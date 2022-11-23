@@ -31,7 +31,6 @@ describe('index', () => {
         room.messages.put(new Post({
             message: 'hello world'
         }))
-        await delay(10000);
         await waitFor(() => peer.programs.get('world')?.size === 2); // 1 program controls the rooms, 1 program is a room, and the message controller inside of that 
 
         expect((peer.programs.get('world')?.get(room.address.toString()!)?.program as Room).messages.index.size).toEqual(1); // The "hello world message"
