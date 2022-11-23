@@ -1,0 +1,13 @@
+node_modules
+orbitdb
+/orbit-db
+orbit-db-stores
+lib
+peerbit/
+.vscode
+/keystore/
+keystore-test
+**/__tests__/**/tmp
+/tmp
+nginx_secrets
+nginx
