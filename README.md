@@ -6,7 +6,7 @@
 
 <h1 align="center" style="border-bottom: none">
     <strong>
-        Peerbit Examples Library
+        Peerbit Exampl Library
 </h1>
 
 

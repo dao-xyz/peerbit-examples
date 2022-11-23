@@ -4,9 +4,7 @@ import { Program, CanOpenSubPrograms } from '@dao-xyz/peerbit-program';
 import { Documents, DocumentIndex } from '@dao-xyz/peerbit-document'
 import { v4 as uuid } from 'uuid';
 import { Entry } from '@dao-xyz/ipfs-log';
-import { RelationContract } from '@dao-xyz/peerbit-trusted-network';
-
-
+import { IdentityGraph } from '@dao-xyz/peerbit-trusted-network';
 
 @variant('rooms')
 export class Rooms extends Program implements CanOpenSubPrograms {
@@ -14,13 +12,13 @@ export class Rooms extends Program implements CanOpenSubPrograms {
     @field({ type: Documents })
     rooms: Documents<Room>;
 
-    @field({ type: RelationContract })
-    identityGraph: RelationContract // connect different identities together, so we can have Metamask as a the identity and a throwaway browser key for fast messages
+    @field({ type: IdentityGraph })
+    identityGraph: IdentityGraph // connect different identities together, so we can have Metamask as a the identity and a throwaway browser key for fast messages
 
-    constructor(properties?: { rooms?: Documents<Room>, identityGraph?: RelationContract }) {
+    constructor(properties?: { rooms?: Documents<Room>, identityGraph?: IdentityGraph }) {
         super();
         if (properties) {
-            this.identityGraph = properties.identityGraph || new RelationContract({})
+            this.identityGraph = properties.identityGraph || new IdentityGraph({})
             this.rooms = properties.rooms || new Documents<Room>({ index: new DocumentIndex({ indexBy: 'id' }) });
         }
     }

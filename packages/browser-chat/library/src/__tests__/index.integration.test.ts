@@ -4,12 +4,14 @@ import { waitFor } from '@dao-xyz/peerbit-time';
 import { jest } from '@jest/globals';
 import { Post, Room, Rooms } from '..';
 import { delay } from '@dao-xyz/peerbit-time';
+import { serialize } from '@dao-xyz/borsh';
 
 describe('index', () => {
     let session: Session, peer: Peerbit, peer2: Peerbit
-    jest.setTimeout(60 * 1000);
+    jest.setTimeout(60 * 1000)
 
     beforeAll(async () => {
+
         session = await Session.connected(2);
         peer = await Peerbit.create(session.peers[0].ipfs, { directory: './peerbit/' + (+new Date) })
         peer2 = await Peerbit.create(session.peers[1].ipfs, { directory: './peerbit/' + (+new Date) })
@@ -35,5 +37,11 @@ describe('index', () => {
         expect((peer.programs.get('world')?.get(room.address.toString()!)?.program as Room).messages.index.size).toEqual(1); // The "hello world message"
     })
 
+
+    it('can create genisis', async () => {
+        const genesis = await peer.open(new Rooms({}));
+        const base64 = Buffer.from(serialize(genesis)).toString("base64")
+        console.log(base64);
+    })
 
 })
