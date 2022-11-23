@@ -1,21 +1,15 @@
-# 
-
 
 <br>
 <p align="center">
     <img width="350" src="./library.jpeg"  alt="Libraryn">
 </p>
 
-<h1 align="center">
+<h1 align="center" style="border-bottom: none">
     <strong>
         Peerbit Examples Library
-   </strong>   
 </h1>
-<h3 align="center">
 
-</h3>
 
-# Content
 
 ## [Chat in the browser](./packages/browser-chat/)
 
