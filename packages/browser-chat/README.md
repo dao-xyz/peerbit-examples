@@ -1,4 +1,4 @@
-# Browser chat
+# Browser chat 🚧 WIP 🚧
 
 This application consists of two parts
 
