@@ -39,7 +39,7 @@ export class Rooms extends Program implements CanOpenSubPrograms {
     }
 
     // Control whether someone can create a "room", which itself is a program with replication
-    // Even if anyone could do "rooms.add(new Room())", that new entry has to be analyzed. And if it turns out that new entry represents a program
+    // Even if anyone could do "rooms.put(new Room())", that new entry has to be analyzed. And if it turns out that new entry represents a program
     // this means it should be handled in a special way (replication etc). This extra functionality needs requires peers to consider this additional security 
     // boundary
     async canOpen(programToOpen: Program, fromEntry: Entry<any>): Promise<boolean> {
