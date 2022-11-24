@@ -1,4 +1,4 @@
-import 'jest-extended';
+import "jest-extended";
 
 function fail(reason = "fail was called in a test.") {
     throw new Error(reason);

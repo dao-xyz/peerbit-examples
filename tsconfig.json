@@ -1,8 +1,5 @@
 {
-    "include": [
-        "packages/*/src",
-        "packages/*/*/src"
-    ],
+    "include": ["packages/*/src", "packages/*/*/src"],
     "exclude": [
         "node_modules",
         "packages/*/node_modules",
@@ -36,10 +33,8 @@
         "isolatedModules": true,
         "emitDecoratorMetadata": true,
         "experimentalDecorators": true,
-        "typeRoots": [
-            "node_modules/@types"
-        ],
-        "skipLibCheck": true,
+        "typeRoots": ["node_modules/@types"],
+        "skipLibCheck": true
     },
     "typedocOptions": {
         "entryPoints": ".",
@@ -47,7 +42,5 @@
         "out": "docs",
         "readme": "README.md"
     },
-    "files": [
-        "global.d.ts"
-    ]
+    "files": ["global.d.ts"]
 }
