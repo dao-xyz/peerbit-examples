@@ -11,6 +11,7 @@ const TOPIC = "world";
 
 // This is a serialized version of RoomsDB manifest.
 // We could store this on IPFS and load it using a CID but this is "easier"
+// For info how to generate this, see https://github.com/dao-xyz/peerbit-examples/blob/63d6923d82d5c496632824e0c0f162b199f1cd37/packages/browser-chat/library/src/__tests__/index.integration.test.ts#L92
 
 const ROOMS_PROGRAM =
     "AAAAACQAAAAwY2ZiMTExMy03ZTM3LTQ4NTctYmNlYy1iMTY1MWU2NWU4YmQFAAAAcm9vbXMAAQAAAAAAAQkAAABkb2N1bWVudHMAAAAAAAAAAQIAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQQAAAAAAQMAAABycGMCAAAAaWQAAQMAAAAAAQgAAABsb2dpbmRleAABBQAAAAABAwAAAHJwYwABAQAAAAAAJAAAADQ3YmRkNzU0LWEzNGQtNDY2Yy05YTE2LWMyMjAyYTZhMzkyNgkAAAByZWxhdGlvbnMAAQYAAAAAAQkAAABkb2N1bWVudHMAAQAAAAAAAQcAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQkAAAAAAQMAAABycGMCAAAAaWQAAQgAAAAAAQgAAABsb2dpbmRleAABCgAAAAABAwAAAHJwYw==";
@@ -32,7 +33,7 @@ export const Rooms = () => {
             // Sync heads
             db.rooms.index.query(
                 new DocumentQueryRequest({ queries: [] }),
-                (response, from) => {},
+                (response, from) => { },
                 { sync: true }
             );
         });
