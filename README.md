@@ -22,7 +22,7 @@ TBD
 
 Launch a node for development purposes
 
-Setup init file so that the IPFS node supports Websocket and PubSub
+Create an init file so that the IPFS node supports Websocket and PubSub
 ```sh
 echo "#\!/bin/sh \nset -ex \nipfs bootstrap rm all \nipfs config Addresses.Swarm '[\"/ip4/0.0.0.0/tcp/4001\", \"/ip4/0.0.0.0/tcp/8081/ws\", \"/ip6/::/tcp/4001\"]' --json\nipfs config --json Pubsub.Enabled true \nipfs config Swarm.RelayService '{"Enabled": true}' --json" > ipfs-config.sh
 ```
