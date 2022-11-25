@@ -7,6 +7,7 @@
 <h1 align="center" style="border-bottom: none">
     <strong>
         Peerbit Example Library
+        </strong>
 </h1>
 
 # 🚧 WIP 🚧
@@ -39,5 +40,12 @@ docker exec ipfs_host ipfs id
 
 Copy the address that looks like this:
 ```/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWDQjLGJppKwWndK8SwYX9gmr2YBCh3doR5bWXxptdKpaL``` 
-. The important thing here is the ```/ws/``` that indicates that this is an address for WebSocket connections
+The important thing here is the ```/ws/``` that indicates that this is an address for WebSocket connections
 
+
+If you want the docker node to relay PubSub messages between two browsers you need to make sure that the node is subscribing to that topic where the communication is going to occur
+
+Run
+```sh
+docker exec ipfs_host pubsub sub TOPIC
+```
