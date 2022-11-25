@@ -5,6 +5,64 @@ import { v4 as uuid } from "uuid";
 import { Entry } from "@dao-xyz/ipfs-log";
 import { IdentityGraph } from "@dao-xyz/peerbit-trusted-network";
 
+
+@variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
+export class Post {
+    @field({ type: "string" })
+    id: string;
+
+    @field({ type: "string" })
+    message: string;
+
+    constructor(properties?: { message: string }) {
+        if (properties) {
+            this.id = uuid();
+            this.message = properties.message;
+        }
+    }
+}
+
+@variant("room")
+export class Room extends Program {
+    @field({ type: "string" })
+    id: string;
+
+    @field({ type: "string" })
+    name: string;
+
+    @field({ type: Documents })
+    messages: Documents<Post>;
+
+    constructor(properties?: { name: string; messages?: Documents<Post> }) {
+        super();
+        if (properties) {
+            this.id = uuid();
+            this.name = properties.name;
+            this.messages =
+                properties.messages ||
+                new Documents({
+                    canEdit: false,
+                    index: new DocumentIndex({ indexBy: "id" }),
+                });
+        }
+    }
+
+    // Setup lifecycle, will be invoked on 'open'
+    async setup(): Promise<void> {
+        await this.messages.setup({
+            type: Post,
+            canAppend: async (entry) => {
+                await entry.verifySignatures();
+                return true; // no verification as of now
+            },
+            canRead: async (identity) => {
+                return true; // Anyone can query
+            },
+        });
+    }
+}
+
+
 @variant("rooms")
 export class Rooms extends Program implements CanOpenSubPrograms {
     @field({ type: Documents })
@@ -61,61 +119,5 @@ export class Rooms extends Program implements CanOpenSubPrograms {
             "Recieved an unexpected type: " + programToOpen.constructor.name
         );
         return false;
-    }
-}
-
-@variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
-export class Post {
-    @field({ type: "string" })
-    id: string;
-
-    @field({ type: "string" })
-    message: string;
-
-    constructor(properties?: { message: string }) {
-        if (properties) {
-            this.id = uuid();
-            this.message = properties.message;
-        }
-    }
-}
-
-@variant("room")
-export class Room extends Program {
-    @field({ type: "string" })
-    id: string;
-
-    @field({ type: "string" })
-    name: string;
-
-    @field({ type: Documents })
-    messages: Documents<Post>;
-
-    constructor(properties?: { name: string; messages?: Documents<Post> }) {
-        super();
-        if (properties) {
-            this.id = uuid();
-            this.name = properties.name;
-            this.messages =
-                properties.messages ||
-                new Documents({
-                    canEdit: false,
-                    index: new DocumentIndex({ indexBy: "id" }),
-                });
-        }
-    }
-
-    // Setup lifecycle, will be invoked on 'open'
-    async setup(): Promise<void> {
-        await this.messages.setup({
-            type: Post,
-            canAppend: async (entry) => {
-                await entry.verifySignatures();
-                return true; // no verification as of now
-            },
-            canRead: async (identity) => {
-                return true; // Anyone can query
-            },
-        });
     }
 }
