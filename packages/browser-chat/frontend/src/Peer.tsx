@@ -14,6 +14,7 @@ export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({ children }: { children: JSX.Element }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
+
     /* const [rootIdentity, setRootIdentity] = React.useState<Identity>(undefined); */
     const [loading, setLoading] = React.useState<boolean>(false);
     /* const wallet = useWallet() */
@@ -26,7 +27,6 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
         [loading, peer?.identity?.publicKey.toString()]
     );
 
-    console.log("123");
     useEffect(() => {
         /*   if (!wallet.publicKey)
               return; */
@@ -88,7 +88,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 } else {
                     const bootstrapConfig: { bootstrap: string[] } = {
                         bootstrap: [
-                            "/dns4/xyz123.peerchecker.com/tcp/4002/wss/p2p/12D3KooWQVtriWH37wD9sQBzayHbCvc2nn626maaSzKWta7XbWe8",
+                            "/dns4/e90541c01852b965cdaf24da143c779386df23d3.peerchecker.com/tcp/4002/wss/p2p/12D3KooWGxebPAYuL98PdXTVJaLcyMemirAiLZWj7fqfFG7HhPzM",
                         ],
                     };
                     await Promise.all(
