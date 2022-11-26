@@ -10,7 +10,6 @@ import { getRoomPath } from "./routes";
 // We could store this on IPFS and load it using a CID but this is "easier"
 // For info how to generate this, see https://github.com/dao-xyz/peerbit-examples/blob/63d6923d82d5c496632824e0c0f162b199f1cd37/packages/browser-chat/library/src/__tests__/index.integration.test.ts#L92
 
-
 export const Rooms = () => {
     const { roomsUpdated, rooms } = useChat();
     const [list, setList] = useState<Room[]>();
@@ -22,8 +21,8 @@ export const Rooms = () => {
     };
 
     const goToRoom = (room: Room) => {
-        navigate(getRoomPath(room))
-    }
+        navigate(getRoomPath(room));
+    };
 
     useEffect(() => {
         if (!rooms?.initialized) {
@@ -55,7 +54,13 @@ export const Rooms = () => {
                         <Box>
                             {list.map((room, ix) => (
                                 <Typography key={ix} variant="h5">
-                                    <Button variant="text" onClick={() => goToRoom(room)}> {room.name}</Button>
+                                    <Button
+                                        variant="text"
+                                        onClick={() => goToRoom(room)}
+                                    >
+                                        {" "}
+                                        {room.name}
+                                    </Button>
                                 </Typography>
                             ))}
                         </Box>

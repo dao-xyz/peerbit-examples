@@ -5,7 +5,6 @@ import { v4 as uuid } from "uuid";
 import { Entry } from "@dao-xyz/ipfs-log";
 import { IdentityGraph } from "@dao-xyz/peerbit-trusted-network";
 
-
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class Post {
     @field({ type: "string" })
@@ -61,7 +60,6 @@ export class Room extends Program {
         });
     }
 }
-
 
 @variant("rooms")
 export class Rooms extends Program implements CanOpenSubPrograms {

@@ -37,17 +37,19 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
             setRooms(db);
 
             // Sync heads
-            console.log('find room?')
-            db.rooms.index.query(
-                new DocumentQueryRequest({ queries: [] }),
-                (response, from) => {
-                    console.log('Found ROOMS', response)
-                    // (response.results.map(x => x.value))
-                },
-                { sync: true, maxAggregationTime: 5000 } // will invoke "onUpdate"
-            ).then(() => {
-                console.log('Query rooms done')
-            });
+            console.log("find room?");
+            db.rooms.index
+                .query(
+                    new DocumentQueryRequest({ queries: [] }),
+                    (response, from) => {
+                        console.log("Found ROOMS", response);
+                        // (response.results.map(x => x.value))
+                    },
+                    { sync: true, maxAggregationTime: 5000 } // will invoke "onUpdate"
+                )
+                .then(() => {
+                    console.log("Query rooms done");
+                });
         });
     }, [peer?.id]);
 
