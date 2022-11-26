@@ -62,7 +62,7 @@ export const NewRoomButtom = () => {
                 </DialogContent>
                 <DialogActions>
                     <Button onClick={handleClose}>Cancel</Button>
-                    <Button onClick={handleNewRoom}>Create new room</Button>
+                    <Button onClick={handleNewRoom}>Create</Button>
                 </DialogActions>
             </Dialog>
         </div>

@@ -19,9 +19,9 @@
 TBD
 
 
-## Development guide
+## How to setup a local relay node
 
-Launch a node for development purposes
+Launch an IPFS node for development purposes
 
 Create an init file so that the IPFS node supports Websocket and PubSub
 ```sh

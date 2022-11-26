@@ -19,20 +19,17 @@ export const useChat = () => useContext(ChatContext);
 export const ChatProvider = ({ children }: { children: JSX.Element }) => {
     const [rooms, setRooms] = useState<Rooms>(undefined);
     const [roomsUpdated, setRoomsUpdated] = useState<bigint>();
-
     const { peer } = usePeer();
-
-    /* const [rootIdentity, setRootIdentity] = React.useState<Identity>(undefined); */
-    const [loading, setLoading] = React.useState<boolean>(false);
 
     useEffect(() => {
         if (!peer?.id) {
             return;
         }
 
-        peer.open(deserialize(fromBase64(ROOMS_PROGRAM), Rooms), {
+        const rooms = deserialize(fromBase64(ROOMS_PROGRAM), Rooms);
+        peer.open(rooms, {
             replicate: true,
-            replicationTopic: TOPIC,
+            topic: TOPIC,
             onUpdate: (oplog, entries) => {
                 setRoomsUpdated(oplog._hlc.last.wallTime);
             },
@@ -40,17 +37,20 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
             setRooms(db);
 
             // Sync heads
+            console.log('find room?')
             db.rooms.index.query(
                 new DocumentQueryRequest({ queries: [] }),
                 (response, from) => {
+                    console.log('Found ROOMS', response)
                     // (response.results.map(x => x.value))
                 },
-                { sync: true } // will invoke "onReplicationComplete"
-            );
+                { sync: true, maxAggregationTime: 5000 } // will invoke "onUpdate"
+            ).then(() => {
+                console.log('Query rooms done')
+            });
         });
     }, [peer?.id]);
 
-    /* const wallet = useWallet() */
     const memo = React.useMemo<IChatContext>(
         () => ({
             rooms,

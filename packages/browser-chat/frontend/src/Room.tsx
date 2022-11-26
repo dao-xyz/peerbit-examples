@@ -1,32 +1,169 @@
-import { useEffect } from "react";
-import { Box, Grid, Typography } from "@mui/material";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Box, Grid, IconButton, TextField, Typography } from "@mui/material";
+import { useParams } from "react-router";
+import { useChat } from "./ChatContext";
+import { DocumentQueryRequest, FieldStringMatchQuery, IndexedValue } from "@dao-xyz/peerbit-document";
+import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
 import { usePeer } from "./Peer";
-import { useLocation } from "react-router";
+import { Send } from "@mui/icons-material";
 
 const TOPIC = "world";
+const shortName = (name: string) => {
+    return name.substring(0, 14) + "..." + name.substring(name.length - 3, name.length)
+}
+
 export const Room = () => {
     /* const [client, setClient] = useState<Awaited<ReturnType<typeof api>> | undefined>();
     const [password, setPassword] = useState<string>();
     const [id, setId] = useState<string>(); */
-    //const { loading, peer } = usePeer();
-    const location = useLocation();
-    console.log(location);
+    const { peer } = usePeer();
+    const { rooms, roomsUpdated } = useChat();
+    const [room, setRoom] = useState<RoomDB>()
+    const [text, setText] = useState('');
+    const [posts, setPosts] = useState<IndexedValue<Post>[]>()
+    const params = useParams();
+
+    const messagesEndRef = useRef(null)
+
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" })
+    }
+
     useEffect(() => {
-        console.log();
-    }, []);
+        if (!room?.initialized) {
+            return;
+        }
+        setPosts([...room.messages.index._index.values()]); // TODO do this better
+
+    }, [room?.id, room?.messages?.store.oplog._hlc.last.wallTime])
+
+    // console.log('room', test, room?.id, room)
+    useEffect(() => {
+        if (!rooms || room || !params.name) {
+            return;
+        }
+        setRoom(undefined);
+        console.log('Find room?')
+        rooms.rooms.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: params.name })] }), (response) => {
+            if (response.results.length > 0) {
+                const roomToOpen = response.results[0].value;
+                peer.open(roomToOpen, {
+                    replicate: true,
+                    topic: TOPIC,
+                }).then((r) => {
+                    setRoom(r)
+                    console.log('Set room to ', r, r.name, params.name)
+
+                }).catch((e) => {
+                    console.error("Failed top open room: " + e.message)
+                    alert("Failed top open room: " + e.message)
+
+                    throw e;
+                })
+            }
+        }, { sync: true, maxAggregationTime: 3000 }).then(() => {
+            if (!room) {
+                /*    const newRoom = new RoomDB({ name: params.name });
+                   rooms.rooms
+                       .put(newRoom).then(() => {
+                           peer.open(newRoom, {
+                               topic: TOPIC, replicate: true
+                           }).then((openRoom) => {
+   
+                               setRoom(openRoom);
+                               console.log('Set room to ', openRoom)
+   
+                           })
+                       }) */
+
+            }
+        })
+
+    },
+        [roomsUpdated, !!rooms?.id, params.name])
+    useEffect(() => {
+        scrollToBottom();
+        // sync latest messages
+    },
+        [posts])
+
+
+    const createPost = useCallback(async () => {
+        console.log('rcreate post', text, room);
+
+        if (!room) {
+            return;
+        }
+
+        room.messages.put(new Post({ message: text })).then(() => {
+            setText("");
+        }).catch((e) => {
+            console.error("Failed to create message: " + e.message)
+            alert("Failed to create message: " + e.message)
+            throw e;
+        })
+    }, [text, room, peer])
     return (
-        <Box
-            sx={{
-                backgroundColor: "#21242d",
-                color: "white",
-                fontFamily: "monospace",
-            }}
-        >
-            <Grid container sx={{ p: 4, height: "100vh" }}>
-                <Grid item container direction="column" maxWidth="400px">
-                    <>ROOM</>
+        <Box>
+            <Grid container direction="column">
+                <Grid item>
+                    <Typography variant="overline">Room</Typography>
                 </Grid>
+                <Grid item>
+                    <Typography variant="caption">{room?.id}</Typography>
+                    <Typography variant="h4">{room?.name}</Typography>
+                </Grid>
+
+                <Grid item border="solid 1px" height="60vh" overflow="scroll" padding={2} mt={2} mb={2}>
+                    {posts?.length > 0 ? <Grid container direction="column">
+                        {posts.map((p, ix) => (<Grid container item direction="column" key={ix} mb={1}>
+                            <Grid item mb={-0.5}>
+                                <Typography fontStyle="italic" variant="caption">{shortName(p.entry.signatures[0].publicKey.toString())}</Typography>
+                            </Grid>
+                            <Grid item>
+                                <Typography> {p.value.message}</Typography>
+                            </Grid>
+                        </Grid>))}
+                    </Grid> : <>No messages found!</>}
+                    <div ref={messagesEndRef} />
+                </Grid>
+
+                <Grid container item justifyContent="space-between" spacing={1}>
+                    <Grid item flex={1}>
+                        <TextField size="small"
+                            id="outlined-multiline-flexible"
+                            label="Create post"
+                            multiline
+                            maxRows={4}
+                            sx={{ width: '100%' }}
+                            onChange={(event) => {
+                                setText(event.target.value)
+                            }}
+                            onKeyPress={(ev) => {
+                                if (ev.key === 'Enter' && !ev.shiftKey) {
+                                    ev.preventDefault();
+
+                                    // Send
+                                    createPost();
+                                }
+                            }}
+                            value={text}
+                        />
+                    </Grid>
+
+                    <Grid item>
+                        <IconButton disabled={!text} onClick={createPost}>
+                            <Send />
+                        </IconButton>
+                    </Grid>
+
+
+
+                </Grid >
             </Grid>
+
+
+
         </Box>
     );
 };

@@ -31,11 +31,11 @@ describe("index", () => {
 
     it("can post", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
-        const replicationTopic = "world";
-        await peer.subscribeToReplicationTopic(replicationTopic);
+        const topic = "world";
+        await peer.subscribeToTopic(topic, true);
 
         // Peer 2 is creating "Rooms" which is a container of "Room"
-        const rooms = await peer2.open(new Rooms({}), { replicationTopic });
+        const rooms = await peer2.open(new Rooms({}), { topic });
 
         // Put 1 Room in Rooms
         const room = new Room({ name: "new room" });
@@ -70,7 +70,7 @@ describe("index", () => {
         ).toContainAllValues([room2.id]);
 
         // Open the room so we can write things inside
-        await peer2.open(room, { replicationTopic });
+        await peer2.open(room, { topic: topic });
 
         // Put a message
         await room.messages.put(

@@ -1,21 +1,29 @@
 import { useEffect, useState } from "react";
-import { Box, Grid, Typography } from "@mui/material";
+import { Box, Button, Grid, Typography } from "@mui/material";
 import { NewRoomButtom } from "./NewRoom";
 import { Room } from "@dao-xyz/peerbit-example-browser-chat";
 import { useChat } from "./ChatContext";
+import { useNavigate } from "react-router-dom";
+import { getRoomPath } from "./routes";
 
 // This is a serialized version of RoomsDB manifest.
 // We could store this on IPFS and load it using a CID but this is "easier"
 // For info how to generate this, see https://github.com/dao-xyz/peerbit-examples/blob/63d6923d82d5c496632824e0c0f162b199f1cd37/packages/browser-chat/library/src/__tests__/index.integration.test.ts#L92
 
+
 export const Rooms = () => {
     const { roomsUpdated, rooms } = useChat();
     const [list, setList] = useState<Room[]>();
     const [open, setOpen] = useState(false);
+    const navigate = useNavigate();
 
     const handleClickOpen = () => {
         setOpen(true);
     };
+
+    const goToRoom = (room: Room) => {
+        navigate(getRoomPath(room))
+    }
 
     useEffect(() => {
         if (!rooms?.initialized) {
@@ -47,7 +55,7 @@ export const Rooms = () => {
                         <Box>
                             {list.map((room, ix) => (
                                 <Typography key={ix} variant="h5">
-                                    {room.name}
+                                    <Button variant="text" onClick={() => goToRoom(room)}> {room.name}</Button>
                                 </Typography>
                             ))}
                         </Box>

@@ -12,7 +12,6 @@ const { addBabelPlugins, disableEsLint, override } = require("customize-cra");
 
 module.exports = (config) => {
     let loaders = config.resolve;
-
     loaders.fallback = {
         /*     
             
