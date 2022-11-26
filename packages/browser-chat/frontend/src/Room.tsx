@@ -58,7 +58,7 @@ export const Room = () => {
                 [...room.messages.index._index.values()].sort((a, b) =>
                     Number(
                         a.entry.metadata.clock.timestamp.wallTime -
-                            b.entry.metadata.clock.timestamp.wallTime
+                        b.entry.metadata.clock.timestamp.wallTime
                     )
                 )
             ); // TODO make more performant and add sort
@@ -108,25 +108,31 @@ export const Room = () => {
                             });
                     }
                 },
-                { sync: true, waitForAmount: 1 }
+                { sync: true, maxAggregationTime: 5000 }
             )
-            .then(() => {
+            .finally(() => {
+                console.log('create room? ', room)
+
                 if (!room) {
                     // Create the room or na? (TODO)
-                    /*    const newRoom = new RoomDB({ name: params.name });
-                   rooms.rooms
-                       .put(newRoom).then(() => {
-                           peer.open(newRoom, {
-                               topic: TOPIC, replicate: true
-                           }).then((openRoom) => {
-   
-                               setRoom(openRoom);
-                               console.log('Set room to ', openRoom)
-   
-                           })
-                       }) */
+                    const newRoom = new RoomDB({ name: params.name });
+                    rooms.rooms
+                        .put(newRoom).then(() => {
+                            peer.open(newRoom, {
+                                topic: TOPIC,
+                                replicate: true,
+                                onUpdate: () => {
+                                    refresh();
+                                },
+                            }).then((openRoom) => {
+
+                                setRoom(openRoom);
+                                console.log('Set room to ', openRoom)
+
+                            })
+                        })
                 }
-            });
+            })
     }, [roomsUpdated, !!rooms?.id, params.name, refresh]);
     useEffect(() => {
         scrollToBottom();
@@ -226,7 +232,7 @@ export const Room = () => {
                     </Grid>
 
                     <Grid item>
-                        <IconButton disabled={!text} onClick={createPost}>
+                        <IconButton disabled={!text || !room} onClick={createPost}>
                             <Send />
                         </IconButton>
                     </Grid>
