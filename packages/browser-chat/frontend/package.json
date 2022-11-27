@@ -2,7 +2,7 @@
     "name": "frontend",
     "version": "0.1.0",
     "private": true,
-    "homepage": "https://dao-xyz.github.io/peerbit-examples",
+    "homepage": "https://dao-xyz.github.io/browser-chat",
     "dependencies": {
         "@testing-library/jest-dom": "^5.16.5",
         "@testing-library/react": "^13.4.0",

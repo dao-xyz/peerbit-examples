@@ -58,7 +58,7 @@ export const Room = () => {
                 [...room.messages.index._index.values()].sort((a, b) =>
                     Number(
                         a.entry.metadata.clock.timestamp.wallTime -
-                        b.entry.metadata.clock.timestamp.wallTime
+                            b.entry.metadata.clock.timestamp.wallTime
                     )
                 )
             ); // TODO make more performant and add sort

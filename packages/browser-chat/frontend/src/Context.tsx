@@ -1,26 +1,14 @@
 import { BaseRoutes } from "./routes";
-import {
-    Box,
-    Grid,
-    IconButton,
-    Tooltip,
-    Typography,
-} from "@mui/material";
-import TravelExploreIcon from '@mui/icons-material/TravelExplore';
+import { Box, Grid, IconButton, Tooltip, Typography } from "@mui/material";
+import TravelExploreIcon from "@mui/icons-material/TravelExplore";
 import { usePeer } from "./Peer";
-
 
 export const Content = () => {
     const { swarm } = usePeer();
     return (
         <Box>
             <Grid container sx={{ p: 4, height: "100vh" }}>
-                <Grid
-                    item
-                    container
-                    direction="column"
-                    maxWidth="400px"
-                >
+                <Grid item container direction="column" maxWidth="400px">
                     <Grid
                         item
                         container
@@ -40,7 +28,9 @@ export const Content = () => {
                         </Grid>
                         <Grid item ml={2}>
                             <Tooltip title={JSON.stringify(swarm)}>
-                                <IconButton ><TravelExploreIcon /></IconButton>
+                                <IconButton>
+                                    <TravelExploreIcon />
+                                </IconButton>
                             </Tooltip>
                         </Grid>
                     </Grid>

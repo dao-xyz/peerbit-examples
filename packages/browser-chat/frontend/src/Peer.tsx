@@ -64,39 +64,41 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 },
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
-                        transports: [
-                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                            webSockets({
-                                filter: (addrs) =>
-                                    addrs.filter(
-                                        (addr) =>
-                                            addr.toString().indexOf("/ws/") !=
-                                            -1 ||
-                                            addr
-                                                .toString()
-                                                .indexOf("/wss/") != -1
-                                    ),
-                            }),
-                        ],
-                    }
+                          transports: [
+                              // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                              webSockets({
+                                  filter: (addrs) =>
+                                      addrs.filter(
+                                          (addr) =>
+                                              addr.toString().indexOf("/ws/") !=
+                                                  -1 ||
+                                              addr
+                                                  .toString()
+                                                  .indexOf("/wss/") != -1
+                                      ),
+                              }),
+                          ],
+                      }
                     : {}),
             },
-
         })
             .then(async (node) => {
                 console.log(process.env.REACT_APP_NETWORK);
                 if (process.env.REACT_APP_NETWORK === "local") {
                     console.log("LOCAL NETWORK");
-                    await node.swarm
-                        .connect(
-                            multiaddr(
-                                "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9"
-                            )
+                    await node.swarm.connect(
+                        multiaddr(
+                            "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9"
                         )
+                    );
                 } else {
                     console.log("REMOT ENETWORK");
-                    const swarmAddressees = ["48f3cbfae3b5ffe415c4f1c0987ac0af718700a6.peerchecker.com"]
-                    const swarmAddresseesResolved = await Promise.all(swarmAddressees.map(s => resolveSwarmAddress(s)))
+                    const swarmAddressees = [
+                        "48f3cbfae3b5ffe415c4f1c0987ac0af718700a6.peerchecker.com",
+                    ];
+                    const swarmAddresseesResolved = await Promise.all(
+                        swarmAddressees.map((s) => resolveSwarmAddress(s))
+                    );
                     await Promise.all(
                         swarmAddresseesResolved.map((swarm) =>
                             node.swarm
@@ -110,7 +112,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                 })
                         )
                     ).then(() => {
-                        setSwarm(swarmAddressees)
+                        setSwarm(swarmAddressees);
                     });
                 }
 
@@ -123,13 +125,15 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 };
                 setRootIdentity(walletIdentity);
      */
-                Peerbit.create(node, { waitForKeysTimout: 0 }).then(async (peer) => {
-                    console.log(
-                        "Created peer",
-                        peer.identity.publicKey.toString()
-                    );
-                    setPeer(peer);
-                });
+                Peerbit.create(node, { waitForKeysTimout: 0 }).then(
+                    async (peer) => {
+                        console.log(
+                            "Created peer",
+                            peer.identity.publicKey.toString()
+                        );
+                        setPeer(peer);
+                    }
+                );
             })
             .catch((e) => {
                 if (e.toString().startsWith("LockExistsError")) {
@@ -144,7 +148,6 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;
 };
-
 
 /*  
  We cant do this kind of config yet

@@ -1,4 +1,4 @@
-import axios from 'axios';
+import axios from "axios";
 export const resolveSwarmAddress = async (url: string) => {
     if (url.startsWith("http") == false) {
         url = "https://" + url;
@@ -13,5 +13,10 @@ export const resolveSwarmAddress = async (url: string) => {
     if (domain.startsWith("https://")) {
         domain = domain.substring("https://".length);
     }
-    return "/dns4/" + domain + "/tcp/4002/wss/p2p/" + (await axios.get(url + ':9002/ipfs/id')).data
-}
+    return (
+        "/dns4/" +
+        domain +
+        "/tcp/4002/wss/p2p/" +
+        (await axios.get(url + ":9002/ipfs/id")).data
+    );
+};

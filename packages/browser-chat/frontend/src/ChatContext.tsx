@@ -50,7 +50,7 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                     .then(() => {
                         console.log("Query rooms done");
                     });
-                await delay(5000)
+                await delay(5000);
             }
         });
     }, [peer?.id]);
