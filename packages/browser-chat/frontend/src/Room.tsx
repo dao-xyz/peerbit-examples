@@ -10,6 +10,7 @@ import {
 import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
 import { usePeer } from "./Peer";
 import { Send } from "@mui/icons-material";
+import { useNavigate } from "react-router-dom";
 
 const TOPIC = "world";
 const shortName = (name: string) => {
@@ -31,7 +32,7 @@ export const Room = () => {
     const [lastUpdated, setLastUpdate] = useState(0);
     const [posts, setPosts] = useState<IndexedValue<Post>[]>();
     const params = useParams();
-
+    const navigate = useNavigate();
     const messagesEndRef = useRef(null);
 
     const scrollToBottom = () => {
@@ -58,7 +59,7 @@ export const Room = () => {
                 [...room.messages.index._index.values()].sort((a, b) =>
                     Number(
                         a.entry.metadata.clock.timestamp.wallTime -
-                            b.entry.metadata.clock.timestamp.wallTime
+                        b.entry.metadata.clock.timestamp.wallTime
                     )
                 )
             ); // TODO make more performant and add sort
@@ -115,19 +116,21 @@ export const Room = () => {
 
                 if (!gotRoom) {
                     // Create the room or na? (TODO)
-                    const newRoom = new RoomDB({ name: params.name });
-                    rooms.rooms.put(newRoom).then(() => {
-                        peer.open(newRoom, {
-                            topic: TOPIC,
-                            replicate: true,
-                            onUpdate: () => {
-                                refresh();
-                            },
-                        }).then((openRoom) => {
-                            setRoom(openRoom);
-                            console.log("Created new room ", openRoom);
-                        });
-                    });
+                    alert("Could not find room: " + params.name + ". Go back and create it!");
+                    navigate("/");
+                    /*  const newRoom = new RoomDB({ name: params.name });
+                     rooms.rooms.put(newRoom).then(() => {
+                         peer.open(newRoom, {
+                             topic: TOPIC,
+                             replicate: true,
+                             onUpdate: () => {
+                                 refresh();
+                             },
+                         }).then((openRoom) => {
+                             setRoom(openRoom);
+                             console.log("Created new room ", openRoom);
+                         });
+                     }); */
                 }
             });
     }, [roomsUpdated, !!rooms?.id, params.name, refresh]);
