@@ -84,6 +84,8 @@ export const Room = () => {
                 (response) => {
                     if (response.results.length > 0) {
                         console.log("Found room!");
+                        gotRoom = true;
+
                         const roomToOpen = response.results[0].value;
                         peer.open(roomToOpen, {
                             replicate: true,
@@ -93,11 +95,7 @@ export const Room = () => {
                             },
                         })
                             .then((r) => {
-                                if (gotRoom) {
-                                    return;
-                                }
-                                console.log("Opened found room!");
-                                gotRoom = true;
+                                console.log("Opened room");
                                 setRoom(r);
                             })
                             .catch((e) => {

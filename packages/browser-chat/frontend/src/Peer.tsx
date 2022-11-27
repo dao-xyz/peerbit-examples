@@ -43,8 +43,8 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
         console.log("load peer: " + loading);
 
         IPFS.create({
-            /*   start: true,
-              relay: { enabled: false, hop: { enabled: false, active: false } }, */
+            /*   start: true,*/
+            // relay: { enabled: false, hop: { enabled: false, active: false } },
             preload: { enabled: false },
             EXPERIMENTAL: { ipnsPubsub: false, pubsub: true } as any,
             offline: false,

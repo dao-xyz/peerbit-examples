@@ -17,7 +17,7 @@
         "@dao-xyz/wallet-adapter-react": "^0.0.6",
         "@dao-xyz/wallet-adapter-material-ui": "^0.0.6",
         "@dao-xyz/wallet-adapter-wallets": "^0.0.8",
-        "@dao-xyz/peerbit": "^0.0.68",
+        "@dao-xyz/peerbit": "^0.0.70",
         "@dao-xyz/peerbit-example-browser-chat": "^0.0.1",
         "@mui/material": "^5.10.13",
         "@emotion/react": "^11.10.5",
