@@ -1301,14 +1301,14 @@
   dependencies:
     text-encoding-utf-8 "^1.0.2"
 
-"@dao-xyz/ipfs-log@^5.5.57":
-  version "5.5.57"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/ipfs-log/-/ipfs-log-5.5.57.tgz#ddb34d0d4f87161002fed022c7dc0f76b0e63cd3"
-  integrity sha512-pF2S5yyNp/gfWzeacOgWTj2pXa8X8yQqPnhJ8fhR6n+UDWCLN9QmbsxdDCN4IVzBmFiEzgWoAVcE6zkp1+60LA==
+"@dao-xyz/ipfs-log@^5.5.58":
+  version "5.5.58"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/ipfs-log/-/ipfs-log-5.5.58.tgz#055a7d9da57b0c9ebecec57aaecca62a2efa93f8"
+  integrity sha512-b1IRQnrMufil/PGhyMmscAslcejydcWi61XePvZo/uepebMOteP9/tnWW6Yib9P6mMRE5nZRKZ4Ojb0PP81Wjg==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/peerbit-crypto" "^0.0.19"
-    "@dao-xyz/peerbit-io-utils" "^1.1.14"
+    "@dao-xyz/peerbit-crypto" "^0.0.20"
+    "@dao-xyz/peerbit-io-utils" "^1.1.15"
     "@dao-xyz/peerbit-logger" "^0.0.3"
     json-stringify-deterministic "^1.0.7"
     multihashing-async "^2.0.1"
@@ -1317,15 +1317,14 @@
     p-map "^5.5.0"
     p-whilst "^3.0.0"
 
-"@dao-xyz/ipfs-pubsub-direct-channel@^0.0.30":
-  version "0.0.30"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/ipfs-pubsub-direct-channel/-/ipfs-pubsub-direct-channel-0.0.30.tgz#b188d7a99379a52cde51e677321f2a73e2a10e72"
-  integrity sha512-tu8LZlGwlCxC5nV0PL2uNiUdHQG1AuDWFqo/fV5Kta2EPqYKS3OKcGuPYHcj2ou+sF0D5v3Hrb3PvhODrpS3SA==
+"@dao-xyz/ipfs-pubsub-direct-channel@^0.0.32":
+  version "0.0.32"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/ipfs-pubsub-direct-channel/-/ipfs-pubsub-direct-channel-0.0.32.tgz#f0c7d08b134a711d21d5cbaffa459d86b71d637e"
+  integrity sha512-VE5h/iOK2UWV37+eD1NNZlsCI2YFJIKe7GwtTNzO8jBk/l9u/e06w4FRGnww8kVkskFKIHpufcHYw7RIw3ur1A==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
     "@dao-xyz/ipfs-pubsub-peer-monitor" "^0.0.15"
     "@dao-xyz/peerbit-borsh-utils" "^0.0.11"
-    "@dao-xyz/peerbit-test-utils" "^0.0.13"
 
 "@dao-xyz/ipfs-pubsub-peer-monitor@^0.0.15":
   version "0.0.15"
@@ -1341,52 +1340,52 @@
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
 
-"@dao-xyz/peerbit-cache@^0.4.22":
-  version "0.4.22"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-cache/-/peerbit-cache-0.4.22.tgz#a32cab2f6ef11ef2392985a96db1c6b234c06cb3"
-  integrity sha512-SU4FNVc2tECn0d70uychuQqKiknja7QQD8V0nBRAXEjILetC2O8mY4doPJkbTXDmbEulKfvmC9jGBY+KdKNWMA==
+"@dao-xyz/peerbit-cache@^0.4.23":
+  version "0.4.23"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-cache/-/peerbit-cache-0.4.23.tgz#ff662d7ac727990f9d4001d205b07a814ce6e12c"
+  integrity sha512-Px903OVgmOmqMgxWtkx1VTYXXQZT6AsyqBz/MnzP/YDpsPzmcpk+X+QgjXotpmlHuOMUOy0UnKnB41scW1t4qg==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
     "@dao-xyz/peerbit-logger" "^0.0.3"
     level "^8.0.0"
 
-"@dao-xyz/peerbit-crypto@^0.0.19":
-  version "0.0.19"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-crypto/-/peerbit-crypto-0.0.19.tgz#d3bf4838c183efbc5d155c12c797f5a086718a3e"
-  integrity sha512-Dl+U4NWKH5AYebeerWU8G8oWKzWfwtCze4oMtn1WJcKgv/TYiK4C5OUEHhMwfN238+D8+/LRcUj8drNhaOLHtg==
+"@dao-xyz/peerbit-crypto@^0.0.20":
+  version "0.0.20"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-crypto/-/peerbit-crypto-0.0.20.tgz#56fd3f19ce6bfb8c8891930f14760b8490667c9d"
+  integrity sha512-3+itnFZMlLHT+c7FhMGesfcqkHZvM07EeKtyK3VXUIEpHbRJAelrWPKhua0KH3xNbQRLShEtOBwKi6BdzWEDsg==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
     "@dao-xyz/peerbit-borsh-utils" "^0.0.11"
     "@ethersproject/wallet" "^5.7.0"
     libsodium-wrappers "^0.7.10"
 
-"@dao-xyz/peerbit-document@^0.0.132":
-  version "0.0.132"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-document/-/peerbit-document-0.0.132.tgz#2cad2960c2a775048b3a1660f588e7d36a6fd278"
-  integrity sha512-ZpYUmdbtbWL4QUlPH3pLDY6W8W58PbRfMcgVV3kwMxKX76jChJ4rnkGrSj/QnQpSHX6ytn4oueNix/d36qM/Dg==
+"@dao-xyz/peerbit-document@^0.0.134":
+  version "0.0.134"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-document/-/peerbit-document-0.0.134.tgz#4d985284355101bb6f6543fd3f89b5151e1d2d95"
+  integrity sha512-TMWLDtqU4mA8Y+yHe6B7XId4RYjnB7JW74H9nMwMc8lI/OSrOZ9HOsvwABPsCVSzLYb/TFgItEbR797ZWRko4A==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/peerbit-logindex" "^0.0.40"
-    "@dao-xyz/peerbit-rpc" "^0.0.56"
-    "@dao-xyz/peerbit-store" "^0.0.68"
+    "@dao-xyz/peerbit-logindex" "^0.0.42"
+    "@dao-xyz/peerbit-rpc" "^0.0.58"
+    "@dao-xyz/peerbit-store" "^0.0.69"
     uuid "^8.3.2"
 
-"@dao-xyz/peerbit-io-utils@^1.1.14":
-  version "1.1.14"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-io-utils/-/peerbit-io-utils-1.1.14.tgz#8e3c3a2afb28010ca8f8b47daa4919d884822c38"
-  integrity sha512-UkW82xsiKD5/wdJEGfRgeiNjXjxp1mwDRWkLcVJh0fY9UdDdCW7Mditiz2McfmfTNjFrUKhQhYSfUv479hjrCw==
+"@dao-xyz/peerbit-io-utils@^1.1.15":
+  version "1.1.15"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-io-utils/-/peerbit-io-utils-1.1.15.tgz#fda5dac4966ff7c9e264fc469f83a2adb6605cfb"
+  integrity sha512-JVbEIjE8VsqsAnQfTJbdoDFr8N6izAYf8f9fvE+QMSO26Yc4SrCo+Ahvobota7NfXv05lkxiAsxmsiKg+AiYnQ==
   dependencies:
     "@ipld/dag-cbor" "^7.0.3"
     "@ipld/dag-pb" "^2.1.18"
 
-"@dao-xyz/peerbit-keystore@^0.0.30":
-  version "0.0.30"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-keystore/-/peerbit-keystore-0.0.30.tgz#1dd07323c77724675bde83f0db31758636211464"
-  integrity sha512-sU19M63ZCs68F94PXNkqeVBB6UUAZISg6Bt6PVasDTaYSjEMDvHp7/DfmrRvOlIhZaoSKT75lSIgJZncnofUzw==
+"@dao-xyz/peerbit-keystore@^0.0.31":
+  version "0.0.31"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-keystore/-/peerbit-keystore-0.0.31.tgz#e0a833089efaa6bcf50d4c1bc00e811adc925d00"
+  integrity sha512-TAf1l4pkJICcc8lsWGxGpjO6M4TK6ztinYtJeek2AlURN88yRpD2gZU40Q+euA2mNRzZzYjsDuNdjYFs6J6vGw==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
     "@dao-xyz/peerbit-borsh-utils" "^0.0.11"
-    "@dao-xyz/peerbit-crypto" "^0.0.19"
+    "@dao-xyz/peerbit-crypto" "^0.0.20"
     "@dao-xyz/peerbit-time" "^0.0.18"
     level "^8.0.0"
     lru-cache "^7.14.0"
@@ -1400,64 +1399,52 @@
   dependencies:
     pino "^8.7.0"
 
-"@dao-xyz/peerbit-logindex@^0.0.40":
-  version "0.0.40"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-logindex/-/peerbit-logindex-0.0.40.tgz#bd84db3ef1c5f867e5b55f274b222ecf10b4676c"
-  integrity sha512-/LfDM8FuuVB85DLLTnvkrf96nTSKgY9oRdAj/sutbXgeoKSrhkjnPAtvXNYtFc5gj/2DkBa1clvOVWTiE+LUpg==
+"@dao-xyz/peerbit-logindex@^0.0.42":
+  version "0.0.42"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-logindex/-/peerbit-logindex-0.0.42.tgz#4c777f83ba2c4d03dc7574d7551f0c59e17f8db3"
+  integrity sha512-APuBtA/NINLdTUu9A6V9rbnUcdhh1cCMZd5dFpatRz5UK4iDUhSEwjQsutrJX+OU2hC5Pe/eJzDiyqrtzpfVMQ==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/ipfs-log" "^5.5.57"
-    "@dao-xyz/peerbit-crypto" "^0.0.19"
+    "@dao-xyz/ipfs-log" "^5.5.58"
+    "@dao-xyz/peerbit-crypto" "^0.0.20"
     "@dao-xyz/peerbit-logger" "^0.0.3"
-    "@dao-xyz/peerbit-rpc" "^0.0.56"
+    "@dao-xyz/peerbit-rpc" "^0.0.58"
     "@dao-xyz/peerbit-time" "^0.0.18"
     uuid "^8.3.2"
 
-"@dao-xyz/peerbit-program@^0.0.53":
-  version "0.0.53"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-program/-/peerbit-program-0.0.53.tgz#365b85dda4cedae99e57cca9048a9c036a3a2a5b"
-  integrity sha512-fSiAGvDyNIJYxUaKumW4kdsgtW8zclRdFZB5c4V9Gt3s9HFdRETRr+/d6QJbfN3xWQeY3wdPAdQ3gN7hs85BQg==
+"@dao-xyz/peerbit-program@^0.0.54":
+  version "0.0.54"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-program/-/peerbit-program-0.0.54.tgz#9e715c16accd5fbc91222d5d7da46932cdb86a19"
+  integrity sha512-FCQFCQb6xlP/nI3hHsK0pRmWs/DJuR+SBqSCJ9ZEl6KvBqj5BiXQqdo6/Vj7qVi17GsK+Jo5N8r93PCZU6x+9g==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/peerbit-crypto" "^0.0.19"
-    "@dao-xyz/peerbit-store" "^0.0.68"
+    "@dao-xyz/peerbit-crypto" "^0.0.20"
+    "@dao-xyz/peerbit-store" "^0.0.69"
 
-"@dao-xyz/peerbit-rpc@^0.0.56":
-  version "0.0.56"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-rpc/-/peerbit-rpc-0.0.56.tgz#24b64846cd46a69c64d6b4a8f4b75959c4b5ba66"
-  integrity sha512-kwCppwb9lS4+eSkzCsoUc5I4kclAuiE/gRvzM3W1d8Y8S2WVRlcn+QnnKtlMn/b5XlSAx4hoZCk/sDb3ywDLTw==
+"@dao-xyz/peerbit-rpc@^0.0.58":
+  version "0.0.58"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-rpc/-/peerbit-rpc-0.0.58.tgz#15775ef4d855df78055f3d8fce5deff52718e19d"
+  integrity sha512-nmiDRS8qoPMOEX1JtW4ihNHo6AlzlqP6r5iuxjlBirEoQaH8QVI2vrpnqRyJTvqWUY+WgXTq8tIVBgOEo0vp/A==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/peerbit-crypto" "^0.0.19"
+    "@dao-xyz/peerbit-crypto" "^0.0.20"
     "@dao-xyz/peerbit-logger" "^0.0.3"
-    "@dao-xyz/peerbit-program" "^0.0.53"
-    "@dao-xyz/peerbit-store" "^0.0.68"
+    "@dao-xyz/peerbit-program" "^0.0.54"
+    "@dao-xyz/peerbit-store" "^0.0.69"
     "@dao-xyz/peerbit-time" "^0.0.18"
     uuid "^8.3.2"
 
-"@dao-xyz/peerbit-store@^0.0.68":
-  version "0.0.68"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-store/-/peerbit-store-0.0.68.tgz#c561da00613948eb53676b5208623580777b531f"
-  integrity sha512-JX7thdG26/tQmGxW9biXWr4QoeXqFuO/RkpqMHVmw0ITi3totwBBSoDq6OyyO8N75+TpKKNB3Va/beOgt6202Q==
+"@dao-xyz/peerbit-store@^0.0.69":
+  version "0.0.69"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-store/-/peerbit-store-0.0.69.tgz#31ed95028b5f87a1d4394cac2922018be051da2e"
+  integrity sha512-dglxX9vLlMHx6apz/i/6een7ZNTbR6+aKAcSJJbVM7g3ppKNLCJJkTsK836OdBv/KE4fYG+kBNu8mZHBqvMgkA==
   dependencies:
-    "@dao-xyz/ipfs-log" "^5.5.57"
-    "@dao-xyz/peerbit-cache" "^0.4.22"
-    "@dao-xyz/peerbit-io-utils" "^1.1.14"
+    "@dao-xyz/ipfs-log" "^5.5.58"
+    "@dao-xyz/peerbit-cache" "^0.4.23"
+    "@dao-xyz/peerbit-io-utils" "^1.1.15"
     p-each-series "^3.0.0"
     p-map "^5.5.0"
     p-queue "^7.3.0"
-
-"@dao-xyz/peerbit-string@^0.0.121":
-  version "0.0.121"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-string/-/peerbit-string-0.0.121.tgz#f69373ff5097fb258d6055755927fc73a797f2c1"
-  integrity sha512-lTv9CWtKvsSlJ172Mx2rqcKmbLUgmgGof1hOX37XbG5SKrHAH7evIeKsUuVSvN1CQSTYw6tUrKTqre9dHU4TCQ==
-  dependencies:
-    "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/peerbit-logger" "^0.0.3"
-    "@dao-xyz/peerbit-program" "^0.0.53"
-    "@dao-xyz/peerbit-rpc" "^0.0.56"
-    "@dao-xyz/peerbit-store" "^0.0.68"
-    "@dao-xyz/peerbit-time" "^0.0.18"
 
 "@dao-xyz/peerbit-test-utils@^0.0.13":
   version "0.0.13"
@@ -1471,34 +1458,34 @@
   resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-time/-/peerbit-time-0.0.18.tgz#0e0c861cd4405124bfbb9c2c3611b43037c690e5"
   integrity sha512-BnW1EZ75kdC32V4vH51GkI82J4dCjSQy6BiuSW75zJNcIqcRhGov2YJgOP/txAj1yHl33jx8mPtCd1/xiPXo6w==
 
-"@dao-xyz/peerbit-trusted-network@^0.0.88":
-  version "0.0.88"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-trusted-network/-/peerbit-trusted-network-0.0.88.tgz#8f061b0ae448ce65d861ba98866ad8d7f9de8225"
-  integrity sha512-rzTcuesXzQZO6L/eggLU9I2xTNpbancn4BpIbkZWNrSmdnLqKga2XTEjDsQzKB1lH5/RV2RnhfQh9030mg8YnA==
+"@dao-xyz/peerbit-trusted-network@^0.0.90":
+  version "0.0.90"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-trusted-network/-/peerbit-trusted-network-0.0.90.tgz#a2b546b92aa18d6faa930d66d1c1f42d0f11a199"
+  integrity sha512-iVFFOoJTBIIko1LrhHZILBDwdNpC4Yygy1GaMn56HrD7hX8gqLDobK42xNoH3CaOtYTE7w+4rHVgNWjisbRgEA==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/peerbit-crypto" "^0.0.19"
-    "@dao-xyz/peerbit-document" "^0.0.132"
-    "@dao-xyz/peerbit-logindex" "^0.0.40"
+    "@dao-xyz/peerbit-crypto" "^0.0.20"
+    "@dao-xyz/peerbit-document" "^0.0.134"
+    "@dao-xyz/peerbit-logindex" "^0.0.42"
     p-map "~1.1.1"
     uuid "^8.3.2"
 
-"@dao-xyz/peerbit@^0.0.70":
-  version "0.0.70"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit/-/peerbit-0.0.70.tgz#52e9344b04dd68ce789e1597589a33847887aa5b"
-  integrity sha512-vHFxL+j3DS6UbHJX/yHVSTVby6ewDJsKqkvt3N7QOZbTicmQovdTpH0Nto96H06nSFPB3Ym+KMoV6KL1lsDkYA==
+"@dao-xyz/peerbit@0.0.74", "@dao-xyz/peerbit@^0.0.74":
+  version "0.0.74"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit/-/peerbit-0.0.74.tgz#3ee795b5c26efa62705dee3b555bbe1fc9e843ed"
+  integrity sha512-TF0A+1/1ic97skrwziBKUt9+qVPvCmKfGdBX8b4Ou+2ag34DOZ2OqXracLZOhVqFVqtzS6IQ+atL1FXTcq0GEw==
   dependencies:
     "@dao-xyz/borsh" "^3.4.4"
-    "@dao-xyz/ipfs-pubsub-direct-channel" "^0.0.30"
+    "@dao-xyz/ipfs-pubsub-direct-channel" "^0.0.32"
     "@dao-xyz/ipfs-pubsub-peer-monitor" "^0.0.15"
-    "@dao-xyz/peerbit-cache" "^0.4.22"
-    "@dao-xyz/peerbit-crypto" "^0.0.19"
-    "@dao-xyz/peerbit-io-utils" "^1.1.14"
-    "@dao-xyz/peerbit-keystore" "^0.0.30"
+    "@dao-xyz/peerbit-cache" "^0.4.23"
+    "@dao-xyz/peerbit-crypto" "^0.0.20"
+    "@dao-xyz/peerbit-io-utils" "^1.1.15"
+    "@dao-xyz/peerbit-keystore" "^0.0.31"
     "@dao-xyz/peerbit-logger" "^0.0.3"
-    "@dao-xyz/peerbit-program" "^0.0.53"
-    "@dao-xyz/peerbit-store" "^0.0.68"
-    "@dao-xyz/peerbit-trusted-network" "^0.0.88"
+    "@dao-xyz/peerbit-program" "^0.0.54"
+    "@dao-xyz/peerbit-store" "^0.0.69"
+    "@dao-xyz/peerbit-trusted-network" "^0.0.90"
     is-node "^1.0.2"
     level "^8.0.0"
     lru-cache "^7.14.0"
@@ -6439,7 +6426,7 @@ axios@^0.21.1:
   dependencies:
     follow-redirects "^1.14.0"
 
-axios@^1.0.0:
+axios@^1.0.0, axios@^1.2.0:
   version "1.2.0"
   resolved "https://registry.yarnpkg.com/axios/-/axios-1.2.0.tgz#1cb65bd75162c70e9f8d118a905126c4a201d383"
   integrity sha512-zT7wZyNYu3N5Bu0wuZ6QccIf93Qk1eV8LOewxgjOZFd2DenOs98cJ7+Y6703d0wkaXGY6/nZd4EweJaHz9uzQw==

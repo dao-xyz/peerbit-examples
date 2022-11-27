@@ -2,24 +2,21 @@ import React, { useContext, useEffect } from "react";
 /* import { useWallet } from "@dao-xyz/wallet-adapter-react"; */
 import * as IPFS from "ipfs-core";
 import { multiaddr } from "@multiformats/multiaddr";
-import { Peerbit, logger } from "@dao-xyz/peerbit";
-import { createLibp2p } from "libp2p";
+import { Peerbit } from "@dao-xyz/peerbit";
 import { webSockets } from "@libp2p/websockets";
-import { mplex } from "@libp2p/mplex";
-import { noise } from "@chainsafe/libp2p-noise";
-import { kadDHT } from "@libp2p/kad-dht";
-import { GossipSub } from "@chainsafe/libp2p-gossipsub";
+import { resolveSwarmAddress } from "./utils";
 
-logger.level = "trace";
 interface IPeerContext {
     peer: Peerbit;
     loading: boolean;
+    swarm: string[];
 }
 
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({ children }: { children: JSX.Element }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
+    const [swarm, setSwarm] = React.useState<string[]>([]);
 
     /* const [rootIdentity, setRootIdentity] = React.useState<Identity>(undefined); */
     const [loading, setLoading] = React.useState<boolean>(false);
@@ -27,6 +24,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
+            swarm,
             /*    rootIdentity, */
             loading,
         }),
@@ -62,100 +60,47 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
             repo: "abcx", // repo name uncertainty: When failing to get remote block
             libp2p: {
                 connectionManager: {
-                    autoDial: false,
+                    autoDial: true,
                 },
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
-                          transports: [
-                              // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                              webSockets({
-                                  filter: (addrs) =>
-                                      addrs.filter(
-                                          (addr) =>
-                                              addr.toString().indexOf("/ws/") !=
-                                                  -1 ||
-                                              addr
-                                                  .toString()
-                                                  .indexOf("/wss/") != -1
-                                      ),
-                              }),
-                          ],
-                      }
+                        transports: [
+                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                            webSockets({
+                                filter: (addrs) =>
+                                    addrs.filter(
+                                        (addr) =>
+                                            addr.toString().indexOf("/ws/") !=
+                                            -1 ||
+                                            addr
+                                                .toString()
+                                                .indexOf("/wss/") != -1
+                                    ),
+                            }),
+                        ],
+                    }
                     : {}),
             },
-            /*  libp2p: ({ peerId }) => {
-                 console.log('here?', peerId)
-                 return createLibp2p({
-                     peerId: peerId,
-                     connectionManager: {
-                         autoDial: false
-                     },
-                     transports: [
-                         webSockets({
-                             filter: (addrs) => {
-                                 console.log('here')
-                                 return addrs.filter(
-                                     (addr) =>
-                                         addr.toString().indexOf("/ws/") !=
-                                         -1 ||
-                                         addr
-                                             .toString()
-                                             .indexOf("/wss/") != -1
-                                 )
-                             }
-                         })
-                     ],
-                     streamMuxers: [mplex()],
-                     connectionEncryption: [noise()],
-                     peerDiscovery: [],
-                     dht: kadDHT(),
-                     pubsub: () => (new GossipSub() as any),
-                     datastore: null
-                 }) 
-        },*/
+
         })
             .then(async (node) => {
                 console.log(process.env.REACT_APP_NETWORK);
-
                 if (process.env.REACT_APP_NETWORK === "local") {
-                    console.log("swarm connect?");
+                    console.log("LOCAL NETWORK");
                     await node.swarm
                         .connect(
                             multiaddr(
-                                "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWSaRg8Sghk3rtzVGmPboAo9yr7F5hdbf9UZXJ3CZFLKWs"
+                                "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9"
                             )
                         )
-                        .then(() => {
-                            node.pubsub.subscribe("xyz", (e) =>
-                                console.log("GOT EMSSAGE", e)
-                            );
-
-                            setTimeout(() => {
-                                console.log("pub messages");
-
-                                node.pubsub.publish(
-                                    "xyz",
-                                    new Uint8Array([1, 2, 3])
-                                );
-                            }, 5000);
-                        });
                 } else {
-                    const bootstrapConfig: { bootstrap: string[] } = {
-                        bootstrap: [
-                            "/ip4/172.17.0.2/tcp/8081/ws/p2p/12D3KooWQFTgNjuekJfuXHf3xqoa6YVP4QKd14CUH2fhMvkoFs2E", // "/dns4/8c8d6a3b36037714d198d9622d4e934222872dc5.peerchecker.com/tcp/4002/wss/p2p/12D3KooWFXg89AFm6RpLFqmK7LiBaY8U49YL2vfMyNre2bHZz3BW",
-                        ],
-                    };
+                    console.log("REMOT ENETWORK");
+                    const swarmAddressees = ["48f3cbfae3b5ffe415c4f1c0987ac0af718700a6.peerchecker.com"]
+                    const swarmAddresseesResolved = await Promise.all(swarmAddressees.map(s => resolveSwarmAddress(s)))
                     await Promise.all(
-                        bootstrapConfig.bootstrap.map((bootstrap) =>
+                        swarmAddresseesResolved.map((swarm) =>
                             node.swarm
-                                .connect(multiaddr(bootstrap)) /* .then(() => {
-                                    node.pubsub.publish("xyz", new Uint8Array([1, 2, 3]));
-                                    setTimeout(() => {
-                                        console.log('pub messages')
-
-                                        node.pubsub.subscribe("xyz", (e) => console.log("GOT EMSSAGE", e))
-                                    }, 5000)
-                                }) */
+                                .connect(multiaddr(swarm))
                                 .catch((error) => {
                                     console.error("PEER CONNECT ERROR", error);
                                     alert(
@@ -164,7 +109,9 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                     throw error;
                                 })
                         )
-                    );
+                    ).then(() => {
+                        setSwarm(swarmAddressees)
+                    });
                 }
 
                 console.log("Connected to swarm!");
@@ -176,7 +123,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 };
                 setRootIdentity(walletIdentity);
      */
-                Peerbit.create(node).then(async (peer) => {
+                Peerbit.create(node, { waitForKeysTimout: 0 }).then(async (peer) => {
                     console.log(
                         "Created peer",
                         peer.identity.publicKey.toString()
@@ -197,3 +144,37 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;
 };
+
+
+/*  
+ We cant do this kind of config yet
+libp2p: ({ peerId }) => {
+        console.log('here?', peerId)
+        return createLibp2p({
+            peerId: peerId,
+            connectionManager: {
+                autoDial: false
+            },
+            transports: [
+                webSockets({
+                    filter: (addrs) => {
+                        console.log('here')
+                        return addrs.filter(
+                            (addr) =>
+                                addr.toString().indexOf("/ws/") !=
+                                -1 ||
+                                addr
+                                    .toString()
+                                    .indexOf("/wss/") != -1
+                        )
+                    }
+                })
+            ],
+            streamMuxers: [mplex()],
+            connectionEncryption: [noise()],
+            peerDiscovery: [],
+            dht: kadDHT(),
+            pubsub: () => (new GossipSub() as any),
+            datastore: null
+        }) 
+},*/

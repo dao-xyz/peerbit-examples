@@ -30,7 +30,7 @@ echo "#\!/bin/sh \nset -ex \nipfs bootstrap rm all \nipfs config Addresses.Swarm
 
 Launch node
 ```sh
-sudo docker run -d --name ipfs_host -v $(pwd)/ipfs-config.sh:/container-init.d/001-test.sh  -p 4001:4001 -p 4001:4001/udp -p 127.0.0.1:8080:8080 -p 127.0.0.1:8081:8081 -p 127.0.0.1:5001:5001 ipfs/kubo:latest daemon
+sudo docker run -d --name ipfs_host -v $(pwd)/ipfs-config.sh:/container-init.d/001-test.sh  -p 4001:4001 -p 4001:4001/udp -p 127.0.0.1:8081:8081 -p 127.0.0.1:5001:5001 ipfs/kubo:latest daemon
 ```
 
 Get adddresses you can connect to locally
@@ -49,3 +49,5 @@ Run
 ```sh
 docker exec ipfs_host pubsub sub TOPIC
 ```
+
+

@@ -4,6 +4,7 @@ import { fromBase64 } from "@dao-xyz/peerbit-crypto";
 import { Room, Rooms } from "@dao-xyz/peerbit-example-browser-chat";
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
 import { usePeer } from "./Peer";
+import { delay } from "@dao-xyz/peerbit-time";
 
 const ROOMS_PROGRAM =
     "AAAAACQAAAAwY2ZiMTExMy03ZTM3LTQ4NTctYmNlYy1iMTY1MWU2NWU4YmQFAAAAcm9vbXMAAQAAAAAAAQkAAABkb2N1bWVudHMAAAAAAAAAAQIAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQQAAAAAAQMAAABycGMCAAAAaWQAAQMAAAAAAQgAAABsb2dpbmRleAABBQAAAAABAwAAAHJwYwABAQAAAAAAJAAAADQ3YmRkNzU0LWEzNGQtNDY2Yy05YTE2LWMyMjAyYTZhMzkyNgkAAAByZWxhdGlvbnMAAQYAAAAAAQkAAABkb2N1bWVudHMAAQAAAAAAAQcAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQkAAAAAAQMAAABycGMCAAAAaWQAAQgAAAAAAQgAAABsb2dpbmRleAABCgAAAAABAwAAAHJwYw==";
@@ -33,12 +34,10 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
             onUpdate: (oplog, entries) => {
                 setRoomsUpdated(oplog._hlc.last.wallTime);
             },
-        }).then((db) => {
+        }).then(async (db) => {
             setRooms(db);
-
-            setTimeout(() => {
-                // Sync heads
-                console.log("find room?");
+            const peerIdStart = peer?.id;
+            while (peerIdStart === peer?.id) {
                 db.rooms.index
                     .query(
                         new DocumentQueryRequest({ queries: [] }),
@@ -51,7 +50,8 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                     .then(() => {
                         console.log("Query rooms done");
                     });
-            }, 5000);
+                await delay(5000)
+            }
         });
     }, [peer?.id]);
 
