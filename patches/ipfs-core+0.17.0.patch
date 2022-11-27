@@ -1,5 +1,5 @@
 diff --git a/node_modules/ipfs-core/src/components/libp2p.js b/node_modules/ipfs-core/src/components/libp2p.js
-index 1c1b57c..6ca435f 100644
+index 1c1b57c..7457a5e 100644
 --- a/node_modules/ipfs-core/src/components/libp2p.js
 +++ b/node_modules/ipfs-core/src/components/libp2p.js
 @@ -48,30 +48,30 @@ const mergeOptions = mergeOpts.bind({ ignoreUndefined: true, concatArrays: true
@@ -54,7 +54,7 @@ index 1c1b57c..6ca435f 100644
  }
  
  /**
-@@ -84,161 +84,162 @@ export function createLibp2p ({
+@@ -84,161 +84,161 @@ export function createLibp2p ({
   * @param {Multiaddr[]} input.multiaddrs
   * @returns {Libp2pOptions}
   */
@@ -62,7 +62,6 @@ index 1c1b57c..6ca435f 100644
 -  const getPubsubRouter = () => {
 -    const router = get(config, 'Pubsub.Router') || 'gossipsub'
 +function getLibp2pOptions({ options, config, datastore, keychainConfig, peerId, multiaddrs }) {
-+    console.error('here');
 +    const getPubsubRouter = () => {
 +        const router = get(config, 'Pubsub.Router') || 'gossipsub'
 +
@@ -988,10 +987,10 @@ index 416e7b0..e19e312 100644
 +    }, config)
  }
 diff --git a/node_modules/ipfs-core/src/utils/service.js b/node_modules/ipfs-core/src/utils/service.js
-index e966592..e230c18 100644
+index e966592..c51897c 100644
 --- a/node_modules/ipfs-core/src/utils/service.js
 +++ b/node_modules/ipfs-core/src/utils/service.js
-@@ -39,199 +39,200 @@ import { withTimeout } from '../utils.js'
+@@ -39,199 +39,199 @@ import { withTimeout } from '../utils.js'
   *
   */
  export class Service {
@@ -1021,7 +1020,6 @@ index e966592..e230c18 100644
 +     * @returns {Service<Parameters<T>[0], State<T>>}
 +     */
 +    static create({ start, stop }) {
-+        console.error(start);
 +        return new Service(start, stop)
 +    }
  

@@ -1,5 +1,32 @@
+diff --git a/node_modules/mortice/dist/src/browser.js b/node_modules/mortice/dist/src/browser.js
+index 8311994..d94b9d8 100644
+--- a/node_modules/mortice/dist/src/browser.js
++++ b/node_modules/mortice/dist/src/browser.js
+@@ -85,10 +85,19 @@ export default (options) => {
+     options = Object.assign({}, defaultOptions, options);
+     const isPrimary = Boolean(globalThis.document) || options.singleProcess;
+     if (isPrimary) {
++        const listeners = [];
+         const emitter = new EventTarget();
+-        observer.addEventListener('message', handleWorkerLockRequest(emitter, 'requestReadLock', WORKER_REQUEST_READ_LOCK, WORKER_RELEASE_READ_LOCK, MASTER_GRANT_READ_LOCK));
+-        observer.addEventListener('message', handleWorkerLockRequest(emitter, 'requestWriteLock', WORKER_REQUEST_WRITE_LOCK, WORKER_RELEASE_WRITE_LOCK, MASTER_GRANT_WRITE_LOCK));
+-        return emitter;
++        listeners.push(handleWorkerLockRequest(emitter, 'requestReadLock', WORKER_REQUEST_READ_LOCK, WORKER_RELEASE_READ_LOCK, MASTER_GRANT_READ_LOCK));
++        listeners.push(handleWorkerLockRequest(emitter, 'requestWriteLock', WORKER_REQUEST_WRITE_LOCK, WORKER_RELEASE_WRITE_LOCK, MASTER_GRANT_WRITE_LOCK));
++        listeners.forEach(l => {
++            observer.addEventListener('message', l);
++        })
++        return {
++            emitter, disconnect: () => {
++                listeners.forEach((l) => observer.removeListener('message', l));
++            }
++        };
++
+     }
+     return {
+         isWorker: true,
 diff --git a/node_modules/mortice/dist/src/index.js b/node_modules/mortice/dist/src/index.js
-index 5babae6..120b2ac 100644
+index 5babae6..7db684f 100644
 --- a/node_modules/mortice/dist/src/index.js
 +++ b/node_modules/mortice/dist/src/index.js
 @@ -51,10 +51,10 @@ const createMutex = (name, options) => {
@@ -27,7 +54,7 @@ index 5babae6..120b2ac 100644
          }
      };
  };
-@@ -75,28 +78,30 @@ const defaultOptions = {
+@@ -75,28 +78,33 @@ const defaultOptions = {
  };
  export default function createMortice(options) {
      const opts = Object.assign({}, defaultOptions, options);
@@ -37,6 +64,9 @@ index 5babae6..120b2ac 100644
          if (implementation.isWorker !== true) {
              // we are master, set up worker requests
 -            implementation.addEventListener('requestReadLock', (event) => {
++            if (!implementation.emitter) {
++                console.error("Unexpected: ", implementation, impl);
++            }
 +            implementation.emitter.addEventListener('requestReadLock', (event) => {
                  if (mutexes[event.data.name] == null) {
                      return;
@@ -62,15 +92,14 @@ index 5babae6..120b2ac 100644
      return mutexes[opts.name];
  }
 diff --git a/node_modules/mortice/dist/src/node.js b/node_modules/mortice/dist/src/node.js
-index b802bac..7573ad4 100644
+index b802bac..d460306 100644
 --- a/node_modules/mortice/dist/src/node.js
 +++ b/node_modules/mortice/dist/src/node.js
-@@ -64,11 +64,19 @@ const makeWorkerLockRequest = (name, requestType, grantType, releaseType) => {
-     };
+@@ -65,10 +65,18 @@ const makeWorkerLockRequest = (name, requestType, grantType, releaseType) => {
  };
  export default (options) => {
-+    const listeners = [];
      if (cluster.isPrimary || options.singleProcess) {
++        const listeners = [];
          const emitter = new EventTarget();
 -        cluster.on('message', handleWorkerLockRequest(emitter, 'requestReadLock', WORKER_REQUEST_READ_LOCK, WORKER_RELEASE_READ_LOCK, MASTER_GRANT_READ_LOCK));
 -        cluster.on('message', handleWorkerLockRequest(emitter, 'requestWriteLock', WORKER_REQUEST_WRITE_LOCK, WORKER_RELEASE_WRITE_LOCK, MASTER_GRANT_WRITE_LOCK));

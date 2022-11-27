@@ -58,7 +58,7 @@ export const Room = () => {
                 [...room.messages.index._index.values()].sort((a, b) =>
                     Number(
                         a.entry.metadata.clock.timestamp.wallTime -
-                        b.entry.metadata.clock.timestamp.wallTime
+                            b.entry.metadata.clock.timestamp.wallTime
                     )
                 )
             ); // TODO make more performant and add sort
@@ -83,6 +83,7 @@ export const Room = () => {
                 }),
                 (response) => {
                     if (response.results.length > 0) {
+                        console.log("Found room!");
                         const roomToOpen = response.results[0].value;
                         peer.open(roomToOpen, {
                             replicate: true,
@@ -95,6 +96,7 @@ export const Room = () => {
                                 if (gotRoom) {
                                     return;
                                 }
+                                console.log("Opened found room!");
                                 gotRoom = true;
                                 setRoom(r);
                             })
@@ -111,28 +113,25 @@ export const Room = () => {
                 { sync: true, maxAggregationTime: 5000 }
             )
             .finally(() => {
-                console.log('create room? ', room)
+                console.log("create room? ", !gotRoom);
 
-                if (!room) {
+                if (!gotRoom) {
                     // Create the room or na? (TODO)
                     const newRoom = new RoomDB({ name: params.name });
-                    rooms.rooms
-                        .put(newRoom).then(() => {
-                            peer.open(newRoom, {
-                                topic: TOPIC,
-                                replicate: true,
-                                onUpdate: () => {
-                                    refresh();
-                                },
-                            }).then((openRoom) => {
-
-                                setRoom(openRoom);
-                                console.log('Set room to ', openRoom)
-
-                            })
-                        })
+                    rooms.rooms.put(newRoom).then(() => {
+                        peer.open(newRoom, {
+                            topic: TOPIC,
+                            replicate: true,
+                            onUpdate: () => {
+                                refresh();
+                            },
+                        }).then((openRoom) => {
+                            setRoom(openRoom);
+                            console.log("Created new room ", openRoom);
+                        });
+                    });
                 }
-            })
+            });
     }, [roomsUpdated, !!rooms?.id, params.name, refresh]);
     useEffect(() => {
         scrollToBottom();
@@ -232,7 +231,10 @@ export const Room = () => {
                     </Grid>
 
                     <Grid item>
-                        <IconButton disabled={!text || !room} onClick={createPost}>
+                        <IconButton
+                            disabled={!text || !room}
+                            onClick={createPost}
+                        >
                             <Send />
                         </IconButton>
                     </Grid>

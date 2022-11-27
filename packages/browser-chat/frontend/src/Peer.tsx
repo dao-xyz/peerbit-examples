@@ -59,7 +59,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     webRTCStar: { Enabled: false },
                 },
             },
-            repo: "abc", // repo name uncertainty: When failing to get remote block
+            repo: "abcx", // repo name uncertainty: When failing to get remote block
             libp2p: {
                 connectionManager: {
                     autoDial: false,

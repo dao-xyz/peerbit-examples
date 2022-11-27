@@ -63,7 +63,9 @@ export const App = () => {
                                         <Grid item>
                                             <Typography
                                                 variant="h3"
-                                                sx={{ fontFamily: "fantasy" }}
+                                                sx={{
+                                                    fontFamily: "Indie Flower",
+                                                }}
                                             >
                                                 Peerbit Chat
                                             </Typography>
