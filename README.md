@@ -10,13 +10,12 @@
         </strong>
 </h1>
 
-# 🚧 WIP 🚧
 
 ## Examples
 ### [Chat in the browser](./packages/browser-chat/)
 
 
-TBD
+ --- 🚧 More TBA 🚧 ---
 
 
 ## How to setup a local relay node
