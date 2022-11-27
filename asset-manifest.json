@@ -1,16 +1,16 @@
 {
   "files": {
-    "main.css": "/browser-chat/static/css/main.14891111.css",
-    "main.js": "/browser-chat/static/js/main.c16a6f62.js",
-    "static/js/636.ff698f0b.chunk.js": "/browser-chat/static/js/636.ff698f0b.chunk.js",
-    "static/js/410.5afd9b6e.chunk.js": "/browser-chat/static/js/410.5afd9b6e.chunk.js",
-    "index.html": "/browser-chat/index.html",
-    "main.14891111.css.map": "/browser-chat/static/css/main.14891111.css.map",
-    "main.c16a6f62.js.map": "/browser-chat/static/js/main.c16a6f62.js.map",
-    "410.5afd9b6e.chunk.js.map": "/browser-chat/static/js/410.5afd9b6e.chunk.js.map"
+    "main.css": "/peerbit-examples/browser-chat/static/css/main.14891111.css",
+    "main.js": "/peerbit-examples/browser-chat/static/js/main.5524882c.js",
+    "static/js/636.ff698f0b.chunk.js": "/peerbit-examples/browser-chat/static/js/636.ff698f0b.chunk.js",
+    "static/js/410.5afd9b6e.chunk.js": "/peerbit-examples/browser-chat/static/js/410.5afd9b6e.chunk.js",
+    "index.html": "/peerbit-examples/browser-chat/index.html",
+    "main.14891111.css.map": "/peerbit-examples/browser-chat/static/css/main.14891111.css.map",
+    "main.5524882c.js.map": "/peerbit-examples/browser-chat/static/js/main.5524882c.js.map",
+    "410.5afd9b6e.chunk.js.map": "/peerbit-examples/browser-chat/static/js/410.5afd9b6e.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.14891111.css",
-    "static/js/main.c16a6f62.js"
+    "static/js/main.5524882c.js"
   ]
 }
