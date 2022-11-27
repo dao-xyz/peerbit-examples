@@ -10,7 +10,7 @@ Contains the data controller functionality and access controll.
 Connects UI code that interacts with The Library to create rooms, posts etc
 
 
-# How to launch a node
+## Developer setup
 
 1. 
 In the root folder of this repo
@@ -20,9 +20,12 @@ yarn lerna bootstrap
 ```
 
 2. 
-See [this](https://github.com/dao-xyz/peerbit/tree/master/packages/server-node) for a remote node (host in a data center)
 
-See [this](../../README.md) for a local node (on your computer in a Docker container)
+For the browser to browser to work you need a relay (or use the one that is already available if its online)
+
+See [this](../../README.md) for a local node (on your computer in a Docker container) (EASY!)
+
+See [this](https://github.com/dao-xyz/peerbit/tree/master/packages/server-node) for a remote node (host in a data center, or at home with port forwarding) (A little harder)
 
 3. 
 The topics you need to subscribe to are 
@@ -39,14 +42,14 @@ Go to [Peer](./frontend/src/Peer.tsx) and modify the hard coded swarm addresses 
 5. 
 In the frontend package
 
-For local network
+To interact with a local node
 ```sh
 yarn start
 ```
 
 or
 
-For remote network
+For remote node
 ```sh
 yarn start-remote
 ```
