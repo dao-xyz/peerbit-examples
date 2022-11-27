@@ -31,8 +31,6 @@
         "pub": "lerna publish --no-private",
         "test": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.unit.ts ",
         "test:integration": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.integration.ts --forceExit  --detectOpenHandles",
-        "deploy": "yarn deploy:docs && yarn deploy:example",
-        "deploy:docs": "yarn docs && gh-pages --dist docs --dotfiles",
         "docs": "shx rm -rf docs && NODE_OPTIONS=--max_old_space_size=8192 typedoc && shx cp ./{.nojekyll} docs/",
         "fmt": "prettier --write '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint": "eslint --ext .ts . && prettier --check '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",

@@ -1,13 +1,17 @@
 # Browser chat
 
-This application consists of two parts
+## [Application is live here](https://dao-xyz.github.io/peerbit-examples/)
 
-## The Library
+
+## About
+
+### library
+
 Contains the data controller functionality and access controll. 
 
 
-## The frontend
-Connects UI code that interacts with The Library to create rooms, posts etc
+### frontend
+Connects UI code that interacts with library to create rooms, posts etc
 
 
 ## Developer setup

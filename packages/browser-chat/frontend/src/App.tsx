@@ -40,7 +40,7 @@ export const App = () => {
             <ChatProvider>
                 <ThemeProvider theme={theme}>
                     <CssBaseline />
-                    <HashRouter basename="/browser-chat">
+                    <HashRouter basename="/">
                         <Content />
                     </HashRouter>
                 </ThemeProvider>
