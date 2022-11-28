@@ -2,6 +2,8 @@
 
 ## [Application is live here](https://dao-xyz.github.io/peerbit-examples/)
 
+App might not work well or at all on mobile (not tested)
+
 Snapshots are currently not implemented. So if you are alone in the app and refresh the page you will loose everything!
 
 ## About
