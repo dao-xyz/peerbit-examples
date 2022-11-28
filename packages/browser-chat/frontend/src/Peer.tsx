@@ -85,12 +85,15 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                         setSwarm([swarmAddress]);
                     });
                 } else {
+                    const axios = await import('axios');
                     console.log("REMOTE ENETWORK");
                     // 1. You can insert the whole address 
                     // or
                     // 2. Or just the domain here (only if you created the domain with the Peerbit CLI)
+                    // ..
+                    // default below is env file from the github repo
                     const swarmAddressees = [
-                        "9f309997a831f681e19dbe531b185595222c61e7.peerchecker.com",
+                        (await axios.default.get('https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env')).data
                     ];
                     try {
                         const swarmAddresseesResolved = await Promise.all(
