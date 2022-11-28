@@ -17,7 +17,7 @@ export const TOPIC = "world";
 interface IChatContext {
     rooms: Rooms;
     roomsUpdated: bigint;
-    loading: boolean
+    loading: boolean;
 }
 
 export const ChatContext = React.createContext<IChatContext>({} as any);
@@ -26,15 +26,14 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
     const [rooms, setRooms] = useState<Rooms>(undefined);
     const [roomsUpdated, setRoomsUpdated] = useState<bigint>();
     const { peer } = usePeer();
-    const [date, setDate] = useState<number>(+new Date);
+    const [date, setDate] = useState<number>(+new Date());
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
-
         if (!peer?.id) {
             return;
         }
-        setLoading(true)
+        setLoading(true);
 
         const rooms = deserialize(fromBase64(ROOMS_PROGRAM), Rooms);
         peer.open(rooms, {
@@ -43,31 +42,31 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
             onUpdate: (oplog, entries) => {
                 setRoomsUpdated(oplog._hlc.last.wallTime);
             },
-        }).then(async (db) => {
-            console.log('open rooms!')
-            setRooms(db);
-            const peerIdStart = peer?.id;
-            while (peerIdStart === peer?.id) {
-                db.rooms.index
-                    .query(
-                        new DocumentQueryRequest({ queries: [] }),
-                        (response, from) => {
-                            console.log("Found rooms", response);
+        })
+            .then(async (db) => {
+                console.log("open rooms!");
+                setRooms(db);
+                const peerIdStart = peer?.id;
+                while (peerIdStart === peer?.id) {
+                    db.rooms.index
+                        .query(
+                            new DocumentQueryRequest({ queries: [] }),
+                            (response, from) => {
+                                setLoading(false);
+                            },
+                            { sync: true, maxAggregationTime: 5000 } // will invoke "onUpdate"
+                        )
+                        .then(() => {
                             setLoading(false);
-                            // (response.results.map(x => x.value))
-                        },
-                        { sync: true, maxAggregationTime: 5000 } // will invoke "onUpdate"
-                    )
-                    .then(() => {
-                        setLoading(false);
-                        console.log("Query rooms done" + date);
-                    });
-                await delay(5000);
-            }
-        }).catch((e) => {
-            console.error("Failed to open rooms", e)
-            setLoading(false)
-        });
+                            console.log("Query rooms done" + date);
+                        });
+                    await delay(5000);
+                }
+            })
+            .catch((e) => {
+                console.error("Failed to open rooms", e);
+                setLoading(false);
+            });
     }, [peer?.id]);
 
     const memo = React.useMemo<IChatContext>(

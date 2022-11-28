@@ -7,7 +7,6 @@ import { useNavigate } from "react-router-dom";
 import { getRoomPath } from "./routes";
 import { usePeer } from "./Peer";
 
-
 export const Rooms = () => {
     const { roomsUpdated, rooms, loading } = useChat();
     const { loading: loadingPeer } = usePeer();
@@ -33,6 +32,13 @@ export const Rooms = () => {
     return (
         <Box>
             <Grid container>
+                <Grid item mb={2}>
+                    <Typography variant="caption">
+                        This app stores all data on the Browser participants. If
+                        you are the only particant left and you close your tab,
+                        the data is gone!
+                    </Typography>
+                </Grid>
                 <Grid
                     container
                     direction="row"
@@ -48,25 +54,31 @@ export const Rooms = () => {
                         <NewRoomButtom />
                     </Grid>
                 </Grid>
-                {loading || loadingPeer ? <Grid item><CircularProgress size={20} /></Grid> : <Grid item>
-                    {list?.length > 0 ? (
-                        <Box>
-                            {list.map((room, ix) => (
-                                <Typography key={ix} variant="h5">
-                                    <Button
-                                        variant="text"
-                                        onClick={() => goToRoom(room)}
-                                    >
-                                        {" "}
-                                        {room.name}
-                                    </Button>
-                                </Typography>
-                            ))}
-                        </Box>
-                    ) : (
-                        <Typography>No rooms found</Typography>
-                    )}
-                </Grid>}
+                {loading || loadingPeer ? (
+                    <Grid item>
+                        <CircularProgress size={20} />
+                    </Grid>
+                ) : (
+                    <Grid item>
+                        {list?.length > 0 ? (
+                            <Box>
+                                {list.map((room, ix) => (
+                                    <Typography key={ix} variant="h5">
+                                        <Button
+                                            variant="text"
+                                            onClick={() => goToRoom(room)}
+                                        >
+                                            {" "}
+                                            {room.name}
+                                        </Button>
+                                    </Typography>
+                                ))}
+                            </Box>
+                        ) : (
+                            <Typography>No rooms found</Typography>
+                        )}
+                    </Grid>
+                )}
             </Grid>
         </Box>
     );

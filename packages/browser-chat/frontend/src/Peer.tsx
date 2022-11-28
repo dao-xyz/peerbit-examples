@@ -49,28 +49,28 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     webRTCStar: { Enabled: false },
                 },
             },
-            repo: "abcx" + +new Date, // If we do same repo, then tab to tab communication does not work (because we filter pubsub messages that go to ourselves)
+            repo: "abcx" + +new Date(), // If we do same repo, then tab to tab communication does not work (because we filter pubsub messages that go to ourselves)
             libp2p: {
                 connectionManager: {
                     autoDial: true,
                 },
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
-                        transports: [
-                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                            webSockets({
-                                filter: (addrs) =>
-                                    addrs.filter(
-                                        (addr) =>
-                                            addr.toString().indexOf("/ws/") !=
-                                            -1 ||
-                                            addr
-                                                .toString()
-                                                .indexOf("/wss/") != -1
-                                    ),
-                            }),
-                        ],
-                    }
+                          transports: [
+                              // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                              webSockets({
+                                  filter: (addrs) =>
+                                      addrs.filter(
+                                          (addr) =>
+                                              addr.toString().indexOf("/ws/") !=
+                                                  -1 ||
+                                              addr
+                                                  .toString()
+                                                  .indexOf("/wss/") != -1
+                                      ),
+                              }),
+                          ],
+                      }
                     : {}),
             },
         })
@@ -78,22 +78,27 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 console.log(process.env.REACT_APP_NETWORK);
                 if (process.env.REACT_APP_NETWORK === "local") {
                     console.log("LOCAL NETWORK");
-                    const swarmAddress = "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9";
-                    await node.swarm.connect(
-                        multiaddr(swarmAddress)
-                    ).then(() => {
-                        setSwarm([swarmAddress]);
-                    });
+                    const swarmAddress =
+                        "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9";
+                    await node.swarm
+                        .connect(multiaddr(swarmAddress))
+                        .then(() => {
+                            setSwarm([swarmAddress]);
+                        });
                 } else {
-                    const axios = await import('axios');
+                    const axios = await import("axios");
                     console.log("REMOTE ENETWORK");
-                    // 1. You can insert the whole address 
+                    // 1. You can insert the whole address
                     // or
                     // 2. Or just the domain here (only if you created the domain with the Peerbit CLI)
                     // ..
                     // default below is env file from the github repo
                     const swarmAddressees = [
-                        (await axios.default.get('https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env')).data
+                        (
+                            await axios.default.get(
+                                "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
+                            )
+                        ).data,
                     ];
                     try {
                         const swarmAddresseesResolved = await Promise.all(
@@ -104,7 +109,10 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                 node.swarm
                                     .connect(multiaddr(swarm))
                                     .catch((error) => {
-                                        console.error("PEER CONNECT ERROR", error);
+                                        console.error(
+                                            "PEER CONNECT ERROR",
+                                            error
+                                        );
                                         alert(
                                             "Failed to connect to peers. Please try again later."
                                         );
@@ -115,20 +123,21 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                             setSwarm(swarmAddressees);
                         });
                     } catch (error) {
-                        alert("Failed to resolve relay node. Please come back later or start the demo locally")
+                        alert(
+                            "Failed to resolve relay node. Please come back later or start the demo locally"
+                        );
                     }
                 }
 
                 console.log("Connected to swarm!");
                 // We create a new directrory to make tab to tab communication go smoothly
-                const peer = await Peerbit.create(node, { waitForKeysTimout: 0, directory: "dir" + +new Date })
-                console.log(
-                    "Created peer",
-                    peer.identity.publicKey.toString()
-                );
+                const peer = await Peerbit.create(node, {
+                    waitForKeysTimout: 0,
+                    directory: "dir" + +new Date(),
+                });
+                console.log("Created peer", peer.identity.publicKey.toString());
                 setPeer(peer);
                 setLoading(false);
-
             })
             .catch((e) => {
                 setLoading(false);
@@ -136,8 +145,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     return; // this context has been remounted in dev mode and the same repo has been created twice
                 }
                 throw e;
-
-            })
+            });
     }, []);
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;

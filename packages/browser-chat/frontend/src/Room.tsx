@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, CircularProgress, Grid, IconButton, TextField, Typography } from "@mui/material";
+import {
+    Box,
+    CircularProgress,
+    Grid,
+    IconButton,
+    OutlinedInput,
+    TextField,
+    Typography,
+} from "@mui/material";
 import { useParams } from "react-router";
 import { TOPIC, useChat } from "./ChatContext";
 import {
@@ -11,7 +19,34 @@ import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
 import { usePeer } from "./Peer";
 import { Send } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
-import ArrowBackIcon from '@mui/icons-material/ArrowBack';
+import InputLabel from "@mui/material/InputLabel";
+import MenuItem from "@mui/material/MenuItem";
+import FormControl from "@mui/material/FormControl";
+import Select, { SelectChangeEvent } from "@mui/material/Select";
+import Chip from "@mui/material/Chip";
+import { Theme, useTheme } from "@mui/material/styles";
+import { PublicSignKey, Ed25519PublicKey } from "@dao-xyz/peerbit-crypto";
+import KeyIcon from "@mui/icons-material/Key";
+const ITEM_HEIGHT = 48;
+const ITEM_PADDING_TOP = 8;
+const MenuProps = {
+    PaperProps: {
+        style: {
+            maxHeight: ITEM_HEIGHT * 4.5 + ITEM_PADDING_TOP,
+            width: 250,
+        },
+    },
+};
+
+function getStyles(name: string, recievers: readonly string[], theme: Theme) {
+    return {
+        fontWeight:
+            recievers.indexOf(name) === -1
+                ? theme.typography.fontWeightRegular
+                : theme.typography.fontWeightMedium,
+    };
+}
+
 const shortName = (name: string) => {
     return (
         name.substring(0, 14) +
@@ -21,12 +56,17 @@ const shortName = (name: string) => {
 };
 
 export const Room = () => {
+    const theme = useTheme();
     const { peer, loading: loadingPeer } = usePeer();
-    const { rooms, roomsUpdated, loading: loadingRooms } = useChat();
+    const { rooms, loading: loadingRooms } = useChat();
     const [room, setRoom] = useState<RoomDB>();
     const [loading, setLoading] = useState(false);
+    const [identitiesInChatMap, setIdentitiesInChatMap] =
+        useState<Map<string, Ed25519PublicKey>>();
 
     const [text, setText] = useState("");
+    const [receivers, setRecievers] = useState<string[]>([]);
+
     const [lastUpdated, setLastUpdate] = useState(0);
     const [posts, setPosts] = useState<IndexedValue<Post>[]>();
     const params = useParams();
@@ -36,6 +76,7 @@ export const Room = () => {
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     };
+
     const refresh = useCallback(() => {
         setLastUpdate(+new Date());
     }, [lastUpdated]);
@@ -53,14 +94,24 @@ export const Room = () => {
                 { sync: true }
             );
         } else {
-            setPosts(
-                [...room.messages.index._index.values()].sort((a, b) =>
+            console.log("update posts!");
+            const newPosts = [...room.messages.index._index.values()].sort(
+                (a, b) =>
                     Number(
                         a.entry.metadata.clock.timestamp.wallTime -
-                        b.entry.metadata.clock.timestamp.wallTime
+                            b.entry.metadata.clock.timestamp.wallTime
                     )
-                )
-            ); // TODO make more performant and add sort
+            );
+            const identityMap = new Map<string, Ed25519PublicKey>();
+            newPosts.forEach((post) => {
+                const id = post.entry.signatures[0].publicKey;
+                if (peer.identity.publicKey.equals(id)) {
+                    return; // ignore me
+                }
+                identityMap.set(id.toString(), id as Ed25519PublicKey); // bad assumption only Ed25519PublicKey in chat
+            });
+            setIdentitiesInChatMap(identityMap);
+            setPosts(newPosts); // TODO make more performant and add sort
         }
     }, [room?.id, room?.messages?.store.oplog._hlc.last.wallTime, lastUpdated]);
 
@@ -85,7 +136,6 @@ export const Room = () => {
                     if (response.results.length > 0) {
                         console.log("Found room!");
                         gotRoom = true;
-
                         const roomToOpen = response.results[0].value;
                         peer.open(roomToOpen, {
                             replicate: true,
@@ -104,24 +154,27 @@ export const Room = () => {
                                 alert("Failed top open room: " + e.message);
 
                                 throw e;
-                            }).finally(() => {
-                                setLoading(false)
+                            })
+                            .finally(() => {
+                                setLoading(false);
                             });
                     }
                 },
                 { sync: true, maxAggregationTime: 5000 }
             )
             .finally(() => {
-                console.log("create room? ", !gotRoom);
                 setLoading(false);
-
                 if (!gotRoom) {
                     // Create the room or na? (TODO)
-                    alert("Could not find room: " + params.name + ". Go back and create it!");
+                    alert(
+                        "Could not find room: " +
+                            params.name +
+                            ". Go back and create it!"
+                    );
                     navigate("/");
                 }
             });
-    }, [roomsUpdated, !!rooms?.id, params.name, refresh]);
+    }, [!!rooms?.id, params.name]);
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
@@ -132,11 +185,15 @@ export const Room = () => {
             return;
         }
 
-        console.log(await peer.ipfs.pubsub.ls());
-        console.log(await peer.ipfs.pubsub.peers(TOPIC));
-
         room.messages
-            .put(new Post({ message: text }))
+            .put(new Post({ message: text }), {
+                reciever: {
+                    payload: receivers.map((r) => identitiesInChatMap.get(r)),
+                    metadata: [],
+                    next: [],
+                    signatures: [],
+                },
+            })
             .then(() => {
                 setText("");
             })
@@ -146,16 +203,32 @@ export const Room = () => {
                 throw e;
             });
     }, [text, room, peer]);
+
+    const handleRecieverChange = (
+        event: SelectChangeEvent<typeof receivers>
+    ) => {
+        const {
+            target: { value },
+        } = event;
+        setRecievers(
+            // On autofill we get a stringified value.
+            typeof value === "string" ? value.split(",") : value
+        );
+    };
+
     return (
         <Box>
             <Grid container direction="column">
-                {loading || loadingPeer ? <Grid item>
-                    <CircularProgress size={20} />
-                </Grid> :
+                {loading || loadingPeer ? (
+                    <Grid item>
+                        <CircularProgress size={20} />
+                    </Grid>
+                ) : (
                     <Grid item>
                         <Typography variant="h4">{room?.name}</Typography>
                         <Typography variant="caption">{room?.id}</Typography>
-                    </Grid>}
+                    </Grid>
+                )}
 
                 <Grid
                     item
@@ -180,6 +253,13 @@ export const Room = () => {
                                         <Typography
                                             fontStyle="italic"
                                             variant="caption"
+                                            color={
+                                                p.entry.signatures[0].publicKey.equals(
+                                                    peer.identity.publicKey
+                                                )
+                                                    ? "primary"
+                                                    : undefined
+                                            }
                                         >
                                             {shortName(
                                                 p.entry.signatures[0].publicKey.toString()
@@ -201,7 +281,13 @@ export const Room = () => {
                     <div ref={messagesEndRef} />
                 </Grid>
 
-                <Grid container item justifyContent="space-between" spacing={1}>
+                <Grid
+                    container
+                    item
+                    direction="row"
+                    justifyContent="space-between"
+                    spacing={1}
+                >
                     <Grid item flex={1}>
                         <TextField
                             size="small"
@@ -232,6 +318,71 @@ export const Room = () => {
                         >
                             <Send />
                         </IconButton>
+                    </Grid>
+                </Grid>
+                <Grid
+                    item
+                    container
+                    justifyContent="space-between"
+                    alignItems="center"
+                    spacing={1}
+                    direction="row"
+                    mt={2}
+                    mb={2}
+                >
+                    <Grid item flex={1}>
+                        <FormControl sx={{ width: "100%" }}>
+                            <InputLabel id="demo-multiple-chip-label">
+                                Recievers
+                            </InputLabel>
+                            <Select
+                                labelId="recieversl"
+                                id="recievers"
+                                multiple
+                                value={receivers}
+                                onChange={handleRecieverChange}
+                                input={
+                                    <OutlinedInput
+                                        id="select-multiple-chip"
+                                        label="Recievers"
+                                    />
+                                }
+                                renderValue={(selected) => (
+                                    <Box
+                                        sx={{
+                                            display: "flex",
+                                            flexWrap: "wrap",
+                                            gap: 0.5,
+                                        }}
+                                    >
+                                        {selected.map((value) => (
+                                            <Chip key={value} label={value} />
+                                        ))}
+                                    </Box>
+                                )}
+                                MenuProps={MenuProps}
+                            >
+                                {identitiesInChatMap &&
+                                    [...identitiesInChatMap.keys()]?.map(
+                                        (id) => (
+                                            <MenuItem
+                                                key={id}
+                                                value={id}
+                                                style={getStyles(
+                                                    id,
+                                                    receivers,
+                                                    theme
+                                                )}
+                                            >
+                                                {shortName(id)}
+                                            </MenuItem>
+                                        )
+                                    )}
+                            </Select>
+                        </FormControl>
+                    </Grid>
+                    <Grid item ml={2}>
+                        <KeyIcon />
                     </Grid>
                 </Grid>
             </Grid>
