@@ -1,16 +1,16 @@
 {
   "files": {
     "main.css": "/peerbit-examples/static/css/main.14891111.css",
-    "main.js": "/peerbit-examples/static/js/main.9c0de0df.js",
+    "main.js": "/peerbit-examples/static/js/main.9cb2bd7f.js",
     "static/js/636.ff698f0b.chunk.js": "/peerbit-examples/static/js/636.ff698f0b.chunk.js",
     "static/js/410.5afd9b6e.chunk.js": "/peerbit-examples/static/js/410.5afd9b6e.chunk.js",
     "index.html": "/peerbit-examples/index.html",
     "main.14891111.css.map": "/peerbit-examples/static/css/main.14891111.css.map",
-    "main.9c0de0df.js.map": "/peerbit-examples/static/js/main.9c0de0df.js.map",
+    "main.9cb2bd7f.js.map": "/peerbit-examples/static/js/main.9cb2bd7f.js.map",
     "410.5afd9b6e.chunk.js.map": "/peerbit-examples/static/js/410.5afd9b6e.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.14891111.css",
-    "static/js/main.9c0de0df.js"
+    "static/js/main.9cb2bd7f.js"
   ]
 }
