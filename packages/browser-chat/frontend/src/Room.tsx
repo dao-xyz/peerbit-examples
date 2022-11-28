@@ -99,7 +99,7 @@ export const Room = () => {
                 (a, b) =>
                     Number(
                         a.entry.metadata.clock.timestamp.wallTime -
-                            b.entry.metadata.clock.timestamp.wallTime
+                        b.entry.metadata.clock.timestamp.wallTime
                     )
             );
             const identityMap = new Map<string, Ed25519PublicKey>();
@@ -168,8 +168,8 @@ export const Room = () => {
                     // Create the room or na? (TODO)
                     alert(
                         "Could not find room: " +
-                            params.name +
-                            ". Go back and create it!"
+                        params.name +
+                        ". Go back and create it!"
                     );
                     navigate("/");
                 }
@@ -330,7 +330,7 @@ export const Room = () => {
                     mt={2}
                     mb={2}
                 >
-                    <Grid item flex={1}>
+                    <Grid item flex={1} pr={1}>
                         <FormControl sx={{ width: "100%" }}>
                             <InputLabel id="demo-multiple-chip-label">
                                 Recievers
@@ -356,7 +356,7 @@ export const Room = () => {
                                         }}
                                     >
                                         {selected.map((value) => (
-                                            <Chip key={value} label={value} />
+                                            <Chip key={value} label={shortName(value)} />
                                         ))}
                                     </Box>
                                 )}
@@ -381,7 +381,7 @@ export const Room = () => {
                             </Select>
                         </FormControl>
                     </Grid>
-                    <Grid item ml={2}>
+                    <Grid item pr={1} >
                         <KeyIcon />
                     </Grid>
                 </Grid>
