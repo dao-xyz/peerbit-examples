@@ -121,25 +121,23 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
 
                 console.log("Connected to swarm!");
                 // We create a new directrory to make tab to tab communication go smoothly
-                Peerbit.create(node, { waitForKeysTimout: 0, directory: "dir" + +new Date }).then(
-                    async (peer) => {
-                        console.log(
-                            "Created peer",
-                            peer.identity.publicKey.toString()
-                        );
-                        setPeer(peer);
-                    }
+                const peer = await Peerbit.create(node, { waitForKeysTimout: 0, directory: "dir" + +new Date })
+                console.log(
+                    "Created peer",
+                    peer.identity.publicKey.toString()
                 );
+                setPeer(peer);
+                setLoading(false);
+
             })
             .catch((e) => {
+                setLoading(false);
                 if (e.toString().startsWith("LockExistsError")) {
                     return; // this context has been remounted in dev mode and the same repo has been created twice
                 }
                 throw e;
+
             })
-            .finally(() => {
-                setLoading(false);
-            });
     }, []);
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;

@@ -1,17 +1,16 @@
 import { useEffect, useState } from "react";
-import { Box, Button, Grid, Typography } from "@mui/material";
+import { Box, Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { NewRoomButtom } from "./NewRoom";
 import { Room } from "@dao-xyz/peerbit-example-browser-chat";
 import { useChat } from "./ChatContext";
 import { useNavigate } from "react-router-dom";
 import { getRoomPath } from "./routes";
+import { usePeer } from "./Peer";
 
-// This is a serialized version of RoomsDB manifest.
-// We could store this on IPFS and load it using a CID but this is "easier"
-// For info how to generate this, see https://github.com/dao-xyz/peerbit-examples/blob/63d6923d82d5c496632824e0c0f162b199f1cd37/packages/browser-chat/library/src/__tests__/index.integration.test.ts#L92
 
 export const Rooms = () => {
-    const { roomsUpdated, rooms } = useChat();
+    const { roomsUpdated, rooms, loading } = useChat();
+    const { loading: loadingPeer } = usePeer();
     const [list, setList] = useState<Room[]>();
     const [open, setOpen] = useState(false);
     const navigate = useNavigate();
@@ -38,7 +37,7 @@ export const Rooms = () => {
                     container
                     direction="row"
                     item
-                    alignItems="center"
+                    alignItems="left"
                     spacing={2}
                     mb={2}
                 >
@@ -49,7 +48,7 @@ export const Rooms = () => {
                         <NewRoomButtom />
                     </Grid>
                 </Grid>
-                <Grid>
+                {loading || loadingPeer ? <Grid item><CircularProgress size={20} /></Grid> : <Grid item>
                     {list?.length > 0 ? (
                         <Box>
                             {list.map((room, ix) => (
@@ -67,7 +66,7 @@ export const Rooms = () => {
                     ) : (
                         <Typography>No rooms found</Typography>
                     )}
-                </Grid>
+                </Grid>}
             </Grid>
         </Box>
     );

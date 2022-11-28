@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Box, Grid, IconButton, TextField, Typography } from "@mui/material";
+import { Box, CircularProgress, Grid, IconButton, TextField, Typography } from "@mui/material";
 import { useParams } from "react-router";
-import { useChat } from "./ChatContext";
+import { TOPIC, useChat } from "./ChatContext";
 import {
     DocumentQueryRequest,
     FieldStringMatchQuery,
@@ -11,8 +11,7 @@ import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
 import { usePeer } from "./Peer";
 import { Send } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
-
-const TOPIC = "world";
+import ArrowBackIcon from '@mui/icons-material/ArrowBack';
 const shortName = (name: string) => {
     return (
         name.substring(0, 14) +
@@ -22,12 +21,11 @@ const shortName = (name: string) => {
 };
 
 export const Room = () => {
-    /* const [client, setClient] = useState<Awaited<ReturnType<typeof api>> | undefined>();
-    const [password, setPassword] = useState<string>();
-    const [id, setId] = useState<string>(); */
-    const { peer } = usePeer();
-    const { rooms, roomsUpdated } = useChat();
+    const { peer, loading: loadingPeer } = usePeer();
+    const { rooms, roomsUpdated, loading: loadingRooms } = useChat();
     const [room, setRoom] = useState<RoomDB>();
+    const [loading, setLoading] = useState(false);
+
     const [text, setText] = useState("");
     const [lastUpdated, setLastUpdate] = useState(0);
     const [posts, setPosts] = useState<IndexedValue<Post>[]>();
@@ -72,6 +70,7 @@ export const Room = () => {
         }
         setRoom(undefined);
         let gotRoom = false;
+        setLoading(true);
         rooms.rooms.index
             .query(
                 new DocumentQueryRequest({
@@ -96,7 +95,6 @@ export const Room = () => {
                             },
                         })
                             .then((r) => {
-                                console.log("Opened room");
                                 setRoom(r);
                             })
                             .catch((e) => {
@@ -106,6 +104,8 @@ export const Room = () => {
                                 alert("Failed top open room: " + e.message);
 
                                 throw e;
+                            }).finally(() => {
+                                setLoading(false)
                             });
                     }
                 },
@@ -113,24 +113,12 @@ export const Room = () => {
             )
             .finally(() => {
                 console.log("create room? ", !gotRoom);
+                setLoading(false);
 
                 if (!gotRoom) {
                     // Create the room or na? (TODO)
                     alert("Could not find room: " + params.name + ". Go back and create it!");
                     navigate("/");
-                    /*  const newRoom = new RoomDB({ name: params.name });
-                     rooms.rooms.put(newRoom).then(() => {
-                         peer.open(newRoom, {
-                             topic: TOPIC,
-                             replicate: true,
-                             onUpdate: () => {
-                                 refresh();
-                             },
-                         }).then((openRoom) => {
-                             setRoom(openRoom);
-                             console.log("Created new room ", openRoom);
-                         });
-                     }); */
                 }
             });
     }, [roomsUpdated, !!rooms?.id, params.name, refresh]);
@@ -161,10 +149,13 @@ export const Room = () => {
     return (
         <Box>
             <Grid container direction="column">
-                <Grid item>
-                    <Typography variant="h4">{room?.name}</Typography>
-                    <Typography variant="caption">{room?.id}</Typography>
-                </Grid>
+                {loading || loadingPeer ? <Grid item>
+                    <CircularProgress size={20} />
+                </Grid> :
+                    <Grid item>
+                        <Typography variant="h4">{room?.name}</Typography>
+                        <Typography variant="caption">{room?.id}</Typography>
+                    </Grid>}
 
                 <Grid
                     item
