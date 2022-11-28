@@ -6,6 +6,7 @@ import {
     IconButton,
     OutlinedInput,
     TextField,
+    Tooltip,
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
@@ -25,8 +26,9 @@ import FormControl from "@mui/material/FormControl";
 import Select, { SelectChangeEvent } from "@mui/material/Select";
 import Chip from "@mui/material/Chip";
 import { Theme, useTheme } from "@mui/material/styles";
-import { PublicSignKey, Ed25519PublicKey } from "@dao-xyz/peerbit-crypto";
+import { Ed25519PublicKey, EncryptedThing } from "@dao-xyz/peerbit-crypto";
 import KeyIcon from "@mui/icons-material/Key";
+import LockIcon from "@mui/icons-material/Lock";
 const ITEM_HEIGHT = 48;
 const ITEM_PADDING_TOP = 8;
 const MenuProps = {
@@ -99,7 +101,7 @@ export const Room = () => {
                 (a, b) =>
                     Number(
                         a.entry.metadata.clock.timestamp.wallTime -
-                        b.entry.metadata.clock.timestamp.wallTime
+                            b.entry.metadata.clock.timestamp.wallTime
                     )
             );
             const identityMap = new Map<string, Ed25519PublicKey>();
@@ -168,13 +170,13 @@ export const Room = () => {
                     // Create the room or na? (TODO)
                     alert(
                         "Could not find room: " +
-                        params.name +
-                        ". Go back and create it!"
+                            params.name +
+                            ". Go back and create it!"
                     );
                     navigate("/");
                 }
             });
-    }, [!!rooms?.id, params.name]);
+    }, [!!rooms?.id, params.name, lastUpdated]);
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
@@ -202,7 +204,7 @@ export const Room = () => {
                 alert("Failed to create message: " + e.message);
                 throw e;
             });
-    }, [text, room, peer]);
+    }, [text, room, peer, receivers]);
 
     const handleRecieverChange = (
         event: SelectChangeEvent<typeof receivers>
@@ -249,22 +251,72 @@ export const Room = () => {
                                     key={ix}
                                     mb={1}
                                 >
-                                    <Grid item mb={-0.5}>
-                                        <Typography
-                                            fontStyle="italic"
-                                            variant="caption"
-                                            color={
-                                                p.entry.signatures[0].publicKey.equals(
-                                                    peer.identity.publicKey
-                                                )
-                                                    ? "primary"
-                                                    : undefined
-                                            }
-                                        >
-                                            {shortName(
-                                                p.entry.signatures[0].publicKey.toString()
-                                            )}
-                                        </Typography>
+                                    <Grid
+                                        item
+                                        container
+                                        direction="row"
+                                        justifyItems="center"
+                                        spacing={0.5}
+                                        mb={-0.5}
+                                    >
+                                        <Grid item>
+                                            <Typography
+                                                fontStyle="italic"
+                                                variant="caption"
+                                                color={
+                                                    p.entry.signatures[0].publicKey.equals(
+                                                        peer.identity.publicKey
+                                                    )
+                                                        ? "primary"
+                                                        : undefined
+                                                }
+                                            >
+                                                {shortName(
+                                                    p.entry.signatures[0].publicKey.toString()
+                                                )}
+                                            </Typography>
+                                        </Grid>
+                                        {p.entry._payload instanceof
+                                            EncryptedThing && (
+                                            <Grid
+                                                item
+                                                display="flex"
+                                                alignItems="center"
+                                            >
+                                                {" "}
+                                                <Tooltip
+                                                    title={
+                                                        <span
+                                                            style={{
+                                                                whiteSpace:
+                                                                    "pre-line",
+                                                            }}
+                                                        >
+                                                            {(
+                                                                p.entry
+                                                                    ._payload as EncryptedThing<any>
+                                                            )._envelope._ks
+                                                                .map((k) =>
+                                                                    shortName(
+                                                                        k._recieverPublicKey.toString()
+                                                                    )
+                                                                )
+                                                                .join("\n")}
+                                                        </span>
+                                                    }
+                                                >
+                                                    <IconButton>
+                                                        <LockIcon
+                                                            color="success"
+                                                            sx={{
+                                                                fontSize:
+                                                                    "14px",
+                                                            }}
+                                                        />{" "}
+                                                    </IconButton>
+                                                </Tooltip>{" "}
+                                            </Grid>
+                                        )}
                                     </Grid>
                                     <Grid item>
                                         <Typography>
@@ -356,7 +408,10 @@ export const Room = () => {
                                         }}
                                     >
                                         {selected.map((value) => (
-                                            <Chip key={value} label={shortName(value)} />
+                                            <Chip
+                                                key={value}
+                                                label={shortName(value)}
+                                            />
                                         ))}
                                     </Box>
                                 )}
@@ -381,8 +436,12 @@ export const Room = () => {
                             </Select>
                         </FormControl>
                     </Grid>
-                    <Grid item pr={1} >
-                        <KeyIcon />
+                    <Grid item pr={1}>
+                        <KeyIcon
+                            color={
+                                receivers?.length > 0 ? "success" : undefined
+                            }
+                        />
                     </Grid>
                 </Grid>
             </Grid>

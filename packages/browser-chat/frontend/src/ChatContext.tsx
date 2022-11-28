@@ -44,7 +44,7 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
             },
         })
             .then(async (db) => {
-                console.log("open rooms!");
+                //  console.log("open rooms!");
                 setRooms(db);
                 const peerIdStart = peer?.id;
                 while (peerIdStart === peer?.id) {
@@ -58,7 +58,7 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                         )
                         .then(() => {
                             setLoading(false);
-                            console.log("Query rooms done" + date);
+                            //    console.log("Query rooms done" + date);
                         });
                     await delay(5000);
                 }
