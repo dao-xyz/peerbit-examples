@@ -90,7 +90,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     // or
                     // 2. Or just the domain here (only if you created the domain with the Peerbit CLI)
                     const swarmAddressees = [
-                        "48f3cbfae3b5ffe415c4f1c0987ac0af718700a6.peerchecker.com",
+                        "9f309997a831f681e19dbe531b185595222c61e7.peerchecker.com",
                     ];
                     try {
                         const swarmAddresseesResolved = await Promise.all(
