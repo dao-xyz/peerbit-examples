@@ -21,8 +21,10 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
     const [rooms, setRooms] = useState<Rooms>(undefined);
     const [roomsUpdated, setRoomsUpdated] = useState<bigint>();
     const { peer } = usePeer();
+    const [date, setDate] = useState<number>(+new Date);
 
     useEffect(() => {
+
         if (!peer?.id) {
             return;
         }
@@ -35,6 +37,7 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                 setRoomsUpdated(oplog._hlc.last.wallTime);
             },
         }).then(async (db) => {
+            console.log('open rooms!')
             setRooms(db);
             const peerIdStart = peer?.id;
             while (peerIdStart === peer?.id) {
@@ -42,13 +45,13 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                     .query(
                         new DocumentQueryRequest({ queries: [] }),
                         (response, from) => {
-                            console.log("Found ROOMS", response);
+                            console.log("Found rooms", response);
                             // (response.results.map(x => x.value))
                         },
                         { sync: true, maxAggregationTime: 5000 } // will invoke "onUpdate"
                     )
                     .then(() => {
-                        console.log("Query rooms done");
+                        console.log("Query rooms done" + date);
                     });
                 await delay(5000);
             }

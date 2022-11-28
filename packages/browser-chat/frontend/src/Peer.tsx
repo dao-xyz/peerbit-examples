@@ -17,23 +17,17 @@ export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({ children }: { children: JSX.Element }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
     const [swarm, setSwarm] = React.useState<string[]>([]);
-
-    /* const [rootIdentity, setRootIdentity] = React.useState<Identity>(undefined); */
     const [loading, setLoading] = React.useState<boolean>(false);
-    /* const wallet = useWallet() */
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
             swarm,
-            /*    rootIdentity, */
             loading,
         }),
         [loading, peer?.identity?.publicKey.toString()]
     );
 
     useEffect(() => {
-        /*   if (!wallet.publicKey)
-              return; */
         if (loading) {
             return;
         }
@@ -41,8 +35,6 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
         console.log("load peer: " + loading);
 
         IPFS.create({
-            /*   start: true,*/
-            // relay: { enabled: false, hop: { enabled: false, active: false } },
             preload: { enabled: false },
             EXPERIMENTAL: { ipnsPubsub: false, pubsub: true } as any,
             offline: false,
@@ -57,28 +49,28 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     webRTCStar: { Enabled: false },
                 },
             },
-            repo: "abcx", // repo name uncertainty: When failing to get remote block
+            repo: "abcx" + +new Date, // If we do same repo, then tab to tab communication does not work (because we filter pubsub messages that go to ourselves)
             libp2p: {
                 connectionManager: {
                     autoDial: true,
                 },
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
-                          transports: [
-                              // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                              webSockets({
-                                  filter: (addrs) =>
-                                      addrs.filter(
-                                          (addr) =>
-                                              addr.toString().indexOf("/ws/") !=
-                                                  -1 ||
-                                              addr
-                                                  .toString()
-                                                  .indexOf("/wss/") != -1
-                                      ),
-                              }),
-                          ],
-                      }
+                        transports: [
+                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                            webSockets({
+                                filter: (addrs) =>
+                                    addrs.filter(
+                                        (addr) =>
+                                            addr.toString().indexOf("/ws/") !=
+                                            -1 ||
+                                            addr
+                                                .toString()
+                                                .indexOf("/wss/") != -1
+                                    ),
+                            }),
+                        ],
+                    }
                     : {}),
             },
         })
@@ -86,46 +78,47 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 console.log(process.env.REACT_APP_NETWORK);
                 if (process.env.REACT_APP_NETWORK === "local") {
                     console.log("LOCAL NETWORK");
+                    const swarmAddress = "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9";
                     await node.swarm.connect(
-                        multiaddr(
-                            "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9"
-                        )
-                    );
+                        multiaddr(swarmAddress)
+                    ).then(() => {
+                        setSwarm([swarmAddress]);
+                    });
                 } else {
-                    console.log("REMOT ENETWORK");
+                    console.log("REMOTE ENETWORK");
+                    // 1. You can insert the whole address 
+                    // or
+                    // 2. Or just the domain here (only if you created the domain with the Peerbit CLI)
                     const swarmAddressees = [
                         "48f3cbfae3b5ffe415c4f1c0987ac0af718700a6.peerchecker.com",
                     ];
-                    const swarmAddresseesResolved = await Promise.all(
-                        swarmAddressees.map((s) => resolveSwarmAddress(s))
-                    );
-                    await Promise.all(
-                        swarmAddresseesResolved.map((swarm) =>
-                            node.swarm
-                                .connect(multiaddr(swarm))
-                                .catch((error) => {
-                                    console.error("PEER CONNECT ERROR", error);
-                                    alert(
-                                        "Failed to connect to peers. Please try again later."
-                                    );
-                                    throw error;
-                                })
-                        )
-                    ).then(() => {
-                        setSwarm(swarmAddressees);
-                    });
+                    try {
+                        const swarmAddresseesResolved = await Promise.all(
+                            swarmAddressees.map((s) => resolveSwarmAddress(s))
+                        );
+                        await Promise.all(
+                            swarmAddresseesResolved.map((swarm) =>
+                                node.swarm
+                                    .connect(multiaddr(swarm))
+                                    .catch((error) => {
+                                        console.error("PEER CONNECT ERROR", error);
+                                        alert(
+                                            "Failed to connect to peers. Please try again later."
+                                        );
+                                        throw error;
+                                    })
+                            )
+                        ).then(() => {
+                            setSwarm(swarmAddressees);
+                        });
+                    } catch (error) {
+                        alert("Failed to resolve relay node. Please come back later or start the demo locally")
+                    }
                 }
 
                 console.log("Connected to swarm!");
-                // TODO fix types
-                /*     console.log('got wallet', wallet)
-                const walletIdentity: Identity = {
-                    publicKey: (wallet.publicKey as (Ed25519PublicKey | Secp256k1PublicKey)) as any,
-                    sign: (data) => (wallet.signMessage(data))
-                };
-                setRootIdentity(walletIdentity);
-     */
-                Peerbit.create(node, { waitForKeysTimout: 0 }).then(
+                // We create a new directrory to make tab to tab communication go smoothly
+                Peerbit.create(node, { waitForKeysTimout: 0, directory: "dir" + +new Date }).then(
                     async (peer) => {
                         console.log(
                             "Created peer",
@@ -144,7 +137,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
             .finally(() => {
                 setLoading(false);
             });
-    }, ["xyz" /* wallet?.publicKey?.toString() */]);
+    }, []);
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;
 };

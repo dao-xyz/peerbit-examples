@@ -1,5 +1,8 @@
 import axios from "axios";
 export const resolveSwarmAddress = async (url: string) => {
+    if (url.startsWith("/")) {
+        return url; // Possible already an swarm address
+    }
     if (url.startsWith("http") == false) {
         url = "https://" + url;
     }
