@@ -1,18 +1,18 @@
 {
   "files": {
     "main.css": "/peerbit-examples/static/css/main.14891111.css",
-    "main.js": "/peerbit-examples/static/js/main.1bbd692c.js",
+    "main.js": "/peerbit-examples/static/js/main.cada5d76.js",
     "static/js/590.1156b657.chunk.js": "/peerbit-examples/static/js/590.1156b657.chunk.js",
     "static/js/636.ff698f0b.chunk.js": "/peerbit-examples/static/js/636.ff698f0b.chunk.js",
     "static/js/410.5afd9b6e.chunk.js": "/peerbit-examples/static/js/410.5afd9b6e.chunk.js",
     "index.html": "/peerbit-examples/index.html",
     "main.14891111.css.map": "/peerbit-examples/static/css/main.14891111.css.map",
-    "main.1bbd692c.js.map": "/peerbit-examples/static/js/main.1bbd692c.js.map",
+    "main.cada5d76.js.map": "/peerbit-examples/static/js/main.cada5d76.js.map",
     "590.1156b657.chunk.js.map": "/peerbit-examples/static/js/590.1156b657.chunk.js.map",
     "410.5afd9b6e.chunk.js.map": "/peerbit-examples/static/js/410.5afd9b6e.chunk.js.map"
   },
   "entrypoints": [
     "static/css/main.14891111.css",
-    "static/js/main.1bbd692c.js"
+    "static/js/main.cada5d76.js"
   ]
 }
