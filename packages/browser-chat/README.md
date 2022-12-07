@@ -4,9 +4,7 @@
 
 App might not work well or at all on mobile (not tested)
 
-This app is running from Browser to Browser.
-
-Snapshots are currently not implemented. So if you are alone in the app and refresh the page you will loose everything! (No one else will help you out when you come back online again)
+This app is running from Browser to Browser. A relay is hosted in a datacenter that allows peers to discover and communicate with each other.
 
 ## About
 

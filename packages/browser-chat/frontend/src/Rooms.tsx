@@ -14,10 +14,6 @@ export const Rooms = () => {
     const [open, setOpen] = useState(false);
     const navigate = useNavigate();
 
-    const handleClickOpen = () => {
-        setOpen(true);
-    };
-
     const goToRoom = (room: Room) => {
         navigate(getRoomPath(room));
     };
@@ -33,11 +29,7 @@ export const Rooms = () => {
         <Box>
             <Grid container>
                 <Grid item mb={2}>
-                    <Typography variant="caption">
-                        This app stores all data on the Browser participants. If
-                        you are the only particant left and you close your tab,
-                        the data is gone!
-                    </Typography>
+                    <Typography variant="subtitle1">A P2P chat app</Typography>
                 </Grid>
                 <Grid
                     container

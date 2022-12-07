@@ -1,10 +1,10 @@
 import { BaseRoutes } from "./routes";
 import { Box, Grid, IconButton, Tooltip, Typography } from "@mui/material";
-import TravelExploreIcon from "@mui/icons-material/TravelExplore";
+import PublicIcon from "@mui/icons-material/Public";
 import { usePeer } from "./Peer";
 
 export const Content = () => {
-    const { swarm } = usePeer();
+    const { peer } = usePeer();
     return (
         <Box>
             <Grid container sx={{ p: 4, height: "100vh" }}>
@@ -28,11 +28,27 @@ export const Content = () => {
                                     </Typography>
                                 </Grid>
                                 <Grid item ml={1}>
-                                    <Tooltip title={JSON.stringify(swarm)}>
-                                        <IconButton>
-                                            <TravelExploreIcon />
-                                        </IconButton>
-                                    </Tooltip>
+                                    {peer?.libp2p.pubsub.getPeers().length >
+                                    0 ? (
+                                        <Tooltip
+                                            color="success"
+                                            title={JSON.stringify(
+                                                peer.libp2p.pubsub
+                                                    .getPeers()
+                                                    .map((x) => x.toString())
+                                            )}
+                                        >
+                                            <IconButton>
+                                                <PublicIcon />
+                                            </IconButton>
+                                        </Tooltip>
+                                    ) : (
+                                        <Tooltip title="Offline">
+                                            <IconButton sx={{ opacity: 0.5 }}>
+                                                <PublicIcon />
+                                            </IconButton>
+                                        </Tooltip>
+                                    )}
                                 </Grid>
                             </Grid>
                         </Grid>

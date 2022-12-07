@@ -1,28 +1,27 @@
 import { Peerbit } from "@dao-xyz/peerbit";
-import { Session } from "@dao-xyz/peerbit-test-utils";
+import { LSession } from "@dao-xyz/peerbit-test-utils";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import { jest } from "@jest/globals";
 import { Post, Room, Rooms } from "..";
-import { delay } from "@dao-xyz/peerbit-time";
 import { serialize } from "@dao-xyz/borsh";
+import { toBase64 } from "@dao-xyz/peerbit-crypto";
+
 import {
     DocumentQueryRequest,
     FieldStringMatchQuery,
     Results,
 } from "@dao-xyz/peerbit-document";
+import { delay } from "@dao-xyz/peerbit-time";
+import { DEFAULT_BLOCK_TRANSPORT_TOPIC } from "@dao-xyz/peerbit-block";
 
 describe("index", () => {
-    let session: Session, peer: Peerbit, peer2: Peerbit;
+    let session: LSession, peer: Peerbit, peer2: Peerbit;
     jest.setTimeout(60 * 1000);
 
     beforeAll(async () => {
-        session = await Session.connected(2);
-        peer = await Peerbit.create(session.peers[0].ipfs, {
-            directory: "./peerbit/" + +new Date(),
-        });
-        peer2 = await Peerbit.create(session.peers[1].ipfs, {
-            directory: "./peerbit/" + +new Date(),
-        });
+        session = await LSession.connected(2, [DEFAULT_BLOCK_TRANSPORT_TOPIC]);
+        peer = await Peerbit.create(session.peers[0]);
+        peer2 = await Peerbit.create(session.peers[1]);
     });
 
     afterAll(async () => {
@@ -33,21 +32,28 @@ describe("index", () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
         const topic = "world";
         await peer.subscribeToTopic(topic, true);
+        const rooms1 = await peer.open(new Rooms({}), {
+            topic,
+            replicate: true,
+        });
 
         // Peer 2 is creating "Rooms" which is a container of "Room"
-        const rooms = await peer2.open(new Rooms({}), { topic });
+        const rooms2 = await peer2.open<Rooms>(rooms1.address!, {
+            topic,
+            replicate: true,
+        });
 
         // Put 1 Room in Rooms
         const room = new Room({ name: "new room" });
-        await rooms.rooms.put(room);
+        await rooms2.rooms.put(room);
 
         // Another room
         const room2 = new Room({ name: "another room" });
-        await rooms.rooms.put(room2);
+        await rooms2.rooms.put(room2);
 
         // Peer2 can "query" for rooms if peer2 does not have anything replicated locally
         const results: Results<Room>[] = [];
-        await rooms.rooms.index.query(
+        await rooms1.rooms.index.query(
             new DocumentQueryRequest({
                 queries: [
                     new FieldStringMatchQuery({
@@ -60,7 +66,9 @@ describe("index", () => {
                 results.push(result);
             },
             {
-                maxAggregationTime: 3000,
+                remote: {
+                    timeout: 3000,
+                },
             }
         );
 
@@ -92,7 +100,7 @@ describe("index", () => {
     it("can create genisis", async () => {
         // This does not really test anything but it generates a serialized version of Rooms that one can hardcode in the frontend, so you dont need to load the Room manifest from IPFS on startup
         const genesis = await peer.open(new Rooms({}));
-        const base64 = Buffer.from(serialize(genesis)).toString("base64");
+        const base64 = toBase64(serialize(genesis));
         console.log(base64);
     });
 });

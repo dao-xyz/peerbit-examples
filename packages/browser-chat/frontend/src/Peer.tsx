@@ -1,151 +1,196 @@
-import React, { useContext, useEffect } from "react";
+import React, { useContext, useEffect, useRef } from "react";
 /* import { useWallet } from "@dao-xyz/wallet-adapter-react"; */
-import * as IPFS from "ipfs-core";
 import { multiaddr } from "@multiformats/multiaddr";
-import { Peerbit } from "@dao-xyz/peerbit";
+import { Peerbit, logger } from "@dao-xyz/peerbit";
 import { webSockets } from "@libp2p/websockets";
-import { resolveSwarmAddress } from "./utils";
+import { createLibp2p } from "libp2p";
+import { noise } from "@chainsafe/libp2p-noise";
+import { gossipsub } from "@chainsafe/libp2p-gossipsub";
+import { floodsub } from "@libp2p/floodsub";
+import { mplex } from "@libp2p/mplex";
+import { getKeypair, resolveSwarmAddress } from "./utils";
+import Cache from "@dao-xyz/peerbit-cache";
+import { Level } from "level";
+import { serialize, deserialize } from "@dao-xyz/borsh";
+import { Entry } from "@dao-xyz/ipfs-log";
+import { Ed25519Keypair, fromBase64, toBase64 } from "@dao-xyz/peerbit-crypto";
+import { delay } from "@dao-xyz/peerbit-time";
+logger.level = "debug";
 
 interface IPeerContext {
     peer: Peerbit;
     loading: boolean;
-    swarm: string[];
 }
 
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({ children }: { children: JSX.Element }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
-    const [swarm, setSwarm] = React.useState<string[]>([]);
     const [loading, setLoading] = React.useState<boolean>(false);
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
-            swarm,
             loading,
         }),
         [loading, peer?.identity?.publicKey.toString()]
     );
+    const ref = useRef(null);
 
     useEffect(() => {
-        if (loading) {
+        if (loading || ref.current) {
             return;
         }
         setLoading(true);
-        console.log("load peer: " + loading);
+        ref.current = getKeypair().then(async (keypair) => {
+            console.log("Creating peer with id:", keypair.publicKey.toString());
 
-        IPFS.create({
-            preload: { enabled: false },
-            EXPERIMENTAL: { ipnsPubsub: false, pubsub: true } as any,
-            offline: false,
-            config: {
-                Bootstrap: [],
-                Addresses: {
-                    Swarm: [],
-                    Delegates: [],
-                },
-                Discovery: {
-                    MDNS: { Enabled: false },
-                    webRTCStar: { Enabled: false },
-                },
-            },
-            repo: "abcx" + +new Date(), // If we do same repo, then tab to tab communication does not work (because we filter pubsub messages that go to ourselves)
-            libp2p: {
+            return createLibp2p({
                 connectionManager: {
                     autoDial: true,
                 },
+                connectionEncryption: [noise()],
+                pubsub: floodsub(),
+                streamMuxers: [mplex()],
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
                           transports: [
                               // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
                               webSockets({
-                                  filter: (addrs) =>
-                                      addrs.filter(
+                                  filter: (addrs) => {
+                                      return addrs.filter(
                                           (addr) =>
                                               addr.toString().indexOf("/ws/") !=
                                                   -1 ||
                                               addr
                                                   .toString()
                                                   .indexOf("/wss/") != -1
-                                      ),
+                                      );
+                                  },
                               }),
                           ],
                       }
-                    : {}),
-            },
-        })
-            .then(async (node) => {
-                console.log(process.env.REACT_APP_NETWORK);
-                if (process.env.REACT_APP_NETWORK === "local") {
-                    console.log("LOCAL NETWORK");
-                    const swarmAddress =
-                        "/ip4/127.0.0.1/tcp/8081/ws/p2p/12D3KooWS85oHFnS64rCmr8UbNny4x5c3YqsgQrow5sm9w7M1PA9";
-                    await node.swarm
-                        .connect(multiaddr(swarmAddress))
-                        .then(() => {
-                            setSwarm([swarmAddress]);
-                        });
-                } else {
-                    const axios = await import("axios");
-                    console.log("REMOTE ENETWORK");
-                    // 1. You can insert the whole address
-                    // or
-                    // 2. Or just the domain here (only if you created the domain with the Peerbit CLI)
-                    // ..
-                    // default below is env file from the github repo
-                    const swarmAddressees = [
-                        (
-                            await axios.default.get(
-                                "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
-                            )
-                        ).data,
-                    ];
-                    try {
-                        const swarmAddresseesResolved = await Promise.all(
-                            swarmAddressees.map((s) => resolveSwarmAddress(s))
-                        );
-                        await Promise.all(
-                            swarmAddresseesResolved.map((swarm) =>
-                                node.swarm
-                                    .connect(multiaddr(swarm))
-                                    .catch((error) => {
-                                        console.error(
-                                            "PEER CONNECT ERROR",
-                                            error
-                                        );
-                                        alert(
-                                            "Failed to connect to peers. Please try again later."
-                                        );
-                                        throw error;
-                                    })
-                            )
-                        ).then(() => {
-                            setSwarm(swarmAddressees);
-                        });
-                    } catch (error) {
-                        alert(
-                            "Failed to resolve relay node. Please come back later or start the demo locally"
-                        );
-                    }
-                }
-
-                console.log("Connected to swarm!");
-                // We create a new directrory to make tab to tab communication go smoothly
-                const peer = await Peerbit.create(node, {
-                    waitForKeysTimout: 0,
-                    directory: "dir" + +new Date(),
-                });
-                console.log("Created peer", peer.identity.publicKey.toString());
-                setPeer(peer);
-                setLoading(false);
+                    : { transports: [webSockets()] }),
             })
-            .catch((e) => {
-                setLoading(false);
-                if (e.toString().startsWith("LockExistsError")) {
-                    return; // this context has been remounted in dev mode and the same repo has been created twice
-                }
-                throw e;
-            });
+                .then(async (node) => {
+                    await node.start();
+                    //  (await node.peerStore.all()).map(x => node.peerStore.delete(x.id))
+                    if (process.env.REACT_APP_NETWORK === "local") {
+                        const swarmAddress =
+                            "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG";
+                        await node.dial(multiaddr(swarmAddress));
+                    } else {
+                        const axios = await import("axios");
+                        // 1. You can insert the whole address
+                        // or
+                        // 2. Or just the domain here (only if you created the domain with the Peerbit CLI)
+                        // ..
+                        // default below is env file from the github repo
+                        const swarmAddressees = [
+                            (
+                                await axios.default.get(
+                                    "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
+                                )
+                            ).data,
+                            ,
+                        ];
+                        try {
+                            const swarmAddresseesResolved = await Promise.all(
+                                swarmAddressees.map((s) =>
+                                    resolveSwarmAddress(s)
+                                )
+                            );
+                            await Promise.all(
+                                swarmAddresseesResolved.map((swarm) =>
+                                    node
+                                        .dial(multiaddr(swarm))
+                                        .catch((error) => {
+                                            console.error(
+                                                "PEER CONNECT ERROR",
+                                                error
+                                            );
+                                            alert(
+                                                "Failed to connect to peers. Please try again later."
+                                            );
+                                            throw error;
+                                        })
+                                )
+                            ).then(() => {});
+                        } catch (error) {
+                            console.log(
+                                "Failed to resolve relay node. Please come back later or start the demo locally"
+                            );
+                            /*  alert(
+                                 "Failed to resolve relay node. Please come back later or start the demo locally"
+                             ); */
+                        }
+                    }
+
+                    console.log("Connected to swarm!");
+                    // We create a new directrory to make tab to tab communication go smoothly
+                    const peer = await Peerbit.create(node, {
+                        waitForKeysTimout: 0,
+                        directory: "./repo",
+                        identity: keypair,
+                    });
+                    console.log(peer);
+
+                    // Cross tab sync when we write
+                    const broadCastWrite = new BroadcastChannel(
+                        keypair.publicKey.toString() + "/onWrite"
+                    );
+                    const onWriteDefault = peer.onWrite.bind(peer);
+                    peer.onWrite = (program, store, entry, topic) => {
+                        broadCastWrite.postMessage({
+                            program: program.address.toString(),
+                            store: store._storeIndex,
+                            entry: serialize(entry),
+                            topic,
+                        });
+                        return onWriteDefault(program, store, entry, topic);
+                    };
+                    broadCastWrite.onmessage = (message) => {
+                        peer.programs
+                            .get(message.data.topic)
+                            ?.get(message.data.program)
+                            ?.program?.allStoresMap.get(message.data.store)
+                            .sync([deserialize(message.data.entry, Entry)], {
+                                canAppend: () => true,
+                                save: false,
+                            });
+                    };
+
+                    // Cross tab sync when we get messages
+                    const broadCastOnMessage = new BroadcastChannel(
+                        keypair.publicKey.toString() + "/onMessage"
+                    );
+                    const onMessageDefault = peer._onMessage.bind(peer);
+                    peer._onMessage = (message) => {
+                        broadCastOnMessage.postMessage(message);
+                        return onMessageDefault(message);
+                    };
+                    broadCastOnMessage.onmessage = (message) => {
+                        onMessageDefault(message.data);
+                    };
+
+                    setPeer(peer);
+                    setLoading(false);
+                    return peer;
+                })
+                .catch((e) => {
+                    setLoading(false);
+                    if (e.toString().startsWith("LockExistsError")) {
+                        return; // this context has been remounted in dev mode and the same repo has been created twice
+                    }
+                    throw e;
+                });
+        });
+
+        /* return () => {
+            someImperativeThing.then((v) => {
+                console.log('close', v)
+                if (v instanceof Peerbit) { v.disconnect(); }
+            })
+        } */
     }, []);
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;

@@ -29,7 +29,6 @@ export const NewRoomButtom = () => {
             rooms.rooms
                 .put(new Room({ name: nameTrimmed }))
                 .then(() => {
-                    console.log("Room succesfully created:" + nameTrimmed);
                     setName("");
                 })
                 .catch((error) => {

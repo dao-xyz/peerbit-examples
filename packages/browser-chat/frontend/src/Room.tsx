@@ -29,12 +29,20 @@ import { Theme, useTheme } from "@mui/material/styles";
 import { Ed25519PublicKey, EncryptedThing } from "@dao-xyz/peerbit-crypto";
 import KeyIcon from "@mui/icons-material/Key";
 import LockIcon from "@mui/icons-material/Lock";
-const ITEM_HEIGHT = 48;
-const ITEM_PADDING_TOP = 8;
+import { Level } from "level";
+/***
+ *  TODO
+ *  This view should be written as multipple parts in multiple files/functions
+ *  This is not a best practice way of doing a "room" chat experience
+ *
+ */
+
+const MENU_ITEM_HEIGHT = 48;
+const MENU_ITEM_PADDING_TOP = 8;
 const MenuProps = {
     PaperProps: {
         style: {
-            maxHeight: ITEM_HEIGHT * 4.5 + ITEM_PADDING_TOP,
+            maxHeight: MENU_ITEM_HEIGHT * 4.5 + MENU_ITEM_PADDING_TOP,
             width: 250,
         },
     },
@@ -60,7 +68,12 @@ const shortName = (name: string) => {
 export const Room = () => {
     const theme = useTheme();
     const { peer, loading: loadingPeer } = usePeer();
-    const { rooms, loading: loadingRooms } = useChat();
+    const {
+        rooms,
+        loading: loadingRooms,
+        loadedLocally: loadedRoomsLocally,
+        roomsUpdated,
+    } = useChat();
     const [room, setRoom] = useState<RoomDB>();
     const [loading, setLoading] = useState(false);
     const [identitiesInChatMap, setIdentitiesInChatMap] =
@@ -68,7 +81,6 @@ export const Room = () => {
 
     const [text, setText] = useState("");
     const [receivers, setRecievers] = useState<string[]>([]);
-
     const [lastUpdated, setLastUpdate] = useState(0);
     const [posts, setPosts] = useState<IndexedValue<Post>[]>();
     const params = useParams();
@@ -84,41 +96,47 @@ export const Room = () => {
     }, [lastUpdated]);
 
     useEffect(() => {
+        if (!room?.id || !room?.initialized) {
+            return;
+        }
+        room.load();
+
+        room.messages.index.query(
+            new DocumentQueryRequest({ queries: [] }),
+            () => {
+                console.log("query messages result;");
+                setLastUpdate(+new Date());
+            },
+            { remote: { sync: true } }
+        );
+    }, [room?.id, room?.initialized]);
+
+    useEffect(() => {
         if (!room?.initialized) {
             return;
         }
-        if (room.messages.index._index.size === 0) {
-            room.messages.index.query(
-                new DocumentQueryRequest({ queries: [] }),
-                () => {
-                    setLastUpdate(+new Date());
-                },
-                { sync: true }
-            );
-        } else {
-            console.log("update posts!");
-            const newPosts = [...room.messages.index._index.values()].sort(
-                (a, b) =>
-                    Number(
-                        a.entry.metadata.clock.timestamp.wallTime -
-                            b.entry.metadata.clock.timestamp.wallTime
-                    )
-            );
-            const identityMap = new Map<string, Ed25519PublicKey>();
-            newPosts.forEach((post) => {
-                const id = post.entry.signatures[0].publicKey;
-                if (peer.identity.publicKey.equals(id)) {
-                    return; // ignore me
-                }
-                identityMap.set(id.toString(), id as Ed25519PublicKey); // bad assumption only Ed25519PublicKey in chat
-            });
-            setIdentitiesInChatMap(identityMap);
-            setPosts(newPosts); // TODO make more performant and add sort
-        }
-    }, [room?.id, room?.messages?.store.oplog._hlc.last.wallTime, lastUpdated]);
+
+        const newPosts = [...room.messages.index._index.values()].sort((a, b) =>
+            Number(
+                a.entry.metadata.clock.timestamp.wallTime -
+                    b.entry.metadata.clock.timestamp.wallTime
+            )
+        );
+        const identityMap = new Map<string, Ed25519PublicKey>();
+        newPosts.forEach((post) => {
+            const id = post.entry.signatures[0].publicKey;
+            if (peer.identity.publicKey.equals(id)) {
+                return; // ignore me
+            }
+            identityMap.set(id.toString(), id as Ed25519PublicKey); // bad assumption only Ed25519PublicKey in chat
+        });
+        setIdentitiesInChatMap(identityMap);
+        setPosts(newPosts); // TODO make more performant and add sort
+    }, [room?.id, lastUpdated]);
 
     useEffect(() => {
-        if (!rooms || room || !params.name) {
+        if (!rooms || room || !params.name || !loadedRoomsLocally) {
+            //('return', rooms, loadedRoomsLocally)
             return;
         }
         setRoom(undefined);
@@ -136,7 +154,6 @@ export const Room = () => {
                 }),
                 (response) => {
                     if (response.results.length > 0) {
-                        console.log("Found room!");
                         gotRoom = true;
                         const roomToOpen = response.results[0].value;
                         peer.open(roomToOpen, {
@@ -162,7 +179,13 @@ export const Room = () => {
                             });
                     }
                 },
-                { sync: true, maxAggregationTime: 5000 }
+                {
+                    remote:
+                        peer.libp2p.pubsub.getSubscribers(TOPIC).length > 0
+                            ? { sync: true, timeout: 5000 }
+                            : false,
+                    local: true,
+                }
             )
             .finally(() => {
                 setLoading(false);
@@ -176,7 +199,15 @@ export const Room = () => {
                     navigate("/");
                 }
             });
-    }, [!!rooms?.id, params.name, lastUpdated]);
+    }, [
+        !!rooms?.id,
+        params.name,
+        roomsUpdated,
+        lastUpdated,
+        loadedRoomsLocally,
+        peer?.id.toString(),
+        peer?.libp2p.pubsub.getSubscribers(TOPIC).length,
+    ]);
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
@@ -186,7 +217,6 @@ export const Room = () => {
         if (!room) {
             return;
         }
-
         room.messages
             .put(new Post({ message: text }), {
                 reciever: {
@@ -198,6 +228,7 @@ export const Room = () => {
             })
             .then(() => {
                 setText("");
+                setLastUpdate(+(+new Date()));
             })
             .catch((e) => {
                 console.error("Failed to create message: " + e.message);
