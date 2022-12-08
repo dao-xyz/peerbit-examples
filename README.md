@@ -19,6 +19,7 @@
 
 
 ## How to setup a local relay node
+(This is just a basic libp2p-js node)
 
 1. 
 Install Node >= 16
