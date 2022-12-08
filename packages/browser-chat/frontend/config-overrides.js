@@ -62,8 +62,8 @@ module.exports = (config) => {
      })) */
 
     /**/
-    /*     config.optimization.splitChunks = { chunks: 'all' };
-     */
+    /*  config.optimization.splitChunks = { chunks: 'all' }; THIS MAKES IT LHELLA SLOW */
+
     return override(
         ...addBabelPlugins([
             "@babel/plugin-transform-typescript",

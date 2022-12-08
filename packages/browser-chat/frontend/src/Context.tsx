@@ -2,9 +2,10 @@ import { BaseRoutes } from "./routes";
 import { Box, Grid, IconButton, Tooltip, Typography } from "@mui/material";
 import PublicIcon from "@mui/icons-material/Public";
 import { usePeer } from "./Peer";
+import { TOPIC } from "./ChatContext";
 
 export const Content = () => {
-    const { peer } = usePeer();
+    const { peer, pubsubPeers } = usePeer();
     return (
         <Box>
             <Grid container sx={{ p: 4, height: "100vh" }}>
@@ -27,15 +28,15 @@ export const Content = () => {
                                         Peerbit Chat
                                     </Typography>
                                 </Grid>
+
                                 <Grid item ml={1}>
-                                    {peer?.libp2p.pubsub.getPeers().length >
-                                    0 ? (
+                                    {pubsubPeers.length > 0 ? (
                                         <Tooltip
                                             color="success"
                                             title={JSON.stringify(
-                                                peer.libp2p.pubsub
-                                                    .getPeers()
-                                                    .map((x) => x.toString())
+                                                pubsubPeers.map((x) =>
+                                                    x.toString()
+                                                )
                                             )}
                                         >
                                             <IconButton>

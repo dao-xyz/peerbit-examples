@@ -3,7 +3,11 @@ import { Program, CanOpenSubPrograms } from "@dao-xyz/peerbit-program";
 import { Documents, DocumentIndex } from "@dao-xyz/peerbit-document";
 import { v4 as uuid } from "uuid";
 import { Entry } from "@dao-xyz/ipfs-log";
-import { IdentityGraph } from "@dao-xyz/peerbit-trusted-network";
+import {
+    getPathGenerator,
+    getFromByTo,
+    IdentityGraph,
+} from "@dao-xyz/peerbit-trusted-network";
 
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class Post {
@@ -91,13 +95,31 @@ export class Rooms extends Program implements CanOpenSubPrograms {
             type: Room,
 
             canAppend: (entry) => {
-                return true; // Anyone can create a new room initiative. I.e. anyone can do "rooms.put(new Room())"
+                return this.canAppend(entry); // Anyone can create a new room initiative. I.e. anyone can do "rooms.put(new Room())"
             },
 
             canRead: (identity) => {
                 return Promise.resolve(true); // Anyone can search for rooms
             },
         });
+    }
+
+    async canAppend(entry: Entry<any>): Promise<boolean> {
+        // Else check whether its trusted by this access controller
+
+        for (const signingKey of entry.publicKeys) {
+            // Walk a long the graph if identity relations, and check whether signingKey can append because it is trusted by someone who can append
+            for await (const trustedByKey of getPathGenerator(
+                signingKey,
+                this.identityGraph.relationGraph,
+                getFromByTo
+            )) {
+                // some acccess condition
+                // for now just return true
+                return true;
+            }
+        }
+        return false;
     }
 
     // Control whether someone can create a "room", which itself is a program with replication

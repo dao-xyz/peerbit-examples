@@ -54,29 +54,36 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                 await db.load();
                 setLoadedLocally(true);
                 const peerIdStart = peer?.id;
-                console.log("initialie loop!");
                 while (peerIdStart === peer?.id) {
                     // TODO do event based without while loop
-                    if (peer.libp2p.pubsub.getSubscribers(TOPIC).length > 0) {
-                        db.rooms.index
-                            .query(
-                                new DocumentQueryRequest({ queries: [] }),
-                                (response, from) => {
+                    try {
+                        if (peer.libp2p.pubsub.getPeers().length > 0) {
+                            await db.rooms.index
+                                .query(
+                                    new DocumentQueryRequest({ queries: [] }),
+                                    (response, from) => {
+                                        setLoading(false);
+                                    },
+                                    { remote: { sync: true, timeout: 5000 } } // will invoke "onUpdate"
+                                )
+                                .then(() => {
                                     setLoading(false);
-                                },
-                                { remote: { sync: true, timeout: 5000 } } // will invoke "onUpdate"
-                            )
-                            .then(() => {
-                                setLoading(false);
-                                //    console.log("Query rooms done" + date);
-                            })
-                            .catch((error) => {
-                                console.error(
-                                    "error while looking for rooms",
-                                    error
-                                );
-                            })
-                            .finally(() => {});
+                                    //    console.log("Query rooms done" + date);
+                                })
+                                /*  .catch((error) => {
+                                     console.error(
+                                         "error while looking for rooms",
+                                         error
+                                     );
+                                 }) */
+                                .finally(() => {});
+                        }
+                    } catch (error) {
+                        console.error(
+                            peer.libp2p.pubsub.getSubscribers(TOPIC),
+                            peer.libp2p.pubsub.getTopics(),
+                            error
+                        );
                     }
 
                     setLoading(false);

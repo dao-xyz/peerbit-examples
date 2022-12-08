@@ -9,30 +9,31 @@ import { gossipsub } from "@chainsafe/libp2p-gossipsub";
 import { floodsub } from "@libp2p/floodsub";
 import { mplex } from "@libp2p/mplex";
 import { getKeypair, resolveSwarmAddress } from "./utils";
-import Cache from "@dao-xyz/peerbit-cache";
-import { Level } from "level";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Entry } from "@dao-xyz/ipfs-log";
-import { Ed25519Keypair, fromBase64, toBase64 } from "@dao-xyz/peerbit-crypto";
+import { PeerId } from "@libp2p/interface-peer-id";
 import { delay } from "@dao-xyz/peerbit-time";
-logger.level = "debug";
 
 interface IPeerContext {
     peer: Peerbit;
     loading: boolean;
+    pubsubPeers: PeerId[];
 }
 
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({ children }: { children: JSX.Element }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
+    const [pubsubPeers, setPubsubPeers] = React.useState<PeerId[]>([]);
     const [loading, setLoading] = React.useState<boolean>(false);
+
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
             loading,
+            pubsubPeers,
         }),
-        [loading, peer?.identity?.publicKey.toString()]
+        [loading, pubsubPeers, peer?.identity?.publicKey.toString()]
     );
     const ref = useRef(null);
 
@@ -46,10 +47,13 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
 
             return createLibp2p({
                 connectionManager: {
-                    autoDial: true,
+                    autoDial: false,
                 },
                 connectionEncryption: [noise()],
-                pubsub: floodsub(),
+                pubsub: gossipsub({
+                    floodPublish: true,
+                    canRelayMessage: true,
+                }),
                 streamMuxers: [mplex()],
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
@@ -72,8 +76,18 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     : { transports: [webSockets()] }),
             })
                 .then(async (node) => {
+                    // const T = await Promise.all((await node.peerStore.all().then((peers) => peers.map(p => node.peerStore.delete(p.id)))).flat())
                     await node.start();
-                    //  (await node.peerStore.all()).map(x => node.peerStore.delete(x.id))
+
+                    node.pubsub.subscribe("world");
+                    node.pubsub.subscribe("world!");
+                    node.pubsub.subscribe("_block");
+                    node.pubsub.addEventListener("message", (evt) => {
+                        if (evt.detail.topic === "world") {
+                            console.log("got message!");
+                        }
+                    });
+
                     if (process.env.REACT_APP_NETWORK === "local") {
                         const swarmAddress =
                             "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG";
@@ -91,7 +105,6 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                     "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
                                 )
                             ).data,
-                            ,
                         ];
                         try {
                             const swarmAddresseesResolved = await Promise.all(
@@ -103,6 +116,19 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                 swarmAddresseesResolved.map((swarm) =>
                                     node
                                         .dial(multiaddr(swarm))
+                                        .then(async (c) => {
+                                            console.log(
+                                                "Successfully dialed remote",
+                                                multiaddr(swarm).toString()
+                                            );
+                                            await delay(5000);
+                                            setPubsubPeers(
+                                                node.pubsub.getPeers()
+                                            );
+
+                                            //
+                                            //
+                                        })
                                         .catch((error) => {
                                             console.error(
                                                 "PEER CONNECT ERROR",
@@ -124,8 +150,15 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                              ); */
                         }
                     }
+                    try {
+                        await node.pubsub.publish(
+                            "world",
+                            new Uint8Array([123])
+                        );
+                    } catch (error) {
+                        console.error("fff", error);
+                    }
 
-                    console.log("Connected to swarm!");
                     // We create a new directrory to make tab to tab communication go smoothly
                     const peer = await Peerbit.create(node, {
                         waitForKeysTimout: 0,
@@ -135,7 +168,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     console.log(peer);
 
                     // Cross tab sync when we write
-                    const broadCastWrite = new BroadcastChannel(
+                    /* const broadCastWrite = new BroadcastChannel(
                         keypair.publicKey.toString() + "/onWrite"
                     );
                     const onWriteDefault = peer.onWrite.bind(peer);
@@ -170,7 +203,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     };
                     broadCastOnMessage.onmessage = (message) => {
                         onMessageDefault(message.data);
-                    };
+                    }; */
 
                     setPeer(peer);
                     setLoading(false);

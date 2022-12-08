@@ -9,11 +9,6 @@ import {
 } from "@mui/material";
 import { ChatProvider } from "./ChatContext";
 import { Content } from "./Context";
-import * as x from "@dao-xyz/peerbit-example-browser-chat";
-import * as y from "@dao-xyz/peerbit";
-import * as z from "@dao-xyz/peerbit-crypto";
-
-console.log(x, y, z);
 let theme = createTheme({
     palette: {
         mode: "dark",
