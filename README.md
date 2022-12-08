@@ -20,6 +20,17 @@
 
 ## How to setup a local relay node
 
-1. Install Node >= 16
-2. sudo npm install -g @dao-xyz/peerbit-node 
-3. peerbit start --relay &
+1. 
+Install Node >= 16
+
+2. 
+Install CLI
+```sh
+sudo npm install -g @dao-xyz/peerbit-node
+```
+3. 
+```sh
+peerbit start --relay &
+```
+
+Ending with '&' to start a background process
