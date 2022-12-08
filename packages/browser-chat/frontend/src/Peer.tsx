@@ -57,37 +57,26 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 streamMuxers: [mplex()],
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
-                          transports: [
-                              // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                              webSockets({
-                                  filter: (addrs) => {
-                                      return addrs.filter(
-                                          (addr) =>
-                                              addr.toString().indexOf("/ws/") !=
-                                                  -1 ||
-                                              addr
-                                                  .toString()
-                                                  .indexOf("/wss/") != -1
-                                      );
-                                  },
-                              }),
-                          ],
-                      }
+                        transports: [
+                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                            webSockets({
+                                filter: (addrs) => {
+                                    return addrs.filter(
+                                        (addr) =>
+                                            addr.toString().indexOf("/ws/") !=
+                                            -1 ||
+                                            addr
+                                                .toString()
+                                                .indexOf("/wss/") != -1
+                                    );
+                                },
+                            }),
+                        ],
+                    }
                     : { transports: [webSockets()] }),
             })
                 .then(async (node) => {
-                    // const T = await Promise.all((await node.peerStore.all().then((peers) => peers.map(p => node.peerStore.delete(p.id)))).flat())
                     await node.start();
-
-                    node.pubsub.subscribe("world");
-                    node.pubsub.subscribe("world!");
-                    node.pubsub.subscribe("_block");
-                    node.pubsub.addEventListener("message", (evt) => {
-                        if (evt.detail.topic === "world") {
-                            console.log("got message!");
-                        }
-                    });
-
                     if (process.env.REACT_APP_NETWORK === "local") {
                         const swarmAddress =
                             "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG";
@@ -104,7 +93,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                 await axios.default.get(
                                     "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
                                 )
-                            ).data,
+                            ).data
                         ];
                         try {
                             const swarmAddresseesResolved = await Promise.all(
@@ -121,13 +110,6 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                                 "Successfully dialed remote",
                                                 multiaddr(swarm).toString()
                                             );
-                                            await delay(5000);
-                                            setPubsubPeers(
-                                                node.pubsub.getPeers()
-                                            );
-
-                                            //
-                                            //
                                         })
                                         .catch((error) => {
                                             console.error(
@@ -140,24 +122,14 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                             throw error;
                                         })
                                 )
-                            ).then(() => {});
+                            ).then(() => { });
                         } catch (error) {
                             console.log(
                                 "Failed to resolve relay node. Please come back later or start the demo locally"
                             );
-                            /*  alert(
-                                 "Failed to resolve relay node. Please come back later or start the demo locally"
-                             ); */
                         }
                     }
-                    try {
-                        await node.pubsub.publish(
-                            "world",
-                            new Uint8Array([123])
-                        );
-                    } catch (error) {
-                        console.error("fff", error);
-                    }
+
 
                     // We create a new directrory to make tab to tab communication go smoothly
                     const peer = await Peerbit.create(node, {
@@ -165,10 +137,9 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                         directory: "./repo",
                         identity: keypair,
                     });
-                    console.log(peer);
 
                     // Cross tab sync when we write
-                    /* const broadCastWrite = new BroadcastChannel(
+                    const broadCastWrite = new BroadcastChannel(
                         keypair.publicKey.toString() + "/onWrite"
                     );
                     const onWriteDefault = peer.onWrite.bind(peer);
@@ -203,9 +174,18 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     };
                     broadCastOnMessage.onmessage = (message) => {
                         onMessageDefault(message.data);
-                    }; */
+                    };
 
                     setPeer(peer);
+                    const updatePeersFn = async () => {
+                        while (true) {
+                            setPubsubPeers(
+                                node.pubsub.getPeers()
+                            );
+                            await delay(500)
+                        }
+                    }
+                    updatePeersFn();
                     setLoading(false);
                     return peer;
                 })

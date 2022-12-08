@@ -43,7 +43,6 @@ export const getKeypair = async (
         try {
             const bytes = await level.get("_key", { valueEncoding: "view" });
             keypair = deserialize(bytes, Ed25519Keypair);
-            console.log("Found key!");
             return keypair;
         } catch (error) {
             console.log("Failed to find key! ", error);

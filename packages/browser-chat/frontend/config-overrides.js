@@ -36,18 +36,22 @@ module.exports = (config) => {
         buffer: require.resolve("buffer"),
     };
     disableEsLint();
-    config.module.rules = [
-        ...config.module.rules,
-        {
-            test: /\.m?js/,
-            resolve: {
-                fullySpecified: false,
-            },
-        },
-    ];
+    /*  config.module.rules = [
+         ...config.module.rules,
+         {
+             test: /\.m?js/,
+             resolve: {
+                 fullySpecified: false,
+             },
+         },
+     ]; */
     config.experiments = {
         topLevelAwait: true,
     };
+    config.optimization = {
+        minimize: false,
+    };
+
     /* config.plugins.push(new webpack.DefinePlugin({
         process: { env: {} }
     })) */

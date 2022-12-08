@@ -70,20 +70,10 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                                     setLoading(false);
                                     //    console.log("Query rooms done" + date);
                                 })
-                                /*  .catch((error) => {
-                                     console.error(
-                                         "error while looking for rooms",
-                                         error
-                                     );
-                                 }) */
                                 .finally(() => {});
                         }
                     } catch (error) {
-                        console.error(
-                            peer.libp2p.pubsub.getSubscribers(TOPIC),
-                            peer.libp2p.pubsub.getTopics(),
-                            error
-                        );
+                        console.error(error);
                     }
 
                     setLoading(false);
