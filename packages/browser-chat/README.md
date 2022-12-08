@@ -30,7 +30,7 @@ yarn lerna bootstrap
 
 For the browser to browser to work you need a relay (or use the one that is already available if its online)
 
-See [this](../../README.md) for a local node (on your computer in a Docker container) (EASY!)
+See [this](../../README.md) for a local node (EASY!)
 
 See [this](https://github.com/dao-xyz/peerbit/tree/master/packages/server-node) for a remote node (host in a data center, or at home with port forwarding) (A little harder)
 
@@ -44,7 +44,7 @@ The topics you need to subscribe to are
 ```
 
 4. 
-Go to [Peer](./frontend/src/Peer.tsx) and modify the hard coded swarm addresses to one of the addresses you obtained in (1)
+Go to [Peer](./frontend/src/Peer.tsx) and modify the hard code addresses to one of the addresses you obtained in (1)
 
 5. 
 In the frontend package
