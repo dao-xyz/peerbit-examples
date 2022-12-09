@@ -134,14 +134,7 @@ export const Room = () => {
     }, [room?.id, lastUpdated]);
 
     useEffect(() => {
-        if (
-            !rooms ||
-            room ||
-            loading ||
-            !params.name ||
-            !loadedRoomsLocally ||
-            loadingRooms
-        ) {
+        if (!rooms || room || !params.name || !loadedRoomsLocally) {
             //('return', rooms, loadedRoomsLocally)
             return;
         }
@@ -195,8 +188,7 @@ export const Room = () => {
             )
             .finally(() => {
                 setLoading(false);
-                console.log("finally", gotRoom, loadingRooms);
-                if (!gotRoom && !loadingRooms) {
+                if (!gotRoom && !loadingRooms && !loadedRoomsLocally) {
                     // Create the room or na? (TODO)
                     alert(
                         "Could not find room: " +
@@ -267,6 +259,7 @@ export const Room = () => {
                 ) : (
                     <Grid item>
                         <Typography variant="h4">{room?.name}</Typography>
+                        <Typography variant="caption">{room?.id}</Typography>
                     </Grid>
                 )}
 

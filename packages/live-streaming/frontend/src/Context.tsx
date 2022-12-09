@@ -20,13 +20,12 @@ export const Content = () => {
                             >
                                 <Grid itemID="">
                                     <Typography
-                                        variant="h4"
-                                        /*    sx={{
-                                           fontFamily: "Indie Flower",
-                                       }} */
+                                        variant="h3"
+                                        sx={{
+                                            fontFamily: "Indie Flower",
+                                        }}
                                     >
-                                        Peer Chat v.
-                                        {process.env.REACT_APP_VERSION}
+                                        Peerbit Chat
                                     </Typography>
                                 </Grid>
 

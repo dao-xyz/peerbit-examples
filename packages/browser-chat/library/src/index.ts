@@ -28,9 +28,6 @@ export class Post {
 @variant("room")
 export class Room extends Program {
     @field({ type: "string" })
-    id: string;
-
-    @field({ type: "string" })
     name: string;
 
     @field({ type: Documents })
@@ -39,7 +36,6 @@ export class Room extends Program {
     constructor(properties?: { name: string; messages?: Documents<Post> }) {
         super();
         if (properties) {
-            this.id = uuid();
             this.name = properties.name;
             this.messages =
                 properties.messages ||
@@ -95,31 +91,13 @@ export class Rooms extends Program implements CanOpenSubPrograms {
             type: Room,
 
             canAppend: (entry) => {
-                return this.canAppend(entry); // Anyone can create a new room initiative. I.e. anyone can do "rooms.put(new Room())"
+                return Promise.resolve(true); // Anyone can create rooms
             },
 
             canRead: (identity) => {
                 return Promise.resolve(true); // Anyone can search for rooms
             },
         });
-    }
-
-    async canAppend(entry: Entry<any>): Promise<boolean> {
-        // Else check whether its trusted by this access controller
-
-        for (const signingKey of entry.publicKeys) {
-            // Walk a long the graph if identity relations, and check whether signingKey can append because it is trusted by someone who can append
-            for await (const trustedByKey of getPathGenerator(
-                signingKey,
-                this.identityGraph.relationGraph,
-                getFromByTo
-            )) {
-                // some acccess condition
-                // for now just return true
-                return true;
-            }
-        }
-        return false;
     }
 
     // Control whether someone can create a "room", which itself is a program with replication

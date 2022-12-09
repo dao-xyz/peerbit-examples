@@ -7,7 +7,8 @@
     "type": "module",
     "workspaces": {
         "packages": [
-            "packages/*/**"
+            "packages/react-utils",
+            "packages/browser-chat/*"
         ],
         "nohoist": [
             "**/@babel/preset-env",

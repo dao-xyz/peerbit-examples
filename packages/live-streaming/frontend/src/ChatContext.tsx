@@ -10,7 +10,7 @@ import { delay } from "@dao-xyz/peerbit-time";
 // We could store this on IPFS and load it using a CID but this is "easier"
 // For info how to generate this, see https://github.com/dao-xyz/peerbit-examples/blob/63d6923d82d5c496632824e0c0f162b199f1cd37/packages/browser-chat/library/src/__tests__/index.integration.test.ts#L92
 const ROOMS_PROGRAM =
-    "AAAAACQAAAA4N2M1YWRlZi1iNTQ2LTQ1MjktYTgxOC0yYmJhOTc2MTQxNTQFAAAAcm9vbXMAAQAAAAAAAQkAAABkb2N1bWVudHMAAAAAAAAAAQIAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQQAAAAAAQMAAABycGMCAAAAaWQAAQMAAAAAAQgAAABsb2dpbmRleAABBQAAAAABAwAAAHJwYwABAQAAAAAAJAAAAGQxZjk5OGU0LTk4NzQtNGE3Mi1iMDljLTZkMTE0YTRkYzBmNgkAAAByZWxhdGlvbnMAAQYAAAAAAQkAAABkb2N1bWVudHMAAQAAAAAAAQcAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQkAAAAAAQMAAABycGMCAAAAaWQAAQgAAAAAAQgAAABsb2dpbmRleAABCgAAAAABAwAAAHJwYw";
+    "AAAAACQAAABjNjhlMzg0Ny1mNjNjLTQzNTItODE5MS00NGE2ZTRmZjc5ODAFAAAAcm9vbXMAAQAAAAAAAQkAAABkb2N1bWVudHMAAAAAAAAAAQIAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQQAAAAAAQMAAABycGMCAAAAaWQAAQMAAAAAAQgAAABsb2dpbmRleAABBQAAAAABAwAAAHJwYwABAQAAAAAAJAAAAGE4OTdiMzY2LTgyM2MtNGYyNy04MzFiLWE3YzczNTliZWE0MwkAAAByZWxhdGlvbnMAAQYAAAAAAQkAAABkb2N1bWVudHMAAQAAAAAAAQcAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQkAAAAAAQMAAABycGMCAAAAaWQAAQgAAAAAAQgAAABsb2dpbmRleAABCgAAAAABAwAAAHJwYw";
 
 export const TOPIC = "world";
 
@@ -41,7 +41,7 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
         setLoadedLocally(false);
 
         const rooms = deserialize(fromBase64(ROOMS_PROGRAM), Rooms);
-        peer.open<Rooms>(rooms, {
+        peer.open(rooms, {
             replicate: true,
             topic: TOPIC,
             onUpdate: (oplog, entries) => {
