@@ -1,1 +1,0 @@
-(self.webpackChunkfrontend=self.webpackChunkfrontend||[]).push([[636],{42636:()=>{}}]);
