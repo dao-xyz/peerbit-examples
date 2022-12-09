@@ -1,19 +1,18 @@
 {
   "files": {
-    "main.css": "/peerbit-examples/static/css/main.d3c2351c.css",
-    "main.js": "/peerbit-examples/static/js/main.a7f13538.js",
-    "static/js/590.4c9bfce4.chunk.js": "/peerbit-examples/static/js/590.4c9bfce4.chunk.js",
-    "static/js/636.5df45d0a.chunk.js": "/peerbit-examples/static/js/636.5df45d0a.chunk.js",
-    "static/js/410.3e6273c4.chunk.js": "/peerbit-examples/static/js/410.3e6273c4.chunk.js",
+    "main.css": "/peerbit-examples/static/css/main.14891111.css",
+    "main.js": "/peerbit-examples/static/js/main.16c0789f.js",
+    "static/js/590.abac5dab.chunk.js": "/peerbit-examples/static/js/590.abac5dab.chunk.js",
+    "static/js/636.60d68af6.chunk.js": "/peerbit-examples/static/js/636.60d68af6.chunk.js",
+    "static/js/410.5afd9b6e.chunk.js": "/peerbit-examples/static/js/410.5afd9b6e.chunk.js",
     "index.html": "/peerbit-examples/index.html",
-    "main.d3c2351c.css.map": "/peerbit-examples/static/css/main.d3c2351c.css.map",
-    "main.a7f13538.js.map": "/peerbit-examples/static/js/main.a7f13538.js.map",
-    "590.4c9bfce4.chunk.js.map": "/peerbit-examples/static/js/590.4c9bfce4.chunk.js.map",
-    "636.5df45d0a.chunk.js.map": "/peerbit-examples/static/js/636.5df45d0a.chunk.js.map",
-    "410.3e6273c4.chunk.js.map": "/peerbit-examples/static/js/410.3e6273c4.chunk.js.map"
+    "main.14891111.css.map": "/peerbit-examples/static/css/main.14891111.css.map",
+    "main.16c0789f.js.map": "/peerbit-examples/static/js/main.16c0789f.js.map",
+    "590.abac5dab.chunk.js.map": "/peerbit-examples/static/js/590.abac5dab.chunk.js.map",
+    "410.5afd9b6e.chunk.js.map": "/peerbit-examples/static/js/410.5afd9b6e.chunk.js.map"
   },
   "entrypoints": [
-    "static/css/main.d3c2351c.css",
-    "static/js/main.a7f13538.js"
+    "static/css/main.14891111.css",
+    "static/js/main.16c0789f.js"
   ]
 }
