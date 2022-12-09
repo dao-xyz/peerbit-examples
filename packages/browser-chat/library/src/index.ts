@@ -2,7 +2,7 @@ import { field, variant } from "@dao-xyz/borsh";
 import { Program, CanOpenSubPrograms } from "@dao-xyz/peerbit-program";
 import { Documents, DocumentIndex } from "@dao-xyz/peerbit-document";
 import { v4 as uuid } from "uuid";
-import { Entry } from "@dao-xyz/ipfs-log";
+import { Entry } from "@dao-xyz/peerbit-log";
 import {
     getPathGenerator,
     getFromByTo,

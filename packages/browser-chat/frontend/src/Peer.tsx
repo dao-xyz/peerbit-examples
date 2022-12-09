@@ -10,7 +10,7 @@ import { floodsub } from "@libp2p/floodsub";
 import { mplex } from "@libp2p/mplex";
 import { getKeypair, resolveSwarmAddress } from "./utils";
 import { serialize, deserialize } from "@dao-xyz/borsh";
-import { Entry } from "@dao-xyz/ipfs-log";
+import { Entry } from "@dao-xyz/peerbit-log";
 import { PeerId } from "@libp2p/interface-peer-id";
 import { delay } from "@dao-xyz/peerbit-time";
 
@@ -57,22 +57,22 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                 streamMuxers: [mplex()],
                 ...(process.env.REACT_APP_NETWORK === "local"
                     ? {
-                        transports: [
-                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                            webSockets({
-                                filter: (addrs) => {
-                                    return addrs.filter(
-                                        (addr) =>
-                                            addr.toString().indexOf("/ws/") !=
-                                            -1 ||
-                                            addr
-                                                .toString()
-                                                .indexOf("/wss/") != -1
-                                    );
-                                },
-                            }),
-                        ],
-                    }
+                          transports: [
+                              // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                              webSockets({
+                                  filter: (addrs) => {
+                                      return addrs.filter(
+                                          (addr) =>
+                                              addr.toString().indexOf("/ws/") !=
+                                                  -1 ||
+                                              addr
+                                                  .toString()
+                                                  .indexOf("/wss/") != -1
+                                      );
+                                  },
+                              }),
+                          ],
+                      }
                     : { transports: [webSockets()] }),
             })
                 .then(async (node) => {
@@ -93,7 +93,7 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                 await axios.default.get(
                                     "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
                                 )
-                            ).data
+                            ).data,
                         ];
                         try {
                             const swarmAddresseesResolved = await Promise.all(
@@ -122,14 +122,13 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                                             throw error;
                                         })
                                 )
-                            ).then(() => { });
+                            ).then(() => {});
                         } catch (error) {
                             console.log(
                                 "Failed to resolve relay node. Please come back later or start the demo locally"
                             );
                         }
                     }
-
 
                     // We create a new directrory to make tab to tab communication go smoothly
                     const peer = await Peerbit.create(node, {
@@ -179,12 +178,10 @@ export const PeerProvider = ({ children }: { children: JSX.Element }) => {
                     setPeer(peer);
                     const updatePeersFn = async () => {
                         while (true) {
-                            setPubsubPeers(
-                                node.pubsub.getPeers()
-                            );
-                            await delay(500)
+                            setPubsubPeers(node.pubsub.getPeers());
+                            await delay(500);
                         }
-                    }
+                    };
                     updatePeersFn();
                     setLoading(false);
                     return peer;

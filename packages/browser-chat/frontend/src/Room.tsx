@@ -104,7 +104,6 @@ export const Room = () => {
         room.messages.index.query(
             new DocumentQueryRequest({ queries: [] }),
             () => {
-                console.log("query messages result;");
                 setLastUpdate(+new Date());
             },
             { remote: { sync: true } }
@@ -189,7 +188,7 @@ export const Room = () => {
             )
             .finally(() => {
                 setLoading(false);
-                if (!gotRoom) {
+                if (!gotRoom && !loadingRooms && !loadedRoomsLocally) {
                     // Create the room or na? (TODO)
                     alert(
                         "Could not find room: " +
@@ -204,6 +203,7 @@ export const Room = () => {
         params.name,
         roomsUpdated,
         lastUpdated,
+        loadingRooms,
         loadedRoomsLocally,
         peer?.id.toString(),
         peer?.libp2p.pubsub.getSubscribers(TOPIC).length,

@@ -35,9 +35,9 @@
         "test:integration": "node ../../../node_modules/.bin/jest test -c  ../../../jest.config.integration.ts --runInBand --forceExit"
     },
     "devDependencies": {
-        "@dao-xyz/peerbit-test-utils": "^0.0.20",
+        "@dao-xyz/peerbit-test-utils": "^0.0.22",
         "typescript": "^4.8.4",
-        "@dao-xyz/peerbit": "^0.0.90"
+        "@dao-xyz/peerbit": "^0.0.93"
     },
     "dependencies": {},
     "peerDependencies": {

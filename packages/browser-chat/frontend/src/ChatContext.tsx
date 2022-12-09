@@ -57,27 +57,41 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                 while (peerIdStart === peer?.id) {
                     // TODO do event based without while loop
                     try {
-                        if (peer.libp2p.pubsub.getPeers().length > 0) {
+                        if (
+                            peer.libp2p.pubsub.getSubscribers(TOPIC).length > 0
+                        ) {
                             await db.rooms.index
                                 .query(
                                     new DocumentQueryRequest({ queries: [] }),
                                     (response, from) => {
                                         setLoading(false);
                                     },
-                                    { remote: { sync: true, timeout: 5000 } } // will invoke "onUpdate"
+                                    {
+                                        local: false,
+                                        remote: {
+                                            sync: true,
+                                            timeout:
+                                                db.rooms.index.size === 0
+                                                    ? 500
+                                                    : 5000,
+                                        },
+                                    } // will invoke "onUpdate"
                                 )
                                 .then(() => {
                                     setLoading(false);
-                                    //    console.log("Query rooms done" + date);
                                 })
-                                .finally(() => {});
+                                .finally(() => {
+                                    setLoading(false);
+                                });
                         }
+                        if (db.rooms.index.size > 0) {
+                            await delay(5000);
+                        } // only do rapid quires if we dont have any local data
                     } catch (error) {
                         console.error(error);
                     }
-
-                    setLoading(false);
-                    await delay(5000);
+                    setLoading(loading && db.rooms.index.size === 0);
+                    await delay(100);
                 }
             })
             .catch((e) => {

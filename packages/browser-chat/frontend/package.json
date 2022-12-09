@@ -7,7 +7,7 @@
         "@chainsafe/libp2p-noise": "^10.2.0",
         "@libp2p/floodsub": "^5.0.0",
         "@libp2p/websockets": "^5.0.0",
-        "@dao-xyz/peerbit": "^0.0.90",
+        "@dao-xyz/peerbit": "^0.0.93",
         "@dao-xyz/peerbit-example-browser-chat": "^0.0.1",
         "@testing-library/jest-dom": "^5.16.5",
         "@testing-library/react": "^13.4.0",
@@ -39,7 +39,8 @@
         "@babel/plugin-transform-typescript": "^7.20.2",
         "react-app-rewired": "^2.2.1",
         "customize-cra": "^1.0.0",
-        "gh-pages": "^4.0.0"
+        "gh-pages": "^4.0.0",
+        "terser-webpack-plugin": "^5.3.6"
     },
     "eslintConfig": {
         "extends": [

@@ -7,6 +7,8 @@
 const { DefinePlugin } = require('webpack');
  */
 const { addBabelPlugins, disableEsLint, override } = require("customize-cra");
+const TerserPlugin = require("terser-webpack-plugin");
+
 /* const webpack = require('webpack');
  */
 
@@ -48,31 +50,6 @@ module.exports = (config) => {
     config.experiments = {
         topLevelAwait: true,
     };
-    config.optimization = {
-        minimize: false,
-    };
 
-    /* config.plugins.push(new webpack.DefinePlugin({
-        process: { env: {} }
-    })) */
-    /*  addWebpackPlugin(
-         new DefinePlugin({
-             process: { env: {} }
-         }),
-     ) */
-
-    /*  config.plugins.push(new webpack.ProvidePlugin({
-         Buffer: ['buffer', 'Buffer'],
-     })) */
-
-    /**/
-    /*  config.optimization.splitChunks = { chunks: 'all' }; THIS MAKES IT LHELLA SLOW */
-
-    return override(
-        ...addBabelPlugins([
-            "@babel/plugin-transform-typescript",
-            { allowNamespaces: true },
-            /*  '@babel/plugin-syntax-dynamic-import'  */
-        ])
-    )(config);
+    return config;
 };
