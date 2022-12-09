@@ -3,7 +3,7 @@ import { deserialize } from "@dao-xyz/borsh";
 import { fromBase64 } from "@dao-xyz/peerbit-crypto";
 import { Room, Rooms } from "@dao-xyz/peerbit-example-browser-chat";
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
-import { usePeer } from "./Peer";
+import { usePeer } from "@dao-xyz/peerbit-react";
 import { delay } from "@dao-xyz/peerbit-time";
 
 // This is a serialized version of RoomsDB manifest.

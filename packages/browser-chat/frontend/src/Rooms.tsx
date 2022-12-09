@@ -5,7 +5,7 @@ import { Room } from "@dao-xyz/peerbit-example-browser-chat";
 import { useChat } from "./ChatContext";
 import { useNavigate } from "react-router-dom";
 import { getRoomPath } from "./routes";
-import { usePeer } from "./Peer";
+import { usePeer } from "@dao-xyz/peerbit-react";
 
 export const Rooms = () => {
     const { roomsUpdated, rooms, loading } = useChat();

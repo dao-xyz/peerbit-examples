@@ -17,7 +17,7 @@ import {
     IndexedValue,
 } from "@dao-xyz/peerbit-document";
 import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
-import { usePeer } from "./Peer";
+import { usePeer } from "@dao-xyz/peerbit-react";
 import { Send } from "@mui/icons-material";
 import { useNavigate } from "react-router-dom";
 import InputLabel from "@mui/material/InputLabel";
@@ -29,7 +29,7 @@ import { Theme, useTheme } from "@mui/material/styles";
 import { Ed25519PublicKey, EncryptedThing } from "@dao-xyz/peerbit-crypto";
 import KeyIcon from "@mui/icons-material/Key";
 import LockIcon from "@mui/icons-material/Lock";
-import { Level } from "level";
+
 /***
  *  TODO
  *  This view should be written as multipple parts in multiple files/functions

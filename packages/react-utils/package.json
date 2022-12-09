@@ -1,15 +1,12 @@
 {
     "name": "@dao-xyz/peerbit-react",
-    "version": "0.1.0",
-    "private": true,
+    "version": "0.0.1",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
-    "main": "lib/cjs/index.js",
-    "module": "lib/esm/index.mjs",
-    "types": "lib/types/index.d.ts",
+    "module": "lib/esm/index.js",
+    "types": "lib/esm/index.d.ts",
     "exports": {
         ".": {
-            "import": "./lib/esm/index.mjs",
-            "require": "./lib/cjs/index.js"
+            "import": "./lib/esm/index.js"
         },
         "./package.json": "./package.json"
     },

@@ -9,6 +9,7 @@
         "@libp2p/websockets": "^5.0.0",
         "@dao-xyz/peerbit": "^0.0.94",
         "@dao-xyz/peerbit-example-browser-chat": "^0.0.1",
+        "@dao-xyz/peerbit-react": "^0.0.1",
         "@testing-library/jest-dom": "^5.16.5",
         "@testing-library/react": "^13.4.0",
         "@testing-library/user-event": "^13.5.0",

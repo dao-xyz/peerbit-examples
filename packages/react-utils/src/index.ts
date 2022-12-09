@@ -1,1 +1,1 @@
-export { PeerContext, usePeer } from "./usePeer";
+export { PeerProvider, PeerContext, usePeer } from "./usePeer.js";

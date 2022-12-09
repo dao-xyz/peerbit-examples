@@ -1,8 +1,7 @@
 import { BaseRoutes } from "./routes";
 import { Box, Grid, IconButton, Tooltip, Typography } from "@mui/material";
 import PublicIcon from "@mui/icons-material/Public";
-import { usePeer } from "./Peer";
-import { TOPIC } from "./ChatContext";
+import { usePeer } from "@dao-xyz/peerbit-react";
 
 export const Content = () => {
     const { peer, pubsubPeers } = usePeer();
@@ -22,8 +21,8 @@ export const Content = () => {
                                     <Typography
                                         variant="h4"
                                         /*    sx={{
-                                           fontFamily: "Indie Flower",
-                                       }} */
+                                       fontFamily: "Indie Flower",
+                                   }} */
                                     >
                                         Peer Chat v.
                                         {process.env.REACT_APP_VERSION}

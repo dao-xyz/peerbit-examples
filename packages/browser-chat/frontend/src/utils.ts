@@ -31,29 +31,23 @@ export const resolveSwarmAddress = async (url: string) => {
     );
 };
 
-let _getKeypair: Promise<any>;
 export const getKeypair = async (
     level: Level<string, Uint8Array> = new Level<string, Uint8Array>("./peer", {
         valueEncoding: "view",
     })
 ) => {
-    await _getKeypair;
-    const fn = async () => {
-        let keypair: Ed25519Keypair;
-        try {
-            const bytes = await level.get("_key", { valueEncoding: "view" });
-            keypair = deserialize(bytes, Ed25519Keypair);
-            return keypair;
-        } catch (error) {
-            console.log("Failed to find key! ", error);
+    let keypair: Ed25519Keypair;
+    try {
+        const bytes = await level.get("_key", { valueEncoding: "view" });
+        keypair = deserialize(bytes, Ed25519Keypair);
+        return keypair;
+    } catch (error) {
+        console.log("Failed to find key! ", error);
 
-            keypair = Ed25519Keypair.create();
-            await level.put("_key", serialize(keypair));
-            return keypair;
-        }
-    };
-    _getKeypair = fn();
-    return _getKeypair;
+        keypair = Ed25519Keypair.create();
+        await level.put("_key", serialize(keypair));
+        return keypair;
+    }
 };
 
 export const getPeerIdFromKeypair = async (
