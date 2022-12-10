@@ -195,7 +195,6 @@ export const Room = () => {
             )
             .finally(() => {
                 setLoading(false);
-                console.log("finally", gotRoom, loadingRooms);
                 if (!gotRoom && !loadingRooms) {
                     // Create the room or na? (TODO)
                     alert(

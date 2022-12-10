@@ -19,7 +19,6 @@ const keypair = await getKeypair();
 interface IPeerContext {
     peer: Peerbit;
     loading: boolean;
-    pubsubPeers: PeerId[];
 }
 
 export const connectTabs = (peer: Peerbit) => {
@@ -73,16 +72,14 @@ export const PeerProvider = ({
     children: JSX.Element;
 }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
-    const [pubsubPeers, setPubsubPeers] = React.useState<PeerId[]>([]);
     const [loading, setLoading] = React.useState<boolean>(false);
 
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
             loading,
-            pubsubPeers,
         }),
-        [loading, pubsubPeers, peer?.identity?.publicKey.toString()]
+        [loading, peer?.identity?.publicKey.toString()]
     );
     const ref = useRef<Promise<Peerbit | void>>(null);
 
@@ -157,14 +154,6 @@ export const PeerProvider = ({
                 // Make sure data flow as expected between tabs and windows locally (offline states)
                 connectTabs(peer);
                 setPeer(peer);
-
-                // Pool peers TODO, dont do this?
-                (async () => {
-                    while (true) {
-                        setPubsubPeers(node.pubsub.getPeers());
-                        await delay(500);
-                    }
-                })();
 
                 setLoading(false);
                 return peer;
