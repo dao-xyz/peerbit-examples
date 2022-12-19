@@ -1,16 +1,18 @@
-import { Room } from "@dao-xyz/peerbit-example-browser-chat";
 import { Routes, Route } from "react-router";
-import { Rooms } from "./Rooms";
-import { Room as RoomView } from "./Room";
-export const ROOM = "r/:name";
-export const getRoomPath = (room: string | Room) =>
-    "r/" + (room instanceof Room ? room.name : room);
+import { Stream } from "./Stream";
+import { PublicSignKey, toBase64, fromBase64 } from '@dao-xyz/peerbit-crypto';
+import { serialize, deserialize } from '@dao-xyz/borsh';
+import { CreateStream } from "./CreateStream";
+
+export const STREAM = "s/:key";
+export const getStreamPath = (key: PublicSignKey) => "s/" + toBase64(serialize(key))
+export const getKeyFromStreamKey = (key: string) => deserialize(fromBase64(key), PublicSignKey);
 
 export function BaseRoutes() {
     return (
         <Routes>
-            <Route path={ROOM} element={<RoomView />} />
-            <Route path={"/"} element={<Rooms />} />
+            <Route path={STREAM} element={<Stream />} />
+            <Route path={"/"} element={<CreateStream />} />
         </Routes>
     );
 }

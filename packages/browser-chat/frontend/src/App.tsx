@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { PeerProvider } from "@dao-xyz/peerbit-react";
 import { HashRouter } from "react-router-dom";
 import {

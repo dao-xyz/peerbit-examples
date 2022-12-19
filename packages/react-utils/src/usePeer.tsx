@@ -5,12 +5,12 @@ import { webSockets } from "@libp2p/websockets";
 import { createLibp2p } from "libp2p";
 import { noise } from "@chainsafe/libp2p-noise";
 import { gossipsub } from "@chainsafe/libp2p-gossipsub";
+import { floodsub } from "@libp2p/floodsub";
+
 import { mplex } from "@libp2p/mplex";
 import { getKeypair } from "./utils.js";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Entry } from "@dao-xyz/peerbit-log";
-import { PeerId } from "@libp2p/interface-peer-id";
-import { delay } from "@dao-xyz/peerbit-time";
 import { Libp2p } from "libp2p";
 import { Multiaddr } from "@multiformats/multiaddr";
 
@@ -92,37 +92,39 @@ export const PeerProvider = ({
             libp2p
                 ? Promise.resolve(libp2p)
                 : createLibp2p({
-                      connectionManager: {
-                          autoDial: false,
-                      },
-                      connectionEncryption: [noise()],
-                      pubsub: gossipsub({
-                          floodPublish: true,
-                          canRelayMessage: true,
-                      }),
-                      streamMuxers: [mplex()],
-                      ...(process.env.REACT_APP_NETWORK === "local"
-                          ? {
-                                transports: [
-                                    // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                    webSockets({
-                                        filter: (addrs) => {
-                                            return addrs.filter(
-                                                (addr) =>
-                                                    addr
-                                                        .toString()
-                                                        .indexOf("/ws/") !=
-                                                        -1 ||
-                                                    addr
-                                                        .toString()
-                                                        .indexOf("/wss/") != -1
-                                            );
-                                        },
-                                    }),
-                                ],
-                            }
-                          : { transports: [webSockets()] }),
-                  })
+                    connectionManager: {
+                        autoDial: true,
+                        maxData
+                    },
+                    connectionEncryption: [noise()],
+                    /*                     pubsub: gossipsub({
+                                            floodPublish: true,
+                                            canRelayMessage: true,
+                                        }), */
+                    pubsub: floodsub(),
+                    streamMuxers: [mplex()],
+                    ...(process.env.REACT_APP_NETWORK === "local"
+                        ? {
+                            transports: [
+                                // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                webSockets({
+                                    filter: (addrs) => {
+                                        return addrs.filter(
+                                            (addr) =>
+                                                addr
+                                                    .toString()
+                                                    .indexOf("/ws/") !=
+                                                -1 ||
+                                                addr
+                                                    .toString()
+                                                    .indexOf("/wss/") != -1
+                                        );
+                                    },
+                                }),
+                            ],
+                        }
+                        : { transports: [webSockets()] }),
+                })
         )
             .then(async (node) => {
                 await node.start();

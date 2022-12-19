@@ -1,11 +1,39 @@
 import { BaseRoutes } from "./routes";
-import { Box, Grid, IconButton, Tooltip, Typography } from "@mui/material";
-import PublicIcon from "@mui/icons-material/Public";
-import { usePeer } from "./Peer";
-import { TOPIC } from "./ChatContext";
-
+import { Box, Grid, Typography } from "@mui/material";
+import { usePeer } from "@dao-xyz/peerbit-react";
+import { useEffect } from "react";
+import { delay } from '@dao-xyz/peerbit-time';
 export const Content = () => {
-    const { peer, pubsubPeers } = usePeer();
+    const { peer } = usePeer();
+
+    useEffect(() => {
+        if (!peer?.id) {
+            return;
+        }
+        peer.libp2p.pubsub.subscribe("world")
+        peer.libp2p.pubsub.addEventListener('message', async (evt) => {
+
+            if (evt.detail.type === 'signed') {
+                if (evt.detail.from.toString() === peer.libp2p.peerId.toString()) {
+                    return;
+                }
+                console.log('got message!')
+
+
+            }
+        })
+        /* const fn = async () => {
+            while (true) {
+                await delay(35);
+                peer.libp2p.pubsub.publish("world", new Uint8Array([1, 2, 3]));
+            }
+        }
+        fn() */
+
+        setTimeout(() => { console.log(peer.libp2p.peerId, peer.libp2p.pubsub.getSubscribers("world"), peer.libp2p.pubsub.getSubscribers("world!")); peer.libp2p.pubsub.publish("world", new Uint8Array([1, 2, 3])); },
+            5000)
+
+    }, [peer?.id])
     return (
         <Box>
             <Grid container sx={{ p: 4, height: "100vh" }}>
@@ -21,35 +49,9 @@ export const Content = () => {
                                 <Grid itemID="">
                                     <Typography
                                         variant="h3"
-                                        sx={{
-                                            fontFamily: "Indie Flower",
-                                        }}
                                     >
-                                        Peerbit Chat
-                                    </Typography>
-                                </Grid>
 
-                                <Grid item ml={1}>
-                                    {pubsubPeers.length > 0 ? (
-                                        <Tooltip
-                                            color="success"
-                                            title={JSON.stringify(
-                                                pubsubPeers.map((x) =>
-                                                    x.toString()
-                                                )
-                                            )}
-                                        >
-                                            <IconButton>
-                                                <PublicIcon />
-                                            </IconButton>
-                                        </Tooltip>
-                                    ) : (
-                                        <Tooltip title="Offline">
-                                            <IconButton sx={{ opacity: 0.5 }}>
-                                                <PublicIcon />
-                                            </IconButton>
-                                        </Tooltip>
-                                    )}
+                                    </Typography>
                                 </Grid>
                             </Grid>
                         </Grid>

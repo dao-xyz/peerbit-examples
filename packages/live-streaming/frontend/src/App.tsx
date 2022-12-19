@@ -1,5 +1,4 @@
 import { useEffect } from "react";
-import { PeerProvider } from "./Peer";
 import { HashRouter } from "react-router-dom";
 import {
     createTheme,
@@ -7,8 +6,39 @@ import {
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { ChatProvider } from "./ChatContext";
 import { Content } from "./Context";
+import { PeerProvider } from "@dao-xyz/peerbit-react";
+import { resolveSwarmAddress } from "./utils";
+import { WindowContextProvider } from "./WindowContext";
+
+
+// Bootstrap addresses for network
+let bootstrapAddresses: string[];
+if (process.env.REACT_APP_NETWORK === "local") {
+    bootstrapAddresses = [
+        "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
+    ];
+} else {
+    const axios = await import("axios");
+    const swarmAddressees = [
+        /*  (
+             await axios.default.get(
+                   "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
+             )
+         ).data, */
+        "c63d8ad86c13bb7594d03496528fa2eecf3e232a.peerchecker.com"
+    ];
+    try {
+        bootstrapAddresses = await Promise.all(
+            swarmAddressees.map((s) => resolveSwarmAddress(s))
+        );
+    } catch (error) {
+        console.log(
+            "Failed to resolve relay node. Please come back later or start the demo locally"
+        );
+    }
+}
+
 let theme = createTheme({
     palette: {
         mode: "dark",
@@ -35,15 +65,15 @@ export const App = () => {
         console.log();
     }, []);
     return (
-        <PeerProvider>
-            <ChatProvider>
-                <ThemeProvider theme={theme}>
-                    <CssBaseline />
+        <PeerProvider bootstrap={bootstrapAddresses}>
+            <ThemeProvider theme={theme}>
+                <CssBaseline />
+                <WindowContextProvider>
                     <HashRouter basename="/">
                         <Content />
                     </HashRouter>
-                </ThemeProvider>
-            </ChatProvider>
+                </WindowContextProvider>
+            </ThemeProvider>
         </PeerProvider>
     );
 };

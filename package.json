@@ -8,7 +8,8 @@
     "workspaces": {
         "packages": [
             "packages/react-utils",
-            "packages/browser-chat/*"
+            "packages/browser-chat/*",
+            "packages/live-streaming/*"
         ],
         "nohoist": [
             "**/@babel/preset-env",

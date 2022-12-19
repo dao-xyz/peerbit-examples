@@ -4,31 +4,21 @@
     "private": true,
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "dependencies": {
-        "@chainsafe/libp2p-noise": "^10.2.0",
-        "@libp2p/floodsub": "^5.0.0",
-        "@libp2p/websockets": "^5.0.0",
-        "@dao-xyz/peerbit": "^0.0.94",
-        "@dao-xyz/peerbit-example-browser-chat": "^0.0.1",
-        "@testing-library/jest-dom": "^5.16.5",
-        "@testing-library/react": "^13.4.0",
-        "@testing-library/user-event": "^13.5.0",
+        "@dao-xyz/peerbit": "^0.0.101",
+        "@dao-xyz/peerbit-react": "^0.0.1",
         "@types/react": "^18.0.25",
         "@types/react-dom": "^18.0.8",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-scripts": "5.0.1",
         "react-router-dom": "^6.4.3",
-        "web-vitals": "^2.1.4",
         "@mui/material": "^5.10.13",
         "@mui/icons-material": "^5.10.16",
         "@emotion/react": "^11.10.5",
         "@emotion/styled": "^11.10.5",
-        "crypto-browserify": "^3.12.0",
-        "stream-browserify": "^3.0.0",
-        "timers-browserify": "^2.0.12",
         "path-browserify": "^1.0.1",
-        "buffer": "^6.0.3",
-        "axios": "^1.2.0"
+        "axios": "^1.2.0",
+        "ebml": "^3.0.0"
     },
     "devDependencies": {
         "@babel/eslint-parser": "^7.19.1",
@@ -40,7 +30,7 @@
         "react-app-rewired": "^2.2.1",
         "customize-cra": "^1.0.0",
         "gh-pages": "^4.0.0",
-        "terser-webpack-plugin": "^5.3.6"
+        "@types/ebml": "^3.0.2"
     },
     "eslintConfig": {
         "extends": [
@@ -63,7 +53,7 @@
         ]
     },
     "scripts": {
-        "start": "HOST=0.0.0.0 REACT_APP_NETWORK=local react-app-rewired start",
+        "start": "REACT_APP_BASE_HREF=/staging HOST=0.0.0.0 REACT_APP_NETWORK=local react-app-rewired start",
         "start-remote": "HOST=0.0.0.0 react-app-rewired start",
         "build": "react-app-rewired build",
         "test": "react-app-rewired test",

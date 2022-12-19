@@ -1,5 +1,9 @@
 {
-    "packages": ["packages/react-utils", "packages/browser-chat/*"],
+    "packages": [
+        "packages/react-utils",
+        "packages/browser-chat/*",
+        "packages/live-streaming/*"
+    ],
     "version": "independent",
     "npmClient": "yarn",
     "useWorkspaces": true
