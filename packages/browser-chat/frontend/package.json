@@ -10,7 +10,7 @@
         "start-remote": "vite --mode staging",
         "build": "tsc && vite build",
         "preview": "vite preview",
-        "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d build"
+        "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
         "ts-ebml": "^2.0.2",
