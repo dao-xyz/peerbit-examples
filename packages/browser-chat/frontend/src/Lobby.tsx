@@ -7,12 +7,25 @@ import { useNavigate } from "react-router-dom";
 import { getRoomPath } from "./routes";
 import { usePeer } from "@dao-xyz/peerbit-react";
 
-export const Rooms = () => {
-    const { roomsUpdated, rooms, loading } = useChat();
+export const Lobby = () => {
+    const { roomsUpdated, lobby: rooms, loading } = useChat();
     const { loading: loadingPeer } = usePeer();
     const [list, setList] = useState<Room[]>();
-    const [open, setOpen] = useState(false);
     const navigate = useNavigate();
+
+    const { peer } = usePeer();
+
+    const [peerCount, setPeerCount] = useState(0);
+    useEffect(() => {
+        if (!peer?.id || !rooms?.address.toString()) {
+            return;
+        }
+        peer.libp2p.directsub.addEventListener("subscribe", () => {
+            setPeerCount(
+                peer.libp2p.directsub.topics.get(rooms.address.toString()).size
+            );
+        });
+    }, [peer?.id.toString(), rooms?.address.toString()]);
 
     const goToRoom = (room: Room) => {
         navigate(getRoomPath(room));
@@ -45,9 +58,23 @@ export const Rooms = () => {
                     <Grid item>
                         <NewRoomButtom />
                     </Grid>
+                    <Grid
+                        item
+                        sx={{
+                            display: "flex",
+                            textAlign: "center",
+                            alignItems: "center",
+                        }}
+                    >
+                        <Typography>Peers in lobby: {peerCount}</Typography>
+                    </Grid>
                 </Grid>
+
                 {loading || loadingPeer ? (
                     <Grid item>
+                        <>
+                            xx peer {String(loading)} {String(loadingPeer)}{" "}
+                        </>{" "}
                         <CircularProgress size={20} />
                     </Grid>
                 ) : (

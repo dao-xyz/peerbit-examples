@@ -22,16 +22,13 @@
         "react": "*"
     },
     "dependencies": {
-        "@chainsafe/libp2p-noise": "^10.2.0",
-        "@libp2p/floodsub": "^5.0.0",
-        "@libp2p/websockets": "^5.0.0",
-        "@dao-xyz/peerbit": "^0.0.101",
+        "@dao-xyz/peerbit": "*",
         "@types/react": "^18.0.25",
         "@types/react-dom": "^18.0.8",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-scripts": "5.0.1",
-        "react-router-dom": "^6.4.3",
+        "react-router-dom": "^6.8.0",
         "@mui/material": "^5.10.13",
         "@mui/icons-material": "^5.10.16",
         "@emotion/react": "^11.10.5",

@@ -10,7 +10,7 @@ import {
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import { TOPIC, useChat } from "./ChatContext";
+import { useChat } from "./ChatContext";
 import {
     DocumentQueryRequest,
     FieldStringMatchQuery,
@@ -29,6 +29,7 @@ import { Theme, useTheme } from "@mui/material/styles";
 import { Ed25519PublicKey, EncryptedThing } from "@dao-xyz/peerbit-crypto";
 import KeyIcon from "@mui/icons-material/Key";
 import LockIcon from "@mui/icons-material/Lock";
+import { ReplicatorType } from "@dao-xyz/peerbit-program";
 
 /***
  *  TODO
@@ -69,7 +70,7 @@ export const Room = () => {
     const theme = useTheme();
     const { peer, loading: loadingPeer } = usePeer();
     const {
-        rooms,
+        lobby: rooms,
         loading: loadingRooms,
         loadedLocally: loadedRoomsLocally,
         roomsUpdated,
@@ -163,13 +164,16 @@ export const Room = () => {
                         gotRoom = true;
                         const roomToOpen = response.results[0].value;
                         peer.open(roomToOpen, {
-                            replicate: true,
-                            topic: TOPIC,
-                            onUpdate: () => {
-                                refresh();
-                            },
+                            // already opened so the updatecallback will not be applied?
+                            role: new ReplicatorType(),
                         })
                             .then((r) => {
+                                roomToOpen.messages.events.addEventListener(
+                                    "change",
+                                    () => {
+                                        refresh();
+                                    }
+                                );
                                 setRoom(r);
                             })
                             .catch((e) => {
@@ -187,7 +191,9 @@ export const Room = () => {
                 },
                 {
                     remote:
-                        peer.libp2p.pubsub.getSubscribers(TOPIC).length > 0
+                        peer.libp2p.directsub.getSubscribers(
+                            rooms.address.toString()
+                        ).size > 0
                             ? { sync: true, timeout: 5000 }
                             : false,
                     local: true,
@@ -213,7 +219,9 @@ export const Room = () => {
         loadingRooms,
         loadedRoomsLocally,
         peer?.id.toString(),
-        peer?.libp2p.pubsub.getSubscribers(TOPIC).length,
+        rooms?.address &&
+            peer?.libp2p.directsub.getSubscribers(rooms.address.toString())
+                .size,
     ]);
     useEffect(() => {
         scrollToBottom();

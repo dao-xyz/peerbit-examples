@@ -3,17 +3,16 @@ import { multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "@dao-xyz/peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { createLibp2p } from "libp2p";
-import { noise } from "@chainsafe/libp2p-noise";
-import { gossipsub } from "@chainsafe/libp2p-gossipsub";
-import { floodsub } from "@libp2p/floodsub";
-
+import { supportedKeys } from "@libp2p/crypto/keys";
 import { mplex } from "@libp2p/mplex";
 import { getKeypair } from "./utils.js";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Entry } from "@dao-xyz/peerbit-log";
 import { Libp2p } from "libp2p";
+import { noise } from "@dao-xyz/libp2p-noise";
+import { peerIdFromKeys } from "@libp2p/peer-id";
+import { createLibp2pExtended } from "@dao-xyz/peerbit-libp2p";
 import { Multiaddr } from "@multiformats/multiaddr";
-
 const keypair = await getKeypair();
 
 interface IPeerContext {
@@ -27,19 +26,17 @@ export const connectTabs = (peer: Peerbit) => {
         keypair.publicKey.toString() + "/onWrite"
     );
     const onWriteDefault = peer.onWrite.bind(peer);
-    peer.onWrite = (program, store, entry, topic) => {
+    peer.onWrite = (program, store, entry) => {
         broadCastWrite.postMessage({
             program: program.address.toString(),
             store: store._storeIndex,
             entry: serialize(entry),
-            topic,
         });
-        return onWriteDefault(program, store, entry, topic);
+        return onWriteDefault(program, store, entry);
     };
     broadCastWrite.onmessage = (message) => {
         peer.programs
-            .get(message.data.topic)
-            ?.get(message.data.program)
+            .get(message.data.program)
             ?.program?.allStoresMap.get(message.data.store)
             .sync([deserialize(message.data.entry, Entry)], {
                 canAppend: () => true,
@@ -64,16 +61,19 @@ export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({
     libp2p,
+    dev,
     bootstrap,
     children,
+    inMemory,
 }: {
     libp2p?: Libp2p;
+    dev?: boolean;
+    inMemory?: boolean;
     bootstrap?: (Multiaddr | string)[];
     children: JSX.Element;
 }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
     const [loading, setLoading] = React.useState<boolean>(false);
-
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
@@ -88,43 +88,62 @@ export const PeerProvider = ({
             return;
         }
         setLoading(true);
+
+        const peerId = peerIdFromKeys(
+            new supportedKeys["ed25519"].Ed25519PublicKey(
+                keypair.publicKey.publicKey
+            ).bytes,
+            new supportedKeys["ed25519"].Ed25519PrivateKey(
+                keypair.privateKey.privateKey,
+                keypair.publicKey.publicKey
+            ).bytes
+        );
         ref.current = (
             libp2p
                 ? Promise.resolve(libp2p)
-                : createLibp2p({
-                    connectionManager: {
-                        autoDial: true,
-                        maxData
-                    },
-                    connectionEncryption: [noise()],
-                    /*                     pubsub: gossipsub({
-                                            floodPublish: true,
-                                            canRelayMessage: true,
-                                        }), */
-                    pubsub: floodsub(),
-                    streamMuxers: [mplex()],
-                    ...(process.env.REACT_APP_NETWORK === "local"
-                        ? {
-                            transports: [
-                                // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                webSockets({
-                                    filter: (addrs) => {
-                                        return addrs.filter(
-                                            (addr) =>
-                                                addr
-                                                    .toString()
-                                                    .indexOf("/ws/") !=
-                                                -1 ||
-                                                addr
-                                                    .toString()
-                                                    .indexOf("/wss/") != -1
-                                        );
-                                    },
-                                }),
-                            ],
-                        }
-                        : { transports: [webSockets()] }),
-                })
+                : peerId.then(async (peerId) => {
+                      return createLibp2pExtended({
+                          blocks: {
+                              directory: !inMemory ? "./blocks" : undefined,
+                          },
+                          libp2p: await createLibp2p({
+                              connectionManager: {
+                                  autoDial: true,
+                              },
+                              connectionEncryption: [noise()],
+                              peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+
+                              streamMuxers: [mplex()],
+                              ...(dev
+                                  ? {
+                                        transports: [
+                                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                            webSockets({
+                                                filter: (addrs) => {
+                                                    return addrs.filter(
+                                                        (addr) =>
+                                                            addr
+                                                                .toString()
+                                                                .indexOf(
+                                                                    "/ws/"
+                                                                ) != -1 ||
+                                                            addr
+                                                                .toString()
+                                                                .indexOf(
+                                                                    "/wss/"
+                                                                ) != -1
+                                                    );
+                                                },
+                                            }),
+                                        ],
+                                    }
+                                  : { transports: [webSockets()] }),
+                          }).then((r) => {
+                              console.log("creating libp2p done!");
+                              return r;
+                          }),
+                      });
+                  })
         )
             .then(async (node) => {
                 await node.start();
@@ -147,16 +166,18 @@ export const PeerProvider = ({
                 }
 
                 // We create a new directrory to make tab to tab communication go smoothly
-                const peer = await Peerbit.create(node, {
-                    waitForKeysTimout: 0,
-                    directory: "./repo",
+                console.log("create peerbit");
+                const peer = await Peerbit.create({
+                    libp2p: node,
+                    directory: !inMemory ? "./repo" : undefined,
                     identity: keypair,
+                    limitSigning: true,
                 });
+                console.log("create peerbit done!");
 
                 // Make sure data flow as expected between tabs and windows locally (offline states)
                 connectTabs(peer);
                 setPeer(peer);
-
                 setLoading(false);
                 return peer;
             })

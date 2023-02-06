@@ -13,6 +13,7 @@
 
 ## Examples
 ### [Chat in the browser](./packages/browser-chat/)
+### [Video in the browser](./packages/live-streaming/)
 
 
  --- 🚧 More TBA 🚧 ---

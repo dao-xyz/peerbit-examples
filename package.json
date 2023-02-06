@@ -37,8 +37,12 @@
         "fmt": "prettier --write '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint": "eslint --ext .ts . && prettier --check '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint:fix": "eslint --fix --ext .ts . && yarn fmt",
-        "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}",
-        "postinstall": "patch-package"
+        "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}"
+    },
+    "dependencies": {
+        "@dao-xyz/peerbit": "0.1.22",
+        "@dao-xyz/peerbit-document": "^0.1.21",
+        "@dao-xyz/peerbit-test-utils": "^0.1.16"
     },
     "devDependencies": {
         "@types/eslint": "^8.2.1",
@@ -61,7 +65,6 @@
         "jest-extended": "^3.1.0",
         "json": "^11.0.0",
         "lerna": "^5.5.1",
-        "patch-package": "^6.4.7",
         "prettier": "^2.7.1",
         "shx": "^0.3.4",
         "start-server-and-test": "^1.14.0",

@@ -1,13 +1,8 @@
 import { field, variant } from "@dao-xyz/borsh";
-import { Program, CanOpenSubPrograms } from "@dao-xyz/peerbit-program";
+import { Program } from "@dao-xyz/peerbit-program";
 import { Documents, DocumentIndex } from "@dao-xyz/peerbit-document";
 import { v4 as uuid } from "uuid";
 import { Entry } from "@dao-xyz/peerbit-log";
-import {
-    getPathGenerator,
-    getFromByTo,
-    IdentityGraph,
-} from "@dao-xyz/peerbit-trusted-network";
 
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class Post {
@@ -40,7 +35,7 @@ export class Room extends Program {
             this.messages =
                 properties.messages ||
                 new Documents({
-                    canEdit: false,
+                    immutable: false,
                     index: new DocumentIndex({ indexBy: "id" }),
                 });
         }
@@ -61,22 +56,14 @@ export class Room extends Program {
     }
 }
 
-@variant("rooms")
-export class Rooms extends Program implements CanOpenSubPrograms {
+@variant("lobby")
+export class Lobby extends Program {
     @field({ type: Documents })
     rooms: Documents<Room>;
 
-    @field({ type: IdentityGraph })
-    identityGraph: IdentityGraph; // connect different identities together, so we can have Metamask as a the identity and a throwaway browser key for fast messages
-
-    constructor(properties?: {
-        rooms?: Documents<Room>;
-        identityGraph?: IdentityGraph;
-    }) {
+    constructor(properties?: { rooms?: Documents<Room> }) {
         super();
         if (properties) {
-            this.identityGraph =
-                properties.identityGraph || new IdentityGraph({});
             this.rooms =
                 properties.rooms ||
                 new Documents<Room>({
@@ -96,6 +83,9 @@ export class Rooms extends Program implements CanOpenSubPrograms {
 
             canRead: (identity) => {
                 return Promise.resolve(true); // Anyone can search for rooms
+            },
+            canOpen: (program) => {
+                return Promise.resolve(true);
             },
         });
     }
