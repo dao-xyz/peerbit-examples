@@ -1,11 +1,14 @@
 import { BaseRoutes } from "./routes";
-import { Box, Grid, IconButton, Tooltip, Typography } from "@mui/material";
-import PublicIcon from "@mui/icons-material/Public";
-import { usePeer } from "./Peer";
-import { TOPIC } from "./ChatContext";
-
+import { Box, Grid, Typography } from "@mui/material";
+import { usePeer } from "@dao-xyz/peerbit-react";
+import { useEffect } from "react";
 export const Content = () => {
-    const { peer, pubsubPeers } = usePeer();
+    const { peer } = usePeer();
+    useEffect(() => {
+        if (!peer?.id) {
+            return;
+        }
+    }, [peer?.id]);
     return (
         <Box>
             <Grid container sx={{ p: 4, height: "100vh" }}>
@@ -19,37 +22,7 @@ export const Content = () => {
                                 alignItems="center"
                             >
                                 <Grid itemID="">
-                                    <Typography
-                                        variant="h3"
-                                        sx={{
-                                            fontFamily: "Indie Flower",
-                                        }}
-                                    >
-                                        Peerbit Chat
-                                    </Typography>
-                                </Grid>
-
-                                <Grid item ml={1}>
-                                    {pubsubPeers.length > 0 ? (
-                                        <Tooltip
-                                            color="success"
-                                            title={JSON.stringify(
-                                                pubsubPeers.map((x) =>
-                                                    x.toString()
-                                                )
-                                            )}
-                                        >
-                                            <IconButton>
-                                                <PublicIcon />
-                                            </IconButton>
-                                        </Tooltip>
-                                    ) : (
-                                        <Tooltip title="Offline">
-                                            <IconButton sx={{ opacity: 0.5 }}>
-                                                <PublicIcon />
-                                            </IconButton>
-                                        </Tooltip>
-                                    )}
+                                    <Typography variant="h3"></Typography>
                                 </Grid>
                             </Grid>
                         </Grid>

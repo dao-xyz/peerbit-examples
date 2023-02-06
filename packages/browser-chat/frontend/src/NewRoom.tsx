@@ -11,7 +11,7 @@ import { Room } from "@dao-xyz/peerbit-example-browser-chat";
 export const NewRoomButtom = () => {
     const [open, setOpen] = React.useState(false);
     const [name, setName] = React.useState("");
-    const { rooms } = useChat();
+    const { lobby: rooms } = useChat();
     const handleClickOpen = () => {
         setOpen(true);
     };

@@ -1,21 +1,20 @@
 import React, { useContext, useEffect, useState } from "react";
 import { deserialize } from "@dao-xyz/borsh";
 import { fromBase64 } from "@dao-xyz/peerbit-crypto";
-import { Room, Rooms } from "@dao-xyz/peerbit-example-browser-chat";
-import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+import { Lobby } from "@dao-xyz/peerbit-example-browser-chat";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { delay } from "@dao-xyz/peerbit-time";
+import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+import { ReplicatorType } from "@dao-xyz/peerbit-program";
 
 // This is a serialized version of RoomsDB manifest.
 // We could store this on IPFS and load it using a CID but this is "easier"
-// For info how to generate this, see https://github.com/dao-xyz/peerbit-examples/blob/63d6923d82d5c496632824e0c0f162b199f1cd37/packages/browser-chat/library/src/__tests__/index.integration.test.ts#L92
-const ROOMS_PROGRAM =
-    "AAAAACQAAAA4N2M1YWRlZi1iNTQ2LTQ1MjktYTgxOC0yYmJhOTc2MTQxNTQFAAAAcm9vbXMAAQAAAAAAAQkAAABkb2N1bWVudHMAAAAAAAAAAQIAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQQAAAAAAQMAAABycGMCAAAAaWQAAQMAAAAAAQgAAABsb2dpbmRleAABBQAAAAABAwAAAHJwYwABAQAAAAAAJAAAAGQxZjk5OGU0LTk4NzQtNGE3Mi1iMDljLTZkMTE0YTRkYzBmNgkAAAByZWxhdGlvbnMAAQYAAAAAAQkAAABkb2N1bWVudHMAAQAAAAAAAQcAAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQkAAAAAAQMAAABycGMCAAAAaWQAAQgAAAAAAQgAAABsb2dpbmRleAABCgAAAAABAwAAAHJwYw";
-
-export const TOPIC = "world";
+// For info how to generate this, see https://github.com/dao-xyz/peerbit-examples/blob/bf90c516115d07f838c3dcc8206cbee7567f4827/packages/browser-chat/library/src/__tests__/index.integration.test.ts#L100
+const LOBBYS_PROGRAM =
+    "AAAAJAAAADYyMWQ4MTVkLWYxZGMtNDE2ZS1hYzU1LTM0N2VlYjMzYzhmNwUAAABsb2JieQABAAAAAAEJAAAAZG9jdW1lbnRzAAAAAAAAAAEBAAAAAQ8AAABkb2N1bWVudHNfaW5kZXgAAQMAAAABAwAAAHJwYwIAAABpZAABAgAAAAEIAAAAbG9naW5kZXgAAQQAAAABAwAAAHJwYw==";
 
 interface IChatContext {
-    rooms: Rooms;
+    lobby: Lobby;
     roomsUpdated: bigint;
     loading: boolean;
     loadedLocally: boolean;
@@ -24,7 +23,7 @@ interface IChatContext {
 export const ChatContext = React.createContext<IChatContext>({} as any);
 export const useChat = () => useContext(ChatContext);
 export const ChatProvider = ({ children }: { children: JSX.Element }) => {
-    const [rooms, setRooms] = useState<Rooms>(undefined);
+    const [rooms, setRooms] = useState<Lobby>(undefined);
     const [roomsUpdated, setRoomsUpdated] = useState<bigint>();
     const { peer } = usePeer();
     const [loading, setLoading] = useState(false);
@@ -34,22 +33,22 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
         if (!peer?.id) {
             return;
         }
-        if (peer._disconnected && peer._disconnected) {
-            return;
-        }
+        /*  if (peer._disconnected && peer._disconnected) {
+             return;
+         } */
+
         setLoading(true);
         setLoadedLocally(false);
 
-        const rooms = deserialize(fromBase64(ROOMS_PROGRAM), Rooms);
-        peer.open<Rooms>(rooms, {
-            replicate: true,
-            topic: TOPIC,
-            onUpdate: (oplog, entries) => {
-                setRoomsUpdated(oplog._hlc.last.wallTime);
-                setLoading(false); // we got 'some' results
-            },
+        const lobby = deserialize(fromBase64(LOBBYS_PROGRAM), Lobby);
+        peer.open<Lobby>(lobby, {
+            role: new ReplicatorType(),
         })
             .then(async (db) => {
+                db.rooms.events.addEventListener("change", () => {
+                    setRoomsUpdated(lobby.rooms.store.oplog.hlc.last.wallTime);
+                    setLoading(false); // we got 'some' results
+                });
                 setRooms(db);
                 await db.load();
                 setLoadedLocally(true);
@@ -58,7 +57,9 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                     // TODO do event based without while loop
                     try {
                         if (
-                            peer.libp2p.pubsub.getSubscribers(TOPIC).length > 0
+                            peer.libp2p.directsub.getSubscribers(
+                                db.address.toString()
+                            ).size > 0
                         ) {
                             await db.rooms.index
                                 .query(
@@ -98,12 +99,12 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                 console.error("Failed to open rooms", e);
                 setLoading(false);
             });
-    }, [peer?.id, peer?._disconnected, peer?._disconnected]);
+    }, [peer?.id /* peer?._disconnected, peer?._disconnected */]);
 
     const memo = React.useMemo<IChatContext>(
         () => ({
             loading,
-            rooms,
+            lobby: rooms,
             roomsUpdated,
             loadedLocally,
         }),

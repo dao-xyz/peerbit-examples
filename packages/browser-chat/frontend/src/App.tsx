@@ -1,4 +1,3 @@
-import { useEffect } from "react";
 import { PeerProvider } from "@dao-xyz/peerbit-react";
 import { HashRouter } from "react-router-dom";
 import {
@@ -9,11 +8,11 @@ import {
 } from "@mui/material";
 import { ChatProvider } from "./ChatContext";
 import { Content } from "./Context";
-import { resolveSwarmAddress } from "./utils";
+import { resolveSwarmAddress } from "@dao-xyz/peerbit-react";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
-if (process.env.REACT_APP_NETWORK === "local") {
+if (import.meta.env.MODE === "development") {
     bootstrapAddresses = [
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
@@ -58,10 +57,13 @@ let theme = createTheme({
     },
 });
 theme = responsiveFontSizes(theme);
-
+// import.meta.env.DEV
 export const App = () => {
     return (
-        <PeerProvider bootstrap={bootstrapAddresses}>
+        <PeerProvider
+            bootstrap={bootstrapAddresses}
+            dev={import.meta.env.MODE === "development"}
+        >
             <ChatProvider>
                 <ThemeProvider theme={theme}>
                     <CssBaseline />

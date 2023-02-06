@@ -12,3 +12,4 @@ keystore-test
 nginx_secrets
 nginx
 .env
+/dist
