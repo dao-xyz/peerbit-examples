@@ -51,7 +51,6 @@ export const Stream = () => {
             const streamKey = getKeyFromStreamKey(params.key);
             //  setIsStreamer(peer.identity.publicKey.equals(streamKey));
             if (peer.identity.publicKey.equals(streamKey)) {
-                console.log("IS STREMER!");
                 peer.open(new VideoStream(peer.identity.publicKey), {
                     role: new ReplicatorType(),
                     trim: {
@@ -93,7 +92,8 @@ export const Stream = () => {
                 }
 
                 // Set the URL of the video file as the src attribute of the video element
-                videoCaptureStream.src = "/clownfish.mp4";
+                videoCaptureStream.src =
+                    import.meta.env.BASE_URL + "clownfish.mp4";
                 videoCaptureStream.load();
             }
 
@@ -250,15 +250,15 @@ export const Stream = () => {
             console.log('got chunks!', chunksRef.current)
             const recordedBlob = new Blob(chunksRef.current, { type: 'video/webm' });
             const recordedUrl = URL.createObjectURL(recordedBlob);
-     
+
             // Set the recorded URL as the src attribute of the playback video element
             playbackRef.src = recordedUrl;
             playbackRef.loop = true; // play the video in a loop
         }
     }, [videoStreamRef, playbackRef]); */
-/* 
+/*
              useEffect(() => {
-        
+
                 // Set the URL of the video file as the src attribute of the video element
                 // videoRef.current.src = "https://joy.videvo.net/videvo_files/video/free/2018-05/large_watermarked/bannerg004_preview.mp4";
                 const videoStream = videoRef.current.captureStream()
@@ -272,7 +272,7 @@ export const Stream = () => {
                         encoder.write(e, 'binary', (e) => {
                             console.log('eerror', e)
                         });
-        
+
                                 }) */
 
 //    if (e[1].name === "Timecode")

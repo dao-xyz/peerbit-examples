@@ -8,8 +8,7 @@ import { Decoder } from "ts-ebml";
 import { ObserverType } from "@dao-xyz/peerbit-program";
 import PQueue from "p-queue";
 import { waitFor } from "@dao-xyz/peerbit-time";
-import { Grid, IconButton } from "@mui/material";
-import LiveTvIcon from "@mui/icons-material/LiveTv";
+import { Button, Grid } from "@mui/material";
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream?(fps?: number): MediaStream;
     mozCaptureStream?(fps?: number): MediaStream;
@@ -33,7 +32,6 @@ const addStreamListener = (
         const mediaSource = new MediaSource();
         pb.src = URL.createObjectURL(mediaSource);
         mediaSource.addEventListener("sourceopen", () => {
-            console.log("reset sb!");
             sb = mediaSource.addSourceBuffer(mimeType); ////'');
             sb.onerror = (error) => {
                 console.error("sb error", error);
@@ -61,11 +59,7 @@ const addStreamListener = (
             };
         });
     };
-
     resetSB();
-
-    console.log("ADD EVENT LISTENER!");
-
     setTimeout(() => {
         vs.chunks.events.addEventListener("change", (evt) => {
             const chunks = evt.detail.added;
@@ -76,10 +70,6 @@ const addStreamListener = (
                         timeout: 30000,
                     });
 
-                    const startIndices = getClusterStartIndices(chunk.chunk);
-                    if (startIndices.length > 0) {
-                        console.error("GOT STARTED INDICES?");
-                    }
                     if (first) {
                         // append header and only chunk if it contains the entry of a cluster
                         const firstCluster = createFirstCluster(
@@ -122,7 +112,7 @@ const addStreamListener = (
                 }
             });
         });
-    }, 5000);
+    }, 1000);
 };
 
 let mimeType = "video/webm;codecs=vp8";
@@ -208,14 +198,14 @@ export const View = () => {
                 />
             </Grid>
             <Grid item>
-                <IconButton
+                <Button
                     onClick={() =>
                         (videoStreamRef.current.currentTime =
                             Number.MAX_SAFE_INTEGER)
                     }
                 >
-                    <LiveTvIcon></LiveTvIcon>
-                </IconButton>
+                    Go live
+                </Button>
             </Grid>
         </Grid>
     );

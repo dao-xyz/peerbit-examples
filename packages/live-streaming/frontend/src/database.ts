@@ -3,6 +3,7 @@ import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { Documents, DocumentIndex } from "@dao-xyz/peerbit-document";
 import { variant, field } from "@dao-xyz/borsh";
 import { v4 as uuid } from "uuid";
+
 @variant(0)
 export class Chunk {
     @field({ type: "string" })

@@ -9,6 +9,7 @@ import {
 import { ChatProvider } from "./ChatContext";
 import { Content } from "./Context";
 import { resolveSwarmAddress } from "@dao-xyz/peerbit-react";
+import axios from "axios";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
@@ -17,10 +18,9 @@ if (import.meta.env.MODE === "development") {
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
 } else {
-    const axios = await import("axios");
     const swarmAddressees = [
         (
-            await axios.default.get(
+            await axios.get(
                 "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
             )
         ).data,

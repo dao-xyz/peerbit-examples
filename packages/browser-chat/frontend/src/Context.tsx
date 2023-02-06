@@ -18,11 +18,11 @@ export const Content = () => {
                                     <Typography
                                         variant="h4"
                                         /*    sx={{
-                               fontFamily: "Indie Flower",
-                           }} */
+                           fontFamily: "Indie Flower",
+                       }} */
                                     >
                                         Peer Chat v.
-                                        {import.meta.env.APP_VERSION}
+                                        {window["APP_VERSION"]}
                                     </Typography>
                                 </Grid>
                             </Grid>
