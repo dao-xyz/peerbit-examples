@@ -1,2 +1,0 @@
-"use strict";(self.webpackChunkchat_frontend=self.webpackChunkchat_frontend||[]).push([[590],{7590:(r,o,e)=>{e.r(o),e.d(o,{Axios:()=>s,AxiosError:()=>n,AxiosHeaders:()=>f,Cancel:()=>C,CancelToken:()=>i,CanceledError:()=>l,VERSION:()=>t,all:()=>d,default:()=>a.Z,formToJSON:()=>k,isAxiosError:()=>x,isCancel:()=>c,spread:()=>A,toFormData:()=>E});var a=e(831);const{Axios:s,AxiosError:n,CanceledError:l,isCancel:c,CancelToken:i,VERSION:t,all:d,Cancel:C,isAxiosError:x,spread:A,toFormData:E,AxiosHeaders:f,formToJSON:k}=a.Z}}]);
-//# sourceMappingURL=590.e975a15c.chunk.js.map
