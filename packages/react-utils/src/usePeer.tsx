@@ -102,48 +102,47 @@ export const PeerProvider = ({
             libp2p
                 ? Promise.resolve(libp2p)
                 : peerId.then(async (peerId) => {
-                      return createLibp2pExtended({
-                          blocks: {
-                              directory: !inMemory ? "./blocks" : undefined,
-                          },
-                          libp2p: await createLibp2p({
-                              connectionManager: {
-                                  autoDial: true,
-                              },
-                              connectionEncryption: [noise()],
-                              peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+                    return createLibp2pExtended({
+                        blocks: {
+                            directory: !inMemory ? "./blocks" : undefined,
+                        },
+                        libp2p: await createLibp2p({
+                            connectionManager: {
+                                autoDial: true,
+                            },
+                            connectionEncryption: [noise()],
+                            peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
 
-                              streamMuxers: [mplex()],
-                              ...(dev
-                                  ? {
-                                        transports: [
-                                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                            webSockets({
-                                                filter: (addrs) => {
-                                                    return addrs.filter(
-                                                        (addr) =>
-                                                            addr
-                                                                .toString()
-                                                                .indexOf(
-                                                                    "/ws/"
-                                                                ) != -1 ||
-                                                            addr
-                                                                .toString()
-                                                                .indexOf(
-                                                                    "/wss/"
-                                                                ) != -1
-                                                    );
-                                                },
-                                            }),
-                                        ],
-                                    }
-                                  : { transports: [webSockets()] }),
-                          }).then((r) => {
-                              console.log("creating libp2p done!");
-                              return r;
-                          }),
-                      });
-                  })
+                            streamMuxers: [mplex()],
+                            ...(dev
+                                ? {
+                                    transports: [
+                                        // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                        webSockets({
+                                            filter: (addrs) => {
+                                                return addrs.filter(
+                                                    (addr) =>
+                                                        addr
+                                                            .toString()
+                                                            .indexOf(
+                                                                "/ws/"
+                                                            ) != -1 ||
+                                                        addr
+                                                            .toString()
+                                                            .indexOf(
+                                                                "/wss/"
+                                                            ) != -1
+                                                );
+                                            },
+                                        }),
+                                    ],
+                                }
+                                : { transports: [webSockets()] }),
+                        }).then((r) => {
+                            return r;
+                        }),
+                    });
+                })
         )
             .then(async (node) => {
                 await node.start();
@@ -166,14 +165,12 @@ export const PeerProvider = ({
                 }
 
                 // We create a new directrory to make tab to tab communication go smoothly
-                console.log("create peerbit");
                 const peer = await Peerbit.create({
                     libp2p: node,
                     directory: !inMemory ? "./repo" : undefined,
                     identity: keypair,
                     limitSigning: true,
                 });
-                console.log("create peerbit done!");
 
                 // Make sure data flow as expected between tabs and windows locally (offline states)
                 connectTabs(peer);

@@ -16,6 +16,7 @@ if (import.meta.env.MODE === "development") {
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
 } else {
+    console.log('LOAD ADDRESS?')
     const axios = await import("axios");
     const swarmAddressees = [
         (
@@ -24,6 +25,7 @@ if (import.meta.env.MODE === "development") {
             )
         ).data,
     ];
+    console.log('RESOLVE SAWRM ADDRESS')
     try {
         bootstrapAddresses = await Promise.all(
             swarmAddressees.map((s) => resolveSwarmAddress(s))
@@ -33,6 +35,7 @@ if (import.meta.env.MODE === "development") {
             "Failed to resolve relay node. Please come back later or start the demo locally"
         );
     }
+    console.log('DONE')
 }
 
 let theme = createTheme({
