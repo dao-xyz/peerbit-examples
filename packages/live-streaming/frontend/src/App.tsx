@@ -17,22 +17,21 @@ if (import.meta.env.MODE === "development") {
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
 } else {
-    const swarmAddressees = [
-        (
-            await axios.get(
-                "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
-            )
-        ).data
-            .split(/\r?\n/)
-            .filter((x) => x.length > 0),
-    ];
+    const swarmAddressees = (
+        await axios.get(
+            "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
+        )
+    ).data
+        .split(/\r?\n/)
+        .filter((x) => x.length > 0);
     try {
         bootstrapAddresses = await Promise.all(
             swarmAddressees.map((s) => resolveSwarmAddress(s))
         );
-    } catch (error) {
+    } catch (error: any) {
         console.log(
-            "Failed to resolve relay node. Please come back later or start the demo locally"
+            "Failed to resolve relay node. Please come back later or start the demo locally: " +
+                error?.message
         );
     }
 }
