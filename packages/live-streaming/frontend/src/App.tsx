@@ -22,7 +22,9 @@ if (import.meta.env.MODE === "development") {
             await axios.get(
                 "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
             )
-        ).data,
+        ).data
+            .split(/\r?\n/)
+            .filter((x) => x.length > 0),
     ];
     try {
         bootstrapAddresses = await Promise.all(

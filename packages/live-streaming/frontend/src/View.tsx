@@ -5,10 +5,11 @@ import { useParams } from "react-router-dom";
 import { getKeyFromStreamKey } from "./routes";
 import { createFirstCluster, getClusterStartIndices } from "./webm.js";
 import { Decoder } from "ts-ebml";
-import { ObserverType } from "@dao-xyz/peerbit-program";
+import { ObserverType, ReplicatorType } from "@dao-xyz/peerbit-program";
 import PQueue from "p-queue";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import { Button, Grid } from "@mui/material";
+import { mimeType } from "./format.js";
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream?(fps?: number): MediaStream;
     mozCaptureStream?(fps?: number): MediaStream;
@@ -24,11 +25,12 @@ const addStreamListener = (
     let decoder = new Decoder();
     let lastTs = 0;
     let sb: SourceBuffer | undefined = undefined;
+    let syncInterval: any = undefined;
     const resetSB = () => {
         if (!pb) {
             return;
         }
-
+        clearInterval(syncInterval);
         const mediaSource = new MediaSource();
         pb.src = URL.createObjectURL(mediaSource);
         mediaSource.addEventListener("sourceopen", () => {
@@ -41,18 +43,43 @@ const addStreamListener = (
 
             // sync?
             let lastLastTs = lastTs;
+            const vend = () =>
+                pb.buffered.length > 0
+                    ? pb.buffered.end(pb.buffered.length - 1)
+                    : 0;
+
             sb.onupdateend = (ev) => {
                 if (lastLastTs !== lastTs) {
-                    const vend =
-                        pb.buffered.length > 0
-                            ? pb.buffered.end(pb.buffered.length - 1)
-                            : 0;
-
-                    if (!first && pb && vend - pb.currentTime > 0.2) {
+                    if (!first && pb) {
                         // UNCOMMENT FOR AUTO SYNC
                         /* console.log("sync!", vend, vend - pb.currentTime);  */
-                        /*          pb.currentTime = Number.MAX_SAFE_INTEGER;
-                                 pb.play(); */
+                        //  pb.currentTime = vend - 0.03;
+                        /*          pb.play(); */
+
+                        // create a sync interval at ends when delta is low
+                        if (vend() - pb.currentTime > 0.2) {
+                            //pb.currentTime = vend - 0.03//
+                            console.log(
+                                "FAST SPEED",
+                                vend() - pb.currentTime,
+                                pb.currentTime
+                            );
+                            pb.playbackRate = 1.5;
+
+                            clearInterval(syncInterval);
+                            syncInterval = setInterval(() => {
+                                if (vend() - pb.currentTime < 0.05) {
+                                    console.log(
+                                        "NORMAL SPEED",
+                                        vend() - pb.currentTime
+                                    );
+                                    pb.playbackRate = 1;
+                                    clearInterval(syncInterval);
+                                    syncInterval = undefined;
+                                }
+                            }, 1000 / 60);
+                        } else {
+                        }
                     }
                     lastLastTs = lastTs;
                 }
@@ -61,17 +88,24 @@ const addStreamListener = (
     };
     resetSB();
     setTimeout(() => {
+        console.log("len!", vs.chunks.index.size);
+        let evtCounter = 0;
         vs.chunks.events.addEventListener("change", (evt) => {
+            //   const t1 = +new Date;
+
+            evtCounter += 1;
             const chunks = evt.detail.added;
             appendQueue.add(async () => {
                 for (const chunk of chunks) {
+                    ///   console.log("A", BigInt(+new Date) - chunk.ts)
                     await waitFor(() => sb && sb.updating === false, {
                         delayInterval: 10,
                         timeout: 30000,
                     });
 
+                    //   console.log("B", BigInt(+new Date) - chunk.ts)
+
                     if (first) {
-                        // append header and only chunk if it contains the entry of a cluster
                         const firstCluster = createFirstCluster(
                             chunk.chunk,
                             firstChunk
@@ -103,8 +137,8 @@ const addStreamListener = (
                                       ])
                                     : chunk.chunk
                             );
+                            const t2 = +new Date();
                         } catch (error) {
-                            //   playbackRef.pause();
                             resetSB();
                             first = true;
                         }
@@ -115,8 +149,7 @@ const addStreamListener = (
     }, 1000);
 };
 
-let mimeType = "video/webm;codecs=vp8";
-export const View = () => {
+export const View = (opts?: { db?: VideoStream }) => {
     const [videoStream, setVideoStream] = useState<VideoStream | null>();
     const videoStreamRef = useRef<HTMLVideoElementWithCaptureStream>();
 
@@ -127,21 +160,20 @@ export const View = () => {
         if (!peer?.libp2p || !params.key) {
             return;
         }
-
         try {
-            const streamKey = getKeyFromStreamKey(params.key);
-            if (!peer.identity.publicKey.equals(streamKey)) {
-                peer.open(new VideoStream(streamKey), {
-                    role: new ObserverType(),
-                    sync: () => true,
-                    /* trim: {
-                        type: "bytelength",
-                        from: 1 * 1e6,
-                        to: 0.5 * 1e6,
-                    }, */
-                }).then((vs) => {
-                    setVideoStream(vs);
-                });
+            if (opts?.db) {
+                setVideoStream(opts.db);
+            } else {
+                const streamKey = getKeyFromStreamKey(params.key);
+                if (!peer.identity.publicKey.equals(streamKey)) {
+                    // Open the VideStream database as a viewer
+                    peer.open(new VideoStream(streamKey), {
+                        role: new ObserverType(),
+                        sync: () => true,
+                    }).then((vs) => {
+                        setVideoStream(vs);
+                    });
+                }
             }
         } catch (error) {
             console.error("Failed to create stream", error);
@@ -152,35 +184,11 @@ export const View = () => {
         (node) => {
             const playbackRef: HTMLVideoElementWithCaptureStream = node;
             videoStreamRef.current = playbackRef;
-
-            //let encoder = new Encoder();
             if (peer && playbackRef && videoStream) {
-                //  const vs = new VideoStream(peer.identity.publicKey);
                 playbackRef.onerror = (error) => {
                     console.error("pb error", error);
                 };
-
                 addStreamListener(videoStream, playbackRef);
-
-                /* let firstChunk = new Uint8Array(0);
-            setTimeout(() => {
-                console.log('OPEN?')
-                peer.open(vs, {
-                    role: new ReplicatorType(),
-                    trim: {
-                        type: "bytelength",
-                        from: 1 * 1e6,
-                        to: 0.5 * 1e6,
-                    },
-                }).then((vs) => {
-                    console.log('OPEN!!')
-
-
-                    videoStreamRef.current = vs;
-                    console.log(vs.address.toString());
-
-                });
-            }, 5000); */
             }
         },
         [peer, videoStream]

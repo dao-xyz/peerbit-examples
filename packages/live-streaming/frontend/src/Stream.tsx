@@ -5,12 +5,14 @@ import { useParams } from "react-router-dom";
 import { getKeyFromStreamKey } from "./routes";
 import { getClusterStartIndices } from "./webm";
 import { Decoder, EBMLElementDetail, Encoder } from "ts-ebml";
-import { ReplicatorType } from "@dao-xyz/peerbit-program";
+import { ReplicatorType, ObserverType } from "@dao-xyz/peerbit-program";
 import { Buffer } from "buffer";
 import { toHexString } from "@dao-xyz/peerbit-crypto";
 import PetsIcon from "@mui/icons-material/Pets";
 import CameraAltIcon from "@mui/icons-material/CameraAlt";
 import { Box, Grid, IconButton } from "@mui/material";
+import { mimeType } from "./format";
+import { View } from "./View";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream?(fps?: number): MediaStream;
@@ -22,7 +24,6 @@ if (PACK_PERFECTLY) {
     globalThis.Buffer = Buffer;
 }
 
-let mimeType = "video/webm;codecs=vp8";
 export const Stream = () => {
     const [useWebcam, setUseWebcam] = useState(false);
     //const [isStreamer, setIsStreamer] = useState<boolean | undefined>(undefined);
@@ -49,15 +50,15 @@ export const Stream = () => {
         try {
             streamKeyRef.current = params.key;
             const streamKey = getKeyFromStreamKey(params.key);
-            //  setIsStreamer(peer.identity.publicKey.equals(streamKey));
+
             if (peer.identity.publicKey.equals(streamKey)) {
                 peer.open(new VideoStream(peer.identity.publicKey), {
-                    role: new ReplicatorType(),
-                    trim: {
-                        type: "bytelength",
-                        from: 1 * 1e6,
-                        to: 0.5 * 1e6,
-                    },
+                    role: new ObserverType(),
+                    /*   trim: {
+                          type: "bytelength",
+                          from: 1 * 1e6,
+                          to: 0.5 * 1e6,
+                      }, */
                 }).then((vs) => {
                     setVideoStream(vs);
                 });
@@ -78,7 +79,7 @@ export const Stream = () => {
                 // Get access to the user's webcam and set up the video stream
                 navigator.mediaDevices
                     .getUserMedia({
-                        video: { width: 1920, height: 1080 },
+                        video: { width: 1280, height: 720 },
                         audio: true,
                     })
                     .then((stream) => {
@@ -122,59 +123,86 @@ export const Stream = () => {
             }
 
             const recorder = new MediaRecorder(stream, {
-                mimeType: mimeType,
+                mimeType,
                 videoBitsPerSecond: 1e7,
             });
             setMediaRecorder(recorder);
+
             let first = true;
             let header: Uint8Array | undefined = undefined;
             let remainder = new Uint8Array([]);
             const encoder = new Encoder();
             const decoder = new Decoder();
+            let ts = BigInt(+new Date());
 
             recorder.ondataavailable = async (e) => {
                 let newArr = new Uint8Array(await e.data.arrayBuffer());
                 if (PACK_PERFECTLY) {
                     // FLAKY if MediaRecorder segment length <  1s
-                    let diff: EBMLElementDetail[];
-                    let arr = new Uint8Array(newArr.length + remainder.length);
-                    arr.set(remainder, 0);
-                    arr.set(newArr, remainder.length);
-                    if (first) {
-                        const clusterStartIndices =
-                            await getClusterStartIndices(arr);
-                        if (clusterStartIndices.length == 1) {
-                            const firstClusterIndex =
-                                clusterStartIndices.splice(0, 1)[0];
-                            header = arr.slice(0, firstClusterIndex);
-                            newArr = arr.slice(firstClusterIndex);
-                            remainder = new Uint8Array(0);
-                            diff = decoder.decode(newArr);
-                            first = false;
-                        } else {
-                            remainder = newArr;
-                        }
-                    } else {
-                        if (getClusterStartIndices(arr).length > 0) {
-                            console.log("cluster!");
-                        }
-                        diff = decoder.decode(arr);
-                    }
-
-                    if (diff.length > 1) {
-                        //newArr?.length > 0
-                        const chunk = new Chunk(
-                            e.data.type,
-                            header,
-                            new Uint8Array(encoder.encode(diff))
-                        );
-                        console.log(toHexString(chunk.chunk.subarray(0, 8)));
-                        videoStream.chunks.put(chunk);
-                        /*  pushed += 1;
-                        videoStreamRef?.current?.chunks.put(chunk, { trim: { bytelength: 3 * 1e6 } }) */
-                    } else {
-                        remainder = arr;
-                    }
+                    /*  let diff: EBMLElementDetail[];
+                     let arr = new Uint8Array(newArr.length + remainder.length);
+                     arr.set(remainder, 0);
+                     arr.set(newArr, remainder.length);
+                     let result: Uint8Array | undefined = undefined;
+                     if (first) {
+                         const clusterStartIndices =
+                             await getClusterStartIndices(arr);
+                         if (clusterStartIndices.length == 1) {
+                             const firstClusterIndex =
+                                 clusterStartIndices.splice(0, 1)[0];
+                             header = arr.slice(0, firstClusterIndex);
+                             newArr = arr.slice(firstClusterIndex);
+                             remainder = new Uint8Array(0);
+                             diff = decoder.decode(newArr);
+                             if (diff.length > 0) {
+                                 result = new Uint8Array(encoder.encode(diff))
+                                 first = false;
+                             }
+                             else {
+                                 remainder = newArr;
+                             }
+ 
+                         } else {
+                             remainder = newArr;
+                         }
+                     } else {
+                         if (getClusterStartIndices(arr).length > 0) {
+                             console.log("cluster!");
+                         }
+                         diff = decoder.decode(arr);
+                         let len = 0;
+                         if (diff.length > 0) {
+                             try {
+                                 for (const d of diff) {
+                                     if (d.dataSize)
+                                         len += d.dataSize
+                                 }
+                                 if (len !== arr.length && len > 0) {
+                                     remainder = arr.subarray(len, arr.length)
+                                 }
+                                 result = new Uint8Array(encoder.encode(diff))
+                             }
+                             catch (err) {
+                                 console.warn(err);
+                                 remainder = arr;
+                             }
+                         }
+                         else {
+                             remainder = arr;
+                         }
+                     }
+ 
+                     if (result) {
+                         //newArr?.length > 0
+                         const chunk = new Chunk(
+                             e.data.type,
+                             header,
+                             result
+                         );
+ 
+                         videoStream.chunks.put(chunk);
+ 
+                     } */
                 } else {
                     if (first) {
                         let arr = new Uint8Array(
@@ -197,12 +225,18 @@ export const Stream = () => {
                             remainder = newArr;
                         }
                     } else {
-                        const chunk = new Chunk(e.data.type, header, newArr);
+                        const chunk = new Chunk(
+                            e.data.type,
+                            header,
+                            newArr,
+                            ts
+                        );
+                        ts = BigInt(+new Date());
                         videoStream.chunks.put(chunk);
                     }
                 }
             };
-            recorder.start(50);
+            recorder.start(5);
         }
     };
 
@@ -233,6 +267,7 @@ export const Stream = () => {
                             )}
                         </IconButton>
                     </Grid>
+                    {/*   {videoStream && <View db={videoStream}></View>} */}
                 </Grid>
             ) : (
                 <></>

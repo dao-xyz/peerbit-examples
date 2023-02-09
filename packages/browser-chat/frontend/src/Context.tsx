@@ -1,6 +1,7 @@
 import { BaseRoutes } from "./routes";
 import { Box, Grid, Typography } from "@mui/material";
 
+const APP_VERSION = globalThis.APP_VERSION;
 export const Content = () => {
     return (
         <Box>
@@ -18,11 +19,11 @@ export const Content = () => {
                                     <Typography
                                         variant="h4"
                                         /*    sx={{
-                           fontFamily: "Indie Flower",
-                       }} */
+                       fontFamily: "Indie Flower",
+                   }} */
                                     >
                                         Peer Chat v.
-                                        {window["APP_VERSION"]}
+                                        {APP_VERSION}
                                     </Typography>
                                 </Grid>
                             </Grid>

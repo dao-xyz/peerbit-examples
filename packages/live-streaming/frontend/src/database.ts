@@ -12,17 +12,26 @@ export class Chunk {
     @field({ type: "string" })
     type: string; // video format
 
+    @field({ type: "u64" })
+    ts: bigint;
+
     @field({ type: Uint8Array })
     header: Uint8Array;
 
     @field({ type: Uint8Array })
     chunk: Uint8Array;
 
-    constructor(type: string, header: Uint8Array, chunk: Uint8Array) {
+    constructor(
+        type: string,
+        header: Uint8Array,
+        chunk: Uint8Array,
+        ts?: bigint
+    ) {
         this.id = uuid();
         this.type = type;
         this.header = header;
         this.chunk = chunk;
+        this.ts = ts || BigInt(+new Date());
     }
 }
 
