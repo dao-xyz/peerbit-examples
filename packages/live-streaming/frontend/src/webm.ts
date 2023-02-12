@@ -1,4 +1,8 @@
+import { fromHexString } from "@dao-xyz/peerbit-crypto";
+
 const clusterStartPattern = new Uint8Array([31, 67, 182, 117]);
+const segmedStartPattern = fromHexString("1654AE6B"); //fromHexString("73A4");
+
 export const getClusterStartIndices = (firstChunk: Uint8Array) => {
     const ret: number[] = [];
     outer: for (
@@ -8,6 +12,23 @@ export const getClusterStartIndices = (firstChunk: Uint8Array) => {
     ) {
         for (let j = 0; j < clusterStartPattern.length; j++) {
             if (firstChunk[i + j] !== clusterStartPattern[j]) {
+                continue outer;
+            }
+        }
+        ret.push(i);
+    }
+    return ret;
+};
+
+export const getSegmentStartIndices = (firstChunk: Uint8Array) => {
+    const ret: number[] = [];
+    outer: for (
+        let i = 0;
+        i < firstChunk.length - segmedStartPattern.length;
+        i++
+    ) {
+        for (let j = 0; j < segmedStartPattern.length; j++) {
+            if (firstChunk[i + j] !== segmedStartPattern[j]) {
                 continue outer;
             }
         }

@@ -9,11 +9,7 @@ export const CreateStream = () => {
     return (
         <Grid container spacing={2}>
             <Grid item>
-                <Button
-                    onClick={() =>
-                        navigate(getStreamPath(peer.identity.publicKey))
-                    }
-                >
+                <Button onClick={() => navigate(getStreamPath(peer.identity.publicKey, peer.idKey.publicKey))}>
                     Create stream
                 </Button>
             </Grid>

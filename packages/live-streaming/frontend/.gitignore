@@ -11,6 +11,7 @@
 # production
 /build
 /dist 
+.cert
 
 # misc
 .DS_Store

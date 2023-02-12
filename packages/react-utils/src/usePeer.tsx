@@ -6,14 +6,17 @@ import { createLibp2p } from "libp2p";
 import { supportedKeys } from "@libp2p/crypto/keys";
 import { mplex } from "@libp2p/mplex";
 import { getKeypair } from "./utils.js";
-import { serialize, deserialize } from "@dao-xyz/borsh";
-import { Entry } from "@dao-xyz/peerbit-log";
 import { Libp2p } from "libp2p";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { peerIdFromKeys } from "@libp2p/peer-id";
 import { createLibp2pExtended } from "@dao-xyz/peerbit-libp2p";
 import { Multiaddr } from "@multiformats/multiaddr";
-const keypair = await getKeypair();
+import { v4 as uuid } from 'uuid';
+const identity = await getKeypair();
+if (!window.name) {
+    window.name = uuid();
+}
+const nodeId = await getKeypair("node/" + window.name);
 
 interface IPeerContext {
     peer: Peerbit;
@@ -22,30 +25,55 @@ interface IPeerContext {
 
 export const connectTabs = (peer: Peerbit) => {
     // Cross tab sync when we write
-    const broadCastWrite = new BroadcastChannel(
-        keypair.publicKey.toString() + "/onWrite"
+
+    /* 
+    const broadCastDirectSub = new BroadcastChannel(
+        keypair.publicKey.toString() + "/directSub"
     );
-    const onWriteDefault = peer.onWrite.bind(peer);
-    peer.onWrite = (program, store, entry) => {
-        broadCastWrite.postMessage({
-            program: program.address.toString(),
-            store: store._storeIndex,
-            entry: serialize(entry),
+
+    const processMessageDefault = peer.libp2p.directsub.processMessage.bind(peer.libp2p.directsub);
+    peer.libp2p.directsub.processMessage = (peerId, stream, arr) => {
+        console.log("Send data from tab", peerId.toString(), arr.length);
+        broadCastDirectSub.postMessage({
+            peerId: peerId.toString(),
+            data: arr.subarray(),
         });
-        return onWriteDefault(program, store, entry);
+        return processMessageDefault(peerId, stream, arr);
     };
-    broadCastWrite.onmessage = (message) => {
-        peer.programs
-            .get(message.data.program)
-            ?.program?.allStoresMap.get(message.data.store)
-            .sync([deserialize(message.data.entry, Entry)], {
-                canAppend: () => true,
-                save: false,
-            });
+    broadCastDirectSub.onmessage = (message) => {
+        const data = message.data.data;
+        const peerId = peerIdFromString(message.data.peerId);
+        const stream = peer.libp2p.directsub.peers.get(
+            getPublicKeyFromPeerId(peerId).hashcode()
+        );
+        console.log("Got data from tab", peerId.toString(), data.length);
+        processMessageDefault(peerId, stream, new Uint8ArrayList(data));
     };
+   const broadCastWrite = new BroadcastChannel(
+           keypair.publicKey.toString() + "/onWrite"
+       );
+   
+       const onWriteDefault = peer.onWrite.bind(peer);
+       peer.onWrite = (program, store, entry) => {
+           broadCastWrite.postMessage({
+               program: program.address.toString(),
+               store: store._storeIndex,
+               entry: serialize(entry),
+           });
+           return onWriteDefault(program, store, entry);
+       };
+       broadCastWrite.onmessage = (message) => {
+           peer.programs
+               .get(message.data.program)
+               ?.program?.allStoresMap.get(message.data.store)
+               .sync([deserialize(message.data.entry, Entry)], {
+                   canAppend: () => true,
+                   save: false,
+               });
+       }; */
 
     // Cross tab sync when we get messages
-    const broadCastOnMessage = new BroadcastChannel(
+    /* const broadCastOnMessage = new BroadcastChannel(
         keypair.publicKey.toString() + "/onMessage"
     );
     const onMessageDefault = peer._onMessage.bind(peer);
@@ -55,7 +83,7 @@ export const connectTabs = (peer: Peerbit) => {
     };
     broadCastOnMessage.onmessage = (message) => {
         onMessageDefault(message.data);
-    };
+    }; */
 };
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
@@ -91,58 +119,58 @@ export const PeerProvider = ({
 
         const peerId = peerIdFromKeys(
             new supportedKeys["ed25519"].Ed25519PublicKey(
-                keypair.publicKey.publicKey
+                nodeId.publicKey.publicKey
             ).bytes,
             new supportedKeys["ed25519"].Ed25519PrivateKey(
-                keypair.privateKey.privateKey,
-                keypair.publicKey.publicKey
+                nodeId.privateKey.privateKey,
+                nodeId.publicKey.publicKey
             ).bytes
         );
         ref.current = (
             libp2p
                 ? Promise.resolve(libp2p)
                 : peerId.then(async (peerId) => {
-                      return createLibp2pExtended({
-                          blocks: {
-                              directory: !inMemory ? "./blocks" : undefined,
-                          },
-                          libp2p: await createLibp2p({
-                              connectionManager: {
-                                  autoDial: true,
-                              },
-                              connectionEncryption: [noise()],
-                              peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+                    return createLibp2pExtended({
+                        blocks: {
+                            directory: !inMemory ? "./blocks" : undefined,
+                        },
+                        libp2p: await createLibp2p({
+                            connectionManager: {
+                                autoDial: true,
+                            },
+                            connectionEncryption: [noise()],
+                            peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
 
-                              streamMuxers: [mplex()],
-                              ...(dev
-                                  ? {
-                                        transports: [
-                                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                            webSockets({
-                                                filter: (addrs) => {
-                                                    return addrs.filter(
-                                                        (addr) =>
-                                                            addr
-                                                                .toString()
-                                                                .indexOf(
-                                                                    "/ws/"
-                                                                ) != -1 ||
-                                                            addr
-                                                                .toString()
-                                                                .indexOf(
-                                                                    "/wss/"
-                                                                ) != -1
-                                                    );
-                                                },
-                                            }),
-                                        ],
-                                    }
-                                  : { transports: [webSockets()] }),
-                          }).then((r) => {
-                              return r;
-                          }),
-                      });
-                  })
+                            streamMuxers: [mplex()],
+                            ...(dev
+                                ? {
+                                    transports: [
+                                        // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                        webSockets({
+                                            filter: (addrs) => {
+                                                return addrs.filter(
+                                                    (addr) =>
+                                                        addr
+                                                            .toString()
+                                                            .indexOf(
+                                                                "/ws/"
+                                                            ) != -1 ||
+                                                        addr
+                                                            .toString()
+                                                            .indexOf(
+                                                                "/wss/"
+                                                            ) != -1
+                                                );
+                                            },
+                                        }),
+                                    ],
+                                }
+                                : { transports: [webSockets()] }),
+                        }).then((r) => {
+                            return r;
+                        }),
+                    });
+                })
         )
             .then(async (node) => {
                 await node.start();
@@ -168,7 +196,7 @@ export const PeerProvider = ({
                 const peer = await Peerbit.create({
                     libp2p: node,
                     directory: !inMemory ? "./repo" : undefined,
-                    identity: keypair,
+                    identity: identity,
                     limitSigning: true,
                 });
 

@@ -4559,6 +4559,11 @@
   dependencies:
     "@types/node" "*"
 
+"@types/dom-webcodecs@^0.1.5":
+  version "0.1.5"
+  resolved "https://registry.yarnpkg.com/@types/dom-webcodecs/-/dom-webcodecs-0.1.5.tgz#2252fdb4a3229924d27f054242cc614e2cd5b83b"
+  integrity sha512-dsAE+4ws75W5mmNmIZ7IKZwv4bcz5GgPuA87u+Mk1CeVWB6g7ZwBfizRwBZDeyO12RSxoU3NlRa8jgLYQeSZGg==
+
 "@types/eslint-plugin-prettier@^3.1.0":
   version "3.1.0"
   resolved "https://registry.yarnpkg.com/@types/eslint-plugin-prettier/-/eslint-plugin-prettier-3.1.0.tgz#451b5e1e5f148a38dc41e9c5b61d45cd2e97af2c"

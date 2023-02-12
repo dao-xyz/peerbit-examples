@@ -1,21 +1,20 @@
 import { usePeer } from "@dao-xyz/peerbit-react";
-import { useRef, useState, useEffect, useContext, useCallback } from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
 import { Chunk, VideoStream } from "./database";
-import { useParams } from "react-router-dom";
-import { getKeyFromStreamKey } from "./routes";
 import { getClusterStartIndices } from "./webm";
-import { Decoder, EBMLElementDetail, Encoder } from "ts-ebml";
-import { ReplicatorType, ObserverType } from "@dao-xyz/peerbit-program";
+import { ObserverType } from "@dao-xyz/peerbit-program";
 import { Buffer } from "buffer";
-import { toHexString } from "@dao-xyz/peerbit-crypto";
 import PetsIcon from "@mui/icons-material/Pets";
 import CameraAltIcon from "@mui/icons-material/CameraAlt";
-import { Box, Grid, IconButton } from "@mui/material";
-import { mimeType } from "./format";
+import { Grid, IconButton } from "@mui/material";
+import { videoMimeType } from "./format";
+import {
+    PublicSignKey
+} from "@dao-xyz/peerbit-crypto";
 import { View } from "./View";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
-    captureStream?(fps?: number): MediaStream;
+    captureStream(fps?: number): MediaStream;
     mozCaptureStream?(fps?: number): MediaStream;
 }
 
@@ -23,8 +22,9 @@ const PACK_PERFECTLY = false;
 if (PACK_PERFECTLY) {
     globalThis.Buffer = Buffer;
 }
+/* globalThis.VSTATS = new Map(); */
 
-export const Stream = () => {
+export const Stream = (args: { identity: PublicSignKey, node: PublicSignKey }) => {
     const [useWebcam, setUseWebcam] = useState(false);
     //const [isStreamer, setIsStreamer] = useState<boolean | undefined>(undefined);
 
@@ -34,24 +34,18 @@ export const Stream = () => {
 
     const [mediaRecorder, setMediaRecorder] = useState<MediaRecorder>();
     const { peer } = usePeer();
-    const params = useParams();
-    const streamKeyRef = useRef<string>();
 
     // TODO
     useEffect(() => {
         if (
-            !peer?.libp2p ||
-            !params.key ||
-            (streamKeyRef.current && params.key === streamKeyRef.current)
+            !peer?.libp2p || !args.identity || !args.node
         ) {
             return;
         }
 
         try {
-            streamKeyRef.current = params.key;
-            const streamKey = getKeyFromStreamKey(params.key);
 
-            if (peer.identity.publicKey.equals(streamKey)) {
+            if (peer.idKey.publicKey.equals(args.node) && peer.identity.publicKey.equals(args.identity)) {
                 peer.open(new VideoStream(peer.identity.publicKey), {
                     role: new ObserverType(),
                     /*   trim: {
@@ -63,14 +57,17 @@ export const Stream = () => {
                     setVideoStream(vs);
                 });
             }
+
         } catch (error) {
             console.error("Failed to create stream", error);
         }
-    }, [peer?.id, params?.key]);
+    }, [peer?.id, args.identity?.hashcode(), args.node?.hashcode()]);
 
     const videoRef = useCallback(
         (node) => {
             const videoCaptureStream: HTMLVideoElementWithCaptureStream = node;
+            // const ctx = videoCaptureStream.getContext("2d");
+
             if (!videoStream || !videoCaptureStream) {
                 return;
             }
@@ -83,18 +80,38 @@ export const Stream = () => {
                         audio: true,
                     })
                     .then((stream) => {
+                        /*      const processor = new globalThis.MediaStreamTrackProcessor(stream.getVideoTracks()[0]);
+                             const reader = processor.readable.getReader(); */
+                        /* readChunk();
+                        function readChunk() {
+                            reader.read().then(({ done, value }) => {
+                                // the MediaStream video can have dynamic size
+                                if (videoCaptureStream.width !== value.displayWidth || videoCaptureStream.height !== value.displayHeight) {
+                                    videoCaptureStream.width = value.displayWidth;
+                                    videoCaptureStream.height = value.displayHeight;
+                                }
+                                ctx.clearRect(0, 0, videoCaptureStream.width, videoCaptureStream.height);
+                                // value is a VideoFrame
+                                ctx.drawImage(value, 0, 0);
+                                value.close(); // close the VideoFrame when we're done with it
+                                if (!done) {
+                                    readChunk();
+                                }
+                            });
+
+                        }
+                        onStart(videoCaptureStream, stream.getAudioTracks()[0]); */
                         videoCaptureStream.srcObject = stream;
                     });
             } else {
-                if (videoCaptureStream && videoCaptureStream.srcObject) {
-                    const tracks = videoCaptureStream.srcObject["getTracks"]();
-                    tracks.forEach((track) => track.stop());
-                    videoCaptureStream.srcObject = null;
-                }
+                /*   if (videoCaptureStream && videoCaptureStream.srcObject) {
+                      const tracks = videoCaptureStream.srcObject["getTracks"]();
+                      tracks.forEach((track) => track.stop());
+                      videoCaptureStream.srcObject = null;
+                  } */
 
                 // Set the URL of the video file as the src attribute of the video element
-                videoCaptureStream.src =
-                    import.meta.env.BASE_URL + "clownfish.mp4";
+                videoCaptureStream.src = import.meta.env.BASE_URL + "clownfish.mp4";
                 videoCaptureStream.load();
             }
 
@@ -104,139 +121,181 @@ export const Stream = () => {
     );
 
     const onStart = () => {
-        let stream: MediaStream;
-        const fps = 0;
-        if (videoCaptureStream.captureStream) {
-            stream = videoCaptureStream.captureStream(fps);
-        } else if (videoCaptureStream.mozCaptureStream) {
-            stream = videoCaptureStream.mozCaptureStream(fps);
-        } else {
-            console.error(
-                "Stream capture is not supported",
-                videoCaptureStream.captureStream
-            );
-            stream = null;
-        }
-        if (stream) {
-            if (videoCaptureStream.muted) {
-                stream.getAudioTracks().forEach((t) => stream.removeTrack(t)); // Remove audo tracks, else the MediaRecorder will not work
+        let stream: MediaStream = videoCaptureStream.srcObject as any as MediaStream;
+        // use srcObject
+        if (!stream) {
+            let fps = 0;
+            if (videoCaptureStream.captureStream) {
+                stream = videoCaptureStream.captureStream(fps);
+            } else if (videoCaptureStream.mozCaptureStream) {
+                stream = videoCaptureStream.mozCaptureStream(fps);
+            } else {
+                console.error(
+                    "Stream capture is not supported",
+                    videoCaptureStream.captureStream
+                );
+                stream = null;
             }
 
-            const recorder = new MediaRecorder(stream, {
-                mimeType,
+        }
+        // stream.addTrack(audioStream);
+
+        function toggleMute() {
+            /*    if (videoCaptureStream.muted) {
+                   videoCaptureStream.muted = false;
+               } */
+            /* else {
+               videoCaptureStream.muted = true;
+               console.log("PLAY")
+           } */
+        }
+
+        setTimeout(toggleMute, 1000);
+        //  setTimeout(toggleMute, 1000);
+
+        if (stream) {
+            //if (videoCaptureStream.muted)
+            // const audioTrack = stream.getAudioTracks()[0];
+            {
+                //stream.getAudioTracks().map(x=>x.getSettings())
+                stream.getAudioTracks().forEach((t) => stream.removeTrack(t)); // Remove audo tracks, else the MediaRecorder will not work
+            }
+            //    stream.getVideoTracks().forEach((t) => stream.removeTrack(t))
+
+
+            const recorder2 = new MediaRecorder(stream, {
+                mimeType: videoMimeType,
                 videoBitsPerSecond: 1e7,
             });
-            setMediaRecorder(recorder);
+
 
             let first = true;
             let header: Uint8Array | undefined = undefined;
             let remainder = new Uint8Array([]);
-            const encoder = new Encoder();
-            const decoder = new Decoder();
             let ts = BigInt(+new Date());
 
-            recorder.ondataavailable = async (e) => {
+            let start = +new Date;
+            let counter = 0;
+            recorder2.ondataavailable = async (e) => {
+                console.log('data!')
+                counter += 1;
+                //  console.log(+new Date - start)
+                start = +new Date;
                 let newArr = new Uint8Array(await e.data.arrayBuffer());
-                if (PACK_PERFECTLY) {
-                    // FLAKY if MediaRecorder segment length <  1s
-                    /*  let diff: EBMLElementDetail[];
-                     let arr = new Uint8Array(newArr.length + remainder.length);
-                     arr.set(remainder, 0);
-                     arr.set(newArr, remainder.length);
-                     let result: Uint8Array | undefined = undefined;
-                     if (first) {
-                         const clusterStartIndices =
-                             await getClusterStartIndices(arr);
-                         if (clusterStartIndices.length == 1) {
-                             const firstClusterIndex =
-                                 clusterStartIndices.splice(0, 1)[0];
-                             header = arr.slice(0, firstClusterIndex);
-                             newArr = arr.slice(firstClusterIndex);
-                             remainder = new Uint8Array(0);
-                             diff = decoder.decode(newArr);
-                             if (diff.length > 0) {
-                                 result = new Uint8Array(encoder.encode(diff))
-                                 first = false;
-                             }
-                             else {
-                                 remainder = newArr;
-                             }
- 
-                         } else {
-                             remainder = newArr;
-                         }
-                     } else {
-                         if (getClusterStartIndices(arr).length > 0) {
-                             console.log("cluster!");
-                         }
-                         diff = decoder.decode(arr);
-                         let len = 0;
-                         if (diff.length > 0) {
-                             try {
-                                 for (const d of diff) {
-                                     if (d.dataSize)
-                                         len += d.dataSize
-                                 }
-                                 if (len !== arr.length && len > 0) {
-                                     remainder = arr.subarray(len, arr.length)
-                                 }
-                                 result = new Uint8Array(encoder.encode(diff))
-                             }
-                             catch (err) {
-                                 console.warn(err);
-                                 remainder = arr;
-                             }
-                         }
-                         else {
-                             remainder = arr;
-                         }
-                     }
- 
-                     if (result) {
-                         //newArr?.length > 0
-                         const chunk = new Chunk(
-                             e.data.type,
-                             header,
-                             result
-                         );
- 
-                         videoStream.chunks.put(chunk);
- 
-                     } */
-                } else {
-                    if (first) {
-                        let arr = new Uint8Array(
-                            newArr.length + remainder.length
-                        );
-                        arr.set(remainder, 0);
-                        arr.set(newArr, remainder.length);
-                        const clusterStartIndices =
-                            await getClusterStartIndices(arr);
-                        if (clusterStartIndices.length == 1) {
-                            const firstClusterIndex =
-                                clusterStartIndices.splice(0, 1)[0];
-                            header = arr.slice(0, firstClusterIndex);
-                            newArr = arr.slice(firstClusterIndex);
-                            remainder = new Uint8Array(0);
-                            const chunk = new Chunk(e.data.type, header, arr);
-                            videoStream.chunks.put(chunk);
-                            first = false;
-                        } else {
-                            remainder = newArr;
-                        }
-                    } else {
-                        const chunk = new Chunk(
-                            e.data.type,
-                            header,
-                            newArr,
-                            ts
-                        );
-                        ts = BigInt(+new Date());
+                if (newArr.length > 0) {
+                    //   console.log(+new Date - start, newArr.length)
+                    start = +new Date;
+                }
+                if (first) {
+                    let arr = new Uint8Array(
+                        newArr.length + remainder.length
+                    );
+                    arr.set(remainder, 0);
+                    arr.set(newArr, remainder.length);
+                    const clusterStartIndices =
+                        await getClusterStartIndices(arr);
+                    if (clusterStartIndices.length == 1) {
+                        const firstClusterIndex =
+                            clusterStartIndices.splice(0, 1)[0];
+                        header = arr.slice(0, firstClusterIndex);
+                        newArr = arr.slice(firstClusterIndex);
+                        remainder = new Uint8Array(0);
+                        const chunk = new Chunk(e.data.type, header, arr);
+                        /* globalThis.VSTATS.set(chunk.id, { a: +new Date }) */
                         videoStream.chunks.put(chunk);
+
+                        first = false;
+                    } else {
+                        remainder = newArr;
                     }
+                } else {
+                    ts = BigInt(+new Date());
+                    const chunk = new Chunk(
+                        e.data.type,
+                        header,
+                        newArr,
+                        ts
+                    );
+                    /* globalThis.VSTATS.set(chunk.id, { a: +new Date }) */
+                    videoStream.chunks.put(chunk)
+
                 }
             };
-            recorder.start(5);
+
+
+            recorder2.start(1)
+
+
+
+            /*  const recorder = new MediaRecorder(new MediaStream(stream.getAudioTracks()), {
+               mimeType: audioMimeType,
+               audioBitsPerSecond: 1e5
+           });
+           setMediaRecorder(recorder);
+         
+                       let first2 = true;
+                       let header2: Uint8Array | undefined = undefined;
+                       let remainder2 = new Uint8Array([]);
+                       let ts2 = BigInt(+new Date());
+           
+                       let start2 = +new Date;
+                       let counter2 = 0;
+                       recorder.ondataavailable = async (e) => {
+                           counter2 += 1;
+                           //  console.log(+new Date - start)
+                           start2 = +new Date;
+                           let newArr = new Uint8Array(await e.data.arrayBuffer());
+                           if (newArr.length > 0) {
+                               //   console.log(+new Date - start, newArr.length)
+                               start2 = +new Date;
+                           }
+                           if (first2) {
+                               let arr = new Uint8Array(
+                                   newArr.length + remainder2.length
+                               );
+                               arr.set(remainder2, 0);
+                               arr.set(newArr, remainder2.length);
+                               const clusterStartIndices =
+                                   await getClusterStartIndices(arr);
+                               if (clusterStartIndices.length == 1) {
+                                   const firstClusterIndex =
+                                       clusterStartIndices.splice(0, 1)[0];
+                                   header2 = arr.slice(0, firstClusterIndex);
+                                   newArr = arr.slice(firstClusterIndex);
+                                   remainder2 = new Uint8Array(0);
+                                   const chunk = new Chunk(e.data.type, header2, arr);
+                                   videoStream.audio.put(chunk).then(() => {
+                                       console.log('first update')
+           
+                                   });;
+                                   first2 = false;
+                               } else {
+                                   remainder2 = newArr;
+                               }
+                           } else {
+                               ts2 = BigInt(+new Date());
+                               const chunk = new Chunk(
+                                   e.data.type,
+                                   header2,
+                                   newArr,
+                                   ts2
+                               );
+           
+                               globalThis.X = ts2
+                               videoStream.audio.put(chunk);
+                           }
+                       };
+                       recorder.start(1); */
+
+
+
+            /*  const recordInterval = setInterval(() => {
+                 recorder.requestData()
+             }, 5)
+             recorder.onstop = () => {
+                 clearInterval(recordInterval)
+             } */
+
         }
     };
 
@@ -253,10 +312,22 @@ export const Stream = () => {
                             width="300"
                             onPlay={onStart}
                             onEnded={onEnd}
-                            muted
                             autoPlay
                             loop
-                        />
+                            muted
+                        >
+
+                        </video>
+                        {/*  <video
+                            ref={videoRef}
+                            width="300"
+                            onPlay={onStart}
+                            onEnded={onEnd}
+                            controls={!useWebcam}
+                            //muted
+                            autoPlay={useWebcam}
+                            loop
+                        /> */}
                     </Grid>
                     <Grid item>
                         <IconButton onClick={() => setUseWebcam(!useWebcam)}>
@@ -267,7 +338,7 @@ export const Stream = () => {
                             )}
                         </IconButton>
                     </Grid>
-                    {/*   {videoStream && <View db={videoStream}></View>} */}
+                    {/*  {videoStream && <View db={videoStream}></View>} */}
                 </Grid>
             ) : (
                 <></>

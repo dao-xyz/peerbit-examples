@@ -1,19 +1,14 @@
 import { Routes, Route } from "react-router";
-import { Stream } from "./Stream";
-import {
-    PublicSignKey,
-    toHexString,
-    fromHexString,
-} from "@dao-xyz/peerbit-crypto";
+import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { CreateStream } from "./CreateStream";
 import { StreamOrView } from "./StreamOrView";
+import { base58btc } from "multiformats/bases/base58";
+export const STREAM = "s/:identity/:node";
 
-export const STREAM = "s/:key";
-export const getStreamPath = (key: PublicSignKey) =>
-    "s/" + toHexString(serialize(key));
+export const getStreamPath = (identity: PublicSignKey, node: PublicSignKey) => "s/" + base58btc.encode(serialize(identity)) + "/" + base58btc.encode(serialize(node));
 export const getKeyFromStreamKey = (key: string) =>
-    deserialize(fromHexString(key), PublicSignKey);
+    deserialize(base58btc.decode(key), PublicSignKey);
 
 export function BaseRoutes() {
     return (
