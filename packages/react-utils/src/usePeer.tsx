@@ -11,7 +11,7 @@ import { noise } from "@dao-xyz/libp2p-noise";
 import { peerIdFromKeys } from "@libp2p/peer-id";
 import { createLibp2pExtended } from "@dao-xyz/peerbit-libp2p";
 import { Multiaddr } from "@multiformats/multiaddr";
-import { v4 as uuid } from 'uuid';
+import { v4 as uuid } from "uuid";
 const identity = await getKeypair();
 if (!window.name) {
     window.name = uuid();
@@ -25,7 +25,6 @@ interface IPeerContext {
 
 export const connectTabs = (peer: Peerbit) => {
     // Cross tab sync when we write
-
     /* 
     const broadCastDirectSub = new BroadcastChannel(
         keypair.publicKey.toString() + "/directSub"
@@ -71,7 +70,6 @@ export const connectTabs = (peer: Peerbit) => {
                    save: false,
                });
        }; */
-
     // Cross tab sync when we get messages
     /* const broadCastOnMessage = new BroadcastChannel(
         keypair.publicKey.toString() + "/onMessage"
@@ -130,47 +128,47 @@ export const PeerProvider = ({
             libp2p
                 ? Promise.resolve(libp2p)
                 : peerId.then(async (peerId) => {
-                    return createLibp2pExtended({
-                        blocks: {
-                            directory: !inMemory ? "./blocks" : undefined,
-                        },
-                        libp2p: await createLibp2p({
-                            connectionManager: {
-                                autoDial: true,
-                            },
-                            connectionEncryption: [noise()],
-                            peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+                      return createLibp2pExtended({
+                          blocks: {
+                              directory: !inMemory ? "./blocks" : undefined,
+                          },
+                          libp2p: await createLibp2p({
+                              connectionManager: {
+                                  autoDial: true,
+                              },
+                              connectionEncryption: [noise()],
+                              peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
 
-                            streamMuxers: [mplex()],
-                            ...(dev
-                                ? {
-                                    transports: [
-                                        // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                        webSockets({
-                                            filter: (addrs) => {
-                                                return addrs.filter(
-                                                    (addr) =>
-                                                        addr
-                                                            .toString()
-                                                            .indexOf(
-                                                                "/ws/"
-                                                            ) != -1 ||
-                                                        addr
-                                                            .toString()
-                                                            .indexOf(
-                                                                "/wss/"
-                                                            ) != -1
-                                                );
-                                            },
-                                        }),
-                                    ],
-                                }
-                                : { transports: [webSockets()] }),
-                        }).then((r) => {
-                            return r;
-                        }),
-                    });
-                })
+                              streamMuxers: [mplex()],
+                              ...(dev
+                                  ? {
+                                        transports: [
+                                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                            webSockets({
+                                                filter: (addrs) => {
+                                                    return addrs.filter(
+                                                        (addr) =>
+                                                            addr
+                                                                .toString()
+                                                                .indexOf(
+                                                                    "/ws/"
+                                                                ) != -1 ||
+                                                            addr
+                                                                .toString()
+                                                                .indexOf(
+                                                                    "/wss/"
+                                                                ) != -1
+                                                    );
+                                                },
+                                            }),
+                                        ],
+                                    }
+                                  : { transports: [webSockets()] }),
+                          }).then((r) => {
+                              return r;
+                          }),
+                      });
+                  })
         )
             .then(async (node) => {
                 await node.start();

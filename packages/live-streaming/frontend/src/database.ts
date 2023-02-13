@@ -43,18 +43,14 @@ export class VideoStream extends Program {
     @field({ type: Documents })
     chunks: Documents<Chunk>;
 
-
-
-
     constructor(sender: PublicSignKey) {
         // force the id of the program to be the same for all stream
         // so that we can repopen the same stream without knowing the db address
         super({ id: sender.hashcode() });
         this.sender = sender;
-        this.chunks =
-            new Documents({ index: new DocumentIndex({ indexBy: "id" }) });
-
-
+        this.chunks = new Documents({
+            index: new DocumentIndex({ indexBy: "id" }),
+        });
     }
 
     async setup(): Promise<void> {

@@ -23,7 +23,9 @@ if (import.meta.env.MODE === "development") {
         ).data
             .split(/\r?\n/)
             .filter((x) => x.length > 0); */
-    const swarmAddressees = ["c134ffe07eeae36ec95917e88b942232324f672f.peerchecker.com"]
+    const swarmAddressees = [
+        "c134ffe07eeae36ec95917e88b942232324f672f.peerchecker.com",
+    ];
     try {
         bootstrapAddresses = await Promise.all(
             swarmAddressees.map((s) => resolveSwarmAddress(s))
@@ -31,7 +33,7 @@ if (import.meta.env.MODE === "development") {
     } catch (error: any) {
         console.log(
             "Failed to resolve relay node. Please come back later or start the demo locally: " +
-            error?.message
+                error?.message
         );
     }
 }
@@ -58,9 +60,6 @@ let theme = createTheme({
 theme = responsiveFontSizes(theme);
 
 export const App = () => {
-
-
-
     return (
         <PeerProvider
             bootstrap={bootstrapAddresses}

@@ -40,7 +40,9 @@ export const getKeypair = async (
         let keypair: Ed25519Keypair;
         const keySuffix = keyName ? "/" + keyName : "";
         try {
-            const bytes = await level.get("_key" + keySuffix, { valueEncoding: "view" });
+            const bytes = await level.get("_key" + keySuffix, {
+                valueEncoding: "view",
+            });
             keypair = deserialize(bytes, Ed25519Keypair);
             return keypair;
         } catch (error) {
