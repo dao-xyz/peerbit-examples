@@ -2,7 +2,7 @@
     "name": "streaming-frontend",
     "version": "0.1.0",
     "private": true,
-    "homepage": "https://dao-xyz.github.io/peerbit-examples",
+    "homepage": "https://stream.peerchecker.com",
     "type": "module",
     "scripts": {
         "dev": "vite",

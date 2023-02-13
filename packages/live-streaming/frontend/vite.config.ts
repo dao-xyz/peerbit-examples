@@ -11,7 +11,6 @@ export default defineConfig({
     define: {
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
-    base: "/peerbit-examples/",
     /*  server: fs.existsSync('./.cert/key.pem') ? {
          https: {
              key: fs.readFileSync('./.cert/key.pem'),
