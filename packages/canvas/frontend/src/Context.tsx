@@ -1,14 +1,9 @@
 import { BaseRoutes } from "./routes";
 import { Box, Grid, Typography } from "@mui/material";
-import { usePeer } from "@dao-xyz/peerbit-react";
-import { useEffect } from "react";
+const logChannel = new BroadcastChannel("/log");
+
 export const Content = () => {
-    const { peer } = usePeer();
-    useEffect(() => {
-        if (!peer?.id) {
-            return;
-        }
-    }, [peer?.id]);
+
     return (
         <Box>
             <Grid container sx={{ p: 4, height: "100vh" }}>

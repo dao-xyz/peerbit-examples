@@ -32,7 +32,7 @@ if (import.meta.env.MODE === "development") {
     } catch (error: any) {
         console.log(
             "Failed to resolve relay node. Please come back later or start the demo locally: " +
-                error?.message
+            error?.message
         );
     }
 }
@@ -60,17 +60,17 @@ theme = responsiveFontSizes(theme);
 
 export const App = () => {
     return (
-        <PeerProvider
-            bootstrap={bootstrapAddresses}
-            inMemory={true}
-            dev={import.meta.env.MODE === "development"}
-        >
-            <ThemeProvider theme={theme}>
-                <CssBaseline />
-                <HashRouter basename="/">
-                    <Content />
-                </HashRouter>
-            </ThemeProvider>
-        </PeerProvider>
+        /*       <PeerProvider
+                  bootstrap={bootstrapAddresses}
+                  inMemory={true}
+                  dev={import.meta.env.MODE === "development"}
+              >
+                  <ThemeProvider theme={theme}>
+                      <CssBaseline /> */
+        <HashRouter basename="/">
+            <Content />
+        </HashRouter>
+        /*     </ThemeProvider>
+        </PeerProvider> */
     );
 };

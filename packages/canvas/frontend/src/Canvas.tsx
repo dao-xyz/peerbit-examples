@@ -1,12 +1,14 @@
-import { usePeer } from "@dao-xyz/peerbit-react";
 import { useState, useEffect } from "react";
-import { useParams } from "react-router-dom";
-import { getKeyFromStreamKey } from "./routes";
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import createCache from "@emotion/cache";
 import styled from "@emotion/styled";
 import ReactDOM from "react-dom";
 import { CacheProvider } from "@emotion/react";
+
+const logChannel = new BroadcastChannel("/log");
+logChannel.onmessage = (event) => {
+    //REM: Just appending it to the body.. lazy
+    console.log(event.data, "from broadcast");
+}
 
 const PreviewIframe = styled("iframe")(() => ({
     border: "none",
@@ -35,31 +37,18 @@ const PreviewPortal = (props: any) => {
     );
 };
 
+const STREAMING_APP = "http://localhost:5801"; //   "https://stream.peerchecker.com" // 
 export const Canvas = () => {
-    const { peer } = usePeer();
-    const params = useParams();
-    const [idArgs, setIdArgs] = useState<{
-        identity: PublicSignKey;
-        node: PublicSignKey;
-    }>();
-    const [isStreamer, setIsStreamer] = useState<boolean | undefined>(
-        undefined
-    );
-
-    // TODO
-    useEffect(() => {
-        if (!peer?.libp2p || !params.node || !params.identity) {
-            return;
-        }
-
-        const node = getKeyFromStreamKey(params.node);
-        setIsStreamer(peer.idKey.publicKey.equals(node));
-        setIdArgs({ identity: getKeyFromStreamKey(params.identity), node });
-    }, [peer?.id, params?.node]);
+    /*   const { peer } = usePeer();
+      const params = useParams(); */
 
     return (
         <>
-            <iframe></iframe>
+            <iframe id="1" style={{ width: "100%", height: "400px", border: 0 }} allow="camera; microphone; display-capture; autoplay; clipboard-write;" src={STREAMING_APP + "/#"}></iframe>
+            <iframe id="1" style={{ width: "100%", height: "400px", border: 0 }} allow="camera; microphone; display-capture; autoplay; clipboard-write;" src={STREAMING_APP + "/#"}></iframe>
+
+            {/*   <iframe id="2" style={{ width: "100%", height: "400px", border: 0 }} allow="camera; microphone; display-capture; autoplay; clipboard-write;" src={STREAMING_APP + "/#"}></iframe>
+            <iframe id="3" style={{ width: "100%", height: "400px", border: 0 }} allow="camera; microphone; display-capture; autoplay; clipboard-write;" src={STREAMING_APP + "/#"}></iframe> */}
         </>
     );
 };

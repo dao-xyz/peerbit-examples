@@ -1,13 +1,12 @@
 {
-    "name": "canvas",
-    "version": "0.0.1",
+    "name": "level-test",
+    "version": "0.1.0",
     "private": true,
-    "homepage": "https://dao-xyz.github.io/peerbit-examples",
+    "homepage": "https://stream.peerchecker.com",
     "type": "module",
     "scripts": {
         "dev": "vite",
         "start": "vite --https false",
-        "start-https": "vite",
         "start-remote": "vite --mode staging",
         "build": "tsc && vite build",
         "preview": "vite preview",

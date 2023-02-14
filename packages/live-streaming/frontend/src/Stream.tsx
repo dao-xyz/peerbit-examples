@@ -13,6 +13,8 @@ import VideoCameraFrontIcon from "@mui/icons-material/VideoCameraFront";
 import OndemandVideoIcon from "@mui/icons-material/OndemandVideo";
 import PresentToAllIcon from "@mui/icons-material/PresentToAll";
 import TvOffIcon from "@mui/icons-material/TvOff";
+import ShareIcon from '@mui/icons-material/Share';
+
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
     mozCaptureStream?(fps?: number): MediaStream;
