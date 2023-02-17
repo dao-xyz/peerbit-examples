@@ -35,7 +35,7 @@ export const Lobby = () => {
         if (!rooms?.initialized) {
             return;
         }
-        setList([...rooms.rooms.index._index.values()].map((x) => x.value)); // show all rooms
+        setList([...rooms.rooms.index.index.values()].map((x) => x.value)); // show all rooms
     }, [roomsUpdated]);
 
     return (

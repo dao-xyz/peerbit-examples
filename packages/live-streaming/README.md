@@ -1,6 +1,6 @@
 # Livestreaming app
 
-## [Application is live here](https://dao-xyz.github.io/peerbit-examples/)
+## [Application is live here](https://stream.dao.xyz)
 
 App might not work well or at all on mobile (not tested)
 

@@ -8,6 +8,7 @@ import {
 import { Content } from "./Context";
 import { PeerProvider, resolveSwarmAddress } from "@dao-xyz/peerbit-react";
 import { WindowContextProvider } from "./WindowContext";
+import blue from "@mui/material/colors/amber";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
@@ -41,6 +42,7 @@ if (import.meta.env.MODE === "development") {
 let theme = createTheme({
     palette: {
         mode: "dark",
+        primary: blue,
     },
     typography: {
         fontFamily: [

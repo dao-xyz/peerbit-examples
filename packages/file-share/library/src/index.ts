@@ -176,9 +176,8 @@ export class Files extends Program {
             }, waitFor)
 
             // query local first, then remote.
-            let queryOptions = [{ local: true }, { remote: { amount: 1 } }]
-            for (const options of queryOptions) {
-                this.files.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: name })] }), (result) => {
+            this.files.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: name })] })).then((results) => {
+                for (const result of results) {
                     if (result.results.length > 0) {
                         result.results[0].value.getFile(this).then((file) => {
                             clearTimeout(timout)
@@ -188,8 +187,9 @@ export class Files extends Program {
                             reject(error)
                         })
                     }
-                }, options)
-            }
+                }
+            })
+
 
         })
     }
@@ -201,15 +201,17 @@ export class Files extends Program {
      */
     async getOne(name: string): Promise<Uint8Array | undefined> {
         return new Promise((resolve, reject) => {
-            this.files.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: name })] }), (result) => {
-                if (result.results.length > 0) {
-                    result.results[0].value.getFile(this).then((file) => {
-                        resolve(file)
-                    }).catch((error) => {
-                        reject(error)
-                    })
+            this.files.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: name })] }), { local: true, remote: { amount: 1, timeout: 10 * 1000 } }).then((results) => {
+                for (const result of results) {
+                    if (result.results.length > 0) {
+                        result.results[0].value.getFile(this).then((file) => {
+                            resolve(file)
+                        }).catch((error) => {
+                            reject(error)
+                        })
+                    }
                 }
-            }, { local: true, remote: { amount: 1, timeout: 10 * 1000 } }).finally(() => {
+            }).catch(() => {
                 resolve(undefined)
             });
         })
