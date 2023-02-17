@@ -13,7 +13,7 @@ import { useParams } from "react-router";
 import { useChat } from "./ChatContext";
 import {
     DocumentQueryRequest,
-    FieldStringMatchQuery,
+    StringMatchQuery,
     IndexedValue,
 } from "@dao-xyz/peerbit-document";
 import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
@@ -153,7 +153,7 @@ export const Room = () => {
             .query(
                 new DocumentQueryRequest({
                     queries: [
-                        new FieldStringMatchQuery({
+                        new StringMatchQuery({
                             key: "name",
                             value: params.name,
                         }),

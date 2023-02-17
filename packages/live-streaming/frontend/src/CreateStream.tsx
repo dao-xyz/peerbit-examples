@@ -1,8 +1,6 @@
 import { usePeer } from "@dao-xyz/peerbit-react";
-import { Button, Grid } from "@mui/material";
 import { useNavigate } from "react-router-dom";
 import { getStreamPath } from "./routes";
-import VideoCameraFrontIcon from "@mui/icons-material/VideoCameraFront";
 import { useEffect } from "react";
 export const CreateStream = () => {
     const { peer } = usePeer();

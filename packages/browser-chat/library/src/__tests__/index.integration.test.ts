@@ -7,7 +7,7 @@ import { serialize } from "@dao-xyz/borsh";
 import { toBase64 } from "@dao-xyz/peerbit-crypto";
 import {
     DocumentQueryRequest,
-    FieldStringMatchQuery,
+    StringMatchQuery,
     Results,
 } from "@dao-xyz/peerbit-document";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";
@@ -46,19 +46,15 @@ describe("index", () => {
         await lobby2.rooms.put(room2);
 
         // Peer2 can "query" for rooms if peer2 does not have anything replicated locally
-        const results: Results<Room>[] = [];
-        await lobby1.rooms.index.query(
+        const results: Results<Room>[] = await lobby1.rooms.index.query(
             new DocumentQueryRequest({
                 queries: [
-                    new FieldStringMatchQuery({
+                    new StringMatchQuery({
                         key: "name",
                         value: "another",
                     }),
                 ],
             }),
-            (result) => {
-                results.push(result);
-            },
             {
                 remote: {
                     timeout: 3000,
