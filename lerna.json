@@ -2,7 +2,8 @@
     "packages": [
         "packages/react-utils",
         "packages/browser-chat/*",
-        "packages/live-streaming/*"
+        "packages/live-streaming/*",
+        "packages/online-transfer-learning/*"
     ],
     "version": "independent",
     "npmClient": "yarn",

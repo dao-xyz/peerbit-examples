@@ -9,7 +9,8 @@
         "packages": [
             "packages/react-utils",
             "packages/browser-chat/*",
-            "packages/live-streaming/*"
+            "packages/live-streaming/*",
+            "packages/online-transfer-learning/*"
         ],
         "nohoist": [
             "**/@babel/preset-env",
@@ -40,8 +41,8 @@
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}"
     },
     "dependencies": {
-        "@dao-xyz/peerbit": "0.1.25",
-        "@dao-xyz/peerbit-document": "^0.1.24",
+        "@dao-xyz/peerbit": "0.1.26",
+        "@dao-xyz/peerbit-document": "^0.1.25",
         "@dao-xyz/peerbit-test-utils": "^0.1.18"
     },
     "devDependencies": {
