@@ -102,13 +102,12 @@ export const Room = () => {
         }
         room.load();
 
-        room.messages.index.query(
-            new DocumentQueryRequest({ queries: [] }),
-            () => {
+        room.messages.index.query(new DocumentQueryRequest({ queries: [] }), {
+            remote: { sync: true },
+            onResponse: () => {
                 setLastUpdate(+new Date());
             },
-            { remote: { sync: true } }
-        );
+        });
     }, [room?.id, room?.initialized]);
 
     useEffect(() => {
@@ -116,7 +115,7 @@ export const Room = () => {
             return;
         }
 
-        const newPosts = [...room.messages.index._index.values()].sort((a, b) =>
+        const newPosts = [...room.messages.index.index.values()].sort((a, b) =>
             Number(
                 a.entry.metadata.clock.timestamp.wallTime -
                     b.entry.metadata.clock.timestamp.wallTime
@@ -159,36 +158,6 @@ export const Room = () => {
                         }),
                     ],
                 }),
-                (response) => {
-                    if (response.results.length > 0) {
-                        gotRoom = true;
-                        const roomToOpen = response.results[0].value;
-                        peer.open(roomToOpen, {
-                            // already opened so the updatecallback will not be applied?
-                            role: new ReplicatorType(),
-                        })
-                            .then((r) => {
-                                roomToOpen.messages.events.addEventListener(
-                                    "change",
-                                    () => {
-                                        refresh();
-                                    }
-                                );
-                                setRoom(r);
-                            })
-                            .catch((e) => {
-                                console.error(
-                                    "Failed top open room: " + e.message
-                                );
-                                alert("Failed top open room: " + e.message);
-
-                                throw e;
-                            })
-                            .finally(() => {
-                                setLoading(false);
-                            });
-                    }
-                },
                 {
                     remote:
                         peer.libp2p.directsub.getSubscribers(
@@ -197,6 +166,36 @@ export const Room = () => {
                             ? { sync: true, timeout: 5000 }
                             : false,
                     local: true,
+                    onResponse: (response) => {
+                        if (response.results.length > 0) {
+                            gotRoom = true;
+                            const roomToOpen = response.results[0].value;
+                            peer.open(roomToOpen, {
+                                // already opened so the updatecallback will not be applied?
+                                role: new ReplicatorType(),
+                            })
+                                .then((r) => {
+                                    roomToOpen.messages.events.addEventListener(
+                                        "change",
+                                        () => {
+                                            refresh();
+                                        }
+                                    );
+                                    setRoom(r);
+                                })
+                                .catch((e) => {
+                                    console.error(
+                                        "Failed top open room: " + e.message
+                                    );
+                                    alert("Failed top open room: " + e.message);
+
+                                    throw e;
+                                })
+                                .finally(() => {
+                                    setLoading(false);
+                                });
+                        }
+                    },
                 }
             )
             .finally(() => {
