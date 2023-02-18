@@ -14,13 +14,6 @@ if (import.meta.env.MODE === "development") {
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
 } else {
-    /*     const swarmAddressees = (
-            await axios.get(
-                "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
-            )
-        ).data
-            .split(/\r?\n/)
-            .filter((x) => x.length > 0); */
     const swarmAddressees = [
         "c134ffe07eeae36ec95917e88b942232324f672f.peerchecker.com",
     ];
