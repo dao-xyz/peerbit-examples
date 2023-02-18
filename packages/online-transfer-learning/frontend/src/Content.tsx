@@ -6,13 +6,6 @@ import { Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { P2PStorage } from "./io-utils";
 import { ModelDatabase } from "./database.js";
 
-/* const STATUS = document.getElementById('status');
-const VIDEO = document.getElementById('webcam');
-const ENABLE_CAM_BUTTON = document.getElementById('enableCam');
-const RESET_BUTTON = document.getElementById('reset');
-const TRAIN_BUTTON = document.getElementById('train');
-
-const STOP_DATA_GATHER = -1; */
 const MOBILE_NET_INPUT_WIDTH = 224;
 const MOBILE_NET_INPUT_HEIGHT = 224;
 const CLASS_NAMES = ["Class 1", "Class 2"];
@@ -24,6 +17,7 @@ function hasGetUserMedia() {
 let trainingDataInputs: any[] = [];
 let trainingDataOutputs: any[] = [];
 let examplesCount: Map<number, number> = new Map();
+
 function dataGatherLoop(
     video: HTMLVideoElement,
     outputState: number,
@@ -31,7 +25,6 @@ function dataGatherLoop(
     condition: () => boolean,
     statusText: HTMLDivElement
 ) {
-    console.log("gather!", condition());
 
     if (condition()) {
         let imageFeatures = tf.tidy(function () {
@@ -290,7 +283,7 @@ export const Content = () => {
 
     return (
         <>
-            <Grid container direction="column" spacing={2} margin={4}>
+            <Grid container direction="column" spacing={2} margin={2}>
                 <Grid item container direction="column">
                     <Grid item>
                         <Typography ref={status}></Typography>
@@ -304,7 +297,7 @@ export const Content = () => {
                     </Grid>
                 </Grid>
                 <Grid item>
-                    <video ref={video} autoPlay muted></video>
+                    <video playsInline ref={video} autoPlay muted></video>
                 </Grid>
                 {loading && <CircularProgress />}
 
