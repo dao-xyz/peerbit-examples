@@ -25,7 +25,6 @@ function dataGatherLoop(
     condition: () => boolean,
     statusText: HTMLDivElement
 ) {
-
     if (condition()) {
         let imageFeatures = tf.tidy(function () {
             let videoFrameAsTensor = tf.browser.fromPixels(video);
@@ -86,7 +85,9 @@ function predictLoop(
                 resizedTensorFrame.expandDims()
             );
             let prediction = (
-                model.predict(imageFeatures as any as tf.Tensor<tf.Rank>) as tf.Tensor<tf.Rank>
+                model.predict(
+                    imageFeatures as any as tf.Tensor<tf.Rank>
+                ) as tf.Tensor<tf.Rank>
             ).squeeze();
 
             let highestIndex = prediction.argMax().arraySync();
@@ -121,7 +122,7 @@ async function train(model: tf.Sequential, storage: tf.io.IOHandler) {
     });
 
     await model.save(storage);
-    console.log('saved model!')
+    console.log("saved model!");
     outputsAsTensor.dispose();
     oneHotOutputs.dispose();
     inputsAsTensor.dispose();
@@ -155,11 +156,11 @@ export const Content = () => {
         if (p2pStorage.current || !peer) {
             return;
         }
-        console.log('open db')
+        console.log("open db");
         setProcessing(true);
         peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID })).then(
             async (db) => {
-                console.log('db open!');
+                console.log("db open!");
                 await db.load();
                 console.log("loaded!", db.address.toString());
                 p2pStorage.current = new P2PStorage(db, MODEL_ID);
@@ -224,7 +225,7 @@ export const Content = () => {
 
             imageNetModel.current = imageNetSmall;
 
-            console.log('Loaded image net')
+            console.log("Loaded image net");
             let tfModel = tf.sequential();
             tfModel.add(
                 tf.layers.dense({
@@ -268,9 +269,8 @@ export const Content = () => {
                     new Date(Number(r.results[0].context.modified / 1000n))
                 );
             });
-        }
-        else {
-            setModelDate(new Date())
+        } else {
+            setModelDate(new Date());
         }
     };
 
@@ -408,7 +408,23 @@ export const Content = () => {
                         >
                             Sync latest
                         </Button>
-                        <Button id="reset">Reset</Button>
+                        <Button
+                            id="reset"
+                            onClick={() => {
+                                examplesCount.clear();
+                                for (
+                                    let i = 0;
+                                    i < trainingDataInputs.length;
+                                    i++
+                                ) {
+                                    trainingDataInputs[i].dispose();
+                                }
+                                trainingDataInputs.length = 0;
+                                trainingDataOutputs.length = 0;
+                            }}
+                        >
+                            Reset
+                        </Button>
                     </Grid>
                 </Grid>
             </Grid>

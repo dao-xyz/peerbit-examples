@@ -9,14 +9,10 @@ export class Model {
     @field({ type: "string" })
     configJSON: string;
 
-    @field({ type: 'string' })
+    @field({ type: "string" })
     weights: string;
 
-    constructor(properties: {
-        id: string;
-        config: object;
-        weights: string;
-    }) {
+    constructor(properties: { id: string; config: object; weights: string }) {
         this.configJSON = JSON.stringify(properties.config);
         this.weights = properties.weights;
         this.id = properties.id;
@@ -28,7 +24,6 @@ export class Model {
 }
 
 export class ModelDatabase extends Program {
-
     @field({ type: Documents })
     models: Documents<Model>;
 

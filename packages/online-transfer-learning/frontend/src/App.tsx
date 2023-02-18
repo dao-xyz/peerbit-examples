@@ -24,7 +24,7 @@ if (import.meta.env.MODE === "development") {
     } catch (error: any) {
         console.log(
             "Failed to resolve relay node. Please come back later or start the demo locally: " +
-            error?.message
+                error?.message
         );
     }
 }

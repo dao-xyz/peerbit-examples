@@ -113,7 +113,7 @@ export class P2PStorage implements IOHandler {
         if (modelArtifacts.modelTopology instanceof ArrayBuffer) {
             throw new Error(
                 "BrowserHTTPRequest.save() does not support saving model topology " +
-                "in binary formats yet."
+                    "in binary formats yet."
             );
         }
 
@@ -133,11 +133,13 @@ export class P2PStorage implements IOHandler {
             new Model({
                 id: this.modelId,
                 config: modelTopologyAndWeightManifest,
-                weights: arrayBufferToBase64String(modelArtifacts.weightData)/* new Uint8Array(
+                weights: arrayBufferToBase64String(
+                    modelArtifacts.weightData
+                ) /* new Uint8Array(
                     modelArtifacts.weightData,
                     0,
                     modelArtifacts.weightData.byteLength
-                ), */
+                ), */,
             })
         );
         return {
@@ -153,9 +155,9 @@ export class P2PStorage implements IOHandler {
         if (modelResults?.results.length === 0) {
             throw new Error(
                 "Did not find model." +
-                this.db.address.toString() +
-                ", " +
-                this.db.models.store.oplog.length
+                    this.db.address.toString() +
+                    ", " +
+                    this.db.models.store.oplog.length
             );
         }
         const model = modelResults.results[0].value;
