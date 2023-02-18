@@ -4,3 +4,9 @@
 This project uses Peerbit to share model weights between peers. 
 
 Last write wins. Which mean the one who trained the latest model will superseed the previous models.
+
+- Create different models based on some url param. /address/v0
+
+- Implement privacy using Peerbit features
+
+- Access control
