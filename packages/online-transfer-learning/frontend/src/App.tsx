@@ -1,4 +1,3 @@
-import { HashRouter } from "react-router-dom";
 import {
     createTheme,
     responsiveFontSizes,
@@ -32,7 +31,7 @@ if (import.meta.env.MODE === "development") {
     } catch (error: any) {
         console.log(
             "Failed to resolve relay node. Please come back later or start the demo locally: " +
-                error?.message
+            error?.message
         );
     }
 }
@@ -62,7 +61,7 @@ export const App = () => {
     return (
         <PeerProvider
             bootstrap={bootstrapAddresses}
-            inMemory={false}
+            inMemory={true}
             dev={import.meta.env.MODE === "development"}
         >
             <ThemeProvider theme={theme}>

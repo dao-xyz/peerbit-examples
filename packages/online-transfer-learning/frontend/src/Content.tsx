@@ -1,12 +1,10 @@
 import { usePeer } from "@dao-xyz/peerbit-react";
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
-
 import * as tf from "@tensorflow/tfjs";
 import { Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { P2PStorage } from "./io-utils";
-import { ModelDatabase } from "./database";
-import { browserLocalStorage } from "@tensorflow/tfjs-core/dist/io/local_storage";
+import { ModelDatabase } from "./database.js";
 
 /* const STATUS = document.getElementById('status');
 const VIDEO = document.getElementById('webcam');
@@ -95,11 +93,12 @@ function predictLoop(
                 resizedTensorFrame.expandDims()
             );
             let prediction = (
-                model.predict(imageFeatures as any) as tf.Tensor<tf.Rank>
+                model.predict(imageFeatures as any as tf.Tensor<tf.Rank>) as tf.Tensor<tf.Rank>
             ).squeeze();
+
             let highestIndex = prediction.argMax().arraySync();
+
             let predictionArray = prediction.arraySync();
-            console.log(predictionArray);
 
             statusText.innerText =
                 "Prediction: " +
@@ -117,12 +116,11 @@ function predictLoop(
 
 async function train(model: tf.Sequential, storage: tf.io.IOHandler) {
     tf.util.shuffleCombo(trainingDataInputs, trainingDataOutputs);
-    console.log(trainingDataInputs, trainingDataOutputs);
     let outputsAsTensor = tf.tensor1d(trainingDataOutputs, "int32");
     let oneHotOutputs = tf.oneHot(outputsAsTensor, CLASS_NAMES.length);
     let inputsAsTensor = tf.stack(trainingDataInputs);
 
-    let results = await model.fit(inputsAsTensor, oneHotOutputs, {
+    await model.fit(inputsAsTensor, oneHotOutputs, {
         shuffle: true,
         batchSize: 5,
         epochs: 10,
@@ -130,7 +128,7 @@ async function train(model: tf.Sequential, storage: tf.io.IOHandler) {
     });
 
     await model.save(storage);
-
+    console.log('saved model!')
     outputsAsTensor.dispose();
     oneHotOutputs.dispose();
     inputsAsTensor.dispose();
@@ -157,23 +155,22 @@ export const Content = () => {
     const [loading, setLoading] = useState(false);
     const loadedModel = useRef(false);
     const [usingCamera, setUsingCamera] = useState(false);
-    const p2pStorage = useRef<P2PStorage>();
+    const p2pStorage = useRef<P2PStorage | tf.io.IOHandler>();
     const [modelDate, setModelDate] = useState<Date>(null);
 
     useEffect(() => {
         if (p2pStorage.current || !peer) {
             return;
         }
-        console.log("HERE!");
+        console.log('open db')
         setProcessing(true);
         peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID })).then(
             async (db) => {
+                console.log('db open!');
                 await db.load();
                 console.log("loaded!", db.address.toString());
                 p2pStorage.current = new P2PStorage(db, MODEL_ID);
                 setProcessing(false);
-
-                //p2pStorage.current = browserLocalStorage('./some/path');
             }
         );
     }, [peer?.id.toString()]);
@@ -198,8 +195,6 @@ export const Content = () => {
                     video.current.srcObject = stream;
                     video.current.addEventListener("loadeddata", function () {
                         setUsingCamera(true);
-                        // videoPlaying = true;
-                        // ENABLE_CAM_BUTTON.classList.add('removed');
                     });
                 });
         } else {
@@ -274,11 +269,16 @@ export const Content = () => {
     }, []);
 
     const updateModelDate = () => {
-        p2pStorage.current.db.models.index.get(MODEL_ID).then((r) => {
-            setModelDate(
-                new Date(Number(r.results[0].context.modified / 1000n))
-            );
-        });
+        if (p2pStorage.current instanceof P2PStorage) {
+            p2pStorage.current.db.models.index.get(MODEL_ID).then((r) => {
+                setModelDate(
+                    new Date(Number(r.results[0].context.modified / 1000n))
+                );
+            });
+        }
+        else {
+            setModelDate(new Date())
+        }
     };
 
     // TODO

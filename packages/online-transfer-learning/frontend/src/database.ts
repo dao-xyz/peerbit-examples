@@ -1,7 +1,6 @@
 import { Program } from "@dao-xyz/peerbit-program";
 import { DocumentIndex, Documents } from "@dao-xyz/peerbit-document";
 import { field } from "@dao-xyz/borsh";
-import { v4 as uuid } from "uuid";
 
 export class Model {
     @field({ type: "string" })
@@ -10,13 +9,13 @@ export class Model {
     @field({ type: "string" })
     configJSON: string;
 
-    @field({ type: Uint8Array })
-    weights: Uint8Array;
+    @field({ type: 'string' })
+    weights: string;
 
     constructor(properties: {
         id: string;
         config: object;
-        weights: Uint8Array;
+        weights: string;
     }) {
         this.configJSON = JSON.stringify(properties.config);
         this.weights = properties.weights;
@@ -29,6 +28,7 @@ export class Model {
 }
 
 export class ModelDatabase extends Program {
+
     @field({ type: Documents })
     models: Documents<Model>;
 
