@@ -1269,24 +1269,24 @@
     "@dao-xyz/peerbit-time" "^0.0.22"
     level "^8.0.0"
 
-"@dao-xyz/libp2p-direct-block@^0.1.16":
-  version "0.1.16"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-block/-/libp2p-direct-block-0.1.16.tgz#f8732efc4186b7ce8f239c7716c778d66f2f85be"
-  integrity sha512-CuBtquccdpGERZksjR9g62OirEkEmjjp7RupKTp/Mx1js/lAnkVx7onVqKh43FbMfJOzSDtjzOBHW7kpb7VNOQ==
+"@dao-xyz/libp2p-direct-block@^0.1.18":
+  version "0.1.18"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-block/-/libp2p-direct-block-0.1.18.tgz#f4cc9e7d17a26b1ea24e8b71b168f09c049d5766"
+  integrity sha512-+Rq7RujHwth1unR1Sc9eFiKjWZeCRb5895ptmSagFHg2d6slQq01k2qH+kTGr2B6cPNeQUWZ4TXA3uC3yP+Ytw==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
     "@dao-xyz/lazy-level" "^0.0.3"
-    "@dao-xyz/libp2p-direct-stream" "^0.1.15"
+    "@dao-xyz/libp2p-direct-stream" "^0.1.17"
     "@dao-xyz/peerbit-crypto" "^0.1.10"
     "@ipld/dag-cbor" "^9.0.0"
     abstract-level "^1.0.3"
     libp2p "^0.42.2"
     memory-level "^1.0.0"
 
-"@dao-xyz/libp2p-direct-stream@^0.1.15":
-  version "0.1.15"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-stream/-/libp2p-direct-stream-0.1.15.tgz#ad9a1ad69ac96da2c0565b54a6cf0fe3d58acca3"
-  integrity sha512-vcki4ZAXITMO9dp7zAWNQSeglnddoXbGLsyj5EDvwZ2p0uVWSRI5mxD+MbX00ejUCgP0GB54vy6ZNpz6TVmkpg==
+"@dao-xyz/libp2p-direct-stream@^0.1.17":
+  version "0.1.17"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-stream/-/libp2p-direct-stream-0.1.17.tgz#40af44b6f4581ab34c26832e3580f4bf4d11eacb"
+  integrity sha512-juCkscnhwQOdE5ClDzWaCExcsFgaXX3C7lyiwXHdY08r124nMptBAYGyjIx0jt1rKBZzrrBS9BrOV8zhDM+ESQ==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
     "@dao-xyz/cache" "^0.0.4"
@@ -1300,12 +1300,12 @@
     uint8arrays "^4.0.2"
     yallist "^4.0.0"
 
-"@dao-xyz/libp2p-direct-sub@^0.1.16":
-  version "0.1.16"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-sub/-/libp2p-direct-sub-0.1.16.tgz#5ad71b413fcee6848005f2be567cde4c671f48e2"
-  integrity sha512-qc2L0usQs3Z30kLFd6UtWlrseezlpneUWnpj2+k/8eKXruri7pyo2ltIydx3wfqLF5IQC9676FaMZ6f73dfgGg==
+"@dao-xyz/libp2p-direct-sub@^0.1.18":
+  version "0.1.18"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-sub/-/libp2p-direct-sub-0.1.18.tgz#aad8621c00465c48962632adc3b3e1233e0bb3a9"
+  integrity sha512-ri62wPcajfH5QFNn2QdcOJPAc3ahcA2nctAms/XI6utMIi3hI+rP/2yfRvghFhxooDxzfWeB7NOyufnHOQOiXg==
   dependencies:
-    "@dao-xyz/libp2p-direct-stream" "^0.1.15"
+    "@dao-xyz/libp2p-direct-stream" "^0.1.17"
     "@dao-xyz/peerbit-logger" "^0.0.5"
     "@dao-xyz/uint8arrays" "^0.0.3"
     "@libp2p/interfaces" "^3.3.1"
@@ -1361,21 +1361,21 @@
     "@libp2p/peer-id" "^2.0.1"
     libsodium-wrappers "^0.7.10"
 
-"@dao-xyz/peerbit-document@*", "@dao-xyz/peerbit-document@^0.1.25":
-  version "0.1.25"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-document/-/peerbit-document-0.1.25.tgz#74c35f81369e20df0591745d61b5dcdde90f0125"
-  integrity sha512-nZecypPcoXU01Qd6Q9wQ3VvzFjufrxZtjjDChO5RdUjBPLnTcW7e8J0lhLDwsqsPOUan07O8U6kFyMvKE9/JcQ==
+"@dao-xyz/peerbit-document@*", "@dao-xyz/peerbit-document@^0.1.27":
+  version "0.1.27"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-document/-/peerbit-document-0.1.27.tgz#be4142bfd3fc2efdc9661e884b54d171334ff0ba"
+  integrity sha512-GP/jpOcbP/0J5Cpk6kAjB9AEzuBMScyc13k+x/Qry22sKQtg6rhGgPupJAFipRbb9XnLQdhGM6Mc9cifCD3WNg==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
-    "@dao-xyz/peerbit-logindex" "^0.1.22"
-    "@dao-xyz/peerbit-rpc" "^0.1.22"
-    "@dao-xyz/peerbit-store" "^0.1.21"
+    "@dao-xyz/peerbit-logindex" "^0.1.24"
+    "@dao-xyz/peerbit-rpc" "^0.1.24"
+    "@dao-xyz/peerbit-store" "^0.1.23"
     "@libp2p/interfaces" "^3.3.1"
 
-"@dao-xyz/peerbit-keystore@^0.1.19":
-  version "0.1.19"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-keystore/-/peerbit-keystore-0.1.19.tgz#5594775a2337983f98f866c72416aff1c2432557"
-  integrity sha512-dp4LMtRxFD43V2BpU5B8uzADUHN9ILDK7Ygrk6WZBlE7qbYfj2OhQZPgsmjI4FfHVwml1K5bLrm9FIu4UJSFyA==
+"@dao-xyz/peerbit-keystore@^0.1.21":
+  version "0.1.21"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-keystore/-/peerbit-keystore-0.1.21.tgz#76ba5238c3e57872daf4f58fd4b2ee07836c999c"
+  integrity sha512-EI0iYCuThq3Xy1Z8o35HnITkQatyL7EgTcsuSqrxp53NdGgEs3yusRP70GOBo/aNWvuZo+KRJyaQfmFm4mVU2Q==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
     "@dao-xyz/cache" "^0.0.4"
@@ -1386,27 +1386,27 @@
     reachdown "^1.1.0"
     safe-buffer "^5.2.1"
 
-"@dao-xyz/peerbit-libp2p@^0.1.17":
-  version "0.1.17"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-libp2p/-/peerbit-libp2p-0.1.17.tgz#6c7a453a8499dbb000c1f7778bc15501f00bf8d9"
-  integrity sha512-T34ICvX3TrN3AEiTyQ8zHco2ML5F5DsIq6H8gwd6t9lxtEtcQbc+I1uULEqaFEUiiCbx+huEiu1XmHv5km9wgA==
+"@dao-xyz/peerbit-libp2p@^0.1.19":
+  version "0.1.19"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-libp2p/-/peerbit-libp2p-0.1.19.tgz#781fa78b8a842330b327fbca2aa3231c3ffcc335"
+  integrity sha512-eQIi6VX8GGfayNjE2LOhUIz5ZFds3sDyaWLAxhBXHNJVbKRpezAqsmUaMiGlSdrukEKmnfe+CyWs3NV14h37/w==
   dependencies:
-    "@dao-xyz/libp2p-direct-block" "^0.1.16"
-    "@dao-xyz/libp2p-direct-sub" "^0.1.16"
+    "@dao-xyz/libp2p-direct-block" "^0.1.18"
+    "@dao-xyz/libp2p-direct-sub" "^0.1.18"
     "@dao-xyz/libp2p-noise" "^11.1.3"
     "@libp2p/mplex" "^7.1.1"
     "@libp2p/websockets" "^5.0.3"
     level "^8.0.0"
     libp2p "^0.42.2"
 
-"@dao-xyz/peerbit-log@^0.1.21":
-  version "0.1.21"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-log/-/peerbit-log-0.1.21.tgz#3ce60187914bdef9efa0214fabf998b32bc4cf00"
-  integrity sha512-KDZTkAbcKvAQR/Nibxm4k7r+1XYALjheGjm0box8iN0VTtzyecL2Stg2TQvl8Z9ie8XiGlslslBwhaPyPptgIw==
+"@dao-xyz/peerbit-log@^0.1.23":
+  version "0.1.23"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-log/-/peerbit-log-0.1.23.tgz#eac8cd5093106ff2e5ee4b60958af5604e77acfd"
+  integrity sha512-hKNAoc7BR8UJpUjzh/4QyQWE0I7JzQAHHgLNoa6sB9pnGQm12IPW/qtMy628Imgrn2+NMqDsglq9NA5WzkSSgA==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
     "@dao-xyz/cache" "^0.0.4"
-    "@dao-xyz/libp2p-direct-block" "^0.1.16"
+    "@dao-xyz/libp2p-direct-block" "^0.1.18"
     "@dao-xyz/peerbit-crypto" "^0.1.10"
     "@dao-xyz/peerbit-logger" "^0.0.5"
     json-stringify-deterministic "^1.0.7"
@@ -1423,61 +1423,61 @@
   dependencies:
     pino "^8.7.0"
 
-"@dao-xyz/peerbit-logindex@^0.1.22":
-  version "0.1.22"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-logindex/-/peerbit-logindex-0.1.22.tgz#8dfc74cc3b8ad5dad1b097fda7a7dde58abb3690"
-  integrity sha512-OLqFNXIo2h5z18muMAstjVNH8xFZHwg1hF5o7BkgueeYq9XNoke0ty+Deq8oRP8mhuQTpjLf6QDQ5Np6MVIu9g==
+"@dao-xyz/peerbit-logindex@^0.1.24":
+  version "0.1.24"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-logindex/-/peerbit-logindex-0.1.24.tgz#b5aef603b41fd62303ad42adf72765cdf77d321a"
+  integrity sha512-Pci0/BD03ujH0D9yJsU2tw5+wMZO6uuYSA+LFKW2TroIyBHmjg4NGvhDI0C83gu0b07YyVcQJg6G7NfM5sdLHA==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
     "@dao-xyz/peerbit-crypto" "^0.1.10"
-    "@dao-xyz/peerbit-log" "^0.1.21"
+    "@dao-xyz/peerbit-log" "^0.1.23"
     "@dao-xyz/peerbit-logger" "^0.0.5"
-    "@dao-xyz/peerbit-rpc" "^0.1.22"
+    "@dao-xyz/peerbit-rpc" "^0.1.24"
     "@dao-xyz/peerbit-time" "^0.0.22"
 
-"@dao-xyz/peerbit-program@^0.1.21":
-  version "0.1.21"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-program/-/peerbit-program-0.1.21.tgz#7d34909d0ea83ee3a5f8648d56b2b5f1ec23d266"
-  integrity sha512-+8RQSF9SMX91FP5UKNld+T1DxkhPvuZgEoU9j8JeIfGX22SiS5sQoly1AWx6u+uVLrP24LTbrcR/LnpI/5MwwA==
+"@dao-xyz/peerbit-program@^0.1.23":
+  version "0.1.23"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-program/-/peerbit-program-0.1.23.tgz#e6c79a912ad49622d7032dd910851282b814fd70"
+  integrity sha512-rE6R2OUZL4Bp6qurWSQWJUaCXtZcYRrBvTpNNMrkragGnmr9qwSpjcsaPnpU4ojFAbrfMaNt7vIuTSzAxSMYBA==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
-    "@dao-xyz/libp2p-direct-sub" "^0.1.16"
+    "@dao-xyz/libp2p-direct-sub" "^0.1.18"
     "@dao-xyz/peerbit-crypto" "^0.1.10"
-    "@dao-xyz/peerbit-libp2p" "^0.1.17"
-    "@dao-xyz/peerbit-store" "^0.1.21"
+    "@dao-xyz/peerbit-libp2p" "^0.1.19"
+    "@dao-xyz/peerbit-store" "^0.1.23"
 
-"@dao-xyz/peerbit-rpc@^0.1.22":
-  version "0.1.22"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-rpc/-/peerbit-rpc-0.1.22.tgz#e10b12c52d96230360997f9971e217de5616b2ff"
-  integrity sha512-Xct/9ryytT5zFwHzviZR9bcplQDRYc8kc/fN2zsAcy9sHHRd9QIoVHqtAu6cFsubD5UH79ZXSXCIjLLLyB6q0w==
+"@dao-xyz/peerbit-rpc@^0.1.24":
+  version "0.1.24"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-rpc/-/peerbit-rpc-0.1.24.tgz#eb0151882278b813fca404372cfe157728dc5ca0"
+  integrity sha512-GpqchX//sqkOYpTGHH0LDwYFQbbC/oYOBBMj9ZOjsxwd3VN2u3ivOt2M6d5jXAjAF/8QK8G7EtWkwTvSjkZoNw==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
     "@dao-xyz/peerbit-crypto" "^0.1.10"
     "@dao-xyz/peerbit-logger" "^0.0.5"
-    "@dao-xyz/peerbit-program" "^0.1.21"
-    "@dao-xyz/peerbit-store" "^0.1.21"
+    "@dao-xyz/peerbit-program" "^0.1.23"
+    "@dao-xyz/peerbit-store" "^0.1.23"
     "@dao-xyz/peerbit-time" "^0.0.22"
 
-"@dao-xyz/peerbit-store@^0.1.21":
-  version "0.1.21"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-store/-/peerbit-store-0.1.21.tgz#e3e67def4f922026c6a78b43266a0afc2d931776"
-  integrity sha512-o/G4PkMXjnjanyQ449aHeTa+StpgQYSgVoeQexFTiUukN0KFHjRz8uUP9fxxfKP0V1+hxiQl6Fix9A57V17HJw==
+"@dao-xyz/peerbit-store@^0.1.23":
+  version "0.1.23"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-store/-/peerbit-store-0.1.23.tgz#05b3d87cf897740b242ef48b0440ed176bd4f317"
+  integrity sha512-6J95Hm0InpmYK6GRPHJFnfOsi+INff/cQBf85np+8wSLHN3C8F+mek/QIS5LuOj2yxqiG6FFrgoMzvRcY8i2yA==
   dependencies:
     "@dao-xyz/lazy-level" "^0.0.3"
-    "@dao-xyz/libp2p-direct-block" "^0.1.16"
-    "@dao-xyz/peerbit-log" "^0.1.21"
+    "@dao-xyz/libp2p-direct-block" "^0.1.18"
+    "@dao-xyz/peerbit-log" "^0.1.23"
     p-each-series "^3.0.0"
     p-map "^5.5.0"
     p-queue "^7.3.3"
     path-browserify "^1.0.1"
 
-"@dao-xyz/peerbit-test-utils@*", "@dao-xyz/peerbit-test-utils@^0.1.18":
-  version "0.1.18"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-test-utils/-/peerbit-test-utils-0.1.18.tgz#ffbf18d0e33a46e64011678076640006aa6c0398"
-  integrity sha512-Z2nAJLQe8KmIRG84Fe3u0o0bz4Ae8d7bosWMs4s/lfAP15sTW6rdU5QJCtS7i4RlfdpwJxe/hso8ca9/vdpZLQ==
+"@dao-xyz/peerbit-test-utils@*", "@dao-xyz/peerbit-test-utils@^0.1.20":
+  version "0.1.20"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-test-utils/-/peerbit-test-utils-0.1.20.tgz#6f1883cb5a6aeecef45d9cb78f6934710865e499"
+  integrity sha512-0mnBIeqz7QaD4rmhCKwp2Ld0J0wimP09N9Ake1o2dj0CC0XlES9zjlTzK+1K6IrAWu1BloMXt1gI3LNS8xjaQQ==
   dependencies:
     "@dao-xyz/libp2p-test-utils" "^0.1.6"
-    "@dao-xyz/peerbit-libp2p" "^0.1.17"
+    "@dao-xyz/peerbit-libp2p" "^0.1.19"
     datastore-level "^9.0.4"
     memory-level "^1.0.0"
 
@@ -1486,18 +1486,18 @@
   resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-time/-/peerbit-time-0.0.22.tgz#35ced7bf1ba8689d4fe94b921332a5e970b6eaf3"
   integrity sha512-pWb7OaAH1SVuQkKRQ69S6PKn0PfWM3gmoMrIVuKkQ96g8JPLHK4pjICofZyH1WV1Xw/4+fxR5KXy4xT7qwj8OQ==
 
-"@dao-xyz/peerbit@*", "@dao-xyz/peerbit@0.1.26":
-  version "0.1.26"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit/-/peerbit-0.1.26.tgz#546bc5f9626301d81dd500aef6dbaa4bbd00fa25"
-  integrity sha512-BqNDWkpQYoxdQVzIERr7+j66jNMZvjVf0G95FCNGShweKSm/KuWF41+dFJF696IaUzrCI41KgZBhYU5VjbLd7w==
+"@dao-xyz/peerbit@*", "@dao-xyz/peerbit@0.1.28":
+  version "0.1.28"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit/-/peerbit-0.1.28.tgz#66c97f7b9ff84e3a94f796be5f4ae89a6f7452bd"
+  integrity sha512-eXHMXB2J429urBoooJr2SC7ushz3o1sda3VICsz9i9y4AER20kcWV8ujyueVnv/ujSStaq3BDoJeN5USJziCPA==
   dependencies:
     "@dao-xyz/borsh" "^5.1.4"
     "@dao-xyz/lazy-level" "^0.0.3"
     "@dao-xyz/peerbit-crypto" "^0.1.10"
-    "@dao-xyz/peerbit-keystore" "^0.1.19"
+    "@dao-xyz/peerbit-keystore" "^0.1.21"
     "@dao-xyz/peerbit-logger" "^0.0.5"
-    "@dao-xyz/peerbit-program" "^0.1.21"
-    "@dao-xyz/peerbit-store" "^0.1.21"
+    "@dao-xyz/peerbit-program" "^0.1.23"
+    "@dao-xyz/peerbit-store" "^0.1.23"
     "@dao-xyz/uint8arrays" "^0.0.3"
     is-node "^1.0.2"
     level "^8.0.0"
@@ -3951,17 +3951,17 @@
     read-package-json-fast "^2.0.3"
     which "^2.0.2"
 
-"@nrwl/cli@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/cli/-/cli-15.7.1.tgz#e6b874806f6188439b9e81cf1bb45216c2d89bb7"
-  integrity sha512-33RcH5Af2BidQvnTGlDTrUWJ6Eul5aA0LeqYmEavYb+I0kzYMqdBzBCLgQT/13gAdoQauTWUO4g3eFhoHnCNrg==
+"@nrwl/cli@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/cli/-/cli-15.7.2.tgz#fd705b022e628f2ed23d9fc5c3542e4d652b8710"
+  integrity sha512-A/72FAW1e0ku8YB/PaCqN9BpVvciO83MS5F5bvX5PA8xCNqe1+iXp/5T2ASnN2lB9zR3fQJmvR7mHKTKQlqQQQ==
   dependencies:
-    nx "15.7.1"
+    nx "15.7.2"
 
 "@nrwl/devkit@>=14.8.1 < 16":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/devkit/-/devkit-15.7.1.tgz#50a575c51ff68eff0e05097fe303c3330313b0ff"
-  integrity sha512-u+4iBukrvrSQbKktnAcEuFzthq5ZGLpjE+SYUgg5+H6R76U0uelupdJ14qTWzIbSjlWLG53YmRZsJaIJ9EUG/w==
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/devkit/-/devkit-15.7.2.tgz#079d30898bf7ddf374e2aaa9f2c52b31447b84ce"
+  integrity sha512-HMGi7L6w2g4IrYwhb04snD8Zr24Z/gzau5i9WUNkwzrjeR1xAm0Cc9WRre221zaeohtK11gyBt7BerT1tgkNwA==
   dependencies:
     "@phenomnomnominal/tsquery" "4.1.1"
     ejs "^3.1.7"
@@ -3969,57 +3969,57 @@
     semver "7.3.4"
     tslib "^2.3.0"
 
-"@nrwl/nx-darwin-arm64@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-darwin-arm64/-/nx-darwin-arm64-15.7.1.tgz#7c65e79988356eb8c55560a77870f583d9ad6f0c"
-  integrity sha512-YaNq1kP0xoaG2SDTjAzc0ZXAzRHE4obnEtVbisMzGRJkMld7SiOzYZAoaLJI6mZJuc7cIzUlA+wFkE2e21q5tQ==
+"@nrwl/nx-darwin-arm64@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-darwin-arm64/-/nx-darwin-arm64-15.7.2.tgz#08cf48f474f8e4e0d02998e4f095ba8c60b5c15a"
+  integrity sha512-F82exjuqkAkElSTxEcTFeLMhHpbGiccfTQh2VjXMS+ONldxM+Kd7atJjtUG8wKNXfg0lxxjjAdnzLy3iBuN/HQ==
 
-"@nrwl/nx-darwin-x64@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-darwin-x64/-/nx-darwin-x64-15.7.1.tgz#bc7a1bf3455a7cf4bd1242015ecd959986db8040"
-  integrity sha512-G/0joeAQfZm4FuqaDyOAam912EfVS6mlG1gFrzp3P/kzzE+gxt/I+iQHNmEOl8Dnp4ercTgW6epUEQ03teRLOA==
+"@nrwl/nx-darwin-x64@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-darwin-x64/-/nx-darwin-x64-15.7.2.tgz#674941b2fc157df70f6b435e3193a6053f261a08"
+  integrity sha512-MNT7Bxz6yhoVLCgGpR0NtVkj20SER1CbrCaY7tmsKVNY9iA/EOZhz9qa3LeA1KZ4lw8Gpi2vD42mOngn7Mwr7w==
 
-"@nrwl/nx-linux-arm-gnueabihf@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-arm-gnueabihf/-/nx-linux-arm-gnueabihf-15.7.1.tgz#e73f00a648ba4e0f293533d74a2b11519c365dcf"
-  integrity sha512-WeZndiNyAPolRc08C4LLY7y+b3g9wAsJVVTWugW9PyaTMD19KY6oFkNG5gg1W0InoGISazW5fUissE+911kgog==
+"@nrwl/nx-linux-arm-gnueabihf@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-arm-gnueabihf/-/nx-linux-arm-gnueabihf-15.7.2.tgz#e647a52c503483ad586116af79bee56fc9b3e736"
+  integrity sha512-QGyPkYnZ9LnUnuCzrP50bwsMJ9n6r8K2bNC1sQQwioijY+4MHNL+bMTOGWc8+lYBP7Ju3gpTqozGV3FQVkaM2w==
 
-"@nrwl/nx-linux-arm64-gnu@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-arm64-gnu/-/nx-linux-arm64-gnu-15.7.1.tgz#f6eddd0b295b7e2286b060fc67ae9afa8d010b3a"
-  integrity sha512-efDPQl2Z1YLnUlEKyu7lsvRnFIRXmvnbkH2nRv3HNHVufnHjjQ41UBw2Gqz4WUrEpmBz2Xq31cYUZluUP7/o6Q==
+"@nrwl/nx-linux-arm64-gnu@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-arm64-gnu/-/nx-linux-arm64-gnu-15.7.2.tgz#43fe691eb56241357242bb85e86bb34c03f08b5b"
+  integrity sha512-HqufFVIvuunfChEFGkIhsLhhQjWLTFcCH2aQBSNesHpm6AhFVRGyokNu+PT6NNobr+BTrqJMocBqNQR1uvSyRQ==
 
-"@nrwl/nx-linux-arm64-musl@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-arm64-musl/-/nx-linux-arm64-musl-15.7.1.tgz#ba4bb123736816caba01312b57e0738bf4d98500"
-  integrity sha512-Esv+ko6vMrI0HLnIXs76up7zUCaDfjArgn2TfMxvPjDEp4qmExiI8gmSh5JM1kC0MkHb4HghCnsSQ86Gg1BRiQ==
+"@nrwl/nx-linux-arm64-musl@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-arm64-musl/-/nx-linux-arm64-musl-15.7.2.tgz#8fa5f886f17f2636acdbce1f9b2f45cd33d1f56a"
+  integrity sha512-9B8q6I/OVyQuYe+Yg2wNyxza/CsbvejIUsrK3QGGWUwHlkklqOSmUOHyTrcyMHUSped6CWPyKdIywngYOQzltQ==
 
-"@nrwl/nx-linux-x64-gnu@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-x64-gnu/-/nx-linux-x64-gnu-15.7.1.tgz#69b6caf42ffadbfc6de403a6b230d87b0cb0c9b4"
-  integrity sha512-9ZkeCHhk+a3ok8CBEcbIheWrlp+gY1KdhmHOksJuDsHTcRMirbZ9HWm+/UIYB2FVaEENCBgcA4akwXRDaxrmYw==
+"@nrwl/nx-linux-x64-gnu@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-x64-gnu/-/nx-linux-x64-gnu-15.7.2.tgz#3e40aff8a4b0bce02dfc80f0ac4a16e5fbc11fa3"
+  integrity sha512-8/6WtQn4derYKUWu5SxWWM+1dGihSZXMhDW9l/sXOr/qbMZu3XBmM2XZSguw/+p9gEVHcMmN0+D+Cai+q6/vDQ==
 
-"@nrwl/nx-linux-x64-musl@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-x64-musl/-/nx-linux-x64-musl-15.7.1.tgz#458240b013b7fe4fb3236ed4d97d0882466f9ca5"
-  integrity sha512-FOs8FhcACKfYjL5l/mIHUESs25KPsZsp3TWrpCYgQNkrvNV9lWbrQ+h9acWf23hR2FYVk7xKVo4wFYsUqF+DbA==
+"@nrwl/nx-linux-x64-musl@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-linux-x64-musl/-/nx-linux-x64-musl-15.7.2.tgz#8303afde8e9c78aa0a02b0c9157d85a34c808592"
+  integrity sha512-c5SbqYZZBeBHhH5E30xwb4cHzCMVa/GQMCyTpZgsS/AHAPHbdkv+pO6bxxALvLPTyimcub7V+xbLCL7rgALzyw==
 
-"@nrwl/nx-win32-arm64-msvc@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-win32-arm64-msvc/-/nx-win32-arm64-msvc-15.7.1.tgz#0aed542e90c128297ff4053daacf134d2f5439ab"
-  integrity sha512-JEhy0ac+ivhIdAPWqEfAN9EqFznKA5vt4oVjIqjDysqgzN9GBKOeo7gphdii9WyqrIKEbOs1L++ADWXw1gev6Q==
+"@nrwl/nx-win32-arm64-msvc@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-win32-arm64-msvc/-/nx-win32-arm64-msvc-15.7.2.tgz#c3f44bfc8a5b124a23910de0974b5c8666d50cbb"
+  integrity sha512-gWD/+gSO3XBma8PHX1Dp86fM6EcntHFfa7n/BISwDFkZ19MfV/gK6HbO847fkD6I34/IcDM/z1PsFwoIpTeoow==
 
-"@nrwl/nx-win32-x64-msvc@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/nx-win32-x64-msvc/-/nx-win32-x64-msvc-15.7.1.tgz#2436f248306b75853ab9b872295366de9ae3ad7b"
-  integrity sha512-GLh5TXKViRb55jBviZSZweavilUr2frmb/8iv3Fz7MPS6VvA+axIqNhuVcTJP1H3C/1yt3Nx5wwsXdWgg3mZpw==
+"@nrwl/nx-win32-x64-msvc@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/nx-win32-x64-msvc/-/nx-win32-x64-msvc-15.7.2.tgz#cb622a96c0f85c37973420c4817e383783237a84"
+  integrity sha512-ARE4qGPgk+e+pSm0uPhHan5UCRtwNYc5ddVNS88NFrVoDTPm5MxYLGdvLnshWWio/Bx526FcwUMSCBWSW8HIFw==
 
-"@nrwl/tao@15.7.1":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/@nrwl/tao/-/tao-15.7.1.tgz#ef1a504eb3df955533e59b13ea35918e35288a49"
-  integrity sha512-pCKIijUGUAht+Lfy9P4WaHxTHnqqr+vaC00vX6XSlkRoFAUFYh7lhbOHDSKOwBG016ZoG73P1IIMg0um4ybd5w==
+"@nrwl/tao@15.7.2":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/@nrwl/tao/-/tao-15.7.2.tgz#6c9264cd815d15d02710202e5046aba3e68156db"
+  integrity sha512-srx9heMIt/QIyuqfewiVYbRpFcD/2pHkTkrEEUKspPd25kzAL2adcAITQKVCHI7/VS2sPdDR67pVsGQPZFBMRQ==
   dependencies:
-    nx "15.7.1"
+    nx "15.7.2"
 
 "@octokit/auth-token@^3.0.0":
   version "3.0.3"
@@ -4839,9 +4839,9 @@
     form-data "^3.0.0"
 
 "@types/node@*", "@types/node@>=13.7.0", "@types/node@^18.0.0":
-  version "18.13.0"
-  resolved "https://registry.yarnpkg.com/@types/node/-/node-18.13.0.tgz#0400d1e6ce87e9d3032c19eb6c58205b0d3f7850"
-  integrity sha512-gC3TazRzGoOnoKAhUx+Q0t8S9Tzs74z7m0ipwGpSqQrleP14hKxP4/JUeEQcD3W1/aIpnWl8pHowI7WokuZpXg==
+  version "18.14.0"
+  resolved "https://registry.yarnpkg.com/@types/node/-/node-18.14.0.tgz#94c47b9217bbac49d4a67a967fdcdeed89ebb7d0"
+  integrity sha512-5EWrvLmglK+imbCJY0+INViFWUHg1AHel1sq4ZVSfdcNqGy9Edv3UB9IIzzg+xPaUcAgZYcfVs2fBcwDeZzU0A==
 
 "@types/node@^17.0.32":
   version "17.0.45"
@@ -10279,9 +10279,9 @@ jest-environment-node@^29.4.3:
     jest-util "^29.4.3"
 
 jest-extended@^3.1.0:
-  version "3.2.3"
-  resolved "https://registry.yarnpkg.com/jest-extended/-/jest-extended-3.2.3.tgz#286c19b4622e2ab828e1bb28d3b2d4a1ed64f8b9"
-  integrity sha512-YcdjfFv3+N2AiWq4aG6gT/r1mfLtDKnbXs0hKXNlL/hf37TKQJTlh2zNwuMUYnvwKRRMtO/X9CfZU1EmOgUREA==
+  version "3.2.4"
+  resolved "https://registry.yarnpkg.com/jest-extended/-/jest-extended-3.2.4.tgz#4ee93c9e495f983ceb911170613ce305f3533b94"
+  integrity sha512-lSEYhSmvXZG/7YXI7KO3LpiUiQ90gi5giwCJNDMMsX5a+/NZhdbQF2G4ALOBN+KcXVT3H6FPVPohAuMXooaLTQ==
   dependencies:
     jest-diff "^29.0.0"
     jest-get-type "^29.0.0"
@@ -11466,9 +11466,9 @@ lru-cache@^6.0.0:
     yallist "^4.0.0"
 
 lru-cache@^7.4.4, lru-cache@^7.5.1, lru-cache@^7.7.1:
-  version "7.16.0"
-  resolved "https://registry.yarnpkg.com/lru-cache/-/lru-cache-7.16.0.tgz#b1b946cff368d3f3c569cc3d6a5ba8f90435160f"
-  integrity sha512-VJBdeMa9Bz27NNlx+DI/YXGQtXdjUU+9gdfN1rYfra7vtTjhodl5tVNmR42bo+ORHuDqDT+lGAUAb+lzvY42Bw==
+  version "7.16.1"
+  resolved "https://registry.yarnpkg.com/lru-cache/-/lru-cache-7.16.1.tgz#7acea16fecd9ed11430e78443c2bb81a06d3dea9"
+  integrity sha512-9kkuMZHnLH/8qXARvYSjNvq8S1GYFFzynQTAfKeaJ0sIrR3PUPuu37Z+EiIANiZBvpfTf2B5y8ecDLSMWlLv+w==
 
 lunr@^2.3.9:
   version "2.3.9"
@@ -12212,13 +12212,13 @@ nwsapi@^2.2.0:
   resolved "https://registry.yarnpkg.com/nwsapi/-/nwsapi-2.2.2.tgz#e5418863e7905df67d51ec95938d67bf801f0bb0"
   integrity sha512-90yv+6538zuvUMnN+zCr8LuV6bPFdq50304114vJYJ8RDyK8D5O9Phpbd6SZWgI7PwzmmfN1upeOJlvybDSgCw==
 
-nx@15.7.1, "nx@>=14.8.1 < 16":
-  version "15.7.1"
-  resolved "https://registry.yarnpkg.com/nx/-/nx-15.7.1.tgz#e4d881307907f266b698ed4d61af9b998faa54eb"
-  integrity sha512-8Gtqazww3rCWxJ+pgB3JDU6hQeA+qRMYh77mXvf5CFQPszqEqvvuiJtKzcieWjxn/IZpeyVRjmPypkEOM6BbHw==
+nx@15.7.2, "nx@>=14.8.1 < 16":
+  version "15.7.2"
+  resolved "https://registry.yarnpkg.com/nx/-/nx-15.7.2.tgz#048f8968420f5d56a1f464a83c8c3e84dfc95bf4"
+  integrity sha512-VRb+CZCji3G4ikdMAGoh6TeU9Q6n5atRwqRSFhUX63er8zhlMvWHLskPMZC4q/81edo/E7RhbmEVUD5MB0JoeA==
   dependencies:
-    "@nrwl/cli" "15.7.1"
-    "@nrwl/tao" "15.7.1"
+    "@nrwl/cli" "15.7.2"
+    "@nrwl/tao" "15.7.2"
     "@parcel/watcher" "2.0.4"
     "@yarnpkg/lockfile" "^1.1.0"
     "@yarnpkg/parsers" "^3.0.0-rc.18"
@@ -12253,15 +12253,15 @@ nx@15.7.1, "nx@>=14.8.1 < 16":
     yargs "^17.6.2"
     yargs-parser "21.1.1"
   optionalDependencies:
-    "@nrwl/nx-darwin-arm64" "15.7.1"
-    "@nrwl/nx-darwin-x64" "15.7.1"
-    "@nrwl/nx-linux-arm-gnueabihf" "15.7.1"
-    "@nrwl/nx-linux-arm64-gnu" "15.7.1"
-    "@nrwl/nx-linux-arm64-musl" "15.7.1"
-    "@nrwl/nx-linux-x64-gnu" "15.7.1"
-    "@nrwl/nx-linux-x64-musl" "15.7.1"
-    "@nrwl/nx-win32-arm64-msvc" "15.7.1"
-    "@nrwl/nx-win32-x64-msvc" "15.7.1"
+    "@nrwl/nx-darwin-arm64" "15.7.2"
+    "@nrwl/nx-darwin-x64" "15.7.2"
+    "@nrwl/nx-linux-arm-gnueabihf" "15.7.2"
+    "@nrwl/nx-linux-arm64-gnu" "15.7.2"
+    "@nrwl/nx-linux-arm64-musl" "15.7.2"
+    "@nrwl/nx-linux-x64-gnu" "15.7.2"
+    "@nrwl/nx-linux-x64-musl" "15.7.2"
+    "@nrwl/nx-win32-arm64-msvc" "15.7.2"
+    "@nrwl/nx-win32-x64-msvc" "15.7.2"
 
 object-assign@^4.0.1, object-assign@^4.1.1:
   version "4.1.1"
@@ -14332,9 +14332,9 @@ rollup@^2.43.1:
     fsevents "~2.3.2"
 
 rollup@^3.10.0:
-  version "3.16.0"
-  resolved "https://registry.yarnpkg.com/rollup/-/rollup-3.16.0.tgz#2ca49e0f8015dda814f2cb93015775e58134611b"
-  integrity sha512-9wE1H5N1SJqnROpQanBGJ7lrIitwlUYGj4Va4eyf3+vNhoIHLPLag2/CUGIiq3V9lHOBJB6zTsGsPvc50oeihg==
+  version "3.17.1"
+  resolved "https://registry.yarnpkg.com/rollup/-/rollup-3.17.1.tgz#4be78852c2689d8ce5a21efbc2a45879bac75362"
+  integrity sha512-8RnSms6rNqHmZK+wiqgnPCqen+rRnUHXkciGDirh7B00g1rX1vpKbPDhuxCvAG2bburoI+W4Q9/PlUB/zYkiYA==
   optionalDependencies:
     fsevents "~2.3.2"
 
@@ -15713,9 +15713,9 @@ unbox-primitive@^1.0.2:
     which-boxed-primitive "^1.0.2"
 
 undici@^5.12.0:
-  version "5.19.1"
-  resolved "https://registry.yarnpkg.com/undici/-/undici-5.19.1.tgz#92b1fd3ab2c089b5a6bd3e579dcda8f1934ebf6d"
-  integrity sha512-YiZ61LPIgY73E7syxCDxxa3LV2yl3sN8spnIuTct60boiiRaE1J8mNWHO8Im2Zi/sFrPusjLlmRPrsyraSqX6A==
+  version "5.20.0"
+  resolved "https://registry.yarnpkg.com/undici/-/undici-5.20.0.tgz#6327462f5ce1d3646bcdac99da7317f455bcc263"
+  integrity sha512-J3j60dYzuo6Eevbawwp1sdg16k5Tf768bxYK4TUJRH7cBM4kFCbf3mOnM/0E3vQYXvpxITbbWmBafaDbxLDz3g==
   dependencies:
     busboy "^1.6.0"
 
