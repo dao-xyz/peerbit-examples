@@ -5,7 +5,7 @@ import * as tf from "@tensorflow/tfjs";
 import { Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { P2PStorage } from "./io-utils";
 import { ModelDatabase } from "./database.js";
-import { delay } from '@dao-xyz/peerbit-time';
+import { delay } from "@dao-xyz/peerbit-time";
 
 const MOBILE_NET_INPUT_WIDTH = 224;
 const MOBILE_NET_INPUT_HEIGHT = 224;
@@ -158,53 +158,25 @@ export const Content = () => {
         if (p2pStorage.current || !peer) {
             return;
         }
-        console.log("open db");
         setProcessing(true);
         peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID })).then(
             async (db) => {
                 peer.libp2p.directsub.addEventListener("subscribe", () => {
-                    console.log("subscription event!");
                     peersCountText.current.innerText = String(
                         (peer.libp2p.directsub.topics.get(db.address.toString())
                             ?.size || 0) + 1
                     );
                 });
                 peer.libp2p.directsub.addEventListener("unsubscribe", () => {
-                    console.log("unsubscription event!");
                     peersCountText.current.innerText = String(
                         (peer.libp2p.directsub.topics.get(db.address.toString())
                             ?.size || 0) + 1
                     );
                 });
 
-                const fn = peer.libp2p.directsub.onPeerReachable.bind(
-                    peer.libp2p.directsub
-                );
-                peer.libp2p.directsub.onPeerReachable = (a) => {
-                    console.log("callback reachable");
-                    return fn(a);
-                };
-
-                peer.libp2p.directsub.addEventListener("peer:reachable", () => {
-                    console.log("eventlistener reachab");
-                });
-
-                window.onfocus = () => {
-                    console.log(
-                        "focus!",
-                        peer.libp2p.directsub.topics.get(db.address.toString())
-                            ?.size
-                    );
-                    peersCountText.current.innerText = String(
-                        (peer.libp2p.directsub.topics.get(db.address.toString())
-                            ?.size || 0) + 1
-                    );
-                };
-
-                console.log("load!");
                 await db.load();
-                console.log("load done!");
                 p2pStorage.current = new P2PStorage(db, MODEL_ID);
+
                 setProcessing(false);
             }
         );
@@ -325,8 +297,9 @@ export const Content = () => {
     return (
         <>
             <Grid container direction="column" spacing={2} padding={2}>
-                <Grid item>
-                    Online: <Typography ref={peersCountText}>1</Typography>
+                <Grid item sx={{ display: "flex", flexDirection: "row" }}>
+                    <Typography>Online: &nbsp;</Typography>{" "}
+                    <Typography ref={peersCountText}>1</Typography>
                 </Grid>
                 <Grid item container direction="column">
                     <Grid item>
