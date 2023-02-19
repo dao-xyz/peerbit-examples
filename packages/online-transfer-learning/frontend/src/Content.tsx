@@ -5,6 +5,7 @@ import * as tf from "@tensorflow/tfjs";
 import { Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { P2PStorage } from "./io-utils";
 import { ModelDatabase } from "./database.js";
+import { delay } from '@dao-xyz/peerbit-time';
 
 const MOBILE_NET_INPUT_WIDTH = 224;
 const MOBILE_NET_INPUT_HEIGHT = 224;
