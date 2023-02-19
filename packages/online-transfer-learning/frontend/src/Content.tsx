@@ -323,7 +323,7 @@ export const Content = () => {
 
     return (
         <>
-            <Grid container direction="column" spacing={2} margin={2}>
+            <Grid container direction="column" spacing={2} padding={2}>
                 <Grid item>
                     Online: <Typography ref={peersCountText}>1</Typography>
                 </Grid>
@@ -340,7 +340,15 @@ export const Content = () => {
                     </Grid>
                 </Grid>
                 <Grid item>
-                    <video playsInline ref={video} autoPlay muted></video>
+                    <video
+                        height="auto"
+                        max-height="100%"
+                        width="100%"
+                        playsInline
+                        ref={video}
+                        autoPlay
+                        muted
+                    ></video>
                 </Grid>
                 {loading && <CircularProgress />}
 
