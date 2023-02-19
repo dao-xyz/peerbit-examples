@@ -5,21 +5,17 @@ import { webSockets } from "@libp2p/websockets";
 import { createLibp2p } from "libp2p";
 import { supportedKeys } from "@libp2p/crypto/keys";
 import { mplex } from "@libp2p/mplex";
-import { getKeypair } from "./utils.js";
+import { getFreeKeypair, getKeypair } from "./utils.js";
 import { Libp2p } from "libp2p";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { peerIdFromKeys } from "@libp2p/peer-id";
 import { createLibp2pExtended } from "@dao-xyz/peerbit-libp2p";
 import { Multiaddr } from "@multiformats/multiaddr";
 import { v4 as uuid } from "uuid";
-const identity = await getKeypair();
-if (!window.name) {
-    window.name = uuid();
-}
-const nodeId = await getKeypair("node/" + window.name);
+import { Level } from "level";
 
 interface IPeerContext {
-    peer: Peerbit;
+    peer: Peerbit | undefined;
     loading: boolean;
 }
 
@@ -83,6 +79,18 @@ export const connectTabs = (peer: Peerbit) => {
         onMessageDefault(message.data);
     }; */
 };
+const level = new Level<string, Uint8Array>("./peer", {
+    valueEncoding: "view",
+});
+const identity = await getKeypair(level);
+if (!window.name) {
+    window.name = uuid();
+}
+const { key: nodeId } = await getFreeKeypair(
+    level,
+    "node/" + document.referrer || "root" + "/" + window.self.location.host
+);
+
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({
@@ -107,7 +115,7 @@ export const PeerProvider = ({
         }),
         [loading, peer?.identity?.publicKey.toString()]
     );
-    const ref = useRef<Promise<Peerbit | void>>(null);
+    const ref = useRef<Promise<Peerbit | void> | null>(null);
 
     useEffect(() => {
         if (ref.current) {
@@ -173,7 +181,7 @@ export const PeerProvider = ({
             .then(async (node) => {
                 await node.start();
 
-                if (bootstrap?.length > 0) {
+                if (bootstrap && bootstrap?.length > 0) {
                     try {
                         await Promise.all(
                             bootstrap

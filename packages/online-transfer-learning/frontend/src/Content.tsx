@@ -313,11 +313,10 @@ export const Content = () => {
                         )}
                     </Grid>
                 </Grid>
-                <Grid item>
+                <Grid item sx={{ height: "min(500px, 50vh)" }}>
                     <video
-                        height="auto"
-                        max-height="100%"
-                        width="100%"
+                        height="100%"
+                        width="auto"
                         playsInline
                         ref={video}
                         autoPlay
