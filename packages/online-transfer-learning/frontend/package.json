@@ -1,8 +1,8 @@
 {
-    "name": "streaming-frontend",
-    "version": "0.1.0",
+    "name": "online-transfer-learning",
+    "version": "0.0.1",
     "private": true,
-    "homepage": "https://stream.peerchecker.com",
+    "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "type": "module",
     "scripts": {
         "dev": "vite",
@@ -16,6 +16,7 @@
         "axios": "^1.3.2",
         "@dao-xyz/peerbit": "*",
         "@dao-xyz/peerbit-document": "*",
+        "@tensorflow/tfjs": "^4.2.0",
         "@dao-xyz/peerbit-react": "^0.0.1",
         "ts-ebml": "^2.0.2",
         "react": "^18.2.0",

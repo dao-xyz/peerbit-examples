@@ -237,7 +237,6 @@ export const Stream = (args: {
                     <Grid item>
                         <Button
                             size="small"
-                            variant="contained"
                             endIcon={<VideoCameraFrontIcon />}
                             onClick={() => setStreamType("camera")}
                         >
@@ -247,7 +246,6 @@ export const Stream = (args: {
                     <Grid item>
                         <Button
                             size="small"
-                            variant="contained"
                             endIcon={<PresentToAllIcon />}
                             onClick={() => setStreamType("screen")}
                         >
@@ -257,7 +255,6 @@ export const Stream = (args: {
                     <Grid item>
                         <Button
                             size="small"
-                            variant="contained"
                             component="label"
                             endIcon={
                                 <OndemandVideoIcon />
@@ -289,7 +286,6 @@ export const Stream = (args: {
                     <Grid item>
                         <Button
                             size="small"
-                            variant="contained"
                             endIcon={<TvOffIcon />}
                             onClick={() => setStreamType(undefined)}
                         >

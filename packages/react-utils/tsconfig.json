@@ -4,7 +4,6 @@
     "compilerOptions": {
         "noEmit": false,
         "outDir": "lib/esm",
-        "jsx": "react-jsx",
-        "strict": false
+        "jsx": "react-jsx"
     }
 }

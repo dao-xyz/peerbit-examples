@@ -28,7 +28,7 @@ Install Node >= 16
 2. 
 Install CLI
 ```sh
-sudo npm install -g @dao-xyz/peerbit-node
+npm install -g @dao-xyz/peerbit-node
 ```
 3. 
 ```sh

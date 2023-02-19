@@ -64,9 +64,7 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                             await db.rooms.index
                                 .query(
                                     new DocumentQueryRequest({ queries: [] }),
-                                    (response, from) => {
-                                        setLoading(false);
-                                    },
+
                                     {
                                         local: false,
                                         remote: {
@@ -75,6 +73,9 @@ export const ChatProvider = ({ children }: { children: JSX.Element }) => {
                                                 db.rooms.index.size === 0
                                                     ? 500
                                                     : 5000,
+                                        },
+                                        onResponse: (response) => {
+                                            setLoading(false);
                                         },
                                     } // will invoke "onUpdate"
                                 )

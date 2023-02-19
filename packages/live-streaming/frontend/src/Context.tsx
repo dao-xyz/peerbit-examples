@@ -1,5 +1,12 @@
 import { BaseRoutes } from "./routes";
-import { Box, Grid, Typography } from "@mui/material";
+import {
+    Avatar,
+    Box,
+    Button,
+    Grid,
+    IconButton,
+    Typography,
+} from "@mui/material";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { useEffect } from "react";
 export const Content = () => {

@@ -17,7 +17,7 @@ module.exports = {
     "plugins": [
         "@typescript-eslint"
     ],
-    "ignorePatterns": ["**/*.test.ts", "/**/lib/", "/**/frontend/build", "/**/frontend/dist", "/**/test-utils/"],
+    "ignorePatterns": ["/**/*.test.ts", "/**/lib/", "/**/frontend/build", "/**/frontend/dist", "/**/test-utils/"],
     "rules": {
         "@typescript-eslint/no-explicit-any": "off",
         "@typescript-eslint/prefer-as-const": "off"

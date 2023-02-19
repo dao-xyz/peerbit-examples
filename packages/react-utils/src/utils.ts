@@ -1,7 +1,8 @@
 import axios from "axios";
-import { Level } from "level";
+import { AbstractLevel } from "abstract-level";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
+import { FastMutex } from "./lockstorage";
 
 export const resolveSwarmAddress = async (url: string) => {
     if (url.startsWith("/")) {
@@ -28,12 +29,31 @@ export const resolveSwarmAddress = async (url: string) => {
     );
 };
 
+export const getFreeKeypair = async (
+    level: AbstractLevel<any, string, Uint8Array>,
+    id: string = "node/" + document.referrer ||
+        "root" + "/" + window.self.location.host,
+    lock: FastMutex = new FastMutex({ clientId: "ID" }),
+    lockCondition: () => boolean = () => true
+) => {
+    for (let i = 0; i < 100; i++) {
+        const key = id + "/" + i;
+        if (lock.isLocked(key)) {
+            continue;
+        }
+        await lock.lock(key, lockCondition);
+        return {
+            path: key,
+            key: await getKeypair(level, key),
+        };
+    }
+    throw new Error("Failed to resolve key");
+};
+
 let _getKeypair: Promise<any>;
 export const getKeypair = async (
-    keyName?: string,
-    level: Level<string, Uint8Array> = new Level<string, Uint8Array>("./peer", {
-        valueEncoding: "view",
-    })
+    level: AbstractLevel<any, string, Uint8Array>,
+    keyName?: string
 ): Promise<Ed25519Keypair> => {
     await _getKeypair;
     const fn = async () => {

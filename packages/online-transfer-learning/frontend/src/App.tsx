@@ -1,14 +1,11 @@
-import { HashRouter } from "react-router-dom";
 import {
     createTheme,
     responsiveFontSizes,
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { Content } from "./Context";
+import { Content } from "./Content";
 import { PeerProvider, resolveSwarmAddress } from "@dao-xyz/peerbit-react";
-import { WindowContextProvider } from "./WindowContext";
-import blue from "@mui/material/colors/amber";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
@@ -17,13 +14,6 @@ if (import.meta.env.MODE === "development") {
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
 } else {
-    /*     const swarmAddressees = (
-            await axios.get(
-                "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
-            )
-        ).data
-            .split(/\r?\n/)
-            .filter((x) => x.length > 0); */
     const swarmAddressees = [
         "c134ffe07eeae36ec95917e88b942232324f672f.peerchecker.com",
     ];
@@ -42,7 +32,6 @@ if (import.meta.env.MODE === "development") {
 let theme = createTheme({
     palette: {
         mode: "dark",
-        primary: blue,
     },
     typography: {
         fontFamily: [
@@ -70,11 +59,7 @@ export const App = () => {
         >
             <ThemeProvider theme={theme}>
                 <CssBaseline />
-                <WindowContextProvider>
-                    <HashRouter basename="/">
-                        <Content />
-                    </HashRouter>
-                </WindowContextProvider>
+                <Content />
             </ThemeProvider>
         </PeerProvider>
     );
