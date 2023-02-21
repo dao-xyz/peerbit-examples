@@ -19,8 +19,6 @@ import {
 } from "@dao-xyz/peerbit-crypto";
 import { Box, Grid } from "@mui/material";
 import iFrameResize from "iframe-resizer";
-import Draggable from "react-draggable";
-import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
 import { logger } from "@dao-xyz/peerbit";
 logger.level = "trace";
 
