@@ -70,7 +70,7 @@ export const App = () => {
     return (
         <PeerProvider
             bootstrap={bootstrapAddresses}
-            inMemory={true}
+            inMemory={false}
             dev={import.meta.env.MODE === "development"}
         >
             <ThemeProvider theme={theme}>

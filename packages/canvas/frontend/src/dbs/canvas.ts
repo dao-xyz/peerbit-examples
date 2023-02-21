@@ -46,6 +46,9 @@ export class Rect {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
+    @field({ type: PublicSignKey })
+    publicKey: PublicSignKey;
+
     @field({ type: Position })
     position: Position;
 
@@ -60,12 +63,14 @@ export class Rect {
 
     constructor(properties: {
         position: Position;
+        publicKey: PublicSignKey;
         size: Size;
         src: string;
         keypair: Ed25519Keypair;
     }) {
         this.position = properties.position;
         this.size = properties.size;
+        this.publicKey = properties.publicKey;
         this.src = properties.src;
         this.id = randomBytes(32);
         this.keypair = properties.keypair;

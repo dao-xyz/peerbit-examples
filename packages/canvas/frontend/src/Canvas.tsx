@@ -8,6 +8,7 @@ import {
     usePeer,
     submitKeypairChange,
     getFreeKeypair,
+    getAllKeyPairs,
     getTabId,
 } from "@dao-xyz/peerbit-react";
 import { useParams } from "react-router-dom";
@@ -73,6 +74,7 @@ export const Canvas = () => {
         (await myCanvas.current).rects.put(
             new Rect({
                 keypair,
+                publicKey: keypair.publicKey,
                 position: new Position({ x: 0, y: 0, z: 0 }),
                 size: new Size({ height: 100, width: 100 }),
                 src: STREAMING_APP + "/" + getStreamPath(keypair.publicKey),
@@ -101,27 +103,59 @@ export const Canvas = () => {
         );
 
         myCanvas.current = peer
-            .open(new MyCanvas({ rootTrust: node }))
+            .open(new MyCanvas({ rootTrust: node }), { sync: () => true })
             .then(async (canvas) => {
                 canvas.rects.events.addEventListener(
                     "change",
                     async (change) => {
                         setRects(
-                            await Promise.all(
-                                [...canvas.rects.index.index.values()].map(
-                                    async (x) => {
-                                        if (!x.value.keypair) {
-                                            const { key: keypair } =
-                                                await getFreeKeypair("canvas");
-                                            x.value.keypair = keypair;
+                            (
+                                await Promise.all(
+                                    [...canvas.rects.index.index.values()].map(
+                                        async (x) => {
+                                            if (isOwner) {
+                                                if (!x.value.keypair) {
+                                                    // try to find it in memory
+                                                    const keypairs =
+                                                        await getAllKeyPairs(
+                                                            "canvas"
+                                                        );
+                                                    for (const keypair of keypairs) {
+                                                        if (
+                                                            keypair.publicKey.equals(
+                                                                x.value
+                                                                    .publicKey
+                                                            )
+                                                        ) {
+                                                            x.value.keypair =
+                                                                keypair;
+                                                            return x.value;
+                                                        }
+                                                    }
+                                                    console.warn(
+                                                        "Could not find keypair for rect"
+                                                    );
+                                                    return undefined; // We don't generate a new one, since its meaningless
+                                                }
+                                            } else {
+                                                if (!x.value.keypair) {
+                                                    const { key: keypair } =
+                                                        await getFreeKeypair(
+                                                            "canvas"
+                                                        );
+                                                    x.value.keypair = keypair;
+                                                }
+                                            }
+                                            return x.value;
                                         }
-                                        return x.value;
-                                    }
+                                    )
                                 )
-                            )
+                            ).filter((x) => !!x)
                         );
                     }
                 );
+                await canvas.load();
+
                 if (canvas.rects.index.size > 0) {
                     return canvas;
                 }
