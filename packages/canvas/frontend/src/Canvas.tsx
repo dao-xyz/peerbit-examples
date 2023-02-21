@@ -53,8 +53,8 @@ const PreviewPortal = (props: any) => {
 
 //"http://localhost:5801/"
 const STREAMING_APP = ["development", "staging"].includes(import.meta.env.MODE)
-    ? "https://stream.test.xyz:5801"
-    : "https://stream.dao.xyz"; /*  "https://iframe.test.xyz:5801" */ // "https://stream.test.xyz:5801"; //   "https://stream.peerchecker.com" //
+    ? "https://stream.test.xyz:5801/#"
+    : "https://stream.dao.xyz/#"; /*  "https://iframe.test.xyz:5801" */ // "https://stream.test.xyz:5801"; //   "https://stream.peerchecker.com" //
 const keypairs = new Map<string, Ed25519Keypair>();
 export const Canvas = () => {
     const { peer } = usePeer();

@@ -1,4 +1,4 @@
-import { BrowserRouter, HashRouter } from "react-router-dom";
+import { HashRouter } from "react-router-dom";
 import {
     createTheme,
     responsiveFontSizes,
@@ -71,9 +71,9 @@ export const App = () => {
         >
             <ThemeProvider theme={theme}>
                 <CssBaseline />
-                <BrowserRouter basename="/">
+                <HashRouter basename="/">
                     <Content />
-                </BrowserRouter>
+                </HashRouter>
             </ThemeProvider>
         </PeerProvider>
     );
