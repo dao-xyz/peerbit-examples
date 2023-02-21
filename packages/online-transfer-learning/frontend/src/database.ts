@@ -1,6 +1,6 @@
 import { Program } from "@dao-xyz/peerbit-program";
 import { DocumentIndex, Documents } from "@dao-xyz/peerbit-document";
-import { field } from "@dao-xyz/borsh";
+import { field, variant } from "@dao-xyz/borsh";
 
 export class Model {
     @field({ type: "string" })
@@ -23,6 +23,7 @@ export class Model {
     }
 }
 
+@variant("models")
 export class ModelDatabase extends Program {
     @field({ type: Documents })
     models: Documents<Model>;

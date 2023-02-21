@@ -6,14 +6,11 @@ export const CreateStream = () => {
     const { peer } = usePeer();
     const navigate = useNavigate();
     useEffect(() => {
-        if (!peer?.identity?.publicKey) {
+        if (!peer?.idKey?.publicKey) {
             return;
         }
-        navigate(getStreamPath(peer.identity.publicKey, peer.idKey.publicKey));
-    }, [
-        peer?.identity?.publicKey.hashcode(),
-        peer?.idKey?.publicKey.hashcode(),
-    ]);
+        navigate(getStreamPath(peer.idKey.publicKey));
+    }, [peer?.idKey?.publicKey.hashcode()]);
     return (
         /*  <Grid container spacing={2}>
              <Grid item>

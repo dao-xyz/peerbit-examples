@@ -6,7 +6,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite",
-        "start": "vite --https false",
+        "start": "vite",
         "start-remote": "vite --mode staging",
         "build": "tsc && vite build",
         "preview": "vite preview",

@@ -29,7 +29,7 @@ jobs:
       run: aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*';
 
     - name: Deploy static site to S3 bucket
-      run: aws s3 sync ./packages/online-transfer-learning/frontend/dist/ s3://demo-dao-xyz-dist --delete
+      run: aws s3 sync ./packages/canvas/frontend/dist/ s3://demo-dao-xyz-dist --delete
 
     - name: Invalidate cache
       run: aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';

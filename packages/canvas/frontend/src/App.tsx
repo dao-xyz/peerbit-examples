@@ -1,13 +1,14 @@
-import { HashRouter } from "react-router-dom";
+import { BrowserRouter } from "react-router-dom";
 import {
     createTheme,
     responsiveFontSizes,
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { Content } from "./Context";
-import { PeerProvider, resolveSwarmAddress } from "@dao-xyz/peerbit-react";
+import { resolveSwarmAddress } from "@dao-xyz/peerbit-react";
 import axios from "axios";
+import { PeerProvider } from "@dao-xyz/peerbit-react";
+import { BaseRoutes } from "./routes";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
@@ -16,22 +17,29 @@ if (import.meta.env.MODE === "development") {
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
 } else {
-    const swarmAddressees = (
-        await axios.get(
-            "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
-        )
-    ).data
-        .split(/\r?\n/)
-        .filter((x) => x.length > 0);
-
+    console.log("get!");
+    /*     const swarmAddressees = (
+            await axios.get(
+                "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env",
+            )
+        ).data
+            .split(/\r?\n/)
+            .filter((x) => x.length > 0);
+            
+     */
+    const swarmAddressees = [
+        "c134ffe07eeae36ec95917e88b942232324f672f.peerchecker.com",
+    ];
     try {
-        bootstrapAddresses = await Promise.all(
-            swarmAddressees.map((s) => resolveSwarmAddress(s))
+        bootstrapAddresses = await Promise.allSettled(
+            swarmAddressees.map((s) => resolveSwarmAddress(s, 500))
+        ).then((x) =>
+            x.map((y) => y.status === "fulfilled" && y.value).filter((x) => !!x)
         );
     } catch (error: any) {
         console.log(
             "Failed to resolve relay node. Please come back later or start the demo locally: " +
-            error?.message
+                error?.message
         );
     }
 }
@@ -60,17 +68,17 @@ theme = responsiveFontSizes(theme);
 
 export const App = () => {
     return (
-        /*       <PeerProvider
-                  bootstrap={bootstrapAddresses}
-                  inMemory={true}
-                  dev={import.meta.env.MODE === "development"}
-              >
-                  <ThemeProvider theme={theme}>
-                      <CssBaseline /> */
-        <HashRouter basename="/">
-            <Content />
-        </HashRouter>
-        /*     </ThemeProvider>
-        </PeerProvider> */
+        <PeerProvider
+            bootstrap={bootstrapAddresses}
+            inMemory={true}
+            dev={import.meta.env.MODE === "development"}
+        >
+            <ThemeProvider theme={theme}>
+                <CssBaseline />
+                <BrowserRouter basename="/">
+                    <BaseRoutes />
+                </BrowserRouter>
+            </ThemeProvider>
+        </PeerProvider>
     );
 };

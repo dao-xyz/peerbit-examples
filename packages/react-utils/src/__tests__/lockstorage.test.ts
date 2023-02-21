@@ -23,7 +23,7 @@ import { jest } from "@jest/globals";
 import { delay } from "@dao-xyz/peerbit-time";
 var LocalStorage = nodelocalstorage.LocalStorage;
 var localStorage = new LocalStorage("./tmp");
-
+globalThis.localStorage = localStorage;
 describe("FastMutex", () => {
     let sandbox;
     beforeEach(() => {
@@ -242,7 +242,7 @@ describe("FastMutex", () => {
     it("should reset the client stats after lock is released", async () => {
         // without resetting the stats, the acquireStart will always be set, and
         // after `timeout` ms, will be unable to acquire a lock anymore
-        const fm1 = new FastMutex({ localStorage: localStorage, timeout: 25 });
+        const fm1 = new FastMutex({ localStorage: localStorage, timeout: 50 });
         let keepLock = true;
         let keepLockFn = () => keepLock;
         await fm1.lock("resetStats", keepLockFn);
@@ -259,14 +259,14 @@ describe("FastMutex", () => {
     });
 
     it("can keep lock with callback function", async () => {
-        const fm1 = new FastMutex({ localStorage: localStorage, timeout: 25 });
-        await fm1.lock("resetStats");
-        await fm1.release("resetStats");
+        const fm1 = new FastMutex({ localStorage: localStorage, timeout: 50 });
+        await fm1.lock("x");
+        await fm1.release("x");
         expect(fm1.lockStats.acquireStart).toBeUndefined();
-        expect(fm1.isLocked("resetStats")).toBeTrue();
-        await delay(50);
-        expect(fm1.isLocked("resetStats")).toBeFalse();
-        const p = fm1.lock("resetStats").then(() => fm1.release("resetStats"));
+        expect(fm1.isLocked("x")).toBeTrue();
+        await delay(100);
+        expect(fm1.isLocked("x")).toBeFalse();
+        const p = fm1.lock("x").then(() => fm1.release("x"));
         await expect(p).toResolve();
     });
 
@@ -274,7 +274,7 @@ describe("FastMutex", () => {
         // in the event a lock cannot be acquired within `timeout`, acquireStart
         // will never be reset, and a subsequent call (after the `timeout`) would
         // immediately fail
-        const fm1 = new FastMutex({ localStorage: localStorage, timeout: 25 });
+        const fm1 = new FastMutex({ localStorage: localStorage, timeout: 50 });
 
         await fm1.lock("resetStats");
 

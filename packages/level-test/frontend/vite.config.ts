@@ -11,14 +11,14 @@ export default defineConfig({
     define: {
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
-    server: {
-        port: 5801
-    }
-    /*  server: fs.existsSync('./.cert/key.pem') ? {
-         https: {
-             key: fs.readFileSync('./.cert/key.pem'),
-             cert: fs.readFileSync('./.cert/cert.pem'),
-         },
-         host: 'meet.dao.xyz'
-     } : undefined, */
+    server: fs.existsSync("./.cert/key.pem")
+        ? {
+              port: 5801,
+              https: {
+                  key: fs.readFileSync("./.cert/key.pem"),
+                  cert: fs.readFileSync("./.cert/cert.pem"),
+              },
+              host: "iframe.test.xyz",
+          }
+        : undefined,
 });

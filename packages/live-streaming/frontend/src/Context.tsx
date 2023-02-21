@@ -7,7 +7,7 @@ import {
     IconButton,
     Typography,
 } from "@mui/material";
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer, inIframe } from "@dao-xyz/peerbit-react";
 import { useEffect } from "react";
 export const Content = () => {
     const { peer } = usePeer();
@@ -17,26 +17,24 @@ export const Content = () => {
         }
     }, [peer?.id]);
     return (
-        <Box>
-            <Grid container sx={{ p: 4, height: "100vh" }}>
-                <Grid item container direction="column" maxWidth="600px">
-                    <Grid item container>
-                        <Grid item container direction="column">
-                            <Grid
-                                item
-                                container
-                                direction="row"
-                                alignItems="center"
-                            >
-                                <Grid itemID="">
-                                    <Typography variant="h3"></Typography>
-                                </Grid>
+        <Grid container sx={{ p: inIframe() ? 0 : 4, height: "100%" }}>
+            <Grid item container direction="column">
+                <Grid item container>
+                    <Grid item container direction="column">
+                        <Grid
+                            item
+                            container
+                            direction="row"
+                            alignItems="center"
+                        >
+                            <Grid itemID="">
+                                <Typography variant="h3"></Typography>
                             </Grid>
                         </Grid>
                     </Grid>
-                    <BaseRoutes />
                 </Grid>
+                <BaseRoutes />
             </Grid>
-        </Box>
+        </Grid>
     );
 };

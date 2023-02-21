@@ -161,11 +161,11 @@ const addStreamListener = async (
     };
 };
 type DBArgs = { db: VideoStream };
-type IdentityArgs = { identity: PublicSignKey; node: PublicSignKey };
+type IdentityArgs = { node: PublicSignKey };
 export const View = (args: DBArgs | IdentityArgs) => {
     const [videoStream, setVideoStream] = useState<VideoStream | null>();
-    const [isStreamerFromAnotherTab, setIsStreamerFromAnotherTab] =
-        useState<boolean>();
+    /* const [isStreamerFromAnotherTab, setIsStreamerFromAnotherTab] =
+        useState<boolean>(); */
     const cleanupRef = useRef<() => void>();
     const videoStreamRef = useRef<HTMLVideoElement>();
 
@@ -183,16 +183,16 @@ export const View = (args: DBArgs | IdentityArgs) => {
 
                 if (!peer.idKey.publicKey.equals(idArgs.node)) {
                     // Open the VideStream database as a viewer
-                    peer.open(new VideoStream(idArgs.identity), {
+                    peer.open(new VideoStream(idArgs.node), {
                         role: new ObserverType(),
                         sync: () => true,
                     }).then((vs) => {
                         setVideoStream(vs);
                     });
                 }
-                setIsStreamerFromAnotherTab(
-                    peer.identity.publicKey.equals(idArgs.identity)
-                );
+                /*   setIsStreamerFromAnotherTab( // TODO add event listener for storage change events
+                      peer.idKey.publicKey.allIDS.equals(idArgs.node)
+                  ); */
             }
         } catch (error) {
             console.error("Failed to create stream", error);
@@ -200,7 +200,6 @@ export const View = (args: DBArgs | IdentityArgs) => {
     }, [
         peer?.id,
         (args as DBArgs).db?.id.toString(),
-        (args as IdentityArgs).identity?.hashcode(),
         (args as IdentityArgs).node?.hashcode(),
     ]);
 

@@ -1,18 +1,22 @@
 import React, { useContext, useEffect, useRef } from "react";
 import { multiaddr } from "@multiformats/multiaddr";
-import { Peerbit } from "@dao-xyz/peerbit";
+import { Identity, Peerbit } from "@dao-xyz/peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { createLibp2p } from "libp2p";
 import { supportedKeys } from "@libp2p/crypto/keys";
 import { mplex } from "@libp2p/mplex";
-import { getFreeKeypair, getKeypair } from "./utils.js";
+import { getFreeKeypair, getKeypair, getTabId, inIframe } from "./utils.js";
 import { Libp2p } from "libp2p";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { peerIdFromKeys } from "@libp2p/peer-id";
 import { createLibp2pExtended } from "@dao-xyz/peerbit-libp2p";
 import { Multiaddr } from "@multiformats/multiaddr";
 import { v4 as uuid } from "uuid";
-import { Level } from "level";
+import { PublicSignKey, Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
+import { FastMutex } from "./lockstorage.js";
+import { serialize, deserialize } from "@dao-xyz/borsh";
+import { waitFor } from "@dao-xyz/peerbit-time";
+import sodium from "libsodium-wrappers";
 
 interface IPeerContext {
     peer: Peerbit | undefined;
@@ -79,30 +83,58 @@ export const connectTabs = (peer: Peerbit) => {
         onMessageDefault(message.data);
     }; */
 };
-const level = new Level<string, Uint8Array>("./peer", {
-    valueEncoding: "view",
-});
-const identity = await getKeypair(level);
+
 if (!window.name) {
     window.name = uuid();
 }
-const { key: nodeId } = await getFreeKeypair(
-    level,
-    "node/" + document.referrer || "root" + "/" + window.self.location.host
-);
+
+interface KeypairMessage {
+    type: "keypair";
+    bytes: Uint8Array;
+}
+export const subscribeToKeypairChange = (
+    onChange: (keypair: Ed25519Keypair) => any
+) => {
+    window.onmessage = (c: MessageEvent) => {
+        if ((c.data as KeypairMessage).type == "keypair") {
+            onChange(
+                deserialize((c.data as KeypairMessage).bytes, Ed25519Keypair)
+            );
+        }
+    };
+};
+
+export const submitKeypairChange = (
+    element: HTMLIFrameElement,
+    keypair: Ed25519Keypair,
+    origin: string
+) => {
+    element.contentWindow!.postMessage(
+        { type: "keypair", bytes: serialize(keypair) } as KeypairMessage,
+        origin
+    );
+};
+
+let keypairMessages: Ed25519Keypair[] = [];
+subscribeToKeypairChange((keypair) => {
+    console.log("got keypair!", keypair);
+    keypairMessages.push(keypair);
+});
 
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({
-    libp2p,
     dev,
     bootstrap,
     children,
     inMemory,
+    identity,
+    waitForKeypairInIFrame,
 }: {
-    libp2p?: Libp2p;
     dev?: boolean;
     inMemory?: boolean;
+    identity?: Identity;
+    waitForKeypairInIFrame?: boolean;
     bootstrap?: (Multiaddr | string)[];
     children: JSX.Element;
 }) => {
@@ -123,102 +155,140 @@ export const PeerProvider = ({
         }
         setLoading(true);
 
-        const peerId = peerIdFromKeys(
-            new supportedKeys["ed25519"].Ed25519PublicKey(
-                nodeId.publicKey.publicKey
-            ).bytes,
-            new supportedKeys["ed25519"].Ed25519PrivateKey(
-                nodeId.privateKey.privateKey,
-                nodeId.publicKey.publicKey
-            ).bytes
-        );
-        ref.current = (
-            libp2p
-                ? Promise.resolve(libp2p)
-                : peerId.then(async (peerId) => {
-                      return createLibp2pExtended({
-                          blocks: {
-                              directory: !inMemory ? "./blocks" : undefined,
-                          },
-                          libp2p: await createLibp2p({
-                              connectionManager: {
-                                  autoDial: true,
-                              },
-                              connectionEncryption: [noise()],
-                              peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+        const mutex = new FastMutex({ clientId: getTabId(), timeout: 1000 });
+        const fn = async (
+            keypair: Ed25519Keypair = keypairMessages[
+                keypairMessages.length - 1
+            ]
+        ) => {
+            await sodium.ready;
 
-                              streamMuxers: [mplex()],
-                              ...(dev
-                                  ? {
-                                        transports: [
-                                            // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                            webSockets({
-                                                filter: (addrs) => {
-                                                    return addrs.filter(
-                                                        (addr) =>
-                                                            addr
-                                                                .toString()
-                                                                .indexOf(
-                                                                    "/ws/"
-                                                                ) != -1 ||
-                                                            addr
-                                                                .toString()
-                                                                .indexOf(
-                                                                    "/wss/"
-                                                                ) != -1
-                                                    );
-                                                },
-                                            }),
-                                        ],
-                                    }
-                                  : { transports: [webSockets()] }),
-                          }).then((r) => {
-                              return r;
-                          }),
-                      });
-                  })
-        )
-            .then(async (node) => {
-                await node.start();
+            if (!keypair && waitForKeypairInIFrame && inIframe()) {
+                await waitFor(
+                    () =>
+                        (keypair = keypairMessages[keypairMessages.length - 1])
+                );
+            }
 
-                if (bootstrap && bootstrap?.length > 0) {
-                    try {
-                        await Promise.all(
-                            bootstrap
-                                .map((a) =>
-                                    typeof a === "string" ? multiaddr(a) : a
-                                )
-                                .map((a) => node.dial(a))
-                        );
-                    } catch (error) {
-                        console.error(
-                            "Failed to resolve relay node. Please come back later or start the demo locally"
-                        );
-                        throw error;
-                    }
+            if (
+                keypair &&
+                keypairMessages[keypairMessages.length - 1] &&
+                keypairMessages[keypairMessages.length - 1].equals(keypair)
+            ) {
+                console.log(
+                    "Creating client from identity sent from parent window: " +
+                        keypair.publicKey.hashcode()
+                );
+            } else {
+                if (!keypair) {
+                    console.log("Generating new keypair for client");
+                } else {
+                    console.log(
+                        "Keypair missmatch with latest keypar message",
+                        keypairMessages
+                    );
                 }
+            }
 
-                // We create a new directrory to make tab to tab communication go smoothly
-                const peer = await Peerbit.create({
-                    libp2p: node,
-                    directory: !inMemory ? "./repo" : undefined,
-                    identity: identity,
-                    limitSigning: true,
-                });
+            if (peer) {
+                await peer.stop();
+                setPeer(undefined);
+            }
 
-                // Make sure data flow as expected between tabs and windows locally (offline states)
-                connectTabs(peer);
-                setPeer(peer);
-                setLoading(false);
-                return peer;
-            })
-            .catch((e) => {
-                setLoading(false);
-                if (e.toString().startsWith("LockExistsError")) {
-                    return; // this context has been remounted in dev mode and the same repo has been created twice
-                }
-                throw e;
+            const nodeId =
+                keypair ||
+                (
+                    await getFreeKeypair(
+                        "",
+                        mutex,
+                        undefined,
+                        true // reuse keypairs from same tab, (force release)
+                    )
+                ).key;
+
+            const peerId = await peerIdFromKeys(
+                new supportedKeys["ed25519"].Ed25519PublicKey(
+                    nodeId.publicKey.publicKey
+                ).bytes,
+                new supportedKeys["ed25519"].Ed25519PrivateKey(
+                    nodeId.privateKey.privateKey,
+                    nodeId.publicKey.publicKey
+                ).bytes
+            );
+
+            identity = identity || nodeId;
+
+            let node = await createLibp2pExtended({
+                blocks: {
+                    directory:
+                        !inMemory && !inIframe() ? "./blocks" : undefined,
+                },
+                libp2p: await createLibp2p({
+                    connectionManager: {
+                        autoDial: true,
+                    },
+                    connectionEncryption: [noise()],
+                    peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+
+                    streamMuxers: [mplex()],
+                    ...(dev
+                        ? {
+                              transports: [
+                                  // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                  webSockets({
+                                      filter: (addrs) => {
+                                          return addrs.filter(
+                                              (addr) =>
+                                                  addr
+                                                      .toString()
+                                                      .indexOf("/ws/") != -1 ||
+                                                  addr
+                                                      .toString()
+                                                      .indexOf("/wss/") != -1
+                                          );
+                                      },
+                                  }),
+                              ],
+                          }
+                        : { transports: [webSockets()] }),
+                }).then((r) => {
+                    return r;
+                }),
             });
+            await node.start();
+
+            if (bootstrap && bootstrap?.length > 0) {
+                try {
+                    await Promise.all(
+                        bootstrap
+                            .map((a) =>
+                                typeof a === "string" ? multiaddr(a) : a
+                            )
+                            .map((a) => node.dial(a))
+                    );
+                } catch (error) {
+                    console.error(
+                        "Failed to resolve relay node. Please come back later or start the demo locally"
+                    );
+                    throw error;
+                }
+            }
+
+            // We create a new directrory to make tab to tab communication go smoothly
+            const newPeer = await Peerbit.create({
+                libp2p: node,
+                directory: !inMemory ? "./repo" : undefined,
+                identity,
+                limitSigning: true,
+            });
+
+            // Make sure data flow as expected between tabs and windows locally (offline states)
+            connectTabs(newPeer);
+            setPeer(newPeer);
+            setLoading(false);
+            return peer;
+        };
+        ref.current = fn();
     }, []);
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;

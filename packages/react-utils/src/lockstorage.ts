@@ -179,6 +179,12 @@ export class FastMutex {
         return !!this.getItem(x) || !!this.getItem(y);
     }
 
+    getLockedInfo(key: string): string | null {
+        const x = this.xPrefix + key;
+        const y = this.yPrefix + key;
+        return this.getItem(x) || this.getItem(y);
+    }
+
     release(key: string) {
         debug(
             'FastMutex client "%s" is releasing lock on "%s"',
@@ -187,6 +193,7 @@ export class FastMutex {
         );
         const y = this.yPrefix + key;
         return new Promise((resolve, reject) => {
+            clearInterval(this.intervals.get(y));
             this.localStorage.removeItem(y);
             this.lockStats.lockEnd = new Date().getTime();
 
@@ -205,7 +212,7 @@ export class FastMutex {
      * Helper function to wrap all values in an object that includes the time (so
      * that we can expire it in the future) and json.stringify's it
      */
-    setItem(key: string, value, keepLocked?: () => boolean) {
+    setItem(key: string, value: any, keepLocked?: () => boolean) {
         if (!keepLocked) {
             return this.localStorage.setItem(
                 key,
@@ -215,19 +222,29 @@ export class FastMutex {
                 })
             );
         } else {
+            let getExpiry = () => +new Date() + this.timeout;
             const ret = this.localStorage.setItem(
                 key,
                 JSON.stringify({
-                    expiresAt: Number.MAX_SAFE_INTEGER,
+                    expiresAt: getExpiry(),
                     value,
                 })
             );
             const interval = setInterval(() => {
                 if (!keepLocked()) {
                     this.localStorage.setItem(
+                        // TODO, release directly?
                         key,
                         JSON.stringify({
                             expiresAt: 0,
+                            value,
+                        })
+                    );
+                } else {
+                    this.localStorage.setItem(
+                        key,
+                        JSON.stringify({
+                            expiresAt: getExpiry(), // bump expiry
                             value,
                         })
                     );
@@ -241,7 +258,7 @@ export class FastMutex {
     /**
      * Helper function to parse JSON encoded values set in localStorage
      */
-    getItem(key) {
+    getItem(key: string): string | null {
         const item = this.localStorage.getItem(key);
         if (!item) return null;
 

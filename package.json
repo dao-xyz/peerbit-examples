@@ -10,6 +10,7 @@
             "packages/react-utils",
             "packages/browser-chat/*",
             "packages/live-streaming/*",
+            "packages/canvas/*",
             "packages/online-transfer-learning/*"
         ],
         "nohoist": [

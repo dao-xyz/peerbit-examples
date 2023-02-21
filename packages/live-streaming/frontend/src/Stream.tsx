@@ -13,7 +13,7 @@ import VideoCameraFrontIcon from "@mui/icons-material/VideoCameraFront";
 import OndemandVideoIcon from "@mui/icons-material/OndemandVideo";
 import PresentToAllIcon from "@mui/icons-material/PresentToAll";
 import TvOffIcon from "@mui/icons-material/TvOff";
-import ShareIcon from '@mui/icons-material/Share';
+import ShareIcon from "@mui/icons-material/Share";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
@@ -27,10 +27,7 @@ if (PACK_PERFECTLY) {
 /* globalThis.VSTATS = new Map(); */
 
 type StreamType = "camera" | "screen" | "media" | undefined;
-export const Stream = (args: {
-    identity: PublicSignKey;
-    node: PublicSignKey;
-}) => {
+export const Stream = (args: { node: PublicSignKey }) => {
     const [streamType, setStreamType] = useState<StreamType>(undefined);
     //const [isStreamer, setIsStreamer] = useState<boolean | undefined>(undefined);
 
@@ -44,16 +41,13 @@ export const Stream = (args: {
 
     // TODO
     useEffect(() => {
-        if (!peer?.libp2p || !args.identity || !args.node) {
+        if (!peer?.libp2p || !args.node) {
             return;
         }
 
         try {
-            if (
-                peer.idKey.publicKey.equals(args.node) &&
-                peer.identity.publicKey.equals(args.identity)
-            ) {
-                peer.open(new VideoStream(peer.identity.publicKey), {
+            if (peer.idKey.publicKey.equals(args.node)) {
+                peer.open(new VideoStream(peer.idKey.publicKey), {
                     role: new ObserverType(),
                     /*   trim: {
                           type: "bytelength",
@@ -67,7 +61,7 @@ export const Stream = (args: {
         } catch (error) {
             console.error("Failed to create stream", error);
         }
-    }, [peer?.id, args.identity?.hashcode(), args.node?.hashcode()]);
+    }, [peer?.id, args.node?.hashcode()]);
 
     const updateStream = async (streamType: StreamType) => {
         if (!videoRef.current) {
@@ -198,7 +192,7 @@ export const Stream = (args: {
                         remainder = new Uint8Array(0);
                         const chunk = new Chunk(e.data.type, header, arr);
                         /* globalThis.VSTATS.set(chunk.id, { a: +new Date }) */
-                        videoStream.chunks.put(chunk);
+                        videoStream.chunks.put(chunk, { unique: true });
 
                         first = false;
                     } else {
@@ -209,7 +203,7 @@ export const Stream = (args: {
                     const chunk = new Chunk(e.data.type, header, newArr, ts);
 
                     /* globalThis.VSTATS.set(chunk.id, { a: +new Date }) */
-                    videoStream.chunks.put(chunk);
+                    videoStream.chunks.put(chunk, { unique: true });
                 }
             };
             recorder.start(1);
@@ -226,6 +220,7 @@ export const Stream = (args: {
                     <video
                         ref={videoRef}
                         width="100%"
+                        height="auto"
                         onPlay={onStart}
                         onEnded={onEnd}
                         autoPlay

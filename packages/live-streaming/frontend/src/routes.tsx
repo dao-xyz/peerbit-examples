@@ -3,16 +3,14 @@ import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { CreateStream } from "./CreateStream";
 import { StreamOrView } from "./StreamOrView";
-import { base58btc } from "multiformats/bases/base58";
-export const STREAM = "s/:identity/:node";
+import { base64url } from "multiformats/bases/base64";
+export const STREAM = "s/:node";
 
-export const getStreamPath = (identity: PublicSignKey, node: PublicSignKey) =>
-    "s/" +
-    base58btc.encode(serialize(identity)) +
-    "/" +
-    base58btc.encode(serialize(node));
+export const getStreamPath = (node: PublicSignKey) =>
+    "s/" + base64url.encode(serialize(node));
+
 export const getKeyFromStreamKey = (key: string) =>
-    deserialize(base58btc.decode(key), PublicSignKey);
+    deserialize(base64url.decode(key), PublicSignKey);
 
 export function BaseRoutes() {
     return (

@@ -10,7 +10,6 @@ export const StreamOrView = () => {
     const { peer } = usePeer();
     const params = useParams();
     const [idArgs, setIdArgs] = useState<{
-        identity: PublicSignKey;
         node: PublicSignKey;
     }>();
     const [isStreamer, setIsStreamer] = useState<boolean | undefined>(
@@ -19,13 +18,13 @@ export const StreamOrView = () => {
 
     // TODO
     useEffect(() => {
-        if (!peer?.libp2p || !params.node || !params.identity) {
+        if (!peer?.libp2p || !params.node || !params.node) {
             return;
         }
 
         const node = getKeyFromStreamKey(params.node);
         setIsStreamer(peer.idKey.publicKey.equals(node));
-        setIdArgs({ identity: getKeyFromStreamKey(params.identity), node });
+        setIdArgs({ node });
     }, [peer?.id, params?.node]);
 
     return (
@@ -33,15 +32,10 @@ export const StreamOrView = () => {
             {isStreamer !== undefined && (
                 <>
                     {isStreamer ? (
-                        <Stream
-                            node={idArgs.node}
-                            identity={idArgs.identity}
-                        ></Stream>
+                        <Stream node={idArgs.node}></Stream>
                     ) : (
-                        <View
-                            node={idArgs.node}
-                            identity={idArgs.identity}
-                        ></View>
+                        /*       <Box sx={{ backgroundColor: 'red', width: '100%', height: '100%' }}> RED</Box> */
+                        <View node={idArgs.node}></View>
                     )}
                 </>
             )}

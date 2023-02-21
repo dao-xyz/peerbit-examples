@@ -1,2 +1,7 @@
-export { PeerProvider, PeerContext, usePeer } from "./usePeer.js";
+export {
+    PeerProvider,
+    PeerContext,
+    usePeer,
+    submitKeypairChange,
+} from "./usePeer.js";
 export * from "./utils.js";
