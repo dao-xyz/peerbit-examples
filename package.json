@@ -11,6 +11,7 @@
             "packages/browser-chat/*",
             "packages/live-streaming/*",
             "packages/canvas/*",
+            "packages/one-chat-room/*",
             "packages/online-transfer-learning/*"
         ],
         "nohoist": [
