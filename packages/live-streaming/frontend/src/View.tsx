@@ -259,6 +259,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 <video
                     ref={playbackRefCb}
                     width="100%"
+                    height="100%"
                     muted
                     controls
                     autoPlay

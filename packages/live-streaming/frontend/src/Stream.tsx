@@ -1,4 +1,4 @@
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { inIframe, usePeer } from "@dao-xyz/peerbit-react";
 import { useRef, useState, useEffect, useCallback } from "react";
 import { Chunk, VideoStream } from "./database";
 import { getClusterStartIndices } from "./webm";
@@ -216,11 +216,18 @@ export const Stream = (args: { node: PublicSignKey }) => {
     return (
         <>
             <Grid container direction="column" spacing={1}>
-                <Grid item>
+                <Grid
+                    item
+                    sx={{
+                        display: "flex",
+                        maxHeight: !inIframe() ? "80%" : "100%",
+                    }}
+                    justifyContent={!inIframe() ? "center" : "left"}
+                >
                     <video
                         ref={videoRef}
-                        width="100%"
                         height="auto"
+                        width="100%"
                         onPlay={onStart}
                         onEnded={onEnd}
                         autoPlay
@@ -228,7 +235,12 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         muted={streamType === "camera" || !streamType}
                     ></video>
                 </Grid>
-                <Grid item container spacing={2}>
+                <Grid
+                    item
+                    container
+                    spacing={1}
+                    justifyContent={!inIframe() ? "center" : "left"}
+                >
                     <Grid item>
                         <Button
                             size="small"
