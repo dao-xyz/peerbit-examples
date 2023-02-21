@@ -310,7 +310,7 @@ export const Room = () => {
                     <TextField
                         size="small"
                         id="outlined-multiline-flexible"
-                        label="Create post"
+                        label="Send message"
                         multiline
                         maxRows={4}
                         sx={{ width: "100%" }}

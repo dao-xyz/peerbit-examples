@@ -44,7 +44,7 @@ const resetSB = async (
     return ret;
 };
 const addStreamListener = async (
-    vs: Documents<Chunk>,
+    chunkDB: Documents<Chunk>,
     pb: HTMLVideoElement | HTMLAudioElement
 ) => {
     let appendQueue = new PQueue({ concurrency: 1 });
@@ -52,7 +52,7 @@ const addStreamListener = async (
     // make sure video plays in background
     let focused = true;
     pb.onpause = (ev) => {
-        //  if (!focused)
+        //  if (!focused) TODO
         {
             pb.play();
         }
@@ -67,9 +67,6 @@ const addStreamListener = async (
     pb.onerror = (err) => {
         console.log(err);
     };
-    /*
-    window.onfocus = function () { pb.play(); };
-    window.onblur = function () { pb.play(); }; */
 
     let firstChunk = new Uint8Array(0);
     let first = true;
@@ -111,29 +108,6 @@ const addStreamListener = async (
                         firstChunk = firstCluster.remainder;
                     }
                 } else {
-                    /*  const firstClusterIndices = getClusterStartIndices(chunk.chunk);
-                    if (firstClusterIndices.length > 0) {
-                        //
-                        first = true;
-                        firstChunk = new Uint8Array(0)
-                        //  chunks = [chunk.sub]
-                        //  appendQueue.add(() => resetSB(pb));
-                        //await resetSB(pb);
-                        await fn();
- 
-                    }  */
-                    /* const diff = decoder.decode(chunk.chunk);
-                    for (const d of diff) {
-                        if (d.name === "Timestamp" && d.type === "u") {
-                            let nrt = +new Date;
-                            console.log(d.value / 1000 - lastTs, nrt - rt)
-                            rt = nrt;
-                            lastTs = d.value / 1000;
-                        }
-    
-                    } */
-                    /*  globalThis.VSTATS.set(chunk.id, { ...globalThis.VSTATS.get(chunk.id), c: +new Date }) */
-
                     try {
                         sb.appendBuffer(
                             first
@@ -155,11 +129,12 @@ const addStreamListener = async (
         appendQueue.add(fn);
     };
 
-    vs.events.addEventListener("change", listener);
+    chunkDB.events.addEventListener("change", listener);
     return () => {
-        vs.events.removeEventListener("change", listener);
+        chunkDB.events.removeEventListener("change", listener);
     };
 };
+
 type DBArgs = { db: VideoStream };
 type IdentityArgs = { node: PublicSignKey };
 export const View = (args: DBArgs | IdentityArgs) => {
@@ -190,9 +165,6 @@ export const View = (args: DBArgs | IdentityArgs) => {
                         setVideoStream(vs);
                     });
                 }
-                /*   setIsStreamerFromAnotherTab( // TODO add event listener for storage change events
-                      peer.idKey.publicKey.allIDS.equals(idArgs.node)
-                  ); */
             }
         } catch (error) {
             console.error("Failed to create stream", error);
@@ -212,46 +184,16 @@ export const View = (args: DBArgs | IdentityArgs) => {
             if (node instanceof HTMLVideoElement)
                 videoStreamRef.current = playbackRef as HTMLVideoElement;
             if (peer && playbackRef && videoStream) {
-                /*  function toggleMute() {
-                     playbackRef.play()
- 
-                     if (playbackRef.muted) {
-                         console.log('unmute!')
-                         playbackRef.muted = false;
-                     }
-                 }
- 
-                 setTimeout(toggleMute, 1000); */
-
                 playbackRef.onerror = (error) => {
                     console.error("pb error", error);
                 };
                 addStreamListener(videoStream.chunks, playbackRef).then(
                     (cleanup) => (cleanupRef.current = cleanup)
                 );
-                // setClose(cleanup)
             }
         },
         [peer, videoStream]
     );
-
-    /*     const playbackRefCb2 = useCallback(
-            (node) => {
-                if (cleanupRef.current) {
-                    cleanupRef.current()
-                }
-                const playbackRef: HTMLVideoElement = node;
-                if (peer && playbackRef && videoStream) {
-                    playbackRef.onerror = (error) => {
-                        console.error("pb error", error);
-                    };
-                    cleanupRef.current = addStreamListener(videoStream.video, playbackRef);
-                }
-    
-    
-            },
-            [peer, videoStream]
-        ); */
 
     return (
         <Grid container direction="column">

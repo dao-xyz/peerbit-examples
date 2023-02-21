@@ -8,6 +8,7 @@ import {
 import { PublicSignKey, randomBytes } from "@dao-xyz/peerbit-crypto";
 import { Program } from "@dao-xyz/peerbit-program";
 import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
+import { BORSH_ENCODING } from "@dao-xyz/peerbit-log";
 
 @variant(0)
 export class Position {
@@ -89,7 +90,7 @@ export class Canvas extends Program {
     name: string;
 
     constructor(properties: { rootTrust: PublicSignKey; name: string }) {
-        super({ id: properties.rootTrust.hashcode() });
+        super({ id: properties.rootTrust.hashcode() + "/" + properties.name });
         this.key = properties.rootTrust;
         this.rects = new Documents({
             index: new DocumentIndex({ indexBy: "id" }),
@@ -131,10 +132,12 @@ export class Spaces extends Program {
             type: Canvas,
             canAppend: async (entry) => {
                 // Only allow modifications from author
-
-                const payload = entry.payload.getValue();
+                const payload = await entry.getPayloadValue();
                 if (payload instanceof PutOperation) {
-                    const from = (payload as PutOperation<Canvas>).value.key;
+                    console.log("VALUE?", payload);
+                    const from = (payload as PutOperation<Canvas>).getValue(
+                        BORSH_ENCODING(this.canvases.index.type)
+                    ).key;
                     return (
                         entry.signatures.find((x) =>
                             x.publicKey.equals(from)
@@ -155,6 +158,7 @@ export class Spaces extends Program {
                 }
                 return false;
             },
+            canOpen: () => Promise.resolve(false), // don't open things that appear in the db
         });
     }
 }

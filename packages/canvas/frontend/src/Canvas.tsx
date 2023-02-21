@@ -8,6 +8,8 @@ import {
     getKeyFromPath,
     CHAT_APP,
     STREAMING_APP,
+    getNameFromPath,
+    getChatPath,
 } from "./routes.js";
 import { CacheProvider } from "@emotion/react";
 import {
@@ -18,7 +20,7 @@ import {
     getTabId,
 } from "@dao-xyz/peerbit-react";
 import { useParams } from "react-router-dom";
-import { Canvas as CanvasDB, Position, Rect, Size } from "./dbs/canvas";
+import { Canvas as CanvasDB, Position, Rect, Size, Spaces } from "./dbs/canvas";
 import {
     toBase64,
     Ed25519Keypair,
@@ -28,6 +30,7 @@ import { Box, Button, Grid, IconButton } from "@mui/material";
 import iFrameResize from "iframe-resizer";
 import { logger } from "@dao-xyz/peerbit";
 import { Add } from "@mui/icons-material";
+import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
 logger.level = "trace";
 
 const PreviewIframe = styled("iframe")(() => ({
@@ -89,6 +92,8 @@ export const Canvas = () => {
         }
 
         const node = getKeyFromPath(params.key);
+        const canvasName = getNameFromPath(params.name);
+
         let isOwner = peer.idKey.publicKey.equals(node);
         setIsOwner(isOwner);
         setIdArgs({ node });
@@ -99,7 +104,7 @@ export const Canvas = () => {
         );
 
         myCanvas.current = peer
-            .open(new CanvasDB({ rootTrust: node, name: "My room" }), {
+            .open(new CanvasDB({ rootTrust: node, name: canvasName }), {
                 sync: () => true,
             })
             .then(async (canvas) => {
@@ -171,13 +176,17 @@ export const Canvas = () => {
                     //addRect();
                     /*     const { key: keypair2 } = await getFreeKeypair('canvas')
                     canvas.rects.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) })) */
+                } else {
+                    setInterval(async () => {
+                        await canvas.rects.index.query(
+                            new DocumentQueryRequest({ queries: [] }),
+                            { remote: { sync: true, amount: 2 } }
+                        );
+                    }, 2000);
                 }
                 return canvas;
                 /*  else {
-                 setInterval(async () => {
-                     const results = await canvas.rects.index.query(new DocumentQueryRequest({ queries: [] }), { remote: { sync: true, amount: 2 } })
-                     console.log(results)
-                 }, 2000)
+                
              } */
             });
     }, [peer?.id.toString()]);
@@ -245,16 +254,14 @@ export const Canvas = () => {
                                 CHAT_APP
                             ) {
                                 (event.target as HTMLIFrameElement).src =
-                                    CHAT_APP +
-                                    "/" +
-                                    getPathFromKey(idArgs.node);
+                                    CHAT_APP + "/" + getChatPath(idArgs.node);
                             } else {
                                 onIframe(event, {
                                     keypair: kp,
                                     src:
                                         CHAT_APP +
                                         "/" +
-                                        getPathFromKey(idArgs.node),
+                                        getChatPath(idArgs.node),
                                 });
                             }
                         }}

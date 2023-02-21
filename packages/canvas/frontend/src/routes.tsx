@@ -8,18 +8,23 @@ import { serialize, deserialize } from "@dao-xyz/borsh";
 export const getStreamPath = (node: PublicSignKey) =>
     "s/" + base64url.encode(serialize(node));
 
-export const getPathFromKey = (node: PublicSignKey) =>
+export const getChatPath = (node: PublicSignKey) =>
     "k/" + base64url.encode(serialize(node));
+
+export const getPathFromKey = (node: PublicSignKey, name: string) =>
+    "k/" + base64url.encode(serialize(node)) + "/" + encodeURIComponent(name);
 
 export const getKeyFromPath = (key: string) =>
     deserialize(base64url.decode(key), PublicSignKey);
 
-export const USER_BY_KEY = "/k/:key";
+export const getNameFromPath = (name: string) => decodeURIComponent(name);
+
+export const USER_BY_KEY_NAME = "/k/:key/:name";
 
 export function BaseRoutes() {
     return (
         <Routes>
-            <Route path={USER_BY_KEY} element={<Canvas />} />
+            <Route path={USER_BY_KEY_NAME} element={<Canvas />} />
             <Route path={"/"} element={<Home />} />
         </Routes>
     );

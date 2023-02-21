@@ -6,7 +6,6 @@ import {
     CssBaseline,
 } from "@mui/material";
 import { resolveSwarmAddress } from "@dao-xyz/peerbit-react";
-import axios from "axios";
 import { PeerProvider } from "@dao-xyz/peerbit-react";
 import { BaseRoutes } from "./routes";
 
@@ -18,15 +17,7 @@ if (import.meta.env.MODE === "development") {
     ];
 } else {
     console.log("get!");
-    /*     const swarmAddressees = (
-            await axios.get(
-                "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env",
-            )
-        ).data
-            .split(/\r?\n/)
-            .filter((x) => x.length > 0);
-            
-     */
+
     const swarmAddressees = [
         "c134ffe07eeae36ec95917e88b942232324f672f.peerchecker.com",
     ];
