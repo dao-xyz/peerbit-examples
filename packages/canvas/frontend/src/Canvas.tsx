@@ -17,9 +17,10 @@ import {
     Ed25519Keypair,
     PublicSignKey,
 } from "@dao-xyz/peerbit-crypto";
-import { Box, Grid } from "@mui/material";
+import { Box, Button, Grid, IconButton } from "@mui/material";
 import iFrameResize from "iframe-resizer";
 import { logger } from "@dao-xyz/peerbit";
+import { Add } from "@mui/icons-material";
 logger.level = "trace";
 
 const PreviewIframe = styled("iframe")(() => ({
@@ -66,6 +67,18 @@ export const Canvas = () => {
 
     useEffect(() => {}, [peer?.id, params?.node]);
 
+    const addRect = async () => {
+        const { key: keypair } = await getFreeKeypair("canvas");
+        (await myCanvas.current).rects.put(
+            new Rect({
+                keypair,
+                position: new Position({ x: 0, y: 0, z: 0 }),
+                size: new Size({ height: 100, width: 100 }),
+                src: STREAMING_APP + "/" + getStreamPath(keypair.publicKey),
+            })
+        );
+    };
+
     useEffect(() => {
         if (!peer?.libp2p || !params.key || myCanvas.current) {
             return;
@@ -85,6 +98,7 @@ export const Canvas = () => {
             "open!?",
             peer.idKey.publicKey.equals(peer.identity.publicKey)
         );
+
         myCanvas.current = peer
             .open(new MyCanvas({ rootTrust: node }))
             .then(async (canvas) => {
@@ -112,18 +126,7 @@ export const Canvas = () => {
                 }
 
                 if (isOwner) {
-                    const { key: keypair } = await getFreeKeypair("canvas");
-                    canvas.rects.put(
-                        new Rect({
-                            keypair,
-                            position: new Position({ x: 0, y: 0, z: 0 }),
-                            size: new Size({ height: 100, width: 100 }),
-                            src:
-                                STREAMING_APP +
-                                "/" +
-                                getStreamPath(keypair.publicKey),
-                        })
-                    );
+                    addRect();
                     /*     const { key: keypair2 } = await getFreeKeypair('canvas')
                     canvas.rects.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) })) */
                 }
@@ -164,6 +167,11 @@ export const Canvas = () => {
                     </Grid>
                 );
             })}
+            {isOwner && (
+                <IconButton size="large" onClick={addRect}>
+                    <Add />
+                </IconButton>
+            )}
         </Box>
     );
 };
