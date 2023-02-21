@@ -110,14 +110,19 @@ export class MyCanvas extends Program {
     }
 }
 
-/* @variant(0)
-export class CanvasDB {
-
+@variant("canvases")
+export class CanvasDB extends Program {
     @field({ type: Documents<Rect> })
-    canvases: Documents<MyCanvas>
+    canvases: Documents<MyCanvas>;
 
     constructor() {
-        this.canvases = new Documents({ index: new DocumentIndex({ indexBy: 'id' }) })
+        super({ id: "STATIC" });
+        this.canvases = new Documents({
+            index: new DocumentIndex({ indexBy: "id" }),
+        });
+    }
+
+    setup(): Promise<void> {
+        return this.canvases.setup({ type: MyCanvas });
     }
 }
- */

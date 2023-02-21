@@ -8,7 +8,6 @@ import {
 } from "@mui/material";
 import { Content } from "./Content";
 import { resolveSwarmAddress, inIframe } from "@dao-xyz/peerbit-react";
-import axios from "axios";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
@@ -52,8 +51,9 @@ let theme = createTheme({
         ].join(","),
     },
 });
+
 theme = responsiveFontSizes(theme);
-// import.meta.env.DEV
+
 export const App = () => {
     return (
         <PeerProvider
