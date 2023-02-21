@@ -17,7 +17,7 @@
         "noEmit": true,
         "jsx": "react-jsx"
     },
-    "include": ["src"],
+    "include": ["src", "../../one-chat-room/frontend/src/Home.tsx"],
     "references": [
         {
             "path": "./tsconfig.node.json"

@@ -7,7 +7,7 @@ import {
 } from "@dao-xyz/peerbit-document";
 import { PublicSignKey, randomBytes } from "@dao-xyz/peerbit-crypto";
 import { Program } from "@dao-xyz/peerbit-program";
-import { toBase64, Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
+import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
 
 @variant(0)
 export class Position {
@@ -78,19 +78,23 @@ export class Rect {
 }
 
 @variant("canvas")
-export class MyCanvas extends Program {
+export class Canvas extends Program {
     @field({ type: Documents<Rect> })
     rects: Documents<Rect>;
 
     @field({ type: PublicSignKey })
     key: PublicSignKey;
 
-    constructor(properties: { rootTrust: PublicSignKey }) {
+    @field({ type: "string" })
+    name: string;
+
+    constructor(properties: { rootTrust: PublicSignKey; name: string }) {
         super({ id: properties.rootTrust.hashcode() });
         this.key = properties.rootTrust;
         this.rects = new Documents({
             index: new DocumentIndex({ indexBy: "id" }),
         });
+        this.name = properties.name;
     }
 
     setup(): Promise<void> {
@@ -110,10 +114,10 @@ export class MyCanvas extends Program {
     }
 }
 
-@variant("canvases")
-export class CanvasDB extends Program {
+@variant("spaces")
+export class Spaces extends Program {
     @field({ type: Documents<Rect> })
-    canvases: Documents<MyCanvas>;
+    canvases: Documents<Canvas>;
 
     constructor() {
         super({ id: "STATIC" });
@@ -123,6 +127,34 @@ export class CanvasDB extends Program {
     }
 
     setup(): Promise<void> {
-        return this.canvases.setup({ type: MyCanvas });
+        return this.canvases.setup({
+            type: Canvas,
+            canAppend: async (entry) => {
+                // Only allow modifications from author
+
+                const payload = entry.payload.getValue();
+                if (payload instanceof PutOperation) {
+                    const from = (payload as PutOperation<Canvas>).value.key;
+                    return (
+                        entry.signatures.find((x) =>
+                            x.publicKey.equals(from)
+                        ) != null
+                    );
+                } else if (payload instanceof DeleteOperation) {
+                    const canvas = await this.canvases.index.get(payload.key);
+                    for (const result of canvas.results) {
+                        const from = result.value.key;
+                        if (
+                            entry.signatures.find((x) =>
+                                x.publicKey.equals(from)
+                            ) != null
+                        ) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            },
+        });
     }
 }

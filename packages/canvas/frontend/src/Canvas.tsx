@@ -18,7 +18,7 @@ import {
     getTabId,
 } from "@dao-xyz/peerbit-react";
 import { useParams } from "react-router-dom";
-import { MyCanvas, Position, Rect, Size } from "./dbs/canvas";
+import { Canvas as CanvasDB, Position, Rect, Size } from "./dbs/canvas";
 import {
     toBase64,
     Ed25519Keypair,
@@ -61,7 +61,7 @@ const keypairs = new Map<string, Ed25519Keypair>();
 export const Canvas = () => {
     const { peer } = usePeer();
     const params = useParams();
-    const myCanvas = useRef<Promise<MyCanvas>>(null);
+    const myCanvas = useRef<Promise<CanvasDB>>(null);
     const [rects, setRects] = useState<Rect[]>([]);
     const [idArgs, setIdArgs] = useState<{
         node: PublicSignKey;
@@ -99,7 +99,9 @@ export const Canvas = () => {
         );
 
         myCanvas.current = peer
-            .open(new MyCanvas({ rootTrust: node }), { sync: () => true })
+            .open(new CanvasDB({ rootTrust: node, name: "My room" }), {
+                sync: () => true,
+            })
             .then(async (canvas) => {
                 canvas.rects.events.addEventListener(
                     "change",
