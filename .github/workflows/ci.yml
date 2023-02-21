@@ -22,14 +22,23 @@ jobs:
     - name: Build
       run: yarn install && yarn build
 
-    - name: Deploy static site to S3 bucket
+    - name: Deploy stream
       run: aws s3 sync ./packages/live-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
 
     - name: Invalidate cache
       run: aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*';
 
-    - name: Deploy static site to S3 bucket
+    - name: Deploy chat
+      run: aws s3 sync ./packages/canvas/frontend/dist/ s3://chat-dao-xyz-dist --delete
+
+    - name: Invalidate cache
+      run: aws cloudfront create-invalidation --distribution-id E2KS1CGVFT7WAY --paths '/*';
+
+    - name: Deploy demo
       run: aws s3 sync ./packages/canvas/frontend/dist/ s3://demo-dao-xyz-dist --delete
 
     - name: Invalidate cache
       run: aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';
+
+
+

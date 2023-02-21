@@ -24,3 +24,13 @@ export function BaseRoutes() {
         </Routes>
     );
 }
+export const STREAMING_APP = ["development", "staging"].includes(
+    import.meta.env.MODE
+)
+    ? "https://stream.test.xyz:5801/#"
+    : "https://stream.dao.xyz/#";
+export const CHAT_APP = ["development", "staging"].includes(
+    import.meta.env.MODE
+)
+    ? "https://chat.test.xyz:5802/#"
+    : "https://chat.dao.xyz/#";

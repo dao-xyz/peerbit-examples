@@ -10,15 +10,15 @@ import {
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import { useChat } from "./ChatContext";
 import {
     DocumentQueryRequest,
     StringMatchQuery,
     IndexedValue,
 } from "@dao-xyz/peerbit-document";
-import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
+import { Post, Room as RoomDB } from "./database.js";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { Send } from "@mui/icons-material";
+import { getKeyFromPath } from "./routes";
 import { useNavigate } from "react-router-dom";
 import InputLabel from "@mui/material/InputLabel";
 import MenuItem from "@mui/material/MenuItem";
@@ -69,12 +69,6 @@ const shortName = (name: string) => {
 export const Room = () => {
     const theme = useTheme();
     const { peer, loading: loadingPeer } = usePeer();
-    const {
-        lobby: rooms,
-        loading: loadingRooms,
-        loadedLocally: loadedRoomsLocally,
-        roomsUpdated,
-    } = useChat();
     const [room, setRoom] = useState<RoomDB>();
     const [loading, setLoading] = useState(false);
     const [identitiesInChatMap, setIdentitiesInChatMap] =
@@ -87,6 +81,7 @@ export const Room = () => {
     const params = useParams();
     const navigate = useNavigate();
     const messagesEndRef = useRef(null);
+    const inputArea = useRef<HTMLDivElement>(null);
 
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
@@ -134,94 +129,29 @@ export const Room = () => {
     }, [room?.id, lastUpdated]);
 
     useEffect(() => {
-        if (
-            !rooms ||
-            room ||
-            loading ||
-            !params.name ||
-            !loadedRoomsLocally ||
-            loadingRooms
-        ) {
+        if (room || loading || !params.key || !peer) {
             //('return', rooms, loadedRoomsLocally)
             return;
         }
         setRoom(undefined);
-        let gotRoom = false;
         setLoading(true);
-        rooms.rooms.index
-            .query(
-                new DocumentQueryRequest({
-                    queries: [
-                        new StringMatchQuery({
-                            key: "name",
-                            value: params.name,
-                        }),
-                    ],
-                }),
-                {
-                    remote:
-                        peer.libp2p.directsub.getSubscribers(
-                            rooms.address.toString()
-                        ).size > 0
-                            ? { sync: true, timeout: 5000 }
-                            : false,
-                    local: true,
-                    onResponse: (response) => {
-                        if (response.results.length > 0) {
-                            gotRoom = true;
-                            const roomToOpen = response.results[0].value;
-                            peer.open(roomToOpen, {
-                                // already opened so the updatecallback will not be applied?
-                                role: new ReplicatorType(),
-                            })
-                                .then((r) => {
-                                    roomToOpen.messages.events.addEventListener(
-                                        "change",
-                                        () => {
-                                            refresh();
-                                        }
-                                    );
-                                    setRoom(r);
-                                })
-                                .catch((e) => {
-                                    console.error(
-                                        "Failed top open room: " + e.message
-                                    );
-                                    alert("Failed top open room: " + e.message);
+        peer.open(new RoomDB({ creator: getKeyFromPath(params.key) }))
+            .then((r) => {
+                r.messages.events.addEventListener("change", () => {
+                    refresh();
+                });
+                setRoom(r);
+            })
+            .catch((e) => {
+                console.error("Failed top open room: " + e.message);
+                alert("Failed top open room: " + e.message);
 
-                                    throw e;
-                                })
-                                .finally(() => {
-                                    setLoading(false);
-                                });
-                        }
-                    },
-                }
-            )
+                throw e;
+            })
             .finally(() => {
                 setLoading(false);
-                if (!gotRoom && !loadingRooms) {
-                    // Create the room or na? (TODO)
-                    alert(
-                        "Could not find room: " +
-                            params.name +
-                            ". Go back and create it!"
-                    );
-                    navigate("/");
-                }
             });
-    }, [
-        !!rooms?.id,
-        params.name,
-        roomsUpdated,
-        lastUpdated,
-        loadingRooms,
-        loadedRoomsLocally,
-        peer?.id.toString(),
-        rooms?.address &&
-            peer?.libp2p.directsub.getSubscribers(rooms.address.toString())
-                .size,
-    ]);
+    }, [params.name, lastUpdated, peer?.id.toString()]);
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
@@ -264,231 +194,219 @@ export const Room = () => {
     };
 
     return (
-        <Box>
-            <Grid container direction="column">
-                {loading || loadingPeer ? (
-                    <Grid item>
-                        <CircularProgress size={20} />
-                    </Grid>
-                ) : (
-                    <Grid item>
-                        <Typography variant="h4">{room?.name}</Typography>
-                    </Grid>
-                )}
-
-                <Grid
-                    item
-                    border="solid 1px"
-                    height="60vh"
-                    sx={{ overflowY: "scroll" }}
-                    padding={2}
-                    mt={2}
-                    mb={2}
-                >
-                    {posts?.length > 0 ? (
-                        <Grid container direction="column">
-                            {posts.map((p, ix) => (
+        <Grid container direction="column" sx={{ height: "100vh" }}>
+            {(loading || loadingPeer) && (
+                <Grid item>
+                    <CircularProgress size={20} />
+                </Grid>
+            )}
+            <Grid
+                item
+                height={`calc(100vh - ${
+                    (inputArea.current?.scrollHeight || 0) + "px"
+                } - 8px)`}
+                sx={{ overflowY: "auto" }}
+                padding={2}
+                mb="8px"
+            >
+                {posts?.length > 0 ? (
+                    <Grid container direction="column">
+                        {posts.map((p, ix) => (
+                            <Grid
+                                container
+                                item
+                                direction="column"
+                                key={ix}
+                                mb={1}
+                            >
                                 <Grid
-                                    container
                                     item
-                                    direction="column"
-                                    key={ix}
-                                    mb={1}
+                                    container
+                                    direction="row"
+                                    justifyItems="center"
+                                    spacing={0.5}
+                                    mb={-0.5}
                                 >
-                                    <Grid
-                                        item
-                                        container
-                                        direction="row"
-                                        justifyItems="center"
-                                        spacing={0.5}
-                                        mb={-0.5}
-                                    >
-                                        <Grid item>
-                                            <Typography
-                                                fontStyle="italic"
-                                                variant="caption"
-                                                color={
-                                                    p.entry.signatures[0].publicKey.equals(
-                                                        peer.identity.publicKey
-                                                    )
-                                                        ? "primary"
-                                                        : undefined
-                                                }
-                                            >
-                                                {shortName(
-                                                    p.entry.signatures[0].publicKey.toString()
-                                                )}
-                                            </Typography>
-                                        </Grid>
-                                        {p.entry._payload instanceof
-                                            EncryptedThing && (
-                                            <Grid
-                                                item
-                                                display="flex"
-                                                alignItems="center"
-                                            >
-                                                {" "}
-                                                <Tooltip
-                                                    title={
-                                                        <span
-                                                            style={{
-                                                                whiteSpace:
-                                                                    "pre-line",
-                                                            }}
-                                                        >
-                                                            {(
-                                                                p.entry
-                                                                    ._payload as EncryptedThing<any>
-                                                            )._envelope._ks
-                                                                .map((k) =>
-                                                                    shortName(
-                                                                        k._recieverPublicKey.toString()
-                                                                    )
-                                                                )
-                                                                .join("\n")}
-                                                        </span>
-                                                    }
-                                                >
-                                                    <IconButton>
-                                                        <LockIcon
-                                                            color="success"
-                                                            sx={{
-                                                                fontSize:
-                                                                    "14px",
-                                                            }}
-                                                        />{" "}
-                                                    </IconButton>
-                                                </Tooltip>{" "}
-                                            </Grid>
-                                        )}
-                                    </Grid>
                                     <Grid item>
-                                        <Typography>
-                                            {" "}
-                                            {p.value.message}
+                                        <Typography
+                                            fontStyle="italic"
+                                            variant="caption"
+                                            color={
+                                                p.entry.signatures[0].publicKey.equals(
+                                                    peer.identity.publicKey
+                                                )
+                                                    ? "primary"
+                                                    : undefined
+                                            }
+                                        >
+                                            {shortName(
+                                                p.entry.signatures[0].publicKey.toString()
+                                            )}
                                         </Typography>
                                     </Grid>
-                                </Grid>
-                            ))}
-                        </Grid>
-                    ) : (
-                        <>No messages found!</>
-                    )}
-                    <div ref={messagesEndRef} />
-                </Grid>
-
-                <Grid
-                    container
-                    item
-                    direction="row"
-                    justifyContent="space-between"
-                    spacing={1}
-                >
-                    <Grid item flex={1}>
-                        <TextField
-                            size="small"
-                            id="outlined-multiline-flexible"
-                            label="Create post"
-                            multiline
-                            maxRows={4}
-                            sx={{ width: "100%" }}
-                            onChange={(event) => {
-                                setText(event.target.value);
-                            }}
-                            onKeyPress={(ev) => {
-                                if (ev.key === "Enter" && !ev.shiftKey) {
-                                    ev.preventDefault();
-
-                                    // Send
-                                    createPost();
-                                }
-                            }}
-                            value={text}
-                        />
-                    </Grid>
-
-                    <Grid item>
-                        <IconButton
-                            disabled={!text || !room}
-                            onClick={createPost}
-                        >
-                            <Send />
-                        </IconButton>
-                    </Grid>
-                </Grid>
-                <Grid
-                    item
-                    container
-                    justifyContent="space-between"
-                    alignItems="center"
-                    spacing={1}
-                    direction="row"
-                    mt={2}
-                    mb={2}
-                >
-                    <Grid item flex={1} pr={1}>
-                        <FormControl sx={{ width: "100%" }}>
-                            <InputLabel id="demo-multiple-chip-label">
-                                Recievers
-                            </InputLabel>
-                            <Select
-                                labelId="recieversl"
-                                id="recievers"
-                                multiple
-                                value={receivers}
-                                onChange={handleRecieverChange}
-                                input={
-                                    <OutlinedInput
-                                        id="select-multiple-chip"
-                                        label="Recievers"
-                                    />
-                                }
-                                renderValue={(selected) => (
-                                    <Box
-                                        sx={{
-                                            display: "flex",
-                                            flexWrap: "wrap",
-                                            gap: 0.5,
-                                        }}
-                                    >
-                                        {selected.map((value) => (
-                                            <Chip
-                                                key={value}
-                                                label={shortName(value)}
-                                            />
-                                        ))}
-                                    </Box>
-                                )}
-                                MenuProps={MenuProps}
-                            >
-                                {identitiesInChatMap &&
-                                    [...identitiesInChatMap.keys()]?.map(
-                                        (id) => (
-                                            <MenuItem
-                                                key={id}
-                                                value={id}
-                                                style={getStyles(
-                                                    id,
-                                                    receivers,
-                                                    theme
-                                                )}
+                                    {p.entry._payload instanceof
+                                        EncryptedThing && (
+                                        <Grid
+                                            item
+                                            display="flex"
+                                            alignItems="center"
+                                        >
+                                            {" "}
+                                            <Tooltip
+                                                title={
+                                                    <span
+                                                        style={{
+                                                            whiteSpace:
+                                                                "pre-line",
+                                                        }}
+                                                    >
+                                                        {(
+                                                            p.entry
+                                                                ._payload as EncryptedThing<any>
+                                                        )._envelope._ks
+                                                            .map((k) =>
+                                                                shortName(
+                                                                    k._recieverPublicKey.toString()
+                                                                )
+                                                            )
+                                                            .join("\n")}
+                                                    </span>
+                                                }
                                             >
-                                                {shortName(id)}
-                                            </MenuItem>
-                                        )
+                                                <IconButton>
+                                                    <LockIcon
+                                                        color="success"
+                                                        sx={{
+                                                            fontSize: "14px",
+                                                        }}
+                                                    />{" "}
+                                                </IconButton>
+                                            </Tooltip>{" "}
+                                        </Grid>
                                     )}
-                            </Select>
-                        </FormControl>
+                                </Grid>
+                                <Grid item>
+                                    <Typography> {p.value.message}</Typography>
+                                </Grid>
+                            </Grid>
+                        ))}
                     </Grid>
-                    <Grid item pr={1}>
-                        <KeyIcon
-                            color={
-                                receivers?.length > 0 ? "success" : undefined
+                ) : (
+                    <>{/* No messages found! */}</>
+                )}
+                <div ref={messagesEndRef} />
+            </Grid>
+
+            <Grid
+                ref={inputArea}
+                container
+                item
+                direction="row"
+                justifyContent="space-between"
+                spacing={1}
+                marginTop="auto"
+            >
+                <Grid item flex={1}>
+                    <TextField
+                        size="small"
+                        id="outlined-multiline-flexible"
+                        label="Create post"
+                        multiline
+                        maxRows={4}
+                        sx={{ width: "100%" }}
+                        onChange={(event) => {
+                            setText(event.target.value);
+                        }}
+                        onKeyPress={(ev) => {
+                            if (ev.key === "Enter" && !ev.shiftKey) {
+                                ev.preventDefault();
+
+                                // Send
+                                createPost();
                             }
-                        />
-                    </Grid>
+                        }}
+                        value={text}
+                    />
+                </Grid>
+
+                <Grid item>
+                    <IconButton disabled={!text || !room} onClick={createPost}>
+                        <Send />
+                    </IconButton>
                 </Grid>
             </Grid>
-        </Box>
+            {/* <Grid
+            item
+            container
+            justifyContent="space-between"
+            alignItems="center"
+            spacing={1}
+            direction="row"
+            mt={2}
+            mb={2}
+        >
+            <Grid item flex={1} pr={1}>
+                <FormControl sx={{ width: "100%" }}>
+                    <InputLabel id="demo-multiple-chip-label">
+                        Recievers
+                    </InputLabel>
+                    <Select
+                        labelId="recieversl"
+                        id="recievers"
+                        multiple
+                        value={receivers}
+                        onChange={handleRecieverChange}
+                        input={
+                            <OutlinedInput
+                                id="select-multiple-chip"
+                                label="Recievers"
+                            />
+                        }
+                        renderValue={(selected) => (
+                            <Box
+                                sx={{
+                                    display: "flex",
+                                    flexWrap: "wrap",
+                                    gap: 0.5,
+                                }}
+                            >
+                                {selected.map((value) => (
+                                    <Chip
+                                        key={value}
+                                        label={shortName(value)}
+                                    />
+                                ))}
+                            </Box>
+                        )}
+                        MenuProps={MenuProps}
+                    >
+                        {identitiesInChatMap &&
+                            [...identitiesInChatMap.keys()]?.map(
+                                (id) => (
+                                    <MenuItem
+                                        key={id}
+                                        value={id}
+                                        style={getStyles(
+                                            id,
+                                            receivers,
+                                            theme
+                                        )}
+                                    >
+                                        {shortName(id)}
+                                    </MenuItem>
+                                )
+                            )}
+                    </Select>
+                </FormControl>
+            </Grid>
+            <Grid item pr={1}>
+                <KeyIcon
+                    color={
+                        receivers?.length > 0 ? "success" : undefined
+                    }
+                />
+            </Grid>
+        </Grid> */}
+        </Grid>
     );
 };

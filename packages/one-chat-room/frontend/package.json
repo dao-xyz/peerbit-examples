@@ -1,6 +1,6 @@
 {
-    "name": "chat-frontend",
-    "version": "0.1.0",
+    "name": "chat-room",
+    "version": "0.0.1",
     "private": true,
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "type": "module",

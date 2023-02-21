@@ -2,7 +2,13 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import createCache from "@emotion/cache";
 import styled from "@emotion/styled";
 import ReactDOM from "react-dom";
-import { getStreamPath, getPathFromKey, getKeyFromPath } from "./routes.js";
+import {
+    getStreamPath,
+    getPathFromKey,
+    getKeyFromPath,
+    CHAT_APP,
+    STREAMING_APP,
+} from "./routes.js";
 import { CacheProvider } from "@emotion/react";
 import {
     usePeer,
@@ -51,31 +57,26 @@ const PreviewPortal = (props: any) => {
     );
 };
 
-//"http://localhost:5801/"
-const STREAMING_APP = ["development", "staging"].includes(import.meta.env.MODE)
-    ? "https://stream.test.xyz:5801/#"
-    : "https://stream.dao.xyz/#"; /*  "https://iframe.test.xyz:5801" */ // "https://stream.test.xyz:5801"; //   "https://stream.peerchecker.com" //
 const keypairs = new Map<string, Ed25519Keypair>();
 export const Canvas = () => {
     const { peer } = usePeer();
     const params = useParams();
     const myCanvas = useRef<Promise<MyCanvas>>(null);
     const [rects, setRects] = useState<Rect[]>([]);
-
     const [idArgs, setIdArgs] = useState<{
         node: PublicSignKey;
     }>();
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
-
-    useEffect(() => {}, [peer?.id, params?.node]);
+    const chatKeypairRef = useRef<Ed25519Keypair>(null);
 
     const addRect = async () => {
         const { key: keypair } = await getFreeKeypair("canvas");
-        (await myCanvas.current).rects.put(
+        const c = await myCanvas.current;
+        c.rects.put(
             new Rect({
                 keypair,
                 publicKey: keypair.publicKey,
-                position: new Position({ x: 0, y: 0, z: 0 }),
+                position: new Position({ x: 0, y: c.rects.index.size, z: 0 }),
                 size: new Size({ height: 100, width: 100 }),
                 src: STREAMING_APP + "/" + getStreamPath(keypair.publicKey),
             })
@@ -87,11 +88,6 @@ export const Canvas = () => {
             return;
         }
 
-        console.log(
-            peer.identity.publicKey.hashcode(),
-            peer.idKey.publicKey.hashcode(),
-            peer.id.toString()
-        );
         const node = getKeyFromPath(params.key);
         let isOwner = peer.idKey.publicKey.equals(node);
         setIsOwner(isOwner);
@@ -111,8 +107,13 @@ export const Canvas = () => {
                         setRects(
                             (
                                 await Promise.all(
-                                    [...canvas.rects.index.index.values()].map(
-                                        async (x) => {
+                                    [...canvas.rects.index.index.values()]
+                                        .sort(
+                                            (a, b) =>
+                                                a.value.position.y -
+                                                b.value.position.y
+                                        )
+                                        .map(async (x) => {
                                             if (isOwner) {
                                                 if (!x.value.keypair) {
                                                     // try to find it in memory
@@ -143,12 +144,16 @@ export const Canvas = () => {
                                                         await getFreeKeypair(
                                                             "canvas"
                                                         );
+
+                                                    console.log(
+                                                        "FREE KEYPAIR",
+                                                        keypair.publicKey.hashcode()
+                                                    );
                                                     x.value.keypair = keypair;
                                                 }
                                             }
                                             return x.value;
-                                        }
-                                    )
+                                        })
                                 )
                             ).filter((x) => !!x)
                         );
@@ -161,7 +166,7 @@ export const Canvas = () => {
                 }
 
                 if (isOwner) {
-                    addRect();
+                    //addRect();
                     /*     const { key: keypair2 } = await getFreeKeypair('canvas')
                     canvas.rects.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) })) */
                 }
@@ -175,38 +180,94 @@ export const Canvas = () => {
             });
     }, [peer?.id.toString()]);
 
-    const onIframe = useCallback((node, rect: Rect) => {
-        const resize = iFrameResize.iframeResize(
-            { /* heightCalculationMethod: 'bodyOffset', */ log: false },
-            node.target
-        );
-        let interval = setInterval(() => {
-            resize[0]["iFrameResizer"].resize();
-        }, 1000); // resize a few times in the beginning, height calculations seems to initialize incorrectly
-        submitKeypairChange(node.target, rect.keypair, rect.src);
-    }, []);
+    const onIframe = useCallback(
+        (
+            node,
+            rect: { keypair: Ed25519Keypair; src: string },
+            autoResize: boolean = true
+        ) => {
+            console.log("LOAD IFRAME");
+            if (autoResize) {
+                const resize = iFrameResize.iframeResize(
+                    { /* heightCalculationMethod: 'bodyOffset', */ log: false },
+                    node.target
+                );
+                setInterval(() => {
+                    resize[0]["iFrameResizer"].resize();
+                }, 1000); // resize a few times in the beginning, height calculations seems to initialize incorrectly
+            }
+            submitKeypairChange(node.target, rect.keypair, rect.src);
+        },
+        []
+    );
 
     return (
-        <Box sx={{ flexDirection: "column", p: 4 }}>
-            {rects.map((x, ix) => {
-                console.log(x.src);
-                return (
-                    <Grid item key={ix} sx={{ maxWidth: "500px" }}>
-                        <iframe
-                            onLoad={(event) => onIframe(event, x)}
-                            style={{ width: "100%", height: "100%", border: 0 }}
-                            src={x.src}
-                            allow="camera; microphone; display-capture; autoplay; clipboard-write;"
-                        ></iframe>
-                        {/*  <Box sx={{ backgroundColor: 'red', width: '100%', height: '100%' }}> RED</Box> */}
-                    </Grid>
-                );
-            })}
-            {isOwner && (
-                <IconButton size="large" onClick={addRect}>
-                    <Add />
-                </IconButton>
-            )}
-        </Box>
+        <Grid container direction="row">
+            <Grid item>
+                <Box sx={{ flexDirection: "column", p: 4 }}>
+                    {rects.map((x, ix) => {
+                        console.log(x.src);
+                        return (
+                            <Grid item key={ix} sx={{ maxWidth: "500px" }}>
+                                <iframe
+                                    onLoad={(event) => onIframe(event, x)}
+                                    style={{
+                                        width: "100%",
+                                        height: "100%",
+                                        border: 0,
+                                    }}
+                                    src={x.src}
+                                    allow="camera; microphone; display-capture; autoplay; clipboard-write;"
+                                ></iframe>
+                                {/*  <Box sx={{ backgroundColor: 'red', width: '100%', height: '100%' }}> RED</Box> */}
+                            </Grid>
+                        );
+                    })}
+                    {isOwner && (
+                        <IconButton size="large" onClick={addRect}>
+                            <Add />
+                        </IconButton>
+                    )}
+                </Box>
+            </Grid>
+            <Grid item marginLeft="auto" mr={1}>
+                {idArgs?.node && (
+                    <iframe
+                        onLoad={async (event) => {
+                            chatKeypairRef.current =
+                                chatKeypairRef.current ||
+                                (await Ed25519Keypair.create());
+                            const kp = chatKeypairRef.current;
+                            if (
+                                (event.target as HTMLIFrameElement).src ==
+                                CHAT_APP
+                            ) {
+                                (event.target as HTMLIFrameElement).src =
+                                    CHAT_APP +
+                                    "/" +
+                                    getPathFromKey(idArgs.node);
+                            } else {
+                                onIframe(event, {
+                                    keypair: kp,
+                                    src:
+                                        CHAT_APP +
+                                        "/" +
+                                        getPathFromKey(idArgs.node),
+                                });
+                            }
+                        }}
+                        style={{
+                            display: "block",
+                            width: "100%",
+                            height: "calc(100vh - 16px)",
+                            border: 0,
+                            overflow: "hidden",
+                        }}
+                        src={CHAT_APP}
+                        allow="camera; microphone; display-capture; autoplay; clipboard-write;"
+                    ></iframe>
+                )}
+            </Grid>
+        </Grid>
     );
 };
