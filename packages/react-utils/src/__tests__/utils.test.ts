@@ -5,7 +5,7 @@ import { delay } from "@dao-xyz/peerbit-time";
 import { default as sodium } from "libsodium-wrappers";
 import { v4 as uuid } from "uuid";
 var LocalStorage = nodelocalstorage.LocalStorage;
-var localStorage = new LocalStorage("./tmp");
+var localStorage = new LocalStorage("./tmp/getKeypair");
 globalThis.localStorage = localStorage;
 
 describe("getKeypair", () => {
@@ -33,7 +33,7 @@ describe("getKeypair", () => {
         expect(path3).toEqual(path1);
         expect(keypair3.equals(keypair)).toBeTrue();
 
-        const allKeypair = await getAllKeyPairs("id");
+        const allKeypair = await getAllKeyPairs(id);
         expect(allKeypair.map((x) => x.publicKey.hashcode())).toEqual([
             keypair3.publicKey.hashcode(),
             keypair2.publicKey.hashcode(),

@@ -22,7 +22,7 @@ import nodelocalstorage from "node-localstorage";
 import { jest } from "@jest/globals";
 import { delay } from "@dao-xyz/peerbit-time";
 var LocalStorage = nodelocalstorage.LocalStorage;
-var localStorage = new LocalStorage("./tmp");
+var localStorage = new LocalStorage("./tmp/FastMutex");
 globalThis.localStorage = localStorage;
 describe("FastMutex", () => {
     let sandbox;

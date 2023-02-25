@@ -2,8 +2,8 @@ import { usePeer } from "@dao-xyz/peerbit-react";
 import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { getKeyFromStreamKey } from "./routes";
-import { Stream } from "./Stream";
-import { View } from "./View";
+import { Stream } from "./media/streamer/Stream";
+import { View } from "./media/viewer/View";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 
 export const StreamOrView = () => {

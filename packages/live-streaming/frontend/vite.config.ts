@@ -14,14 +14,14 @@ export default defineConfig({
     /*   server: {
           port: 5801,
       }, */
-    server: fs.existsSync("./.cert/key.pem")
-        ? {
-              port: 5801,
-              https: {
-                  key: fs.readFileSync("./.cert/key.pem"),
-                  cert: fs.readFileSync("./.cert/cert.pem"),
-              },
-              host: "stream.test.xyz",
-          }
-        : undefined,
+    /*    server: fs.existsSync("./.cert/key.pem")
+           ? {
+                 port: 5801,
+                 https: {
+                     key: fs.readFileSync("./.cert/key.pem"),
+                     cert: fs.readFileSync("./.cert/cert.pem"),
+                 },
+                 host: "stream.test.xyz",
+             }
+           : undefined, */
 });

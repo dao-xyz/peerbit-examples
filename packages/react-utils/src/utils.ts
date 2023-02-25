@@ -41,7 +41,7 @@ export const getTabId = () => {
     }
 };
 
-const ID_COUNTER_KEY = "idCounter";
+const ID_COUNTER_KEY = "idc/";
 
 const getKeyId = (prefix: string, id: number) => prefix + "/" + id;
 export const getFreeKeypair = async (
