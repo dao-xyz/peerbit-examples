@@ -1,6 +1,5 @@
 .video-wrapper {
     width: 100%;
-    max-width: 700px;
     position: relative;
     display: flex;
     justify-content: center;
@@ -19,7 +18,7 @@
     bottom: 0px;
     width: 100%;
     flex-wrap: wrap;
-    background: rgba(255, 255, 255, 0.25);
+    background: rgba(41, 41, 41, 0.25);
     box-shadow: 0 8px 32px 0 rgba(255, 255, 255, 0.1);
 
     backdrop-filter: blur(1px);
@@ -28,23 +27,14 @@
     transition: 1s;
 
 
-    border: 1px solid rgba(255, 255, 255, 0.18);
+    border: 1px solid rgba(41, 41, 41, 0.25);
     /* transform: translateY(150%); */
     transition: all 0.3s ease-in-out;
+
+
 }
 
-.actions button {
-    background: none;
-    border: none;
-    outline: none;
-    cursor: pointer;
-}
 
-.actions button i {
-    background-color: none;
-    color: white;
-    font-size: 30px;
-}
 
 input[type="range"] {
     -webkit-appearance: none !important;
@@ -65,15 +55,17 @@ input[type="range"]::-moz-range-progress {
 }
 
 
-.mute-btn {
-    background: none;
-    border: none;
-    outline: none;
-    cursor: pointer;
+
+#volume-button:hover+#volume-slider {
+    display: flex;
 }
 
-.mute-btn i {
-    background-color: none;
-    color: white;
-    font-size: 20px;
+#volume-slider:hover {
+    display: flex;
 }
+
+
+
+/* video::-webkit-media-controls-enclosure {
+    display: none !important;
+} */

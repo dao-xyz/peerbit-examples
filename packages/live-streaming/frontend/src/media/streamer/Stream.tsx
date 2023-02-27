@@ -22,9 +22,15 @@ import {
 } from "@mui/material";
 import { videoNoAudioMimeType, videoAudioMimeType } from "../format";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
-import { SourceSetting, StreamType } from "./../controller/settings";
 import { Controls } from "../controller/Control";
-import { Resolution, RESOLUTIONS, resolutionToSourceSetting } from "../controller/SourceSettings";
+import {
+    SourceSetting,
+    StreamType,
+    Resolution,
+    resolutionToSourceSetting,
+    RESOLUTIONS,
+} from "./../controller/settings.js";
+
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
     mozCaptureStream?(fps?: number): MediaStream;
@@ -37,16 +43,25 @@ if (PACK_PERFECTLY) {
 /* globalThis.VSTATS = new Map(); */
 
 export const Stream = (args: { node: PublicSignKey }) => {
-    const [streamType, setStreamType] = useState<StreamType>({ type: "noise" });
-    const [quality, setQuality] = useState<SourceSetting[]>([resolutionToSourceSetting(720)]);
-    const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>([]);
-    const videoRef = useRef<HTMLVideoElementWithCaptureStream>(null);
-    const videoRefsToRecord = useRef<HTMLVideoElement[]>([])
+    const streamType = useRef<StreamType>({ type: "noise" });
+    const [quality, setQuality] = useState<SourceSetting[]>([
+        resolutionToSourceSetting(360),
+    ]);
+    const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
+        []
+    );
+    const videoRefsToRecord = useRef<HTMLVideoElement[]>([]);
     const videoLoadedOnce = useRef(false);
-    const [mediaRecorders, setMediaRecorders] = useState<{ ref: HTMLVideoElement, stream: MediaStreamDB; recorder: MediaRecorder }[]>([]);
+    const mediaRecorders = useRef<
+        {
+            ref: HTMLVideoElement;
+            stream: MediaStreamDB;
+            settings: SourceSetting;
+            recorder?: MediaRecorder;
+        }[]
+    >([]);
     const { peer } = usePeer();
     const mediaStreamDBs = useRef<Promise<MediaStreamDBs>>(null);
-    const updatingSource = useRef<boolean[] | boolean>(false);
 
     useEffect(() => {
         if (videoLoadedOnce.current) {
@@ -54,265 +69,347 @@ export const Stream = (args: { node: PublicSignKey }) => {
         }
         updateStream({ streamType: { type: "noise" } });
         videoLoadedOnce.current = true;
-    }, [videoRef]);
+    }, [videoRefsToRecord.current.length > 0]);
 
     // TODO
     useEffect(() => {
         if (!peer?.libp2p || !args.node || mediaStreamDBs.current) {
             return;
         }
-        mediaStreamDBs.current = peer.open(
-            new MediaStreamDBs(peer.idKey.publicKey)
-        );
+        mediaStreamDBs.current = peer
+            .open(new MediaStreamDBs(peer.idKey.publicKey))
+            .then(async (db) => {
+                await db.load();
+
+                // See all previous dbs as inactive, we do this since the last session might have ended unexpectedly
+                [...db.streams.index.index.values()].map((x) =>
+                    db.streams.put(
+                        new MediaStreamDBInfo({ db: x.value.db, active: false })
+                    )
+                );
+                return db;
+            });
     }, [peer?.id, args.node?.hashcode()]);
 
-    const updateStream = async (properties: { streamType?: StreamType, quality?: SourceSetting[] }) => {
+    const updateStream = async (properties: {
+        streamType?: StreamType;
+        quality?: SourceSetting[];
+    }) => {
         if (properties.streamType) {
-            setStreamType(properties.streamType);
+            streamType.current = properties.streamType;
         }
-        let streamTypeSetting = properties.streamType || streamType
-        let qualitySetting = properties.quality || quality
+
+        let qualitySetting = properties.quality || quality;
         let newQualities: Set<number>;
+        let reInitializeAll = false;
         if (properties.streamType) {
             // New stream type -> all qualities are "new"
-            newQualities = new Set(qualitySetting.map((x, i) => x.video.height));
-        }
-        else {
-            newQualities = !properties.quality ? new Set() : new Set(properties.quality.map((x, i) => !quality.find(y => JSON.stringify(y) === JSON.stringify(x)) ? x.video.height : undefined).filter(x => x != null));
-        }
+            newQualities = new Set(
+                qualitySetting.map((x, i) => x.video.height)
+            );
+            reInitializeAll = true;
+        } else {
+            newQualities = !properties.quality
+                ? new Set()
+                : new Set(
+                      properties.quality
+                          .map((x, i) =>
+                              !quality.find(
+                                  (y) => JSON.stringify(y) === JSON.stringify(x)
+                              )
+                                  ? x.video.height
+                                  : undefined
+                          )
+                          .filter((x) => x != null)
+                  );
 
-        console.log("NEW QUALITIES", newQualities, quality, properties.quality)
-
-        setQuality(qualitySetting)
+            // There seems to be an issue that we have to reopen all streams
+            // Else we will never be able to request the highest resolution
+            reInitializeAll = true;
+            if (properties.quality) {
+                outer: for (const q of properties.quality) {
+                    if (!newQualities.has(q.video.height)) {
+                        for (const nq of newQualities) {
+                            if (q.video.height >= nq) {
+                                reInitializeAll = false;
+                                break outer;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         /*  if (!videoRef.current) {
              return;
          }
-  */
+    */
 
-        updatingSource.current = true;
         let removedStreamDBs = new Set();
-        if (properties.quality) {
 
+        if (reInitializeAll) {
+            // TODO, do we really need to inactivate dbs if we are going to stream same quality?
+
+            const dbs = await mediaStreamDBs.current;
+            if (dbs) {
+                const allStreams = [...dbs.streams.index.index.values()];
+                for (const stream of allStreams) {
+                    // Inactivate existing stream
+                    removedStreamDBs.add(stream.value.id);
+                    await dbs.streams.put(
+                        new MediaStreamDBInfo({
+                            active: false,
+                            db: stream.value.db,
+                        })
+                    );
+                }
+            }
+        } else if (properties.quality) {
             /// Quality has changed!
             /// Inactivate all that are no longer supported
             const dbs = await mediaStreamDBs.current;
             if (dbs) {
-                const allStreams = [...dbs.streams.index.index.values()].filter(x => x.value.active)
+                const allStreams = [...dbs.streams.index.index.values()].filter(
+                    (x) => x.value.active
+                );
                 for (const stream of allStreams) {
                     // Inactivate existing stream
-                    if (!properties.quality.find(x => x.video.height === stream.value.db.info.video.height)) {
-                        console.log('CAN NOT FIND', stream.value.db.info.video.height, properties.quality.map(x => x.video.height))
+                    if (
+                        !properties.quality.find(
+                            (x) =>
+                                x.video.height ===
+                                stream.value.db.info.video.height
+                        )
+                    ) {
+                        console.log(
+                            "CAN NOT FIND",
+                            stream.value.db.info.video.height,
+                            properties.quality.map((x) => x.video.height)
+                        );
                         removedStreamDBs.add(stream.value.id);
-                        await dbs.streams.put(new MediaStreamDBInfo({ active: false, db: stream.value.db }))
+                        await dbs.streams.put(
+                            new MediaStreamDBInfo({
+                                active: false,
+                                db: stream.value.db,
+                            })
+                        );
                     }
                 }
             }
         }
 
-        if (properties.streamType) { // TODO, do we really need to inactivate dbs if we are going to stream same quality?
-
-            console.log('REMOVE ALL')
-            const dbs = await mediaStreamDBs.current;
-            if (dbs) {
-                const allStreams = [...dbs.streams.index.index.values()]
-                for (const stream of allStreams) {
-                    // Inactivate existing stream
-                    removedStreamDBs.add(stream.value.id);
-                    await dbs.streams.put(new MediaStreamDBInfo({ active: false, db: stream.value.db }))
-                }
-            }
-        }
-
-        console.log('REMOVED', removedStreamDBs, properties.quality)
-
-        if (mediaRecorders.length > 0) {
+        if (mediaRecorders.current.length > 0) {
             let newMediaRecorders = [];
-            for (const mediaRecorder of mediaRecorders) {
-                if (removedStreamDBs.has(mediaRecorder.stream.id)) {
-                    console.log('STOP RECORDER!')
-                    mediaRecorder.ref.src = '';
-                    (mediaRecorder.ref.srcObject as MediaStream)?.getTracks()
+            for (const mediaRecorder of mediaRecorders.current) {
+                let removed = false;
+                if (removedStreamDBs.has(mediaRecorder.stream.id) || removed) {
+                    mediaRecorder.ref.removeAttribute("DISPLAY_MEDIA_HEIGHT");
+                    mediaRecorder.ref.removeAttribute("src");
+                    (mediaRecorder.ref.srcObject as MediaStream)
+                        ?.getTracks()
                         .forEach((track) => {
                             if (track.readyState == "live") {
                                 track.stop();
                             }
-                            (videoRef.current.srcObject as MediaStream).removeTrack(
-                                track
-                            );
+                            (
+                                mediaRecorder.ref.srcObject as MediaStream
+                            ).removeTrack(track);
                         });
 
-                    if (mediaRecorder.recorder.state !== 'inactive') {
+                    if (
+                        mediaRecorder.recorder &&
+                        mediaRecorder.recorder.state !== "inactive"
+                    ) {
                         mediaRecorder.recorder.stop();
-                        await waitFor(() => mediaRecorder.recorder.state === "inactive");
+                        await waitFor(
+                            () => mediaRecorder.recorder.state === "inactive"
+                        );
                     }
-                }
-                else {
+                    delete mediaRecorder.recorder;
+                    mediaRecorder.ref.srcObject = undefined;
+
+                    // removed = true;
+                } else {
                     newMediaRecorders.push(mediaRecorder);
                 }
             }
-            setMediaRecorders(newMediaRecorders);
+
+            mediaRecorders.current = newMediaRecorders;
         }
 
+        videoRefsToRecord.current = videoRefsToRecord.current.filter(
+            (x) => !!x
+        );
+        // Quality needs to be sorted highest first, so that requesting user media works as expected (bug/feature of chrome?)
 
+        setQuality(
+            [...qualitySetting].sort((a, b) => b.video.height - a.video.height)
+        );
+    };
 
-        /*  if (videoRef.current.srcObject instanceof MediaStream) {
-             (videoRef.current.srcObject as MediaStream)
-                 .getTracks()
-                 .forEach((track) => {
-                     if (track.readyState == "live") {
-                         track.stop();
-                     }
-                     (videoRef.current.srcObject as MediaStream).removeTrack(
-                         track
-                     );
-                 });
-         } */
+    const onRef = async (
+        videoRef: HTMLVideoElementWithCaptureStream,
+        s: SourceSetting
+    ) => {
+        if (!videoRef) {
+            return videoRef;
+        }
 
-        let allRefs = [videoRef.current, ...videoRefsToRecord.current].filter(x => !!x)
-        const rv = qualitySetting.sort((a, b) => a.video.height - b.video.height).reverse()
-
-        switch (streamTypeSetting.type) {
+        switch (streamType.current.type) {
             case "noise":
-                videoRef.current.src = import.meta.env.BASE_URL + "noise.mp4";
-                videoRef.current.load();
+                if (videoRef.src?.length > 0) {
+                    return;
+                }
+                videoRef.muted = true;
+                videoRef.src = import.meta.env.BASE_URL + "noise.mp4";
+                videoRef.load();
                 break;
             case "media":
-                videoRef.current.src = streamTypeSetting.src;
-                videoRef.current.load();
+                videoRef.src = streamType.current.src;
+                videoRef.load();
                 break;
 
             case "camera":
-                updatingSource.current = new Array(quality.length).fill(true)
-                for (const [ix, s] of rv.entries()) {
-                    let currentVideoRef = allRefs.find(x => (x.srcObject as MediaStream)?.getVideoTracks()?.[0]?.getSettings().height === s.video.height);
-                    if (!currentVideoRef) {
-                        currentVideoRef = allRefs.find(x => !x.srcObject);// find one with no video
-                    }
-                    if (!currentVideoRef) {
-                        currentVideoRef = allRefs[0];
-                    }
+                /*   updatingSource.current = new Array(quality.length).fill(true)
+                  for (const [ix, s] of rv.entries()) {
+                      let currentVideoRef = allRefs.find(x => (x.srcObject as MediaStream)?.getVideoTracks()?.[0]?.getSettings().height === s.video.height);
+                      if (!currentVideoRef) {
+                          currentVideoRef = allRefs.find(x => !x.srcObject);// find one with no video
+                      }
+                      if (!currentVideoRef) {
+                          currentVideoRef = allRefs[0];
+                      }
+  
+  
+  
+                    //  console.log('Start new camera stream?', s.video.height, newQualities, newQualities.has(s.video.height), quality)
+                      if (quality.map(x=>x.video.height).includes(s.video.height) || (currentVideoRef.srcObject as MediaStream)?.active === false) {
+                          const stream = await navigator.mediaDevices
+                              .getUserMedia({
+                                  video: { height: s.video.height },
+                                  audio: !!s.audio
+  
+                              })
+  
+                          currentVideoRef.srcObject = stream;
+                      }
+  
+                      updatingSource.current[ix] = false
+                  }
+                  */
 
-                    console.log('Start new camera stream?', s.video.height, newQualities, newQualities.has(s.video.height), quality)
-                    if (newQualities.has(s.video.height)) {
-                        const stream = await navigator.mediaDevices
-                            .getUserMedia({
-                                video: { height: s.video.height/* , aspectRatio: { ideal: 1 }  */ },
-                                audio: !!s.audio
-
-                            })
-                        currentVideoRef.srcObject = stream;
+                if ((videoRef.srcObject as MediaStream)?.active === true) {
+                    console.log(
+                        (videoRef.srcObject as MediaStream)
+                            .getVideoTracks()[0]
+                            .getSettings().height,
+                        s.video.height
+                    );
+                    if (
+                        Math.abs(
+                            (videoRef.srcObject as MediaStream)
+                                .getVideoTracks()[0]
+                                .getSettings().height - s.video.height
+                        ) < 50
+                    ) {
+                        console.log(
+                            "ALREADY HAVE MEDIA STREAM",
+                            s.video.height
+                        );
+                        return;
                     }
-
-                    updatingSource.current[ix] = false
+                    /* if (videoRef.getAttribute("DISPLAY_MEDIA_HEIGHT") === String(s.video.height)) {
+                        console.log('ALREADY HAVE MEDIA STREAM', s.video.height, (videoRef.srcObject as MediaStream).getVideoTracks()[0].getSettings().height)
+                        return;
+                    } */
                 }
+
+                if (videoRef.getAttribute("REQUESTING_DISPLAY_MEDIA") === "Y") {
+                    return;
+                }
+                videoRef.setAttribute("REQUESTING_DISPLAY_MEDIA", "Y");
+                videoRef.srcObject = await navigator.mediaDevices.getUserMedia({
+                    video: { height: s.video.height },
+                    audio: !!s.audio,
+                });
+                videoRef.removeAttribute("REQUESTING_DISPLAY_MEDIA");
+                videoRef.setAttribute(
+                    "DISPLAY_MEDIA_HEIGHT",
+                    String(s.video.height)
+                );
 
                 break;
 
             case "screen":
-                updatingSource.current = new Array(qualitySetting.length).fill(true)
-
-                for (const [ix, s] of rv.entries()) {
-                    let currentVideoRef = allRefs.find(x => (x.srcObject as MediaStream)?.getVideoTracks()?.[0]?.getSettings().height === s.video.height);
-                    if (!currentVideoRef) {
-                        currentVideoRef = allRefs.find(x => !x.srcObject);// find one with no video
+                if ((videoRef.srcObject as MediaStream)?.active === true) {
+                    console.log(
+                        (videoRef.srcObject as MediaStream)
+                            .getVideoTracks()[0]
+                            .getSettings().height,
+                        s.video.height
+                    );
+                    if (
+                        Math.abs(
+                            (videoRef.srcObject as MediaStream)
+                                .getVideoTracks()[0]
+                                .getSettings().height - s.video.height
+                        ) < 50
+                    ) {
+                        console.log(
+                            "ALREADY HAVE MEDIA STREAM",
+                            s.video.height
+                        );
+                        return;
                     }
-                    if (!currentVideoRef) {
-                        currentVideoRef = allRefs[0];
-                    }
-
-                    if (newQualities.has(s.video.height)) {
-                        const stream = await navigator.mediaDevices
-                            .getDisplayMedia({
-                                video: { height: s.video.height }, // { height: s.video.height, width: s.video.width },
-                                audio: !!s.audio,
-                            })
-
-
-                        currentVideoRef.srcObject = stream;
-
-                    }
-                    updatingSource.current[ix] = false
-
+                    /* if (videoRef.getAttribute("DISPLAY_MEDIA_HEIGHT") === String(s.video.height)) {
+                        console.log('ALREADY HAVE MEDIA STREAM', s.video.height, (videoRef.srcObject as MediaStream).getVideoTracks()[0].getSettings().height)
+                        return;
+                    } */
                 }
+
+                if (videoRef.getAttribute("REQUESTING_DISPLAY_MEDIA") === "Y") {
+                    return;
+                }
+                videoRef.setAttribute("REQUESTING_DISPLAY_MEDIA", "Y");
+                videoRef.srcObject =
+                    await navigator.mediaDevices.getDisplayMedia({
+                        video: { height: s.video.height }, // { height: s.video.height, width: s.video.width },
+                        audio: !!s.audio,
+                    });
+                videoRef.removeAttribute("REQUESTING_DISPLAY_MEDIA");
+                videoRef.setAttribute(
+                    "DISPLAY_MEDIA_HEIGHT",
+                    String(s.video.height)
+                );
+
+                //updatingSource.current[ix] = false
                 break;
         }
-        updatingSource.current = false;
 
-    };
+        await waitFor(() => !videoRef.paused);
 
-    const onStart = async (videoRef: HTMLVideoElementWithCaptureStream, sourceSetting: SourceSetting) => {
-        let existingMediaRecorder = mediaRecorders.find(x => x.ref === videoRef);
+        // stream.getAudioTracks().forEach((t) => stream.removeTrack(t)); // Remove audo tracks, else the MediaRecorder will not work
+        const dbs = await waitFor(() => mediaStreamDBs.current);
 
-        /*  if ((Array.isArray(updatingSource.current) && updatingSource.current[index]) || (!Array.isArray(updatingSource.current) && updatingSource.current)) {
-             return;
-         } */
-        console.log(updatingSource.current)
-
-        let stream: MediaStream = videoRef
-            .srcObject as any as MediaStream;
-
-        if (videoRef && streamType) {
-
-            console.log('UPDATE AVAILABLE RESOLUTION!', streamType.type)
-            // TODO why do we need this here?
-            if (streamType.type === "noise" || streamType.type === "media") {
-                setResolutionOptions([videoRef.videoHeight as Resolution]);
-            } else {
-                setResolutionOptions(RESOLUTIONS);
-            }
-        }
-
+        //    const allStreams = [...dbs.streams.index.index.values()].filter(x => x.value.active).sort((a, b));
+        console.log("start stream!");
+        let existingMediaRecorder = mediaRecorders.current.find(
+            (x) => x.settings.video.height === s.video.height
+        );
         if (existingMediaRecorder) {
-            console.log('already set!', existingMediaRecorder.recorder.state)
-            return // already set!
-        }
-
-
-        // use srcObject
-        if (!stream) {
-            let fps = 0;
-            if (videoRef.captureStream) {
-                stream = videoRef.captureStream(fps);
-            } else if (videoRef.mozCaptureStream) {
-                stream = videoRef.mozCaptureStream(fps);
-            } else {
-                console.error(
-                    "Stream capture is not supported",
-                    videoRef.captureStream
-                );
-                stream = null;
-            }
-        }
-        console.log("START", videoRef.videoWidth, stream.getVideoTracks()[0].getSettings().width, streamType);
-
-        if (stream) {
-            // stream.getAudioTracks().forEach((t) => stream.removeTrack(t)); // Remove audo tracks, else the MediaRecorder will not work
-            const dbs = await mediaStreamDBs.current;
-
-            //    const allStreams = [...dbs.streams.index.index.values()].filter(x => x.value.active).sort((a, b));
-            console.log('start stream!')
-            let recorder: MediaRecorder;
+            existingMediaRecorder.ref = videoRef;
+            existingMediaRecorder.recorder = undefined;
+            existingMediaRecorder.settings = s;
+        } else {
             let mediaStreamDB: MediaStreamDB;
-
-            if (streamType.type !== "noise") {
-
-                const setting = sourceSetting
-                recorder = (
-                    new MediaRecorder(stream, {
-                        mimeType: setting.audio
-                            ? videoAudioMimeType
-                            : videoNoAudioMimeType,
-                        videoBitsPerSecond: setting.video.bitrate,
-                    })
-                );
+            if (streamType.current.type !== "noise") {
                 mediaStreamDB = await peer.open(
                     new MediaStreamDB(
                         peer.idKey.publicKey,
                         new MediaStreamInfo({
-                            audio: setting.audio,
+                            audio: s.audio,
                             video: {
-                                ...setting.video,
+                                ...s.video,
                                 height: videoRef.videoHeight,
                                 width: videoRef.videoWidth,
                             },
@@ -322,15 +419,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         role: new ReplicatorType(),
                     }
                 );
-                await dbs.streams.put(new MediaStreamDBInfo({ active: true, db: mediaStreamDB }));
-
+                await dbs.streams.put(
+                    new MediaStreamDBInfo({ active: true, db: mediaStreamDB })
+                );
             } else {
-                stream.getAudioTracks().forEach((t) => stream.removeTrack(t));
-                recorder = new MediaRecorder(stream, {
-                    mimeType: videoNoAudioMimeType,
-                    videoBitsPerSecond: 1e5,
-                })
-
                 mediaStreamDB = await peer.open(
                     new MediaStreamDB(
                         peer.idKey.publicKey,
@@ -347,15 +439,80 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     }
                 );
 
-                await dbs.streams.put(new MediaStreamDBInfo({ active: true, db: mediaStreamDB }));
+                await dbs.streams.put(
+                    new MediaStreamDBInfo({ active: true, db: mediaStreamDB })
+                );
             }
+            mediaRecorders.current.push({
+                ref: videoRef,
+                settings: s,
+                stream: mediaStreamDB,
+            });
+        }
+    };
 
-            let newMediaRecorders = [...mediaRecorders];
-            newMediaRecorders.push({ ref: videoRef, recorder, stream: mediaStreamDB })
-            console.log(newMediaRecorders)
-            setMediaRecorders(
-                newMediaRecorders
-            );
+    const onStart = async (
+        videoRef: HTMLVideoElementWithCaptureStream,
+        sourceSetting: SourceSetting
+    ) => {
+        let existingMediaRecorder = await waitFor(() =>
+            mediaRecorders.current.find(
+                (x) => x.settings.video.height === sourceSetting.video.height
+            )
+        );
+
+        let stream: MediaStream = videoRef.srcObject as any as MediaStream;
+
+        if (videoRef && streamType) {
+            // TODO why do we need this here?
+            if (
+                streamType.current.type === "noise" ||
+                streamType.current.type === "media"
+            ) {
+                setResolutionOptions([videoRef.videoHeight as Resolution]);
+            } else {
+                setResolutionOptions(RESOLUTIONS);
+            }
+        }
+
+        if (existingMediaRecorder.recorder) {
+            return; // already set!
+        }
+
+        // use srcObject
+        if (!stream) {
+            let fps = 0;
+            if (videoRef.captureStream) {
+                stream = videoRef.captureStream(fps);
+            } else if (videoRef.mozCaptureStream) {
+                stream = videoRef.mozCaptureStream(fps);
+            } else {
+                console.error(
+                    "Stream capture is not supported",
+                    videoRef.captureStream
+                );
+                stream = null;
+            }
+        }
+
+        if (stream) {
+            let recorder: MediaRecorder;
+            if (streamType.current.type !== "noise") {
+                const setting = sourceSetting;
+                recorder = new MediaRecorder(stream, {
+                    mimeType: setting.audio
+                        ? videoAudioMimeType
+                        : videoNoAudioMimeType,
+                    videoBitsPerSecond: setting.video.bitrate,
+                });
+            } else {
+                stream.getAudioTracks().forEach((t) => stream.removeTrack(t));
+                recorder = new MediaRecorder(stream, {
+                    mimeType: videoNoAudioMimeType,
+                    videoBitsPerSecond: 1e5,
+                });
+            }
+            existingMediaRecorder.recorder = recorder;
 
             let first = true;
             let header: Uint8Array | undefined = undefined;
@@ -374,28 +531,31 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 }
 
                 if (first) {
-                    let arr = new Uint8Array(
-                        newArr.length + remainder.length
-                    );
+                    let arr = new Uint8Array(newArr.length + remainder.length);
                     arr.set(remainder, 0);
                     arr.set(newArr, remainder.length);
-                    const clusterStartIndices =
-                        await getClusterStartIndices(arr);
+                    const clusterStartIndices = await getClusterStartIndices(
+                        arr
+                    );
                     if (clusterStartIndices.length == 1) {
-                        const firstClusterIndex =
-                            clusterStartIndices.splice(0, 1)[0];
+                        const firstClusterIndex = clusterStartIndices.splice(
+                            0,
+                            1
+                        )[0];
                         header = arr.slice(0, firstClusterIndex);
                         newArr = arr.slice(firstClusterIndex);
                         remainder = new Uint8Array(0);
                         const chunk = new Chunk(e.data.type, header, arr);
                         if (
-                            mediaStreamDB.closed ||
+                            existingMediaRecorder.stream.closed ||
                             recorder.state === "inactive"
                         ) {
                             return;
                         }
 
-                        mediaStreamDB.chunks.put(chunk, { unique: true });
+                        existingMediaRecorder.stream.chunks.put(chunk, {
+                            unique: true,
+                        });
 
                         first = false;
                     } else {
@@ -403,20 +563,17 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     }
                 } else {
                     ts = BigInt(+new Date());
-                    const chunk = new Chunk(
-                        e.data.type,
-                        header,
-                        newArr,
-                        ts
-                    );
+                    const chunk = new Chunk(e.data.type, header, newArr, ts);
                     if (
-                        mediaStreamDB.closed ||
+                        existingMediaRecorder.stream.closed ||
                         recorder.state === "inactive"
                     ) {
                         return;
                     }
 
-                    mediaStreamDB.chunks.put(chunk, { unique: true });
+                    existingMediaRecorder.stream.chunks.put(chunk, {
+                        unique: true,
+                    });
                 }
             };
             recorder.start(1);
@@ -424,8 +581,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
     };
 
     const onEnd = () => {
-        console.log("end!");
-        mediaRecorders.map((x) => x.recorder.stop());
+        mediaRecorders.current.map((x) => x.recorder.stop());
     };
     return (
         <>
@@ -440,143 +596,56 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 >
                     <div className="container">
                         <div className="video-wrapper">
-                            <video
-                                ref={videoRef}
-                                height="auto"
-                                width="100%"
-                                onPlay={(e) => onStart(e.currentTarget as HTMLVideoElementWithCaptureStream, quality[0])}
-                                onEnded={onEnd}
-                                autoPlay
-                                loop
-                                /*   controls */
-                                muted={streamType.type === "noise"}
-                            ></video>
+                            {quality.map((s, i) => (
+                                <video
+                                    id={"video-" + s.video.height}
+                                    key={i}
+                                    ref={(ref) => {
+                                        videoRefsToRecord.current[i] = ref;
+                                        onRef(
+                                            ref as HTMLVideoElementWithCaptureStream,
+                                            s
+                                        );
+                                    }}
+                                    /*    height="0"
+                                       width="0" */
+                                    height={i === 0 ? "auto" : "0"}
+                                    width={i === 0 ? "100%" : "0"}
+                                    onPlay={(e) =>
+                                        onStart(
+                                            e.currentTarget as HTMLVideoElementWithCaptureStream,
+                                            s
+                                        )
+                                    }
+                                    onEnded={onEnd}
+                                    autoPlay
+                                    loop
+                                    muted={streamType.current.type === "noise"}
+                                ></video>
+                            ))}
 
-                            {/* <video
-                                ref={(ref) => videoRefsToRecord.current[1] = ref}
-                                height="auto"
-                                width="100%"
-                                onPlay={onStart}
-                                onEnded={onEnd}
-                                autoPlay
-                                loop
-                            ></video> */}
                             <Controls
                                 isStreamer={true}
+                                selectedResolution={
+                                    quality.map(
+                                        (x) => x.video.height
+                                    ) as Resolution[]
+                                }
                                 resolutionOptions={resolutionOptions}
-                                videoRef={videoRef}
-
+                                videoRef={videoRefsToRecord.current[0]}
                                 onStreamTypeChange={(settings) => {
                                     updateStream({ streamType: settings });
                                 }}
-
                                 onQualityChange={(settings) => {
                                     updateStream({ quality: settings });
                                 }}
-
                             ></Controls>
                         </div>
                     </div>
                 </Grid>
-                {quality.length}
-                {(streamType.type === 'screen' || streamType.type === 'camera') && quality.filter((s, i) => i > 0).map((s, i) =>
-                    <video
-                        key={i}
-                        ref={(ref) => { videoRefsToRecord.current[i] = ref }}
-                        /*    height="0"
-                           width="0" */
-                        height="auto"
-                        width="100%"
-                        onPlay={(e) => onStart(e.currentTarget as HTMLVideoElementWithCaptureStream, s)}
-                        onEnded={onEnd}
-                        autoPlay
-                        loop
-                        muted
-                    ></video>
-                )}
-
-
-                {/*   <SourceMenu onStreamType={(type) => updateStream(type)} />
-                <SourceSettingsDialog open={sourceSettingsOpen} onClose={(value) => {
-                    setSourceSettingsOpen(false);
-                    if (value && streamType.type !== 'noise') {
-                        updateStream({ ...streamType, settings: value })
-                    }
-                }} ></SourceSettingsDialog> */}
 
                 {/*  {videoStream && <View db={videoStream}></View>} */}
             </Grid>
         </>
     );
 };
-
-/* useEffect(() => {
-        console.log('got chunks?', chunksRef.current.length)
-        // If there are recorded video chunks, create a Blob from them and
-        // create an object URL that points to the Blob
-        streamQueue
-        if (chunksRef.current.length > 0) {
-            console.log('got chunks!', chunksRef.current)
-            const recordedBlob = new Blob(chunksRef.current, { type: 'video/webm' });
-            const recordedUrl = URL.createObjectURL(recordedBlob);
-
-            // Set the recorded URL as the src attribute of the playback video element
-            playbackRef.src = recordedUrl;
-            playbackRef.loop = true; // play the video in a loop
-        }
-    }, [videoStreamRef, playbackRef]); */
-/*
-             useEffect(() => {
-
-                // Set the URL of the video file as the src attribute of the video element
-                // videoRef.current.src = "https://joy.videvo.net/videvo_files/video/free/2018-05/large_watermarked/bannerg004_preview.mp4";
-                const videoStream = videoRef.current.captureStream()
-                videoRefRecording.current.srcObject = videoStream;
-            }, [videoRef?.current?.src]);  */
-/*          encoder.('data', (e) => {
-                        console.log('encoder data', e)
-                    })
-                    decoder.on('data', (e) => {
-                        console.log(e[1]);
-                        encoder.write(e, 'binary', (e) => {
-                            console.log('eerror', e)
-                        });
-
-                                }) */
-
-//    if (e[1].name === "Timecode")
-//       console.log('data', e[1].start, sourceBufferRef.current?.timestampOffset, e[1].start + sourceBufferRef.current?.timestampOffset * 1e6, playbackRef?.currentTime)
-
-/*  const trimJob = async () => {
-                            const trimeSeconds = 10;
-                            while (true && playbackRef) {
-                                const trimTo =
-                                    playbackRef.currentTime -
-                                    trimeSeconds;
-                                const trimFrom = Math.max(
-                                    playbackRef.currentTime -
-                                    trimeSeconds * 2,
-                                    0
-                                );
-                                console.log(trimTo, trimFrom);
-                                try {
-                                    if (
-                                        trimFrom > 10 &&
-                                        (await waitFor(
-                                            () =>
-                                                sourceBufferRef?.current
-                                                    .updating === false
-                                        ))
-                                    ) {
-                                        sourceBufferRef.current?.remove(
-                                            0,
-                                            trimTo
-                                        );
-                                    }
-                                } catch (error) {
-                                    // ignore
-                                }
-                                await delay(trimeSeconds * 1000);
-                            }
-                        };
-                        trimJob(); */

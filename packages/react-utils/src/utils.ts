@@ -1,11 +1,10 @@
 import axios from "axios";
-import { AbstractLevel } from "abstract-level";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Ed25519Keypair, toBase64, fromBase64 } from "@dao-xyz/peerbit-crypto";
 import { FastMutex } from "./lockstorage";
 import { v4 as uuid } from "uuid";
 
-export const resolveSwarmAddress = async (url: string, timeout = 3000) => {
+export const resolveSwarmAddress = async (url: string, timeout = 5000) => {
     if (url.startsWith("/")) {
         return url; // Possible already an swarm address
     }

@@ -217,6 +217,11 @@ export const PeerProvider = ({
             );
 
             identity = identity || nodeId;
+            console.log(
+                "CREATE PEER WITH KEYPAIR",
+                keypair?.publicKey.hashcode(),
+                identity?.publicKey.hashcode()
+            );
 
             let node = await createLibp2pExtended({
                 blocks: {

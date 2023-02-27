@@ -6,10 +6,9 @@ import {
     useCallback,
     MutableRefObject,
 } from "react";
+import { AudioInfo } from "../database";
 import {
-    AudioInfo
-} from "../database";
-import {
+    Box,
     Button,
     Grid,
     IconButton,
@@ -29,11 +28,7 @@ import {
 } from "@mui/material";
 import { videoNoAudioMimeType, videoAudioMimeType } from "../format";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
-import {
-    Resolution,
-    RESOLUTIONS,
-    resolutionToSourceSetting,
-} from "./SourceSettings";
+
 import Divider from "@mui/material/Divider";
 import AppsIcon from "@mui/icons-material/Apps";
 import useVideoPlayer from "../useVideoPlayer";
@@ -45,41 +40,68 @@ import VideoSettingsIcon from "@mui/icons-material/VideoSettings";
 import TuneIcon from "@mui/icons-material/Tune";
 import SlowMotionVideoIcon from "@mui/icons-material/SlowMotionVideo";
 import StreamIcon from "@mui/icons-material/Stream";
-import { SourceSetting, StreamType } from "./settings.js";
+import {
+    SourceSetting,
+    StreamType,
+    Resolution,
+    resolutionToSourceSetting,
+} from "./settings.js";
 import VideoCameraFrontIcon from "@mui/icons-material/VideoCameraFront";
 import OndemandVideoIcon from "@mui/icons-material/OndemandVideo";
 import PresentToAllIcon from "@mui/icons-material/PresentToAll";
-import Settings from "@mui/icons-material/Settings";
 import TvOffIcon from "@mui/icons-material/TvOff";
-import { Check, FitScreen, Fullscreen } from "@mui/icons-material";
+import { Check, Fullscreen } from "@mui/icons-material";
 import VolumeUpIcon from "@mui/icons-material/VolumeUp";
+import VolumeOffIcon from "@mui/icons-material/VolumeOff";
+
 import Replay10Icon from "@mui/icons-material/Replay10";
 import "./Controls.css";
+
 export const Controls = (props: {
     isStreamer: boolean;
     resolutionOptions: Resolution[];
-    videoRef: MutableRefObject<HTMLVideoElement>;
+    selectedResolution?: Resolution[];
+    videoRef?: HTMLVideoElement;
     onStreamTypeChange?: (settings: StreamType) => void;
     onQualityChange: (settings: SourceSetting[]) => void;
-
 }) => {
     const theme = useTheme();
+    const [showControls, setShowControls] = useState(false);
     const {
-        isMuted,
         isPlaying,
         progress,
         speed,
+        setVolume,
         togglePlay,
         handleOnTimeUpdate,
         handleVideoProgress,
         handleVideoSpeed,
         toggleMute,
     } = useVideoPlayer(props.videoRef);
+
+    const addShowControlsListener = (ref: HTMLElement) => {
+        ref.addEventListener("mouseenter", () => {
+            setShowControls(true);
+        });
+        ref.addEventListener("mouseleave", () => {
+            setShowControls(false);
+        });
+    };
+    const controlRef = useCallback((node) => {
+        if (node) addShowControlsListener(node);
+    }, []);
+
     useEffect(() => {
-        props.videoRef.current.ontimeupdate = (ev) => {
+        if (!props.videoRef) {
+            return;
+        }
+
+        props.videoRef.ontimeupdate = (ev) => {
             return handleOnTimeUpdate();
         };
-    }, [props.videoRef.current]);
+
+        addShowControlsListener(props.videoRef);
+    }, [props.videoRef]);
 
     const [videoSettingsAnchor, setVideoSettingsAnchor] =
         useState<null | HTMLElement>(null);
@@ -87,10 +109,19 @@ export const Controls = (props: {
         "main" | "resolution" | "source" | undefined
     >(undefined);
 
-    let [selectedResolutions, setSelectedResolutions] = useState<Resolution[]>([]);
+    let [selectedResolutions, setSelectedResolutions] = useState<Resolution[]>(
+        []
+    );
     const [sourceType, setSourceType] = useState<StreamType>({ type: "noise" });
-    const [prevSettings, setPrevSettings] = useState<StreamType>({ type: "noise" });
+    const [prevSettings, setPrevSettings] = useState<StreamType>({
+        type: "noise",
+    });
 
+    useEffect(() => {
+        if (props.selectedResolution) {
+            setSelectedResolutions(props.selectedResolution);
+        }
+    }, [props.selectedResolution]);
     const handleVideoSettingsClose = () => {
         setSettingsOpen(undefined);
 
@@ -129,27 +160,28 @@ export const Controls = (props: {
             props.onStreamTypeChange(type);
         }
         setSourceType(type);
-    }
+        handleVideoSettingsClose();
+    };
 
     useEffect(() => {
-        let compatibleResolutions = selectedResolutions.filter(x => props.resolutionOptions.includes(x));
-        console.log(selectedResolutions, compatibleResolutions)
-        if (
-            compatibleResolutions.length === selectedResolutions.length
-        ) {
+        let compatibleResolutions = selectedResolutions.filter((x) =>
+            props.resolutionOptions.includes(x)
+        );
+        if (compatibleResolutions.length === selectedResolutions.length) {
             if (compatibleResolutions.length > 0) {
-                setSelectedResolutions(compatibleResolutions)
-
-            }
-            else {
-                setSelectedResolutions(props.resolutionOptions.length > 0 ? [props.resolutionOptions[0]] : []);
+                setSelectedResolutions(compatibleResolutions);
+            } else {
+                setSelectedResolutions(
+                    props.resolutionOptions.length > 0
+                        ? [props.resolutionOptions[0]]
+                        : []
+                );
             }
         }
-
     }, [props.resolutionOptions]);
 
     const handleResolutionChange = (resolution: Resolution) => {
-        let newResolutions = [...selectedResolutions]
+        let newResolutions = [...selectedResolutions];
         const index = newResolutions.indexOf(resolution);
         if (index !== -1) {
             newResolutions.splice(index, 1);
@@ -162,7 +194,9 @@ export const Controls = (props: {
         }
         newResolutions.sort();
 
-        let change = JSON.stringify(newResolutions) != JSON.stringify(selectedResolutions)
+        let change =
+            JSON.stringify(newResolutions) !=
+            JSON.stringify(selectedResolutions);
 
         setSelectedResolutions(
             // On autofill we get a stringified value.
@@ -170,21 +204,29 @@ export const Controls = (props: {
         );
 
         if (change) {
-            props.onQualityChange(newResolutions.map(x => resolutionToSourceSetting(x)))
+            props.onQualityChange(
+                newResolutions.map((x) => resolutionToSourceSetting(x))
+            );
         }
-
-
     };
 
     return (
-        <Grid container direction="column" className="controls">
+        <Grid
+            container
+            ref={controlRef}
+            direction="column"
+            className="controls"
+            sx={{ opacity: showControls ? 1 : 0 }}
+        >
             <Grid
                 item
                 display="flex"
                 justifyContent="center"
-                sx={{ width: "100%", height: "15px", marginTop: "-15px" }}
+                sx={{ width: "100%", height: "15px", marginTop: "-14px" }}
             >
                 <Slider
+                    sx={{ borderRadius: "0px" }}
+                    size="small"
                     min={0}
                     max={100}
                     value={progress || 0}
@@ -203,34 +245,66 @@ export const Controls = (props: {
                         {!isPlaying ? <PlayArrowIcon /> : <PauseIcon />}
                     </IconButton>
                 </Grid>
-                <Grid item>
-                    <Button
-                        color="inherit"
-                        onClick={() =>
-                        (props.videoRef.current.currentTime =
-                            props.videoRef.current.buffered.length > 0
-                                ? props.videoRef.current.buffered.end(
-                                    props.videoRef.current.buffered
-                                        .length - 1
-                                )
-                                : 0)
-                        }
-                    >
-                        Live
-                    </Button>
-                </Grid>
-                <Grid item justifyContent="center">
-                    <IconButton onClick={() => { }} sx={{ borderRadius: 0 }}>
-                        <Replay10Icon />
-                    </IconButton>
-                </Grid>
-                <Grid item justifyContent="center" sx={{ mr: "auto" }}>
-                    <IconButton onClick={toggleMute} sx={{ borderRadius: 0 }}>
-                        <VolumeUpIcon />
-                    </IconButton>
-                </Grid>
+                {!props.isStreamer && (
+                    <>
+                        <Grid item>
+                            <Button
+                                color="inherit"
+                                onClick={() =>
+                                    (props.videoRef.currentTime =
+                                        props.videoRef.buffered.length > 0
+                                            ? props.videoRef.buffered.end(
+                                                  props.videoRef.buffered
+                                                      .length - 1
+                                              )
+                                            : 0)
+                                }
+                            >
+                                Live
+                            </Button>
+                        </Grid>
+                        <Grid item justifyContent="center">
+                            <IconButton
+                                onClick={() => {}}
+                                sx={{ borderRadius: 0 }}
+                            >
+                                <Replay10Icon />
+                            </IconButton>
+                        </Grid>
+                        <Grid id="volume-button" item justifyContent="center">
+                            <IconButton
+                                onClick={toggleMute}
+                                sx={{ borderRadius: 0 }}
+                            >
+                                {props.videoRef?.muted ? (
+                                    <VolumeOffIcon />
+                                ) : (
+                                    <VolumeUpIcon />
+                                )}
+                            </IconButton>
+                        </Grid>
+                        <Grid
+                            id="volume-slider"
+                            item
+                            justifyContent="center"
+                            display="none"
+                            sx={{ width: "75px", pl: 1 }}
+                        >
+                            <Slider
+                                size="small"
+                                aria-label="Volume"
+                                value={props.videoRef?.volume || 1}
+                                max={1}
+                                step={0.005}
+                                onChange={(e, v) => {
+                                    setVolume(v as number);
+                                }}
+                            />
+                        </Grid>
+                    </>
+                )}
 
-                <Grid item>
+                <Grid item sx={{ ml: "auto" }}>
                     <IconButton
                         sx={{ borderRadius: 0 }}
                         onClick={(e) => {
@@ -322,8 +396,9 @@ export const Controls = (props: {
                             <MenuItem
                                 onClick={() => setSettingsOpen("resolution")}
                                 disabled={
-                                    (props.isStreamer && (sourceType.type === "noise" ||
-                                        sourceType.type === "media")) ||
+                                    (props.isStreamer &&
+                                        (sourceType.type === "noise" ||
+                                            sourceType.type === "media")) ||
                                     props.resolutionOptions.length === 0
                                 }
                             >
@@ -333,12 +408,14 @@ export const Controls = (props: {
                                 <ListItemText>Quality</ListItemText>
                                 <Typography sx={{ ml: "auto" }} variant="body2">
                                     {selectedResolutions.length > 2
-                                        ? `${selectedResolutions[0]}p, ${selectedResolutions[1]
-                                        }p, (+${selectedResolutions.length - 2
-                                        })`
+                                        ? `${selectedResolutions[0]}p, ${
+                                              selectedResolutions[1]
+                                          }p, (+${
+                                              selectedResolutions.length - 2
+                                          })`
                                         : selectedResolutions
-                                            .map((x) => x + "p")
-                                            .join(", ")}
+                                              .map((x) => x + "p")
+                                              .join(", ")}
                                 </Typography>
                             </MenuItem>
                         </MenuList>
@@ -370,7 +447,12 @@ export const Controls = (props: {
                         anchorOrigin={{ horizontal: "right", vertical: "top" }}
                     >
                         <MenuList dense disablePadding>
-                            <MenuItem onClick={() => { handleVideoSettingsClose(); setSettingsOpen("main") }}>
+                            <MenuItem
+                                onClick={() => {
+                                    handleVideoSettingsClose();
+                                    setSettingsOpen("main");
+                                }}
+                            >
                                 <ListItemIcon>
                                     <ChevronLeftIcon fontSize="small" />
                                 </ListItemIcon>
@@ -429,7 +511,12 @@ export const Controls = (props: {
                         anchorOrigin={{ horizontal: "right", vertical: "top" }}
                     >
                         <MenuList dense disablePadding>
-                            <MenuItem onClick={() => { handleVideoSettingsClose(); setSettingsOpen("main") }}>
+                            <MenuItem
+                                onClick={() => {
+                                    handleVideoSettingsClose();
+                                    setSettingsOpen("main");
+                                }}
+                            >
                                 <ListItemIcon>
                                     <ChevronLeftIcon fontSize="small" />
                                 </ListItemIcon>
@@ -439,7 +526,7 @@ export const Controls = (props: {
                             <MenuItem
                                 onClick={() =>
                                     handleSourceTypeChange({
-                                        type: "camera"
+                                        type: "camera",
                                     })
                                 }
                             >
@@ -457,7 +544,7 @@ export const Controls = (props: {
                             <MenuItem
                                 onClick={() =>
                                     handleSourceTypeChange({
-                                        type: "screen"
+                                        type: "screen",
                                     })
                                 }
                             >
@@ -500,7 +587,7 @@ export const Controls = (props: {
                                             type: "media",
                                             src: URL.createObjectURL(
                                                 event.target.files[0]
-                                            )
+                                            ),
                                         });
                                     }}
                                 />
@@ -513,7 +600,9 @@ export const Controls = (props: {
                                 )}
                             </MenuItem>
                             <MenuItem
-                                onClick={() => handleSourceTypeChange({ type: "noise" })}
+                                onClick={() =>
+                                    handleSourceTypeChange({ type: "noise" })
+                                }
                             >
                                 <ListItemIcon>
                                     <TvOffIcon fontSize="small" />
@@ -542,13 +631,18 @@ export const Controls = (props: {
         </Select> */}
                 </Grid>
 
-                <Grid item justifyContent="center">
+                {/*  <Grid item justifyContent="center">
                     <IconButton onClick={() => { }} sx={{ borderRadius: 0 }}>
                         <FitScreen />
                     </IconButton>
-                </Grid>
+                </Grid> */}
                 <Grid item justifyContent="center">
-                    <IconButton onClick={() => { }} sx={{ borderRadius: 0 }}>
+                    <IconButton
+                        onClick={() => {
+                            props.videoRef?.requestFullscreen();
+                        }}
+                        sx={{ borderRadius: 0 }}
+                    >
                         <Fullscreen />
                     </IconButton>
                 </Grid>

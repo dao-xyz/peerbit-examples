@@ -9,6 +9,7 @@ import { Content } from "./Context";
 import { PeerProvider, resolveSwarmAddress } from "@dao-xyz/peerbit-react";
 import { WindowContextProvider } from "./WindowContext";
 import blue from "@mui/material/colors/amber";
+import { inIframe } from "@dao-xyz/peerbit-react";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
@@ -65,7 +66,7 @@ export const App = () => {
     return (
         <PeerProvider
             bootstrap={bootstrapAddresses}
-            inMemory={true}
+            inMemory={inIframe()}
             waitForKeypairInIFrame={true}
             dev={import.meta.env.MODE === "development"}
         >

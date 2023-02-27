@@ -21,16 +21,13 @@ import {
 } from "@dao-xyz/peerbit-react";
 import { useParams } from "react-router-dom";
 import { Canvas as CanvasDB, Position, Rect, Size, Spaces } from "./dbs/canvas";
-import {
-    toBase64,
-    Ed25519Keypair,
-    PublicSignKey,
-} from "@dao-xyz/peerbit-crypto";
-import { Box, Button, Grid, IconButton } from "@mui/material";
+import { Ed25519Keypair, PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { Box, Grid, IconButton } from "@mui/material";
 import iFrameResize from "iframe-resizer";
 import { logger } from "@dao-xyz/peerbit";
-import { Add } from "@mui/icons-material";
+import { Add, Clear } from "@mui/icons-material";
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+
 logger.level = "trace";
 
 const PreviewIframe = styled("iframe")(() => ({
@@ -70,6 +67,7 @@ export const Canvas = () => {
         node: PublicSignKey;
     }>();
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
+
     const chatKeypairRef = useRef<Ed25519Keypair>(null);
 
     const addRect = async () => {
@@ -180,7 +178,7 @@ export const Canvas = () => {
                     setInterval(async () => {
                         await canvas.rects.index.query(
                             new DocumentQueryRequest({ queries: [] }),
-                            { remote: { sync: true, amount: 2 } }
+                            { remote: { sync: true } }
                         );
                     }, 2000);
                 }
@@ -214,23 +212,77 @@ export const Canvas = () => {
 
     return (
         <Grid container direction="row">
-            <Grid item>
+            <Grid
+                item
+                sx={{
+                    maxHeight: "100vh",
+                    overflowY: "auto",
+                    width: "calc(100% - 250px)",
+                }}
+            >
                 <Box sx={{ flexDirection: "column", p: 4 }}>
                     {rects.map((x, ix) => {
-                        console.log(x.src);
                         return (
-                            <Grid item key={ix} sx={{ maxWidth: "500px" }}>
-                                <iframe
-                                    onLoad={(event) => onIframe(event, x)}
-                                    style={{
-                                        width: "100%",
-                                        height: "100%",
-                                        border: 0,
-                                    }}
-                                    src={x.src}
-                                    allow="camera; microphone; display-capture; autoplay; clipboard-write;"
-                                ></iframe>
-                                {/*  <Box sx={{ backgroundColor: 'red', width: '100%', height: '100%' }}> RED</Box> */}
+                            <Grid
+                                item
+                                ref={(ref) => {
+                                    ref?.querySelector<HTMLElement>(
+                                        "#frame-" + ix
+                                    )?.addEventListener("mouseenter", () => {
+                                        ref.querySelector<HTMLElement>(
+                                            "#header-" + ix
+                                        ).style.opacity = "1";
+                                    });
+
+                                    ref?.querySelector<HTMLElement>(
+                                        "#frame-" + ix
+                                    )?.addEventListener("mouseleave", () => {
+                                        ref.querySelector<HTMLElement>(
+                                            "#header-" + ix
+                                        ).style.opacity = "0";
+                                    });
+                                }}
+                                container
+                                direction="column"
+                                key={ix}
+                                sx={{
+                                    position: "relative",
+                                    width: "100%",
+                                    maxWidth: "100%",
+                                }}
+                            >
+                                <Grid
+                                    id={"header-" + ix}
+                                    item
+                                    alignItems="right"
+                                    width="100%"
+                                    display="flex"
+                                    position="absolute"
+                                    sx={{ top: "0px", opacity: 0 }}
+                                >
+                                    {" "}
+                                    <IconButton
+                                        size="small"
+                                        sx={{ ml: "auto" }}
+                                        onClick={() => {
+                                            console.log("delete!");
+                                        }}
+                                    >
+                                        <Clear />
+                                    </IconButton>
+                                </Grid>
+                                <Grid id={"frame-" + ix} item>
+                                    <iframe
+                                        onLoad={(event) => onIframe(event, x)}
+                                        style={{
+                                            width: "100%",
+                                            height: "100%",
+                                            border: 0,
+                                        }}
+                                        src={x.src}
+                                        allow="camera; microphone; display-capture; fullscreen; autoplay; clipboard-write;"
+                                    ></iframe>
+                                </Grid>
                             </Grid>
                         );
                     })}
@@ -241,7 +293,15 @@ export const Canvas = () => {
                     )}
                 </Box>
             </Grid>
-            <Grid item marginLeft="auto" mr={1}>
+            <Grid
+                item
+                sx={{
+                    width: "225px",
+                    position: "fixed",
+                    bottom: "10px",
+                    right: "10px",
+                }} /* marginLeft="auto" mr={1} */
+            >
                 {idArgs?.node && (
                     <iframe
                         onLoad={async (event) => {

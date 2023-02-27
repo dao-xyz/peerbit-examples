@@ -104,9 +104,8 @@ export class MediaStreamDB extends Program {
     @field({ type: PublicSignKey })
     sender: PublicSignKey;
 
-    @field({ type: 'u64' })
-    timestamp: bigint
-
+    @field({ type: "u64" })
+    timestamp: bigint;
 
     @field({ type: Documents })
     chunks: Documents<Chunk>;
@@ -123,7 +122,7 @@ export class MediaStreamDB extends Program {
             index: new DocumentIndex({ indexBy: "id" }),
         });
         this.info = info;
-        this.timestamp = BigInt(+new Date);
+        this.timestamp = BigInt(+new Date());
     }
 
     async setup(): Promise<void> {
@@ -145,22 +144,20 @@ export class MediaStreamDB extends Program {
 
 @variant(0)
 export class MediaStreamDBInfo {
-
-    @field({ type: 'string' })
+    @field({ type: "string" })
     id: string;
 
-    @field({ type: 'bool' })
-    active: boolean
+    @field({ type: "bool" })
+    active: boolean;
 
     @field({ type: MediaStreamDB })
-    db: MediaStreamDB
+    db: MediaStreamDB;
 
-    constructor(properties: { active: boolean, db: MediaStreamDB }) {
+    constructor(properties: { active: boolean; db: MediaStreamDB }) {
         this.active = properties.active;
         this.db = properties.db;
         this.id = this.db.id;
     }
-
 }
 
 @variant("media_streams")

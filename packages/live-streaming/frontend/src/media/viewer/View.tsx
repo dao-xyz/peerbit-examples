@@ -4,14 +4,18 @@ import { Chunk, MediaStreamDB, MediaStreamDBs } from "../database.js";
 import { ObserverType, ReplicatorType } from "@dao-xyz/peerbit-program";
 import PQueue from "p-queue";
 import { waitFor } from "@dao-xyz/peerbit-time";
-import { Button, Grid } from "@mui/material";
+import { Box, Button, Grid } from "@mui/material";
 import { audioMimeType } from "../format.js";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { DocumentQueryRequest, Documents } from "@dao-xyz/peerbit-document";
 import { createFirstCluster } from "../webm.js";
 import { delay } from "@dao-xyz/peerbit-time";
 import { Controls } from "../controller/Control.js";
-import { Resolution } from "../controller/SourceSettings.js";
+import { Resolution } from "./../controller/settings.js";
+
+import "./View.css";
+import CatOffline from "/catbye64.png";
+
 const resetSB = async (
     pb: HTMLAudioElement | HTMLVideoElement,
     mimeType: string
@@ -38,7 +42,7 @@ const resetSB = async (
                         ? pb.buffered.end(pb.buffered.length - 1)
                         : 0; */
         ready = true;
-        sb.onupdateend = (ev) => { };
+        sb.onupdateend = (ev) => {};
     });
 
     let ret = await waitFor(() => sb);
@@ -55,9 +59,9 @@ const addStreamListener = async (
     let focused = true;
     pb.onpause = (ev) => {
         //  if (!focused) TODO
-        {
+        /* {
             pb.play();
-        }
+        } */
     };
     pb.onblur = () => {
         focused = false;
@@ -114,9 +118,9 @@ const addStreamListener = async (
                         sb.appendBuffer(
                             first
                                 ? new Uint8Array([
-                                    ...chunk.header,
-                                    ...chunk.chunk,
-                                ])
+                                      ...chunk.header,
+                                      ...chunk.chunk,
+                                  ])
                                 : chunk.chunk
                         );
                     } catch (error) {
@@ -134,11 +138,15 @@ const addStreamListener = async (
     chunkDB.events.addEventListener("change", listener);
     return () => {
         chunkDB.events.removeEventListener("change", listener);
+        appendQueue.clear();
     };
 };
 
 type DBArgs = { db: MediaStreamDBs };
 type IdentityArgs = { node: PublicSignKey };
+
+let updatingStream: Promise<any>;
+
 export const View = (args: DBArgs | IdentityArgs) => {
     const [videoStream, setVideoStream] = useState<MediaStreamDBs | null>();
 
@@ -148,8 +156,13 @@ export const View = (args: DBArgs | IdentityArgs) => {
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
         []
     );
-    const currentStreamRef = useRef<Promise<MediaStreamDB>>(null);
+    const [selectedResolutions, setSelectedResolutions] = useState<
+        Resolution[]
+    >([]);
 
+    const currentStreamRef = useRef<Promise<MediaStreamDB>>(null);
+    const containerRef = useRef<HTMLDivElement>(null);
+    const [streamerOnline, setStreamerOnline] = useState(false);
     const { peer } = usePeer();
 
     useEffect(() => {
@@ -181,11 +194,16 @@ export const View = (args: DBArgs | IdentityArgs) => {
         (args as IdentityArgs).node?.hashcode(),
     ]);
 
-    const updateStream = async (streamToOpen: MediaStreamDB, playbackRef: HTMLVideoElement) => {
-        const current = (await currentStreamRef.current)
+    const updateStream = async (
+        streamToOpen: MediaStreamDB,
+        playbackRef: HTMLVideoElement
+    ) => {
+        const current = await currentStreamRef.current;
+        await updatingStream;
         if (current) {
-            cleanupRef.current()
-            await current.close()
+            cleanupRef.current();
+            updatingStream = current.drop();
+            const closeResult = await updatingStream;
         }
 
         // get stream with closest bitrate
@@ -194,14 +212,15 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 role: new ObserverType(),
                 sync: () => true,
             })
-            .then((s) => {
+            .then(async (s) => {
                 console.log("add listener!");
-                addStreamListener(s.chunks, playbackRef).then(
+                setSelectedResolutions([s.info.video.height as Resolution]);
+                await addStreamListener(s.chunks, playbackRef).then(
                     (cleanup) => (cleanupRef.current = cleanup)
                 );
                 return s;
             });
-    }
+    };
 
     const playbackRefCb = useCallback(
         (node) => {
@@ -227,8 +246,11 @@ export const View = (args: DBArgs | IdentityArgs) => {
                         .map((x) => x.value)
                         .filter(
                             (v, ix, arr) =>
-                                v.active && arr.findIndex((x) => x.id === v.id) === ix
-                        ).map(x => x.db);
+                                v.active &&
+                                arr.findIndex((x) => x.id === v.id) === ix
+                        )
+                        .map((x) => x.db);
+
                     const newStreams = uniqueResults.filter(
                         (x) => !streamOptions.current.find((y) => y.id === x.id)
                     );
@@ -237,44 +259,40 @@ export const View = (args: DBArgs | IdentityArgs) => {
                         (x) => !uniqueResults.find((y) => y.id === x.id)
                     );
 
-                    const current = (await currentStreamRef.current)
-                    let currentIsRemoved = !!removedStreams.find(x => x.id == current?.id);
-
-                    console.log(
-                        newStreams,
-                        uniqueResults.length,
-                        streamOptions.current.length,
-                        currentIsRemoved
+                    const current = await currentStreamRef.current;
+                    let currentIsRemoved = !!removedStreams.find(
+                        (x) => x.id == current?.id
                     );
+
                     if (
                         uniqueResults.length > 0 &&
                         (streamOptions.current.length === 0 || currentIsRemoved)
                     ) {
-                        let wantedBitrate = currentIsRemoved ? current.info.video.bitrate : 1e5;
-                        uniqueResults.sort((a, b) => Math.abs(a.info.video.bitrate - wantedBitrate) - Math.abs(b.info.video.bitrate - wantedBitrate));
+                        let wantedBitrate = currentIsRemoved
+                            ? current.info.video.bitrate
+                            : 1e5;
+                        uniqueResults.sort(
+                            (a, b) =>
+                                Math.abs(a.info.video.bitrate - wantedBitrate) -
+                                Math.abs(b.info.video.bitrate - wantedBitrate)
+                        );
                         let streamToOpen = uniqueResults[0];
-
-                        await updateStream(streamToOpen, playbackRef)
-
+                        await updateStream(streamToOpen, playbackRef);
                     }
+
                     streamOptions.current = uniqueResults;
-                    console.log("RESOLUTIONS", [...uniqueResults.map(
-                        (x) => x.info.video.height
-                    )].sort())
                     setResolutionOptions(
-                        [...uniqueResults.map(
-                            (x) => x.info.video.height
-                        )].sort() as Resolution[]
+                        [
+                            ...uniqueResults.map((x) => x.info.video.height),
+                        ].sort() as Resolution[]
+                    );
+
+                    setStreamerOnline(
+                        peer.libp2p.directsub
+                            .getSubscribers(videoStream.address.toString())
+                            .has(videoStream.sender.hashcode())
                     );
                 }, 1000);
-                /*  videoStream.streams.events.addEventListener('change', (c) => {
-                     console.log('change!', c)
-                 }) */
-                /* 
-                /*
-                addStreamListener(videoStream.chunks, playbackRef).then(
-                    (cleanup) => (cleanupRef.current = cleanup)
-                ); */
             }
         },
         [peer, videoStream]
@@ -283,7 +301,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
     return (
         <Grid container direction="column">
             <Grid item>
-                <div className="container">
+                <div className="container" ref={containerRef}>
                     <div className="video-wrapper">
                         <video
                             id="stream-playback"
@@ -294,15 +312,63 @@ export const View = (args: DBArgs | IdentityArgs) => {
                             autoPlay
                             loop
                         />
-                        <Controls
-                            isStreamer={false}
-                            resolutionOptions={resolutionOptions}
-                            videoRef={videoStreamRef}
-                            onQualityChange={(settings) => {
-                                const streamToOpen = streamOptions.current.find(x => x.info.video.height === settings[0].video.height);
-                                return updateStream(streamToOpen, document.getElementById("stream-playback") as HTMLVideoElement)
-                            }}
-                        ></Controls>
+                        {streamerOnline && (
+                            <Controls
+                                isStreamer={false}
+                                selectedResolution={selectedResolutions}
+                                resolutionOptions={resolutionOptions}
+                                videoRef={videoStreamRef.current}
+                                onQualityChange={(settings) => {
+                                    const setting = settings[0];
+                                    if (!setting) {
+                                        return;
+                                    }
+                                    const streamToOpen =
+                                        streamOptions.current.find(
+                                            (x) =>
+                                                x.info.video.height ===
+                                                setting.video.height
+                                        );
+                                    let videoRef =
+                                        document.getElementById(
+                                            "stream-playback"
+                                        );
+                                    if (!videoRef) {
+                                        return;
+                                    }
+                                    return updateStream(
+                                        streamToOpen,
+                                        document.getElementById(
+                                            "stream-playback"
+                                        ) as HTMLVideoElement
+                                    );
+                                }}
+                            ></Controls>
+                        )}
+                        {!streamerOnline && (
+                            <Grid
+                                container
+                                direction="column"
+                                className="cat"
+                                justifyContent="center"
+                                spacing={1}
+                            >
+                                <Grid
+                                    item
+                                    sx={{
+                                        display: "flex",
+                                        ml: "-10px",
+                                        maxHeight: "40%",
+                                        maxWidth: "40%",
+                                        justifyContent: "center",
+                                        alignContent: "center",
+                                    }}
+                                >
+                                    <img src={CatOffline} />
+                                </Grid>
+                                <Grid item>Streamer is offline</Grid>
+                            </Grid>
+                        )}
                     </div>
                 </div>
             </Grid>

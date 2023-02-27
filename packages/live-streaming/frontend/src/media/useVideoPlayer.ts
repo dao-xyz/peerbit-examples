@@ -1,56 +1,64 @@
 import { useState, useEffect, MutableRefObject } from "react";
 
-const useVideoPlayer = (videoElement: MutableRefObject<HTMLVideoElement>) => {
-    const [isPlaying, setIsPlaying] = useState(!videoElement.current?.paused);
-    const [isMuted, setIsMuted] = useState(videoElement.current?.muted);
+const useVideoPlayer = (videoElement?: HTMLVideoElement) => {
+    const [isPlaying, setIsPlaying] = useState(!videoElement?.paused);
     const [progress, setProgress] = useState(0);
     const [speed, setSpeed] = useState(1);
+    const [prevMuteVolume, setPrevMuteVolume] = useState(
+        videoElement?.volume ?? 1
+    );
 
     const togglePlay = () => {
         const isPlayingNow = !isPlaying;
         console.log("toggle play state!", isPlayingNow);
-        setIsPlaying(isPlayingNow);
-        isPlayingNow
-            ? videoElement.current.play()
-            : videoElement.current.pause();
+        isPlayingNow ? videoElement.play() : videoElement.pause();
     };
 
+    useEffect(() => {
+        if (videoElement) {
+            setIsPlaying(!videoElement.paused);
+        }
+    }, [videoElement?.paused]);
+
+    const duration = () =>
+        videoElement.buffered.length > 0
+            ? videoElement.buffered.end(videoElement.buffered.length - 1)
+            : 0;
     const handleOnTimeUpdate = () => {
-        const progress =
-            (videoElement.current.currentTime / videoElement.current.duration) *
-            100;
+        const progress = (videoElement.currentTime / duration()) * 100;
         setProgress(progress);
     };
 
     const handleVideoProgress = (event) => {
         const manualChange = Number(event.target.value);
-        videoElement.current.currentTime =
-            (videoElement.current.duration / 100) * manualChange;
+        videoElement.currentTime = (duration() / 100) * manualChange;
         setProgress(manualChange);
     };
 
     const handleVideoSpeed = (event) => {
         const speed = Number(event.target.value);
-        videoElement.current.playbackRate = speed;
+        videoElement.playbackRate = speed;
         setSpeed(speed);
     };
 
     const toggleMute = () => {
-        setIsMuted(!isMuted);
+        if (!videoElement.muted) {
+            setPrevMuteVolume(videoElement.volume);
+            videoElement.volume = 0.0000001;
+        } else {
+            videoElement.volume = prevMuteVolume;
+        }
+        videoElement.muted = !videoElement.muted;
     };
 
-    useEffect(() => {
-        if (isMuted == null || isMuted === videoElement.current.muted) {
-            return;
-        }
-        isMuted
-            ? (videoElement.current.muted = true)
-            : (videoElement.current.muted = false);
-    }, [isMuted, videoElement]);
+    const setVolume = (value: number) => {
+        setPrevMuteVolume(value);
+        videoElement.volume = value;
+    };
 
     return {
         isPlaying,
-        isMuted,
+        setVolume,
         progress,
         speed,
         togglePlay,
