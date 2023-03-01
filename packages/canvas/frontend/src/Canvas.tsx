@@ -220,7 +220,7 @@ export const Canvas = () => {
                 <Grid
                     item
                     sx={{
-                        height: `calc(100vh - ${header.current?.scrollHeight})"`,
+                        height: `calc(100vh - ${header.current?.scrollHeight}px)`,
                         overflowY: "scroll",
                         width: "calc(100% - 275px)",
                     }}
