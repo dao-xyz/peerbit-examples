@@ -43,6 +43,14 @@ export const getTabId = () => {
 const ID_COUNTER_KEY = "idc/";
 
 const getKeyId = (prefix: string, id: number) => prefix + "/" + id;
+
+export const releaseKey = (
+    path: string,
+    lock: FastMutex = new FastMutex({ clientId: getTabId() })
+) => {
+    lock.release(path);
+};
+
 export const getFreeKeypair = async (
     id: string = "",
     lock: FastMutex = new FastMutex({ clientId: getTabId() }),
@@ -57,7 +65,7 @@ export const getFreeKeypair = async (
         let lockedInfo = lock.getLockedInfo(key);
         if (lockedInfo) {
             if (lockedInfo === lock.clientId && releaseLockIfSameId) {
-                await lock.release(key); // Release lock, because
+                await lock.release(key); // Release lock
             } else {
                 continue;
             }

@@ -1,6 +1,6 @@
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
 import { usePeer } from "@dao-xyz/peerbit-react";
-import { Button, Grid, Input, TextField, Typography } from "@mui/material";
+import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Canvas, Spaces } from "./dbs/canvas";
@@ -94,6 +94,9 @@ export const Home = () => {
                         variant="outlined"
                     />
                     <Button
+                        disabled={
+                            !spaces || !textInput || textInput.length == 0
+                        }
                         onClick={() => {
                             spaces.current.then((db) => {
                                 console.log(
@@ -108,9 +111,6 @@ export const Home = () => {
                                 );
                             });
                         }}
-                        disabled={
-                            !spaces || !textInput || textInput.length == 0
-                        }
                         sx={{ ml: 1 }}
                     >
                         Create

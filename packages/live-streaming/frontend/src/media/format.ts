@@ -1,6 +1,9 @@
 export const audioMimeType = "audio/webm;codecs=opus";
-export const videoNoAudioMimeType = "video/webm;codecs=vp8";
-export const videoAudioMimeType = "video/webm;codecs=vp8,opus";
+/* export const videoNoAudioMimeType = "video/webm;codecs=vp8";
+export const videoAudioMimeType = "video/webm;codecs=vp8,opus"; */
+
+export const videoNoAudioMimeType = "video/webm;codecs=vp9";
+export const videoAudioMimeType = "video/webm;codecs=vp9,opus";
 
 // export const mimeType = 'video/webm;codecs="avc1.42E01F"';
 // export const mimeType = 'video/webm;codecs="avc1.42E01F"';

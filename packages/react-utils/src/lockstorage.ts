@@ -16,47 +16,19 @@ THIS SOFTWARE.
 */
 
 import debugFn from "debug";
+import { v4 as uuid } from "uuid";
 const debug = debugFn("FastMutex");
 
-/**
- * Helper function to create a randomId to distinguish between different
- * FastMutex clients.  localStorage uses strings, so explicitly cast to string:
- */
-const randomId = () => Math.random() + "";
-
-/**
- * Helper function to calculate the endTime, lock acquisition time, and then
- * resolve the promise with all the lock stats
- */
-const resolveWithStats = (resolve, stats) => {
-    const currentTime = new Date().getTime();
-    stats.acquireEnd = currentTime;
-    stats.acquireDuration = stats.acquireEnd - stats.acquireStart;
-    stats.lockStart = currentTime;
-    resolve(stats);
-};
-
-export type LockStats = {
-    restartCount: number;
-    locksLost: number;
-    contentionCount: number;
-    acquireDuration: number;
-    acquireStart?: number;
-    lockEnd?: number;
-    lockStart?: number;
-    lockDuration?: number;
-};
 export class FastMutex {
     clientId: string;
     xPrefix: string;
     yPrefix: string;
     timeout: number;
     localStorage: any;
-    lockStats: LockStats;
     intervals: Map<string, any>;
 
     constructor({
-        clientId = randomId(),
+        clientId = uuid(),
         xPrefix = "_MUTEX_LOCK_X_",
         yPrefix = "_MUTEX_LOCK_Y_",
         timeout = 5000,
@@ -69,10 +41,12 @@ export class FastMutex {
         this.intervals = new Map();
 
         this.localStorage = localStorage || window.localStorage;
-        this.resetStats();
     }
 
-    lock(key: string, keepLocked?: () => boolean): Promise<LockStats> {
+    lock(
+        key: string,
+        keepLocked?: () => boolean
+    ): Promise<{ restartCount: number; contentionCount; locksLost: number }> {
         debug(
             'Attempting to acquire Lock on "%s" using FastMutex instance "%s"',
             key,
@@ -80,25 +54,25 @@ export class FastMutex {
         );
         const x = this.xPrefix + key;
         const y = this.yPrefix + key;
-        this.resetStats();
-
-        if (!this.lockStats.acquireStart) {
-            this.lockStats.acquireStart = new Date().getTime();
-        }
-
+        let acquireStart = +new Date();
         return new Promise((resolve, reject) => {
             // we need to differentiate between API calls to lock() and our internal
             // recursive calls so that we can timeout based on the original lock() and
             // not each subsequent call.  Therefore, create a new function here within
             // the promise closure that we use for subsequent calls:
+            let restartCount = 0;
+            let contentionCount = 0;
+            let locksLost = 0;
             const acquireLock = (key) => {
-                if (this.lockStats.acquireStart == null) {
-                    reject(new Error("Unexpected, missing acquire start"));
-                    return;
+                if (
+                    restartCount > 1000 ||
+                    contentionCount > 1000 ||
+                    locksLost > 1000
+                ) {
+                    reject("Failed to resolve lock");
                 }
 
-                const elapsedTime =
-                    new Date().getTime() - this.lockStats.acquireStart;
+                const elapsedTime = new Date().getTime() - acquireStart;
                 if (elapsedTime >= this.timeout) {
                     debug(
                         'Lock on "%s" could not be acquired within %sms by FastMutex client "%s"',
@@ -119,7 +93,7 @@ export class FastMutex {
                 let lsY = this.getItem(y);
                 if (lsY) {
                     debug("Lock exists on Y (%s), restarting...", lsY);
-                    this.lockStats.restartCount++;
+                    restartCount++;
                     setTimeout(() => acquireLock(key));
                     return;
                 }
@@ -130,7 +104,7 @@ export class FastMutex {
                 // if x was changed, another client is contending for an inner lock
                 let lsX = this.getItem(x);
                 if (lsX !== this.clientId) {
-                    this.lockStats.contentionCount++;
+                    contentionCount++;
                     debug('Lock contention detected. X="%s"', lsX);
 
                     // Give enough time for critical section:
@@ -143,11 +117,15 @@ export class FastMutex {
                                 this.clientId,
                                 key
                             );
-                            resolveWithStats(resolve, this.lockStats);
+                            resolve({
+                                contentionCount,
+                                locksLost,
+                                restartCount,
+                            });
                         } else {
                             // we lost the lock, restart the process again
-                            this.lockStats.restartCount++;
-                            this.lockStats.locksLost++;
+                            restartCount++;
+                            locksLost++;
                             debug(
                                 'FastMutex client "%s" lost the lock contention on "%s" to another process (%s). Restarting...',
                                 this.clientId,
@@ -166,7 +144,7 @@ export class FastMutex {
                     this.clientId,
                     key
                 );
-                resolveWithStats(resolve, this.lockStats);
+                resolve({ contentionCount, locksLost, restartCount });
             };
 
             acquireLock(key);
@@ -179,7 +157,7 @@ export class FastMutex {
         return !!this.getItem(x) || !!this.getItem(y);
     }
 
-    getLockedInfo(key: string): string | null {
+    getLockedInfo(key: string): string | undefined {
         const x = this.xPrefix + key;
         const y = this.yPrefix + key;
         return this.getItem(x) || this.getItem(y);
@@ -191,21 +169,12 @@ export class FastMutex {
             this.clientId,
             key
         );
-        const y = this.yPrefix + key;
-        return new Promise((resolve, reject) => {
-            clearInterval(this.intervals.get(y));
-            this.localStorage.removeItem(y);
-            this.lockStats.lockEnd = new Date().getTime();
-
-            if (this.lockStats.lockStart == null) {
-                reject(new Error("Unexpected, missing lock start"));
-                return;
-            }
-            this.lockStats.lockDuration =
-                this.lockStats.lockEnd - this.lockStats.lockStart;
-            resolve(this.lockStats);
-            this.resetStats();
-        });
+        let ps = [this.yPrefix + key, this.xPrefix + key];
+        for (const p of ps) {
+            clearInterval(this.intervals.get(p));
+            this.intervals.delete(p);
+            this.localStorage.removeItem(p);
+        }
     }
 
     /**
@@ -258,9 +227,9 @@ export class FastMutex {
     /**
      * Helper function to parse JSON encoded values set in localStorage
      */
-    getItem(key: string): string | null {
+    getItem(key: string): string | undefined {
         const item = this.localStorage.getItem(key);
-        if (!item) return null;
+        if (!item) return;
 
         const parsed = JSON.parse(item);
         if (new Date().getTime() - parsed.expiresAt >= this.timeout) {
@@ -272,23 +241,15 @@ export class FastMutex {
             this.localStorage.removeItem(key);
             clearInterval(this.intervals.get(key));
             this.intervals.delete(key);
-            return null;
+            return;
         }
+        console.log(
+            "Key not expired",
+            key,
+            new Date().getTime() - parsed.expiresAt,
+            this.timeout
+        );
 
         return JSON.parse(item).value;
-    }
-
-    /**
-     * Helper function to reset statistics. A single FastMutex client can be used
-     * to perform multiple successive lock()s so we need to reset stats each time
-     */
-    resetStats() {
-        this.lockStats = {
-            restartCount: 0,
-            locksLost: 0,
-            contentionCount: 0,
-            acquireDuration: 0,
-            acquireStart: undefined,
-        };
     }
 }

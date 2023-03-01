@@ -128,11 +128,13 @@ export const PeerProvider = ({
     bootstrap,
     children,
     inMemory,
+    keypair,
     identity,
     waitForKeypairInIFrame,
 }: {
     dev?: boolean;
     inMemory?: boolean;
+    keypair?: Ed25519Keypair;
     identity?: Identity;
     waitForKeypairInIFrame?: boolean;
     bootstrap?: (Multiaddr | string)[];
@@ -155,7 +157,6 @@ export const PeerProvider = ({
         }
         setLoading(true);
 
-        const mutex = new FastMutex({ clientId: getTabId(), timeout: 1000 });
         const fn = async (
             keypair: Ed25519Keypair = keypairMessages[
                 keypairMessages.length - 1
@@ -200,7 +201,7 @@ export const PeerProvider = ({
                 (
                     await getFreeKeypair(
                         "",
-                        mutex,
+                        new FastMutex({ clientId: getTabId(), timeout: 1000 }),
                         undefined,
                         true // reuse keypairs from same tab, (force release)
                     )
@@ -293,7 +294,7 @@ export const PeerProvider = ({
             setLoading(false);
             return peer;
         };
-        ref.current = fn();
+        ref.current = fn(keypair);
     }, []);
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;

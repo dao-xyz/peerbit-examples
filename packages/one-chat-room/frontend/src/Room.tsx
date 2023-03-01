@@ -10,26 +10,15 @@ import {
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import {
-    DocumentQueryRequest,
-    StringMatchQuery,
-    IndexedValue,
-} from "@dao-xyz/peerbit-document";
+import { DocumentQueryRequest, IndexedValue } from "@dao-xyz/peerbit-document";
 import { Post, Room as RoomDB } from "./database.js";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { Send } from "@mui/icons-material";
 import { getKeyFromPath } from "./routes";
-import { useNavigate } from "react-router-dom";
-import InputLabel from "@mui/material/InputLabel";
-import MenuItem from "@mui/material/MenuItem";
-import FormControl from "@mui/material/FormControl";
-import Select, { SelectChangeEvent } from "@mui/material/Select";
-import Chip from "@mui/material/Chip";
-import { Theme, useTheme } from "@mui/material/styles";
 import { Ed25519PublicKey, EncryptedThing } from "@dao-xyz/peerbit-crypto";
-import KeyIcon from "@mui/icons-material/Key";
 import LockIcon from "@mui/icons-material/Lock";
-import { ReplicatorType } from "@dao-xyz/peerbit-program";
+import PeopleIcon from "@mui/icons-material/People";
+import { Names } from "@dao-xyz/peer-names";
 
 /***
  *  TODO
@@ -38,26 +27,6 @@ import { ReplicatorType } from "@dao-xyz/peerbit-program";
  *
  */
 
-const MENU_ITEM_HEIGHT = 48;
-const MENU_ITEM_PADDING_TOP = 8;
-const MenuProps = {
-    PaperProps: {
-        style: {
-            maxHeight: MENU_ITEM_HEIGHT * 4.5 + MENU_ITEM_PADDING_TOP,
-            width: 250,
-        },
-    },
-};
-
-function getStyles(name: string, recievers: readonly string[], theme: Theme) {
-    return {
-        fontWeight:
-            recievers.indexOf(name) === -1
-                ? theme.typography.fontWeightRegular
-                : theme.typography.fontWeightMedium,
-    };
-}
-
 const shortName = (name: string) => {
     return (
         name.substring(0, 14) +
@@ -65,28 +34,26 @@ const shortName = (name: string) => {
         name.substring(name.length - 3, name.length)
     );
 };
-
+let namesCache = new Map();
 export const Room = () => {
-    const theme = useTheme();
     const { peer, loading: loadingPeer } = usePeer();
+    const names = useRef<Names>();
     const [room, setRoom] = useState<RoomDB>();
+    const [peerCounter, setPeerCounter] = useState<number>(1);
     const [loading, setLoading] = useState(false);
     const [identitiesInChatMap, setIdentitiesInChatMap] =
         useState<Map<string, Ed25519PublicKey>>();
-
     const [text, setText] = useState("");
     const [receivers, setRecievers] = useState<string[]>([]);
     const [lastUpdated, setLastUpdate] = useState(0);
     const [posts, setPosts] = useState<IndexedValue<Post>[]>();
     const params = useParams();
-    const navigate = useNavigate();
     const messagesEndRef = useRef(null);
     const inputArea = useRef<HTMLDivElement>(null);
-
+    const header = useRef<HTMLDivElement>(null);
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     };
-
     const refresh = useCallback(() => {
         setLastUpdate(+new Date());
     }, [lastUpdated]);
@@ -135,22 +102,61 @@ export const Room = () => {
         }
         setRoom(undefined);
         setLoading(true);
-        peer.open(new RoomDB({ creator: getKeyFromPath(params.key) }))
-            .then((r) => {
-                r.messages.events.addEventListener("change", () => {
-                    refresh();
-                });
-                setRoom(r);
-            })
-            .catch((e) => {
-                console.error("Failed top open room: " + e.message);
-                alert("Failed top open room: " + e.message);
+        const key = getKeyFromPath(params.key);
+        peer.open(new Names(), { sync: () => true }).then(async (namesDB) => {
+            await namesDB.load();
+            names.current = namesDB;
 
-                throw e;
-            })
-            .finally(() => {
-                setLoading(false);
-            });
+            await peer
+                .open(new RoomDB({ creator: key }))
+                .then((r) => {
+                    const updateNames = async (p: Post) => {
+                        const pk = r.messages.index.index.get(p.id).entry
+                            .signatures[0].publicKey;
+                        namesDB.getName(pk).then((name) => {
+                            namesCache.set(pk.hashcode(), name);
+                        });
+                    };
+                    r.messages.events.addEventListener("change", (e) => {
+                        e.detail.added?.forEach((p) => {
+                            updateNames(p);
+                        });
+                        e.detail.removed?.forEach((p) => {
+                            updateNames(p);
+                        });
+                        refresh();
+                    });
+
+                    setRoom(r);
+
+                    peer.libp2p.directsub.addEventListener("subscribe", () => {
+                        setPeerCounter(
+                            peer.libp2p.directsub.getSubscribers(
+                                r.address.toString()
+                            ).size + 1
+                        );
+                    });
+                    peer.libp2p.directsub.addEventListener(
+                        "unsubscribe",
+                        () => {
+                            setPeerCounter(
+                                peer.libp2p.directsub.getSubscribers(
+                                    r.address.toString()
+                                ).size + 1
+                            );
+                        }
+                    );
+                })
+                .catch((e) => {
+                    console.error("Failed top open room: " + e.message);
+                    alert("Failed top open room: " + e.message);
+
+                    throw e;
+                })
+                .finally(() => {
+                    setLoading(false);
+                });
+        });
     }, [params.name, lastUpdated, peer?.id.toString()]);
     useEffect(() => {
         scrollToBottom();
@@ -181,7 +187,7 @@ export const Room = () => {
             });
     }, [text, room, peer, receivers]);
 
-    const handleRecieverChange = (
+    /* const handleRecieverChange = (
         event: SelectChangeEvent<typeof receivers>
     ) => {
         const {
@@ -191,22 +197,38 @@ export const Room = () => {
             // On autofill we get a stringified value.
             typeof value === "string" ? value.split(",") : value
         );
-    };
+    }; */
 
-    return (
+    const getDisplayName = (p: IndexedValue<Post>) => {
+        const name = namesCache.get(p.entry.signatures[0].publicKey.hashcode());
+        if (name) {
+            return name;
+        }
+        return shortName(p.entry.signatures[0].publicKey.toString());
+    };
+    const hasDisplayName = (p: IndexedValue<Post>) =>
+        namesCache.has(p.entry.signatures[0].publicKey.hashcode());
+
+    return loading || loadingPeer ? (
+        <>
+            {" "}
+            <CircularProgress size={20} />
+        </>
+    ) : (
         <Grid container direction="column" sx={{ height: "100vh" }}>
-            {(loading || loadingPeer) && (
+            <Grid item container ref={header} pl={1} pt={1} pb={1} spacing={1}>
                 <Grid item>
-                    <CircularProgress size={20} />
+                    <PeopleIcon />{" "}
                 </Grid>
-            )}
+                <Grid item>{peerCounter}</Grid>
+            </Grid>
             <Grid
                 item
                 height={`calc(100vh - ${
-                    (inputArea.current?.scrollHeight || 0) + "px"
-                } - 8px)`}
+                    (header.current?.offsetHeight || 0) + "px"
+                }  - ${(inputArea.current?.offsetHeight || 0) + "px"} - 8px)`}
                 sx={{ overflowY: "auto" }}
-                padding={2}
+                padding={1}
                 mb="8px"
             >
                 {posts?.length > 0 ? (
@@ -228,21 +250,26 @@ export const Room = () => {
                                     mb={-0.5}
                                 >
                                     <Grid item>
-                                        <Typography
-                                            fontStyle="italic"
-                                            variant="caption"
-                                            color={
-                                                p.entry.signatures[0].publicKey.equals(
-                                                    peer.identity.publicKey
-                                                )
-                                                    ? "primary"
-                                                    : undefined
-                                            }
+                                        <Tooltip
+                                            title={p.entry.signatures[0].publicKey.toString()}
                                         >
-                                            {shortName(
-                                                p.entry.signatures[0].publicKey.toString()
-                                            )}
-                                        </Typography>
+                                            <Typography
+                                                fontStyle={
+                                                    !hasDisplayName(p) &&
+                                                    "italic"
+                                                }
+                                                variant="caption"
+                                                color={
+                                                    p.entry.signatures[0].publicKey.equals(
+                                                        peer.identity.publicKey
+                                                    )
+                                                        ? "primary"
+                                                        : undefined
+                                                }
+                                            >
+                                                {getDisplayName(p)}
+                                            </Typography>
+                                        </Tooltip>
                                     </Grid>
                                     {p.entry._payload instanceof
                                         EncryptedThing && (
@@ -322,7 +349,9 @@ export const Room = () => {
                                 ev.preventDefault();
 
                                 // Send
-                                createPost();
+                                if (text.length > 0) {
+                                    createPost();
+                                }
                             }
                         }}
                         value={text}

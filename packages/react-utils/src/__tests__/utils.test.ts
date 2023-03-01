@@ -1,4 +1,4 @@
-import { getAllKeyPairs, getFreeKeypair } from "../utils";
+import { getAllKeyPairs, getFreeKeypair, releaseKey } from "../utils";
 import nodelocalstorage from "node-localstorage";
 import { FastMutex } from "../lockstorage";
 import { delay } from "@dao-xyz/peerbit-time";
@@ -62,5 +62,22 @@ describe("getKeypair", () => {
         expect(path1).toEqual(path2);
         const allKeypair = await getAllKeyPairs(id);
         expect(allKeypair).toHaveLength(1);
+    });
+
+    it("releases manually", async () => {
+        let timeout = 1000;
+        let mutex = new FastMutex({ localStorage, timeout });
+        const id = uuid();
+
+        const { key: keypair, path: path1 } = await getFreeKeypair(id, mutex);
+
+        const { key: keypair2, path: path2 } = await getFreeKeypair(id, mutex);
+
+        expect(path1).not.toEqual(path2);
+        releaseKey(path1, mutex);
+        expect(mutex.getLockedInfo(path1)).toBeUndefined();
+        const { key: keypair3, path: path3 } = await getFreeKeypair(id, mutex);
+
+        expect(path1).toEqual(path3); // we can now acquire key at path1 again, since we released it
     });
 });

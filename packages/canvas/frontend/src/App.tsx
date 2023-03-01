@@ -1,13 +1,14 @@
-import { HashRouter } from "react-router-dom";
 import {
     createTheme,
     responsiveFontSizes,
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { resolveSwarmAddress } from "@dao-xyz/peerbit-react";
+import { releaseKey, resolveSwarmAddress } from "@dao-xyz/peerbit-react";
 import { PeerProvider } from "@dao-xyz/peerbit-react";
-import { BaseRoutes } from "./routes";
+import { Body } from "./Body";
+import { NameProvider } from "./useNames";
+import { getRootKeypair } from "./keys";
 
 // Bootstrap addresses for network
 let bootstrapAddresses: string[];
@@ -91,6 +92,11 @@ let theme = createTheme({
 });
 
 theme = responsiveFontSizes(theme);
+let { key: keypair, path: rootKeyPath } = await getRootKeypair();
+
+window.onbeforeunload = function () {
+    releaseKey(rootKeyPath);
+};
 
 export const App = () => {
     return (
@@ -98,13 +104,15 @@ export const App = () => {
             bootstrap={bootstrapAddresses}
             inMemory={false}
             dev={import.meta.env.MODE === "development"}
+            keypair={keypair}
+            identity={keypair}
         >
-            <ThemeProvider theme={theme}>
-                <CssBaseline />
-                <HashRouter basename="/">
-                    <BaseRoutes />
-                </HashRouter>
-            </ThemeProvider>
+            <NameProvider>
+                <ThemeProvider theme={theme}>
+                    <CssBaseline />
+                    <Body />
+                </ThemeProvider>
+            </NameProvider>
         </PeerProvider>
     );
 };

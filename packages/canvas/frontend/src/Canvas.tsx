@@ -16,8 +16,6 @@ import {
     usePeer,
     submitKeypairChange,
     getFreeKeypair,
-    getAllKeyPairs,
-    getTabId,
 } from "@dao-xyz/peerbit-react";
 import { useParams } from "react-router-dom";
 import { Canvas as CanvasDB, Position, Rect, Size, Spaces } from "./dbs/canvas";
@@ -27,6 +25,9 @@ import iFrameResize from "iframe-resizer";
 import { logger } from "@dao-xyz/peerbit";
 import { Add, Clear } from "@mui/icons-material";
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+import { useNames } from "./useNames.js";
+import { getCanvasKeypair, getCanvasKeypairs } from "./keys.js";
+import { Header } from "./Header.js";
 
 logger.level = "trace";
 
@@ -57,7 +58,6 @@ const PreviewPortal = (props: any) => {
     );
 };
 
-const keypairs = new Map<string, Ed25519Keypair>();
 export const Canvas = () => {
     const { peer } = usePeer();
     const params = useParams();
@@ -67,11 +67,13 @@ export const Canvas = () => {
         node: PublicSignKey;
     }>();
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
-
     const chatKeypairRef = useRef<Ed25519Keypair>(null);
+    const { name, setName } = useNames();
+    const header = useRef<HTMLDivElement>();
 
     const addRect = async () => {
-        const { key: keypair } = await getFreeKeypair("canvas");
+        const { key: keypair } = await getCanvasKeypair();
+        await setName(name); // Reinitialize names, so that all keypairs get associated with the name
         const c = await myCanvas.current;
         c.rects.put(
             new Rect({
@@ -123,9 +125,7 @@ export const Canvas = () => {
                                                 if (!x.value.keypair) {
                                                     // try to find it in memory
                                                     const keypairs =
-                                                        await getAllKeyPairs(
-                                                            "canvas"
-                                                        );
+                                                        await getCanvasKeypairs();
                                                     for (const keypair of keypairs) {
                                                         if (
                                                             keypair.publicKey.equals(
@@ -146,14 +146,13 @@ export const Canvas = () => {
                                             } else {
                                                 if (!x.value.keypair) {
                                                     const { key: keypair } =
-                                                        await getFreeKeypair(
-                                                            "canvas"
-                                                        );
-
-                                                    console.log(
-                                                        "FREE KEYPAIR",
-                                                        keypair.publicKey.hashcode()
-                                                    );
+                                                        await getCanvasKeypair();
+                                                    /*  const keypair =
+                                                         await Ed25519Keypair.create();
+                                                     console.log(
+                                                         "FREE KEYPAIR",
+                                                         keypair.publicKey.hashcode()
+                                                     ); */
                                                     x.value.keypair = keypair;
                                                 }
                                             }
@@ -176,9 +175,13 @@ export const Canvas = () => {
                     canvas.rects.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) })) */
                 } else {
                     setInterval(async () => {
-                        await canvas.rects.index.query(
-                            new DocumentQueryRequest({ queries: [] }),
-                            { remote: { sync: true } }
+                        console.log(
+                            (
+                                await canvas.rects.index.query(
+                                    new DocumentQueryRequest({ queries: [] }),
+                                    { remote: { sync: true } }
+                                )
+                            ).length
                         );
                     }, 2000);
                 }
@@ -202,7 +205,7 @@ export const Canvas = () => {
                     node.target
                 );
                 setInterval(() => {
-                    resize[0]["iFrameResizer"].resize();
+                    resize[0]?.["iFrameResizer"]?.resize();
                 }, 1000); // resize a few times in the beginning, height calculations seems to initialize incorrectly
             }
             submitKeypairChange(node.target, rect.keypair, rect.src);
@@ -211,132 +214,149 @@ export const Canvas = () => {
     );
 
     return (
-        <Grid container direction="row">
-            <Grid
-                item
-                sx={{
-                    maxHeight: "100vh",
-                    overflowY: "auto",
-                    width: "calc(100% - 250px)",
-                }}
-            >
-                <Box sx={{ flexDirection: "column", p: 4 }}>
-                    {rects.map((x, ix) => {
-                        return (
-                            <Grid
-                                item
-                                ref={(ref) => {
-                                    ref?.querySelector<HTMLElement>(
-                                        "#frame-" + ix
-                                    )?.addEventListener("mouseenter", () => {
-                                        ref.querySelector<HTMLElement>(
-                                            "#header-" + ix
-                                        ).style.opacity = "1";
-                                    });
-
-                                    ref?.querySelector<HTMLElement>(
-                                        "#frame-" + ix
-                                    )?.addEventListener("mouseleave", () => {
-                                        ref.querySelector<HTMLElement>(
-                                            "#header-" + ix
-                                        ).style.opacity = "0";
-                                    });
-                                }}
-                                container
-                                direction="column"
-                                key={ix}
-                                sx={{
-                                    position: "relative",
-                                    width: "100%",
-                                    maxWidth: "100%",
-                                }}
-                            >
+        <>
+            <Header ref={header}></Header>
+            <Grid container direction="row">
+                <Grid
+                    item
+                    sx={{
+                        height: `calc(100vh - ${header.current?.scrollHeight})"`,
+                        overflowY: "scroll",
+                        width: "calc(100% - 275px)",
+                    }}
+                >
+                    <Box sx={{ flexDirection: "column", p: 4 }}>
+                        {rects.map((x, ix) => {
+                            return (
                                 <Grid
-                                    id={"header-" + ix}
                                     item
-                                    alignItems="right"
-                                    width="100%"
-                                    display="flex"
-                                    position="absolute"
-                                    sx={{ top: "0px", opacity: 0 }}
+                                    ref={(ref) => {
+                                        ref?.querySelector<HTMLElement>(
+                                            "#frame-" + ix
+                                        )?.addEventListener(
+                                            "mouseenter",
+                                            () => {
+                                                ref.querySelector<HTMLElement>(
+                                                    "#header-" + ix
+                                                ).style.opacity = "1";
+                                            }
+                                        );
+
+                                        ref?.querySelector<HTMLElement>(
+                                            "#frame-" + ix
+                                        )?.addEventListener(
+                                            "mouseleave",
+                                            () => {
+                                                ref.querySelector<HTMLElement>(
+                                                    "#header-" + ix
+                                                ).style.opacity = "0";
+                                            }
+                                        );
+                                    }}
+                                    container
+                                    direction="column"
+                                    key={ix}
+                                    sx={{
+                                        position: "relative",
+                                        width: "100%",
+                                        maxWidth: "100%",
+                                    }}
                                 >
-                                    {" "}
-                                    <IconButton
-                                        size="small"
-                                        sx={{ ml: "auto" }}
-                                        onClick={() => {
-                                            console.log("delete!");
-                                        }}
+                                    <Grid
+                                        id={"header-" + ix}
+                                        item
+                                        alignItems="right"
+                                        width="100%"
+                                        display="flex"
+                                        position="absolute"
+                                        sx={{ top: "0px", opacity: 0 }}
                                     >
-                                        <Clear />
-                                    </IconButton>
+                                        {" "}
+                                        <IconButton
+                                            size="small"
+                                            sx={{ ml: "auto" }}
+                                            onClick={() => {
+                                                console.log("delete!");
+                                            }}
+                                        >
+                                            <Clear />
+                                        </IconButton>
+                                    </Grid>
+                                    <Grid id={"frame-" + ix} item>
+                                        <iframe
+                                            onLoad={(event) =>
+                                                onIframe(event, x)
+                                            }
+                                            style={{
+                                                width: "100%",
+                                                height: "500px",
+                                                border: 0,
+                                            }}
+                                            src={x.src}
+                                            allow="camera; microphone; display-capture; fullscreen; autoplay; clipboard-write;"
+                                        ></iframe>
+                                    </Grid>
                                 </Grid>
-                                <Grid id={"frame-" + ix} item>
-                                    <iframe
-                                        onLoad={(event) => onIframe(event, x)}
-                                        style={{
-                                            width: "100%",
-                                            height: "100%",
-                                            border: 0,
-                                        }}
-                                        src={x.src}
-                                        allow="camera; microphone; display-capture; fullscreen; autoplay; clipboard-write;"
-                                    ></iframe>
-                                </Grid>
-                            </Grid>
-                        );
-                    })}
-                    {isOwner && (
-                        <IconButton size="large" onClick={addRect}>
-                            <Add />
-                        </IconButton>
-                    )}
-                </Box>
-            </Grid>
-            <Grid
-                item
-                sx={{
-                    width: "225px",
-                    position: "fixed",
-                    bottom: "10px",
-                    right: "10px",
-                }} /* marginLeft="auto" mr={1} */
-            >
-                {idArgs?.node && (
-                    <iframe
-                        onLoad={async (event) => {
-                            chatKeypairRef.current =
-                                chatKeypairRef.current ||
-                                (await Ed25519Keypair.create());
-                            const kp = chatKeypairRef.current;
-                            if (
-                                (event.target as HTMLIFrameElement).src ==
-                                CHAT_APP
-                            ) {
-                                (event.target as HTMLIFrameElement).src =
-                                    CHAT_APP + "/" + getChatPath(idArgs.node);
-                            } else {
-                                onIframe(event, {
-                                    keypair: kp,
-                                    src:
+                            );
+                        })}
+                        {isOwner && (
+                            <IconButton size="large" onClick={addRect}>
+                                <Add />
+                            </IconButton>
+                        )}
+                    </Box>
+                </Grid>
+                <Grid
+                    item
+                    sx={{
+                        width: "250px",
+                        position: "fixed",
+                        bottom: "10px",
+                        right: "10px",
+                    }}
+                >
+                    {idArgs?.node && (
+                        <iframe
+                            onLoad={async (event) => {
+                                if (!chatKeypairRef.current) {
+                                    chatKeypairRef.current = (
+                                        await getCanvasKeypair()
+                                    ).key;
+
+                                    setName(name);
+                                }
+                                const kp = chatKeypairRef.current;
+                                if (
+                                    (event.target as HTMLIFrameElement).src ==
+                                    CHAT_APP
+                                ) {
+                                    (event.target as HTMLIFrameElement).src =
                                         CHAT_APP +
                                         "/" +
-                                        getChatPath(idArgs.node),
-                                });
-                            }
-                        }}
-                        style={{
-                            display: "block",
-                            width: "100%",
-                            height: "calc(100vh - 16px)",
-                            border: 0,
-                            overflow: "hidden",
-                        }}
-                        src={CHAT_APP}
-                        allow="camera; microphone; display-capture; autoplay; clipboard-write;"
-                    ></iframe>
-                )}
+                                        getChatPath(idArgs.node);
+                                } else {
+                                    onIframe(event, {
+                                        keypair: kp,
+                                        src:
+                                            CHAT_APP +
+                                            "/" +
+                                            getChatPath(idArgs.node),
+                                    });
+                                }
+                            }}
+                            style={{
+                                display: "block",
+                                width: "100%",
+                                height: "calc(100vh - 50px)",
+                                border: 0,
+                                overflow: "hidden",
+                            }}
+                            src={CHAT_APP}
+                            allow="camera; microphone; display-capture; autoplay; clipboard-write;"
+                        ></iframe>
+                    )}
+                </Grid>
             </Grid>
-        </Grid>
+        </>
     );
 };
