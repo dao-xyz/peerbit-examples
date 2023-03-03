@@ -112,16 +112,16 @@ export const Stream = (args: { node: PublicSignKey }) => {
             newQualities = !properties.quality
                 ? new Set()
                 : new Set(
-                      properties.quality
-                          .map((x, i) =>
-                              !quality.find(
-                                  (y) => JSON.stringify(y) === JSON.stringify(x)
-                              )
-                                  ? x.video.height
-                                  : undefined
-                          )
-                          .filter((x) => x != null)
-                  );
+                    properties.quality
+                        .map((x, i) =>
+                            !quality.find(
+                                (y) => JSON.stringify(y) === JSON.stringify(x)
+                            )
+                                ? x.video.height
+                                : undefined
+                        )
+                        .filter((x) => x != null)
+                );
 
             // There seems to be an issue that we have to reopen all streams
             // Else we will never be able to request the highest resolution
@@ -265,38 +265,15 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 videoRef.load();
                 break;
             case "media":
+                if (videoRef.src?.length > 0) {
+                    return;
+                }
                 videoRef.src = streamType.current.src;
                 videoRef.load();
                 break;
 
             case "camera":
-                /*   updatingSource.current = new Array(quality.length).fill(true)
-                  for (const [ix, s] of rv.entries()) {
-                      let currentVideoRef = allRefs.find(x => (x.srcObject as MediaStream)?.getVideoTracks()?.[0]?.getSettings().height === s.video.height);
-                      if (!currentVideoRef) {
-                          currentVideoRef = allRefs.find(x => !x.srcObject);// find one with no video
-                      }
-                      if (!currentVideoRef) {
-                          currentVideoRef = allRefs[0];
-                      }
-  
-  
-  
-                    //  console.log('Start new camera stream?', s.video.height, newQualities, newQualities.has(s.video.height), quality)
-                      if (quality.map(x=>x.video.height).includes(s.video.height) || (currentVideoRef.srcObject as MediaStream)?.active === false) {
-                          const stream = await navigator.mediaDevices
-                              .getUserMedia({
-                                  video: { height: s.video.height },
-                                  audio: !!s.audio
-  
-                              })
-  
-                          currentVideoRef.srcObject = stream;
-                      }
-  
-                      updatingSource.current[ix] = false
-                  }
-                  */
+
 
                 if ((videoRef.srcObject as MediaStream)?.active === true) {
                     console.log(
