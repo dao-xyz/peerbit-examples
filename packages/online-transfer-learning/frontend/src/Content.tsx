@@ -5,7 +5,8 @@ import * as tf from "@tensorflow/tfjs";
 import { Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { P2PStorage } from "./io-utils";
 import { ModelDatabase } from "./database.js";
-import { delay } from "@dao-xyz/peerbit-time";
+import PublicIcon from "@mui/icons-material/Public";
+import Link from "@mui/material/Link";
 
 const MOBILE_NET_INPUT_WIDTH = 224;
 const MOBILE_NET_INPUT_HEIGHT = 224;
@@ -53,9 +54,15 @@ function dataGatherLoop(
 
         statusText.innerText = "";
         for (let n = 0; n < CLASS_NAMES.length; n++) {
+            if (n > 0) {
+                statusText.innerText += "\n";
+            }
             statusText.innerText +=
-                CLASS_NAMES[n] + " data count: " + examplesCount[n] + ". ";
+                CLASS_NAMES[n] +
+                " data count: " +
+                (examplesCount.get(n) || "NO SAMPLES");
         }
+        console.log(statusText.innerText);
         window.requestAnimationFrame(() =>
             dataGatherLoop(video, outputState, imageNet, condition, statusText)
         );
@@ -69,7 +76,7 @@ function predictLoop(
     condition: () => boolean,
     statusText: HTMLDivElement
 ) {
-    if (condition) {
+    if (condition()) {
         tf.tidy(function () {
             let videoFrameAsTensor = tf.browser.fromPixels(video).div(255);
             let resizedTensorFrame = tf.image.resizeBilinear(
@@ -109,31 +116,37 @@ function predictLoop(
     }
 }
 
-async function train(model: tf.Sequential, storage: tf.io.IOHandler) {
+async function train(
+    model: tf.Sequential,
+    storage: tf.io.IOHandler,
+    statusText: HTMLDivElement
+) {
     tf.util.shuffleCombo(trainingDataInputs, trainingDataOutputs);
     let outputsAsTensor = tf.tensor1d(trainingDataOutputs, "int32");
     let oneHotOutputs = tf.oneHot(outputsAsTensor, CLASS_NAMES.length);
     let inputsAsTensor = tf.stack(trainingDataInputs);
 
+    let EPOCHS = 10;
     await model.fit(inputsAsTensor, oneHotOutputs, {
         shuffle: true,
         batchSize: 5,
-        epochs: 10,
-        callbacks: { onEpochEnd: logProgress },
+        epochs: EPOCHS,
+        callbacks: {
+            onEpochEnd: (epoch, logs) => {
+                console.log("Data for epoch " + epoch, logs);
+                statusText.innerText =
+                    "Training: " + Math.round((epoch / EPOCHS) * 100) + "%";
+            },
+        },
     });
-
     await model.save(storage);
-    console.log("saved model!");
     outputsAsTensor.dispose();
     oneHotOutputs.dispose();
     inputsAsTensor.dispose();
+    statusText.innerText = "Training done!";
 }
 
 // predictLoop(video, model, imageNet, condition, statusText);
-
-function logProgress(epoch, logs) {
-    console.log("Data for epoch " + epoch, logs);
-}
 
 export const MODEL_ID = "V0";
 export const MODEL_DATABASE_ID = "V0";
@@ -297,6 +310,11 @@ export const Content = () => {
     return (
         <>
             <Grid container direction="column" spacing={2} padding={2}>
+                <Grid item>
+                    <Typography variant="h5">
+                        Binary classification demo
+                    </Typography>
+                </Grid>
                 <Grid item sx={{ display: "flex", flexDirection: "row" }}>
                     <Typography>Online: &nbsp;</Typography>{" "}
                     <Typography ref={peersCountText}>1</Typography>
@@ -313,17 +331,17 @@ export const Content = () => {
                         )}
                     </Grid>
                 </Grid>
-                <Grid item sx={{ height: "min(500px, 50vh)" }}>
+                <Grid item sx={{ height: "min(500px, 50vh)", width: "100%" }}>
                     <video
                         height="100%"
-                        width="auto"
+                        width="100%"
                         playsInline
                         ref={video}
                         autoPlay
                         muted
                     ></video>
                 </Grid>
-                {loading && <CircularProgress />}
+                {loading && <CircularProgress size={20} />}
 
                 <Grid item container direction="column">
                     <Grid item>
@@ -365,12 +383,14 @@ export const Content = () => {
                             disabled={processing}
                             onClick={() => {
                                 setProcessing(true);
-                                train(model.current, p2pStorage.current).then(
-                                    () => {
-                                        updateModelDate();
-                                        setProcessing(false);
-                                    }
-                                );
+                                train(
+                                    model.current,
+                                    p2pStorage.current,
+                                    status.current
+                                ).then(() => {
+                                    updateModelDate();
+                                    setProcessing(false);
+                                });
                             }}
                         >
                             Train
@@ -397,6 +417,8 @@ export const Content = () => {
                         >
                             Predict
                         </Button>
+
+                        {processing && <CircularProgress size={20} />}
                     </Grid>
                     <Grid item>
                         <Button
@@ -406,6 +428,8 @@ export const Content = () => {
                             Stop
                         </Button>
                         <Button
+                            startIcon={<PublicIcon />}
+                            color="secondary"
                             onClick={() => {
                                 tf.loadLayersModel(p2pStorage.current).then(
                                     (loaded) => {
@@ -430,10 +454,11 @@ export const Content = () => {
                                 );
                             }}
                         >
-                            Sync latest
+                            Sync from peers
                         </Button>
                         <Button
                             id="reset"
+                            color="warning"
                             onClick={() => {
                                 examplesCount.clear();
                                 for (
@@ -450,6 +475,11 @@ export const Content = () => {
                             Reset
                         </Button>
                     </Grid>
+                </Grid>
+                <Grid item ml="auto">
+                    <Link href="https://github.com/dao-xyz/peerbit-examples/tree/master/packages/online-transfer-learning">
+                        Source code
+                    </Link>
                 </Grid>
             </Grid>
         </>
