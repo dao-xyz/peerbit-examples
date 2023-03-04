@@ -6,7 +6,7 @@ import { base64url } from "multiformats/bases/base64";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { NewSpace } from "./NewSpace";
 import { Canvas as CanvasDB } from "./dbs/canvas";
-import { Address } from '@dao-xyz/peerbit-program'
+import { Address } from "@dao-xyz/peerbit-program";
 
 export const getStreamPath = (node: PublicSignKey) =>
     "/s/" + base64url.encode(serialize(node));
@@ -14,7 +14,8 @@ export const getStreamPath = (node: PublicSignKey) =>
 export const getChatPath = (node: PublicSignKey) =>
     "/k/" + base64url.encode(serialize(node));
 
-export const getCanvasPath = (canvas: CanvasDB) => "/k/" + base64url.encode(serialize(canvas.address));
+export const getCanvasPath = (canvas: CanvasDB) =>
+    "/k/" + base64url.encode(serialize(canvas.address));
 
 export const getAdressFromKey = (key: string) =>
     deserialize(base64url.decode(key), Address);

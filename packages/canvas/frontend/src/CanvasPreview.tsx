@@ -5,15 +5,17 @@ import { Canvas } from "./dbs/canvas";
 import { getCanvasPath } from "./routes";
 
 export const CanvasPreview = (props: { canvas: Canvas }) => {
-    const navigate = useNavigate()
+    const navigate = useNavigate();
     const { peer } = usePeer();
     return (
         <Card>
-            <Button sx={{ minWidth: "100px", minHeight: "100px" }} onClick={async () => {
-                const db = await peer.open(props.canvas)
-                navigate(getCanvasPath(db))
-            }}>
-
+            <Button
+                sx={{ minWidth: "100px", minHeight: "100px" }}
+                onClick={async () => {
+                    const db = await peer.open(props.canvas);
+                    navigate(getCanvasPath(db));
+                }}
+            >
                 <CardContent>
                     <Typography gutterBottom variant="h5" component="div">
                         {props.canvas.info.name}

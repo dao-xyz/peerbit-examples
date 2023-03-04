@@ -31,19 +31,17 @@ export const Home = () => {
                         results.map((x) => x.results.map((y) => y.value)).flat()
                     );
                 });
-        }
-        refresh()
+        };
+        refresh();
         setInterval(async () => {
-            refresh()
+            refresh();
         }, 2000);
     }, [spaces]);
 
     return (
         <Grid container direction="column" padding={4} spacing={4}>
             <Grid item>
-                <Typography variant="h4" >
-                    My stuff
-                </Typography>
+                <Typography variant="h4">My stuff</Typography>
             </Grid>
             <Grid item container direction="row" spacing={2}>
                 {canvases.find((x) => x.key.equals(peer.idKey.publicKey)) && (
@@ -60,19 +58,19 @@ export const Home = () => {
                     </Grid>
                 )}
                 <Grid item>
-                    <Button variant="outlined" size="large" onClick={() => navigate(NEW_SPACE)}>
+                    <Button
+                        variant="outlined"
+                        size="large"
+                        onClick={() => navigate(NEW_SPACE)}
+                    >
                         <Add />
                     </Button>
                 </Grid>
             </Grid>
             <Grid item>
-                <Typography variant="h4">
-                    Explore
-                </Typography>
-
+                <Typography variant="h4">Explore</Typography>
             </Grid>
             <Grid item>
-
                 <Grid container spacing={2}>
                     {canvases.map((canvas, ix) => {
                         return (

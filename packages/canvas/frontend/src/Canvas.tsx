@@ -17,6 +17,7 @@ import { Add, Clear } from "@mui/icons-material";
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
 import { useNames } from "./useNames.js";
 import { getCanvasKeypair, getCanvasKeypairs } from "./keys.js";
+import { HEIGHT } from "./Header.js";
 
 export const Canvas = () => {
     const { peer } = usePeer();
@@ -40,7 +41,7 @@ export const Canvas = () => {
                 publicKey: keypair.publicKey,
                 position: new Position({ x: 0, y: c.rects.index.size, z: 0 }),
                 size: new Size({ height: 100, width: 100 }),
-                src: STREAMING_APP + "/" + getStreamPath(keypair.publicKey),
+                src: STREAMING_APP + getStreamPath(keypair.publicKey),
             })
         );
     };
@@ -57,10 +58,10 @@ export const Canvas = () => {
                 sync: () => true,
             })
             .then(async (canvas) => {
-                console.log('OPEN!', canvas)
+                console.log("OPEN!", canvas);
                 const node = canvas.key;
                 let isOwner = peer.idKey.publicKey.equals(node);
-                console.log('is owner?', isOwner)
+                console.log("is owner?", isOwner);
                 setIsOwner(isOwner);
                 setIdArgs({ node });
                 canvas.rects.events.addEventListener(
@@ -145,8 +146,6 @@ export const Canvas = () => {
                 
              } */
             });
-
-
     }, [peer?.id.toString()]);
 
     const onIframe = useCallback(
@@ -171,15 +170,16 @@ export const Canvas = () => {
     );
 
     return (
-        <Grid container direction="row" sx={{ width: '100%', height: '100%' }}>
+        <Grid container direction="row" sx={{ width: "100%" }}>
             <Grid
                 item
                 sx={{
                     overflowY: "scroll",
+                    height: `calc(100vh - ${HEIGHT})`,
                     width: `calc(100% - 275px)`,
                 }}
             >
-                <Box sx={{ flexDirection: "column", p: 4 }}>
+                <Box sx={{ flexDirection: "column" }}>
                     {rects.map((x, ix) => {
                         return (
                             <Grid
@@ -286,9 +286,7 @@ export const Canvas = () => {
                             } else {
                                 onIframe(event, {
                                     keypair: kp,
-                                    src:
-                                        CHAT_APP +
-                                        getChatPath(idArgs.node),
+                                    src: CHAT_APP + getChatPath(idArgs.node),
                                 });
                             }
                         }}

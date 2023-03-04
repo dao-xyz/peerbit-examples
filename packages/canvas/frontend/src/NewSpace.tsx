@@ -8,8 +8,7 @@ import { userSpaces } from "./useSpaces";
 import { getCanvasPath } from "./routes";
 
 export const NewSpace = () => {
-
-    const { spaces } = userSpaces()
+    const { spaces } = userSpaces();
     const { peer } = usePeer();
     const navigate = useNavigate();
     let [canvases, setCanvases] = useState<Canvas[]>([]);
@@ -19,24 +18,17 @@ export const NewSpace = () => {
     const create = async () => {
         let canvas = new Canvas({
             rootTrust: peer.idKey.publicKey,
-            info: new TitleAndDescription(name, description)
+            info: new TitleAndDescription(name, description),
         });
-        canvas = await peer.open(canvas)
-        return spaces.canvases.put(
-            canvas
-        ).then(() => {
-            navigate(getCanvasPath(canvas))
-        })
-    }
+        canvas = await peer.open(canvas);
+        return spaces.canvases.put(canvas).then(() => {
+            navigate(getCanvasPath(canvas));
+        });
+    };
 
     return (
         <>
-            <Grid
-                container
-                direction="column"
-                padding={4}
-                spacing={4}
-            >
+            <Grid container direction="column" padding={4} spacing={4}>
                 <Grid container item direction="column" spacing={2}>
                     <Grid item>
                         <Typography variant="h5" gutterBottom>
@@ -56,7 +48,6 @@ export const NewSpace = () => {
                     </Grid>
 
                     <Grid item>
-
                         <TextField
                             size="small"
                             label="Description"
@@ -68,9 +59,7 @@ export const NewSpace = () => {
                     </Grid>
                     <Grid item>
                         <Button
-                            disabled={
-                                !spaces || !name || name.length == 0
-                            }
+                            disabled={!spaces || !name || name.length == 0}
                             onClick={() => create()}
                             sx={{ ml: 1 }}
                         >

@@ -19,7 +19,7 @@ export const Body = () => {
                     <Grid item sx={{ height: "100%" }}>
                         <CanvasToolbar direction="column" />
                     </Grid>
-                    <Grid item sx={{ width: '100%' }}>
+                    <Grid item sx={{ width: "100%" }}>
                         <BaseRoutes />
                     </Grid>
                 </Grid>
