@@ -3,6 +3,7 @@ import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Ed25519Keypair, toBase64, fromBase64 } from "@dao-xyz/peerbit-crypto";
 import { FastMutex } from "./lockstorage";
 import { v4 as uuid } from "uuid";
+import sodium from "libsodium-wrappers";
 
 export const resolveSwarmAddress = async (url: string, timeout = 5000) => {
     if (url.startsWith("/")) {
@@ -57,6 +58,7 @@ export const getFreeKeypair = async (
     lockCondition: () => boolean = () => true,
     releaseLockIfSameId?: boolean
 ) => {
+    await sodium.ready;
     const idCounterKey = ID_COUNTER_KEY + id;
     await lock.lock(idCounterKey, () => true);
     let idCounter = JSON.parse(localStorage.getItem(idCounterKey) || "0");

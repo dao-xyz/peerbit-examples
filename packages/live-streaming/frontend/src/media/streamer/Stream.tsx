@@ -112,16 +112,16 @@ export const Stream = (args: { node: PublicSignKey }) => {
             newQualities = !properties.quality
                 ? new Set()
                 : new Set(
-                    properties.quality
-                        .map((x, i) =>
-                            !quality.find(
-                                (y) => JSON.stringify(y) === JSON.stringify(x)
-                            )
-                                ? x.video.height
-                                : undefined
-                        )
-                        .filter((x) => x != null)
-                );
+                      properties.quality
+                          .map((x, i) =>
+                              !quality.find(
+                                  (y) => JSON.stringify(y) === JSON.stringify(x)
+                              )
+                                  ? x.video.height
+                                  : undefined
+                          )
+                          .filter((x) => x != null)
+                  );
 
             // There seems to be an issue that we have to reopen all streams
             // Else we will never be able to request the highest resolution
@@ -273,8 +273,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 break;
 
             case "camera":
-
-
                 if ((videoRef.srcObject as MediaStream)?.active === true) {
                     console.log(
                         (videoRef.srcObject as MediaStream)

@@ -78,6 +78,20 @@ export class Rect {
     }
 }
 
+@variant(0)
+export class TitleAndDescription {
+    @field({ type: "string" })
+    name: string;
+
+    @field({ type: "string" })
+    description: string;
+
+    constructor(name: string, description: string) {
+        this.name = name;
+        this.description = description;
+    }
+}
+
 @variant("canvas")
 export class Canvas extends Program {
     @field({ type: Documents<Rect> })
@@ -86,16 +100,19 @@ export class Canvas extends Program {
     @field({ type: PublicSignKey })
     key: PublicSignKey;
 
-    @field({ type: "string" })
-    name: string;
+    @field({ type: TitleAndDescription })
+    info: TitleAndDescription;
 
-    constructor(properties: { rootTrust: PublicSignKey; name: string }) {
-        super({ id: properties.rootTrust.hashcode() + "/" + properties.name });
+    constructor(properties: {
+        rootTrust: PublicSignKey;
+        info: TitleAndDescription;
+    }) {
+        super();
         this.key = properties.rootTrust;
         this.rects = new Documents({
             index: new DocumentIndex({ indexBy: "id" }),
         });
-        this.name = properties.name;
+        this.info = properties.info;
     }
 
     setup(): Promise<void> {

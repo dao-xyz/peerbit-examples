@@ -2,7 +2,7 @@ import { Name, Names } from "@dao-xyz/peer-names";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { SignatureWithKey, PreHash } from "@dao-xyz/peerbit-crypto";
-import { getAllKeypairs, getCanvasKeypairs } from "./keys";
+import { getAllKeypairs } from "./keys";
 
 interface INameContext {
     name?: string;
@@ -55,7 +55,6 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                         if (name !== n && n) {
                             setName(n);
                         }
-                        console.log('set name"!', n);
                     });
                 });
                 await db.load();

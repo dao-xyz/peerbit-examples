@@ -1,62 +1,22 @@
 import { useState, useEffect, useRef, useCallback } from "react";
-import createCache from "@emotion/cache";
-import styled from "@emotion/styled";
-import ReactDOM from "react-dom";
+
 import {
     getStreamPath,
-    getPathFromKey,
-    getKeyFromPath,
     CHAT_APP,
     STREAMING_APP,
-    getNameFromPath,
     getChatPath,
+    getAdressFromKey,
 } from "./routes.js";
-import { CacheProvider } from "@emotion/react";
-import {
-    usePeer,
-    submitKeypairChange,
-    getFreeKeypair,
-} from "@dao-xyz/peerbit-react";
+import { usePeer, submitKeypairChange } from "@dao-xyz/peerbit-react";
 import { useParams } from "react-router-dom";
-import { Canvas as CanvasDB, Position, Rect, Size, Spaces } from "./dbs/canvas";
+import { Canvas as CanvasDB, Position, Rect, Size } from "./dbs/canvas";
 import { Ed25519Keypair, PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { Box, Grid, IconButton } from "@mui/material";
 import iFrameResize from "iframe-resizer";
-import { logger } from "@dao-xyz/peerbit";
 import { Add, Clear } from "@mui/icons-material";
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
 import { useNames } from "./useNames.js";
 import { getCanvasKeypair, getCanvasKeypairs } from "./keys.js";
-import { Header } from "./Header.js";
-
-logger.level = "trace";
-
-const PreviewIframe = styled("iframe")(() => ({
-    border: "none",
-    height: "100%",
-    width: "100%",
-}));
-
-const PreviewPortal = (props: any) => {
-    const [contentRef, setContentRef] = useState<any>(null);
-    const mountNode = contentRef?.contentWindow?.document?.body;
-    const cache = createCache({
-        key: "css",
-        container: contentRef?.contentWindow?.document?.head,
-        prepend: true,
-    });
-    return (
-        <PreviewIframe ref={setContentRef}>
-            {mountNode &&
-                ReactDOM.createPortal(
-                    <CacheProvider value={cache}>
-                        {props.children}
-                    </CacheProvider>,
-                    mountNode
-                )}
-        </PreviewIframe>
-    );
-};
 
 export const Canvas = () => {
     const { peer } = usePeer();
@@ -69,7 +29,6 @@ export const Canvas = () => {
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
     const chatKeypairRef = useRef<Ed25519Keypair>(null);
     const { name, setName } = useNames();
-    const header = useRef<HTMLDivElement>();
 
     const addRect = async () => {
         const { key: keypair } = await getCanvasKeypair();
@@ -91,23 +50,19 @@ export const Canvas = () => {
             return;
         }
 
-        const node = getKeyFromPath(params.key);
-        const canvasName = getNameFromPath(params.name);
-
-        let isOwner = peer.idKey.publicKey.equals(node);
-        setIsOwner(isOwner);
-        setIdArgs({ node });
-
-        console.log(
-            "open!?",
-            peer.idKey.publicKey.equals(peer.identity.publicKey)
-        );
+        const canvasAddress = getAdressFromKey(params.key);
 
         myCanvas.current = peer
-            .open(new CanvasDB({ rootTrust: node, name: canvasName }), {
+            .open<CanvasDB>(canvasAddress, {
                 sync: () => true,
             })
             .then(async (canvas) => {
+                console.log('OPEN!', canvas)
+                const node = canvas.key;
+                let isOwner = peer.idKey.publicKey.equals(node);
+                console.log('is owner?', isOwner)
+                setIsOwner(isOwner);
+                setIdArgs({ node });
                 canvas.rects.events.addEventListener(
                     "change",
                     async (change) => {
@@ -190,6 +145,8 @@ export const Canvas = () => {
                 
              } */
             });
+
+
     }, [peer?.id.toString()]);
 
     const onIframe = useCallback(
@@ -214,149 +171,139 @@ export const Canvas = () => {
     );
 
     return (
-        <>
-            <Header ref={header}></Header>
-            <Grid container direction="row">
-                <Grid
-                    item
-                    sx={{
-                        height: `calc(100vh - ${header.current?.scrollHeight}px)`,
-                        overflowY: "scroll",
-                        width: "calc(100% - 275px)",
-                    }}
-                >
-                    <Box sx={{ flexDirection: "column", p: 4 }}>
-                        {rects.map((x, ix) => {
-                            return (
-                                <Grid
-                                    item
-                                    ref={(ref) => {
-                                        ref?.querySelector<HTMLElement>(
-                                            "#frame-" + ix
-                                        )?.addEventListener(
-                                            "mouseenter",
-                                            () => {
-                                                ref.querySelector<HTMLElement>(
-                                                    "#header-" + ix
-                                                ).style.opacity = "1";
-                                            }
-                                        );
+        <Grid container direction="row" sx={{ width: '100%', height: '100%' }}>
+            <Grid
+                item
+                sx={{
+                    overflowY: "scroll",
+                    width: `calc(100% - 275px)`,
+                }}
+            >
+                <Box sx={{ flexDirection: "column", p: 4 }}>
+                    {rects.map((x, ix) => {
+                        return (
+                            <Grid
+                                item
+                                ref={(ref) => {
+                                    ref?.querySelector<HTMLElement>(
+                                        "#frame-" + ix
+                                    )?.addEventListener("mouseenter", () => {
+                                        ref.querySelector<HTMLElement>(
+                                            "#header-" + ix
+                                        ).style.opacity = "1";
+                                    });
 
-                                        ref?.querySelector<HTMLElement>(
-                                            "#frame-" + ix
-                                        )?.addEventListener(
-                                            "mouseleave",
-                                            () => {
-                                                ref.querySelector<HTMLElement>(
-                                                    "#header-" + ix
-                                                ).style.opacity = "0";
-                                            }
-                                        );
-                                    }}
-                                    container
-                                    direction="column"
-                                    key={ix}
-                                    sx={{
-                                        position: "relative",
-                                        width: "100%",
-                                        maxWidth: "100%",
-                                    }}
+                                    ref?.querySelector<HTMLElement>(
+                                        "#frame-" + ix
+                                    )?.addEventListener("mouseleave", () => {
+                                        ref.querySelector<HTMLElement>(
+                                            "#header-" + ix
+                                        ).style.opacity = "0";
+                                    });
+                                }}
+                                container
+                                direction="column"
+                                key={ix}
+                                sx={{
+                                    position: "relative",
+                                    width: "100%",
+                                    maxWidth: "100%",
+                                }}
+                            >
+                                <Grid
+                                    id={"header-" + ix}
+                                    item
+                                    alignItems="right"
+                                    width="100%"
+                                    display="flex"
+                                    position="absolute"
+                                    sx={{ top: "0px", opacity: 0 }}
                                 >
-                                    <Grid
-                                        id={"header-" + ix}
-                                        item
-                                        alignItems="right"
-                                        width="100%"
-                                        display="flex"
-                                        position="absolute"
-                                        sx={{ top: "0px", opacity: 0 }}
-                                    >
-                                        {" "}
+                                    {isOwner && (
                                         <IconButton
                                             size="small"
                                             sx={{ ml: "auto" }}
                                             onClick={() => {
-                                                console.log("delete!");
+                                                myCanvas.current.then(
+                                                    (canvas) => {
+                                                        canvas.rects.del(x.id);
+                                                    }
+                                                );
                                             }}
                                         >
                                             <Clear />
                                         </IconButton>
-                                    </Grid>
-                                    <Grid id={"frame-" + ix} item>
-                                        <iframe
-                                            onLoad={(event) =>
-                                                onIframe(event, x)
-                                            }
-                                            style={{
-                                                width: "100%",
-                                                height: "500px",
-                                                border: 0,
-                                            }}
-                                            src={x.src}
-                                            allow="camera; microphone; display-capture; fullscreen; autoplay; clipboard-write;"
-                                        ></iframe>
-                                    </Grid>
+                                    )}
                                 </Grid>
-                            );
-                        })}
-                        {isOwner && (
-                            <IconButton size="large" onClick={addRect}>
-                                <Add />
-                            </IconButton>
-                        )}
-                    </Box>
-                </Grid>
-                <Grid
-                    item
-                    sx={{
-                        width: "250px",
-                        position: "fixed",
-                        bottom: "10px",
-                        right: "10px",
-                    }}
-                >
-                    {idArgs?.node && (
-                        <iframe
-                            onLoad={async (event) => {
-                                if (!chatKeypairRef.current) {
-                                    chatKeypairRef.current = (
-                                        await getCanvasKeypair()
-                                    ).key;
-
-                                    setName(name);
-                                }
-                                const kp = chatKeypairRef.current;
-                                if (
-                                    (event.target as HTMLIFrameElement).src ==
-                                    CHAT_APP
-                                ) {
-                                    (event.target as HTMLIFrameElement).src =
-                                        CHAT_APP +
-                                        "/" +
-                                        getChatPath(idArgs.node);
-                                } else {
-                                    onIframe(event, {
-                                        keypair: kp,
-                                        src:
-                                            CHAT_APP +
-                                            "/" +
-                                            getChatPath(idArgs.node),
-                                    });
-                                }
-                            }}
-                            style={{
-                                display: "block",
-                                width: "100%",
-                                height: "calc(100vh - 50px)",
-                                border: 0,
-                                overflow: "hidden",
-                            }}
-                            src={CHAT_APP}
-                            allow="camera; microphone; display-capture; autoplay; clipboard-write;"
-                        ></iframe>
+                                <Grid id={"frame-" + ix} item>
+                                    <iframe
+                                        onLoad={(event) => onIframe(event, x)}
+                                        style={{
+                                            width: "100%",
+                                            height: "500px",
+                                            border: 0,
+                                        }}
+                                        src={x.src}
+                                        allow="camera; microphone; display-capture; fullscreen; autoplay; clipboard-write;"
+                                    ></iframe>
+                                </Grid>
+                            </Grid>
+                        );
+                    })}
+                    {isOwner && (
+                        <IconButton size="large" onClick={addRect}>
+                            <Add />
+                        </IconButton>
                     )}
-                </Grid>
+                </Box>
             </Grid>
-        </>
+            <Grid
+                item
+                sx={{
+                    width: "250px",
+                    position: "fixed",
+                    bottom: "10px",
+                    right: "10px",
+                }}
+            >
+                {idArgs?.node && (
+                    <iframe
+                        onLoad={async (event) => {
+                            if (!chatKeypairRef.current) {
+                                chatKeypairRef.current = (
+                                    await getCanvasKeypair()
+                                ).key;
+
+                                setName(name);
+                            }
+                            const kp = chatKeypairRef.current;
+                            if (
+                                (event.target as HTMLIFrameElement).src ==
+                                CHAT_APP
+                            ) {
+                                (event.target as HTMLIFrameElement).src =
+                                    CHAT_APP + getChatPath(idArgs.node);
+                            } else {
+                                onIframe(event, {
+                                    keypair: kp,
+                                    src:
+                                        CHAT_APP +
+                                        getChatPath(idArgs.node),
+                                });
+                            }
+                        }}
+                        style={{
+                            display: "block",
+                            width: "100%",
+                            height: "calc(100vh - 50px)",
+                            border: 0,
+                            overflow: "hidden",
+                        }}
+                        src={CHAT_APP}
+                        allow="camera; microphone; display-capture; autoplay; clipboard-write;"
+                    ></iframe>
+                )}
+            </Grid>
+        </Grid>
     );
 };

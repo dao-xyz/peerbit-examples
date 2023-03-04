@@ -1,4 +1,4 @@
-import { Grid, IconButton, TextField, Typography } from "@mui/material";
+import { Grid, IconButton, Paper, TextField, Typography } from "@mui/material";
 import {
     useEffect,
     useRef,
@@ -10,6 +10,7 @@ import EditIcon from "@mui/icons-material/Edit";
 import { useNames } from "./useNames";
 import { Save } from "@mui/icons-material";
 
+export const HEIGHT = "40px";
 export const Header = forwardRef((props: any, ref) => {
     let [showInput, setShowInput] = useState(false);
     let inputRef = useRef<HTMLInputElement>();
@@ -17,7 +18,9 @@ export const Header = forwardRef((props: any, ref) => {
     const [localName, setLocalName] = useState(name || "");
 
     useEffect(() => {
-        setLocalName(name);
+        if (name != null) {
+            setLocalName(name);
+        }
     }, [name]);
     useEffect(() => {
         if (!inputRef.current) {
@@ -50,11 +53,20 @@ export const Header = forwardRef((props: any, ref) => {
     };
 
     return (
-        <>
-            <Grid ref={ref as any} container item sx={{ width: "100%", p: 1 }}>
+        <Paper
+            ref={ref as any}
+            sx={{
+                width: "100%",
+                height: HEIGHT,
+                display: "flex",
+                alignItems: "center",
+            }}
+        >
+            <Grid container item spacing={1}>
                 <Grid item sx={{ ml: "auto" }}>
                     {!showInput && (
                         <Grid
+                            spacing={1}
                             container
                             direction="row"
                             alignItems="center"
@@ -73,14 +85,22 @@ export const Header = forwardRef((props: any, ref) => {
                                 )}{" "}
                             </Grid>
                             <Grid item>
-                                <IconButton size="small">
+                                <IconButton
+                                    size="small"
+                                    sx={{ borderRadius: 0 }}
+                                >
                                     <EditIcon />
                                 </IconButton>{" "}
                             </Grid>
                         </Grid>
                     )}
                     {showInput && (
-                        <Grid container direction="row" alignItems="center">
+                        <Grid
+                            container
+                            direction="row"
+                            alignItems="center"
+                            spacing={1}
+                        >
                             <Grid item>
                                 <TextField
                                     ref={inputRef}
@@ -102,7 +122,11 @@ export const Header = forwardRef((props: any, ref) => {
                                 />
                             </Grid>
                             <Grid item>
-                                <IconButton size="small" onClick={saveName}>
+                                <IconButton
+                                    size="small"
+                                    onClick={saveName}
+                                    sx={{ borderRadius: 0 }}
+                                >
                                     <Save />
                                 </IconButton>{" "}
                             </Grid>
@@ -110,6 +134,6 @@ export const Header = forwardRef((props: any, ref) => {
                     )}
                 </Grid>
             </Grid>
-        </>
+        </Paper>
     );
 });

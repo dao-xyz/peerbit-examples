@@ -80,7 +80,7 @@ export const Room = () => {
         const newPosts = [...room.messages.index.index.values()].sort((a, b) =>
             Number(
                 a.entry.metadata.clock.timestamp.wallTime -
-                    b.entry.metadata.clock.timestamp.wallTime
+                b.entry.metadata.clock.timestamp.wallTime
             )
         );
         const identityMap = new Map<string, Ed25519PublicKey>();
@@ -210,23 +210,21 @@ export const Room = () => {
         namesCache.has(p.entry.signatures[0].publicKey.hashcode());
 
     return loading || loadingPeer ? (
-        <>
-            {" "}
+        <Box sx={{ height: '100vh', display: "flex", justifyContent: 'center', alignItems: 'center' }}>
             <CircularProgress size={20} />
-        </>
+        </Box>
     ) : (
         <Grid container direction="column" sx={{ height: "100vh" }}>
             <Grid item container ref={header} pl={1} pt={1} pb={1} spacing={1}>
                 <Grid item>
-                    <PeopleIcon />{" "}
+                    <PeopleIcon />
                 </Grid>
                 <Grid item>{peerCounter}</Grid>
             </Grid>
             <Grid
                 item
-                height={`calc(100vh - ${
-                    (header.current?.offsetHeight || 0) + "px"
-                }  - ${(inputArea.current?.offsetHeight || 0) + "px"} - 8px)`}
+                height={`calc(100vh - ${(header.current?.offsetHeight || 0) + "px"
+                    }  - ${(inputArea.current?.offsetHeight || 0) + "px"} - 8px)`}
                 sx={{ overflowY: "auto" }}
                 padding={1}
                 mb="8px"
@@ -273,44 +271,44 @@ export const Room = () => {
                                     </Grid>
                                     {p.entry._payload instanceof
                                         EncryptedThing && (
-                                        <Grid
-                                            item
-                                            display="flex"
-                                            alignItems="center"
-                                        >
-                                            {" "}
-                                            <Tooltip
-                                                title={
-                                                    <span
-                                                        style={{
-                                                            whiteSpace:
-                                                                "pre-line",
-                                                        }}
-                                                    >
-                                                        {(
-                                                            p.entry
-                                                                ._payload as EncryptedThing<any>
-                                                        )._envelope._ks
-                                                            .map((k) =>
-                                                                shortName(
-                                                                    k._recieverPublicKey.toString()
-                                                                )
-                                                            )
-                                                            .join("\n")}
-                                                    </span>
-                                                }
+                                            <Grid
+                                                item
+                                                display="flex"
+                                                alignItems="center"
                                             >
-                                                <IconButton>
-                                                    <LockIcon
-                                                        color="success"
-                                                        sx={{
-                                                            fontSize: "14px",
-                                                        }}
-                                                    />{" "}
-                                                </IconButton>
-                                            </Tooltip>{" "}
-                                        </Grid>
-                                    )}
+                                                {" "}
+                                                <Tooltip
+                                                    title={
+                                                        <span
+                                                            style={{
+                                                                whiteSpace:
+                                                                    "pre-line",
+                                                            }}
+                                                        >
+                                                            {(
+                                                                p.entry
+                                                                    ._payload as EncryptedThing<any>
+                                                            )._envelope._ks
+                                                                .map((k) =>
+                                                                    shortName(
+                                                                        k._recieverPublicKey.toString()
+                                                                    )
+                                                                )
+                                                                .join("\n")}
+                                                        </span>
+                                                    }
+                                                >
+                                                    <IconButton>
+                                                        <LockIcon
+                                                            color="success"
+                                                            sx={{
+                                                                fontSize: "14px",
+                                                            }}
+                                                        />{" "}
+                                                    </IconButton>
+                                                </Tooltip>{" "}
+                                            </Grid>
+                                        )}
                                 </Grid>
                                 <Grid item>
                                     <Typography> {p.value.message}</Typography>

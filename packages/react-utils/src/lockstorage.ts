@@ -243,12 +243,6 @@ export class FastMutex {
             this.intervals.delete(key);
             return;
         }
-        console.log(
-            "Key not expired",
-            key,
-            new Date().getTime() - parsed.expiresAt,
-            this.timeout
-        );
 
         return JSON.parse(item).value;
     }

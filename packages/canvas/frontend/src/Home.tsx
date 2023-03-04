@@ -1,146 +1,83 @@
 import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
-import { usePeer } from "@dao-xyz/peerbit-react";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Canvas, Spaces } from "./dbs/canvas";
-import { getPathFromKey } from "./routes";
+import { usePeer } from "@dao-xyz/peerbit-react";
+import { userSpaces } from "./useSpaces";
+import { CanvasPreview } from "./CanvasPreview";
+import { Add } from "@mui/icons-material";
+import { NEW_SPACE } from "./routes";
 
 export const Home = () => {
+    const { spaces } = userSpaces();
     const { peer } = usePeer();
-    const navigate = useNavigate();
-    let spaces = useRef<Promise<Spaces>>(null);
     let [canvases, setCanvases] = useState<Canvas[]>([]);
-
-    const [textInput, setTextInput] = useState("");
-    const handleTextInputChange = (event) => {
-        setTextInput(event.target.value);
-    };
-
+    const [name, setName] = useState("");
+    const [description, setDescription] = useState("");
+    const navigate = useNavigate();
     useEffect(() => {
-        if (spaces.current || !peer) {
+        if (!spaces || !peer) {
             return;
         }
-        spaces.current = peer
-            .open(new Spaces(), { sync: () => true })
-            .then(async (result) => {
-                result.canvases.events.addEventListener(
-                    "change",
-                    async (_change) => {
-                        setCanvases(
-                            [...result.canvases.index.index.values()].map(
-                                (x) => x.value
-                            )
-                        );
-                    }
-                );
-
-                await result.load();
-                setInterval(async () => {
-                    await result.canvases.index.query(
-                        new DocumentQueryRequest({ queries: [] }),
-                        { remote: { sync: true, amount: 2 } }
+        const refresh = () => {
+            spaces.canvases.index
+                .query(new DocumentQueryRequest({ queries: [] }), {
+                    remote: { amount: 2 },
+                })
+                .then((results) => {
+                    console.log(results);
+                    setCanvases(
+                        results.map((x) => x.results.map((y) => y.value)).flat()
                     );
-                }, 2000);
-                return result;
-            });
-    }, [peer?.identity.toString()]);
+                });
+        }
+        refresh()
+        setInterval(async () => {
+            refresh()
+        }, 2000);
+    }, [spaces]);
 
     return (
-        <Grid
-            container
-            justifyContent="center"
-            direction="column"
-            padding={4}
-            spacing={4}
-        >
-            {canvases.find((x) => x.key.equals(peer.idKey.publicKey)) ? (
-                <Grid item>
-                    <Typography variant="h4" gutterBottom>
-                        My space
-                    </Typography>
-                    <Typography variant="h5">
-                        {
-                            canvases.find((x) =>
-                                x.key.equals(peer.idKey.publicKey)
-                            ).name
-                        }
-                    </Typography>
-                    <Button
-                        onClick={() => {
-                            navigate(
-                                getPathFromKey(
-                                    peer.idKey.publicKey,
-                                    canvases.find((x) =>
-                                        x.key.equals(peer.idKey.publicKey)
-                                    ).name
-                                )
-                            );
-                        }}
-                    >
-                        Open
-                    </Button>
-                </Grid>
-            ) : (
-                <Grid item>
-                    <Typography variant="h4" gutterBottom>
-                        Create space
-                    </Typography>
-                    <TextField
-                        size="small"
-                        value={textInput}
-                        onChange={handleTextInputChange}
-                        id="outlined-basic"
-                        variant="outlined"
-                    />
-                    <Button
-                        disabled={
-                            !spaces || !textInput || textInput.length == 0
-                        }
-                        onClick={() => {
-                            spaces.current.then((db) => {
-                                console.log(
-                                    "create canvas with name",
-                                    textInput
-                                );
-                                db.canvases.put(
-                                    new Canvas({
-                                        rootTrust: peer.idKey.publicKey,
-                                        name: textInput,
-                                    })
-                                );
-                            });
-                        }}
-                        sx={{ ml: 1 }}
-                    >
-                        Create
-                    </Button>
-                </Grid>
-            )}
-
+        <Grid container direction="column" padding={4} spacing={4}>
             <Grid item>
-                <Typography variant="h4" gutterBottom>
+                <Typography variant="h4" >
+                    My stuff
+                </Typography>
+            </Grid>
+            <Grid item container direction="row" spacing={2}>
+                {canvases.find((x) => x.key.equals(peer.idKey.publicKey)) && (
+                    <Grid item container spacing={2}>
+                        {canvases
+                            .filter((x) => x.key.equals(peer.idKey.publicKey))
+                            .map((canvas, ix) => {
+                                return (
+                                    <Grid item key={ix}>
+                                        <CanvasPreview canvas={canvas} />
+                                    </Grid>
+                                );
+                            })}
+                    </Grid>
+                )}
+                <Grid item>
+                    <Button variant="outlined" size="large" onClick={() => navigate(NEW_SPACE)}>
+                        <Add />
+                    </Button>
+                </Grid>
+            </Grid>
+            <Grid item>
+                <Typography variant="h4">
                     Explore
                 </Typography>
-                <Grid container direction="column">
+
+            </Grid>
+            <Grid item>
+
+                <Grid container spacing={2}>
                     {canvases.map((canvas, ix) => {
-                        console.log(canvas);
                         return (
                             <Grid item key={ix}>
-                                <Button
-                                    size="large"
-                                    disabled={!peer}
-                                    onClick={() => {
-                                        navigate(
-                                            getPathFromKey(
-                                                canvas.key,
-                                                canvas.name
-                                            )
-                                        );
-                                    }}
-                                >
-                                    {canvas.name}
-                                </Button>
+                                <CanvasPreview canvas={canvas} />
                             </Grid>
                         );
                     })}
