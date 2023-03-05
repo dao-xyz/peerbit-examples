@@ -316,8 +316,9 @@ export const Content = () => {
                     </Typography>
                 </Grid>
                 <Grid item sx={{ display: "flex", flexDirection: "row" }}>
-                    <Typography>Online: &nbsp;</Typography>{" "}
+                    <Typography >Online: &nbsp;</Typography>
                     <Typography>{subscribers}</Typography>
+                    {subscribers === 1 && <Typography>&nbsp;(just you)</Typography>}
                 </Grid>
                 <Grid item container direction="column">
                     <Grid item>
@@ -327,7 +328,7 @@ export const Content = () => {
                         {modelDate ? (
                             <Typography>{modelDate.toUTCString()}</Typography>
                         ) : (
-                            <Typography>No active model</Typography>
+                            <Typography>No model currently active. Enable your camera and gather samples, or sync with online peers to create a model!</Typography>
                         )}
                     </Grid>
                 </Grid>
@@ -380,7 +381,7 @@ export const Content = () => {
                         })}
                         <Button
                             id="train"
-                            disabled={processing}
+                            disabled={processing || trainingDataInputs.length === 0}
                             onClick={() => {
                                 setProcessing(true);
                                 train(
