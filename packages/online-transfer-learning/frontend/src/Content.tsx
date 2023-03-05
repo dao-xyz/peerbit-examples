@@ -165,7 +165,7 @@ export const Content = () => {
     const [usingCamera, setUsingCamera] = useState(false);
     const p2pStorage = useRef<P2PStorage | tf.io.IOHandler>();
     const [modelDate, setModelDate] = useState<Date>(null);
-    const peersCountText = useRef<HTMLDivElement>(null);
+    const [subscribers, setSubscribers] = useState(0);
 
     useEffect(() => {
         if (p2pStorage.current || !peer) {
@@ -175,13 +175,13 @@ export const Content = () => {
         peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID })).then(
             async (db) => {
                 peer.libp2p.directsub.addEventListener("subscribe", () => {
-                    peersCountText.current.innerText = String(
+                    setSubscribers(
                         (peer.libp2p.directsub.topics.get(db.address.toString())
                             ?.size || 0) + 1
                     );
                 });
                 peer.libp2p.directsub.addEventListener("unsubscribe", () => {
-                    peersCountText.current.innerText = String(
+                    setSubscribers(
                         (peer.libp2p.directsub.topics.get(db.address.toString())
                             ?.size || 0) + 1
                     );
@@ -317,7 +317,7 @@ export const Content = () => {
                 </Grid>
                 <Grid item sx={{ display: "flex", flexDirection: "row" }}>
                     <Typography>Online: &nbsp;</Typography>{" "}
-                    <Typography ref={peersCountText}>1</Typography>
+                    <Typography>{subscribers}</Typography>
                 </Grid>
                 <Grid item container direction="column">
                     <Grid item>
@@ -430,9 +430,10 @@ export const Content = () => {
                         <Button
                             startIcon={<PublicIcon />}
                             color="secondary"
+                            disabled={!p2pStorage.current || subscribers <= 1}
                             onClick={() => {
-                                tf.loadLayersModel(p2pStorage.current).then(
-                                    (loaded) => {
+                                tf.loadLayersModel(p2pStorage.current)
+                                    .then((loaded) => {
                                         console.log("Loaded model", loaded);
                                         const sequential =
                                             loaded as tf.Sequential;
@@ -450,8 +451,12 @@ export const Content = () => {
                                         });
                                         model.current = sequential;
                                         updateModelDate();
-                                    }
-                                );
+                                    })
+                                    .catch((e) =>
+                                        alert(
+                                            "Did not find a model from peers. If you just started the application, try again in a moment"
+                                        )
+                                    );
                             }}
                         >
                             Sync from peers

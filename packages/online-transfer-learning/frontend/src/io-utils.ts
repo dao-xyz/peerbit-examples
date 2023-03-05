@@ -150,13 +150,14 @@ export class P2PStorage implements IOHandler {
         const modelResults = await this.db.models.index.get(this.modelId, {
             remote: true,
         });
-        if (modelResults?.results.length === 0) {
-            throw new Error(
+
+        if (!modelResults || modelResults?.results.length === 0) {
+            const msg =
                 "Did not find model: " +
-                    this.db.address.toString() +
-                    ", " +
-                    this.db.models.store.oplog.length
-            );
+                this.db.address.toString() +
+                ", " +
+                this.db.models.store.oplog.length;
+            throw new Error(msg);
         }
         const model = modelResults.results[0].value;
         const modelConfig = model.config;
