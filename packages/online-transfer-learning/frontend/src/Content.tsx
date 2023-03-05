@@ -165,7 +165,7 @@ export const Content = () => {
     const [usingCamera, setUsingCamera] = useState(false);
     const p2pStorage = useRef<P2PStorage | tf.io.IOHandler>();
     const [modelDate, setModelDate] = useState<Date>(null);
-    const [subscribers, setSubscribers] = useState(0);
+    const [subscribers, setSubscribers] = useState(1);
 
     useEffect(() => {
         if (p2pStorage.current || !peer) {
