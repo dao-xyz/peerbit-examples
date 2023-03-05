@@ -11,3 +11,4 @@ Things that is missing from the demo, but should be added:
 - Create different models based on some url param. /address/v0
 - Implement privacy using Peerbit features
 - Access control
+- All-reduce strategy for merging weights, instead of "last write wins"
