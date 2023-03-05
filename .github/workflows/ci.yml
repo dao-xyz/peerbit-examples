@@ -42,7 +42,7 @@ jobs:
 
 
     - name: Deploy ml demo
-      run: aws s3 sync ./packages/online-transfer-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
+      run: aws s3 sync ./packages/collaborative-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
 
     - name: Invalidate cache
       run: aws cloudfront create-invalidation --distribution-id E371A736SNF0PO --paths '/*';

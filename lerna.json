@@ -6,7 +6,7 @@
         "packages/name-service/*",
         "packages/canvas/*",
         "packages/one-chat-room/*",
-        "packages/online-transfer-learning/*"
+        "packages/collaborative-learning/*"
     ],
     "version": "independent",
     "npmClient": "yarn",
