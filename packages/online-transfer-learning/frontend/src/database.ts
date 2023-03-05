@@ -9,10 +9,14 @@ export class Model {
     @field({ type: "string" })
     configJSON: string;
 
-    @field({ type: "string" })
-    weights: string;
+    @field({ type: Uint8Array })
+    weights: Uint8Array;
 
-    constructor(properties: { id: string; config: object; weights: string }) {
+    constructor(properties: {
+        id: string;
+        config: object;
+        weights: Uint8Array;
+    }) {
         this.configJSON = JSON.stringify(properties.config);
         this.weights = properties.weights;
         this.id = properties.id;

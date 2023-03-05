@@ -133,13 +133,11 @@ export class P2PStorage implements IOHandler {
             new Model({
                 id: this.modelId,
                 config: modelTopologyAndWeightManifest,
-                weights: arrayBufferToBase64String(
-                    modelArtifacts.weightData
-                ) /* new Uint8Array(
+                weights: new Uint8Array(
                     modelArtifacts.weightData,
                     0,
                     modelArtifacts.weightData.byteLength
-                ), */,
+                ),
             })
         );
         return {
@@ -173,12 +171,17 @@ export class P2PStorage implements IOHandler {
         const loadWeights = async (
             from
         ): Promise<[WeightsManifestEntry[], ArrayBuffer]> => {
-            const weightData = base64StringToArrayBuffer(model.weights);
             const weightSpecs: WeightsManifestEntry[] = [];
             for (const entry of from) {
                 weightSpecs.push(...entry.weights);
             }
-            return [weightSpecs, weightData];
+
+            // tf does not seem to handle uint8arrays that are views of ArrayBuffers with non-zero offset, so we make a copy
+            // to fix this
+            const cp = new Uint8Array(model.weights.byteLength);
+            cp.set(model.weights);
+
+            return [weightSpecs, cp.buffer];
         };
 
         return getModelArtifactsForJSON(modelConfig, (weightsManifest) =>
