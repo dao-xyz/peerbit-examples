@@ -14,7 +14,7 @@ export default defineConfig({
     /*   server: {
           port: 5801,
       }, */
-    server: fs.existsSync("./.cert/key.pem")
+    /* server: fs.existsSync("./.cert/key.pem")
         ? {
               port: 5801,
               https: {
@@ -23,5 +23,5 @@ export default defineConfig({
               },
               host: "stream.test.xyz",
           }
-        : undefined,
+        : undefined, */
 });

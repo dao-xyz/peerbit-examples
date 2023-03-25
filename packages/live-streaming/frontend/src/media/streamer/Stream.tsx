@@ -12,14 +12,7 @@ import { getClusterStartIndices } from "../webm";
 import { ObserverType, ReplicatorType } from "@dao-xyz/peerbit-program";
 import { Buffer } from "buffer";
 import { waitFor, delay } from "@dao-xyz/peerbit-time";
-import {
-    Button,
-    Grid,
-    IconButton,
-    MenuItem,
-    Select,
-    Slider,
-} from "@mui/material";
+import { Grid } from "@mui/material";
 import { videoNoAudioMimeType, videoAudioMimeType } from "../format";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { Controls } from "../controller/Control";
@@ -30,7 +23,6 @@ import {
     resolutionToSourceSetting,
     RESOLUTIONS,
 } from "./../controller/settings.js";
-
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
     mozCaptureStream?(fps?: number): MediaStream;
@@ -102,6 +94,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
         let qualitySetting = properties.quality || quality;
         let newQualities: Set<number>;
         let reInitializeAll = false;
+
         if (properties.streamType) {
             // New stream type -> all qualities are "new"
             newQualities = new Set(
@@ -181,11 +174,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 stream.value.db.info.video.height
                         )
                     ) {
-                        console.log(
-                            "CAN NOT FIND",
-                            stream.value.db.info.video.height,
-                            properties.quality.map((x) => x.video.height)
-                        );
                         removedStreamDBs.add(stream.value.id);
                         await dbs.streams.put(
                             new MediaStreamDBInfo({

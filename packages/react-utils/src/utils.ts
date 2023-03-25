@@ -9,7 +9,7 @@ export const resolveSwarmAddress = async (url: string, timeout = 5000) => {
     if (url.startsWith("/")) {
         return url; // Possible already an swarm address
     }
-    if (url.startsWith("http") == false) {
+    if (url.startsWith("http") === false) {
         url = "https://" + url;
     }
     if (url.endsWith("/")) {

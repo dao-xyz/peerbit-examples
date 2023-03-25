@@ -1,13 +1,20 @@
-import { field, variant } from "@dao-xyz/borsh";
+import { field, variant, vec } from "@dao-xyz/borsh";
 import { Program } from "@dao-xyz/peerbit-program";
-import { Documents, DocumentIndex, FieldStringMatchQuery, DocumentQueryRequest, ResultWithSource } from "@dao-xyz/peerbit-document";
+import {
+    Documents,
+    DocumentIndex,
+    StringMatchMethod,
+    DocumentQuery,
+    ResultWithSource,
+    StringMatch,
+} from "@dao-xyz/peerbit-document";
 import { sha256Base64Sync } from "@dao-xyz/peerbit-crypto";
 import {
     createBlock,
     getBlockValue,
     DirectBlock,
 } from "@dao-xyz/libp2p-direct-block";
-import { concat } from 'uint8arrays';
+import { concat } from "uint8arrays";
 
 abstract class AbstractFile {
     abstract id: string;
@@ -15,9 +22,10 @@ abstract class AbstractFile {
     abstract getFile(files: Files): Promise<Uint8Array>;
 }
 
+const TINY_FILE_SIZE_LIMIT = 1e3;
+
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class TinyFile extends AbstractFile {
-
     @field({ type: "string" })
     id: string;
 
@@ -39,106 +47,144 @@ export class TinyFile extends AbstractFile {
     }
 }
 
+const SMALL_FILE_SIZE_LIMIT = 1e6 * 9;
+
 @variant(1) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class SmallFile extends AbstractFile {
-
     @field({ type: "string" })
     id: string; // cid
 
     @field({ type: "string" })
     name: string;
 
-    @field({ type: 'string' })
-    cid: string
+    @field({ type: "string" })
+    cid: string; // store file separately in a block store, like IPFS
 
     constructor(properties: { name: string; cid: string }) {
         super();
         this.id = properties.cid;
-        this.name = properties.name
+        this.name = properties.name;
         this.cid = properties.cid;
     }
 
     static async create(name: string, file: Uint8Array, blocks: DirectBlock) {
-        if (file.length > 1e6 * 9) {
-            throw new Error("To large file for SmallFile")
+        if (file.length > SMALL_FILE_SIZE_LIMIT) {
+            throw new Error("To large file for SmallFile");
         }
         const cid = await blocks.put(await createBlock(file, "raw"));
         return new SmallFile({ name, cid });
     }
 
     async getFile(files: Files) {
+        // Load the file from the block store
         const block = await files.libp2p.directblock.get(this.id);
+
+        // Get the file value
         return (block ? await getBlockValue(block) : undefined) as Uint8Array;
     }
 }
 
 @variant(2) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class LargeFile extends AbstractFile {
-
     @field({ type: "string" })
     id: string; // hash
 
     @field({ type: "string" })
     name: string;
 
-    @field({ type: 'string' })
-    chunkIds: string[]
+    @field({ type: vec("string") })
+    fileIds: string[];
 
-    constructor(properties: { id: string, name: string, chunkIds: string[] }) {
+    constructor(properties: { id: string; name: string; fileIds: string[] }) {
         super();
         this.id = properties.id;
         this.name = properties.name;
-        this.chunkIds = properties.chunkIds;
+        this.fileIds = properties.fileIds;
     }
 
     static async create(name: string, file: Uint8Array, files: Files) {
-        const segmetSize = 1e6; // 1 mb
-        let chunkIds: string[] = [];
-        const id = sha256Base64Sync(file)
+        const segmetSize = SMALL_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
+        const fileIds: string[] = [];
+        const id = sha256Base64Sync(file);
         for (let i = 0; i < Math.ceil(file.byteLength / segmetSize); i++) {
-            chunkIds.push((await files.create(id + "/" + name, file.subarray(i * segmetSize, Math.min((i + 1) * segmetSize, file.length)))));
+            fileIds.push(
+                await files.create(
+                    id + "/" + name,
+                    file.subarray(
+                        i * segmetSize,
+                        Math.min((i + 1) * segmetSize, file.length)
+                    )
+                )
+            );
         }
 
-        return new LargeFile({ id, name, chunkIds });
+        return new LargeFile({ id, name, fileIds });
     }
 
     async getFile(files: Files) {
+        // Get all sub files (SmallFiles) and concatinate them in the right order (the order of this.fileIds)
+        const expectedIds = new Set(this.fileIds);
+        const chunks: Map<string, Promise<Uint8Array>> = new Map();
+        const waitFor = 10 * 1000;
 
-        /*  let ids = new Set<string>();
-        let chunks: ResultWithSource<AbstractFile>[] = []
-        let stopSearch: () => void;
-       await new Promise<void>((resolve, _reject) => {
-            files.files.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: this.id + "/" + this.name })] }), (result) => {
-                if (result.results.length > 0) {
-                    for (const r of result.results) {
-                        if (ids.has(r.context.head)) {
-                            // chunk already added;
+        await new Promise<void>((resolve, reject) => {
+            const timout = setTimeout(() => {
+                reject(new Error("Timed out"));
+            }, waitFor);
+
+            let stopSearch: () => void;
+            files.files.index.query(
+                new DocumentQuery({
+                    queries: [
+                        new StringMatch({
+                            key: "name",
+                            value: this.id + "/" + this.name,
+                        }),
+                    ],
+                }),
+                {
+                    local: true,
+                    remote: {
+                        timeout: waitFor,
+                        stopper: (stopperFn) => {
+                            stopSearch = stopperFn;
+                        },
+                    },
+                    onResponse: (result) => {
+                        if (result.results.length > 0) {
+                            for (const r of result.results) {
+                                if (chunks.has(r.value.id)) {
+                                    // chunk already added;
+                                }
+                                if (!expectedIds.has(r.value.id)) {
+                                    // chunk is not part of this file
+                                }
+
+                                chunks.set(r.value.id, r.value.getFile(files));
+                            }
+
+                            if (chunks.size === expectedIds.size) {
+                                clearTimeout(timout);
+                                stopSearch && stopSearch();
+                                resolve();
+                            }
                         }
-                        ids.add(r.context.head); // The head is unique for every document/chunk it is the hash of the commit
-                        chunks.push(r)
-                    }
-
-                    if (chunks.length === this.chunks) {
-                        stopSearch && stopSearch();
-                        resolve()
-                    }
+                    },
                 }
-            }, { local: true, remote: { timeout: 10 * 1000, stopper: (stopperFn) => { stopSearch = stopperFn } } })
-        })
- 
+            );
+        });
 
-        chunks.sort((a, b) => Number(a.context.created - b.context.created))*/
-        let chunkDatas: Uint8Array[] = await Promise.all(chunks.map(x => x.value.getFile(files)));
-        return concat(chunkDatas);
+        const chunkContentResolved: Uint8Array[] = await Promise.all(
+            this.fileIds.map((x) => chunks.get(x)!)
+        );
+        return concat(chunkContentResolved);
     }
 }
-
-
 
 @variant("files")
 export class Files extends Program {
     @field({ type: Documents })
-    files: Documents<AbstractFile>; // Or Document<TinyFile | SmallFile | LargeFile> 
+    files: Documents<AbstractFile>;
 
     constructor() {
         super();
@@ -150,71 +196,105 @@ export class Files extends Program {
 
     async create(name: string, file: Uint8Array) {
         let toPut: AbstractFile;
-        if (file.byteLength <= 1e3) {
+        if (file.byteLength <= TINY_FILE_SIZE_LIMIT) {
             toPut = new TinyFile({ name, file });
-        } else if (file.byteLength > 1e3 && file.byteLength <= 9 * 1e6) {
-            toPut = await SmallFile.create(name, file, this.libp2p.directblock)
-
-        }
-        else {
-            toPut = await LargeFile.create(name, file, this)
+        } else if (
+            file.byteLength > TINY_FILE_SIZE_LIMIT &&
+            file.byteLength <= SMALL_FILE_SIZE_LIMIT
+        ) {
+            toPut = await SmallFile.create(name, file, this.libp2p.directblock);
+        } else {
+            toPut = await LargeFile.create(name, file, this);
         }
         await this.files.put(toPut);
-        return toPut.id
+        return toPut.id;
     }
 
     /**
      * Get one file
-     * @param name 
-     * @returns 
+     * @param name
+     * @returns
      */
     async get(name: string): Promise<Uint8Array | undefined> {
         return new Promise((resolve, reject) => {
-            let waitFor = 10 * 1000;
-            let timout = setTimeout(() => {
-                reject()
-            }, waitFor)
+            const waitFor = 10 * 1000;
+            const timout = setTimeout(() => {
+                reject(new Error("Timed out"));
+            }, waitFor);
 
             // query local first, then remote.
-            this.files.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: name })] })).then((results) => {
-                for (const result of results) {
-                    if (result.results.length > 0) {
-                        result.results[0].value.getFile(this).then((file) => {
-                            clearTimeout(timout)
-                            resolve(file)
-                        }).catch((error) => {
-                            clearTimeout(timout)
-                            reject(error)
-                        })
+            let stopSearch: (() => void) | undefined = undefined;
+            this.files.index
+                .query(
+                    new DocumentQuery({
+                        queries: [
+                            new StringMatch({ key: "name", value: name }),
+                        ],
+                    }),
+                    {
+                        local: true,
+                        remote: {
+                            stopper: (stopper) => {
+                                stopSearch = stopper;
+                            },
+                        },
                     }
-                }
-            })
-
-
-        })
+                )
+                .then((results) => {
+                    for (const result of results) {
+                        if (result.results.length > 0) {
+                            result.results[0].value
+                                .getFile(this)
+                                .then((file) => {
+                                    clearTimeout(timout);
+                                    stopSearch && stopSearch();
+                                    resolve(file);
+                                })
+                                .catch((error) => {
+                                    clearTimeout(timout);
+                                    stopSearch && stopSearch();
+                                    reject(error);
+                                });
+                        }
+                    }
+                });
+        });
     }
 
     /**
      * Get all
-     * @param name 
-     * @returns 
+     * @param name
+     * @returns
      */
     async getOne(name: string): Promise<Uint8Array | undefined> {
         return new Promise((resolve, reject) => {
-            this.files.index.query(new DocumentQueryRequest({ queries: [new FieldStringMatchQuery({ key: 'name', value: name })] }), { local: true, remote: { amount: 1, timeout: 10 * 1000 } }).then((results) => {
-                for (const result of results) {
-                    if (result.results.length > 0) {
-                        result.results[0].value.getFile(this).then((file) => {
-                            resolve(file)
-                        }).catch((error) => {
-                            reject(error)
-                        })
+            this.files.index
+                .query(
+                    new DocumentQuery({
+                        queries: [
+                            new StringMatch({ key: "name", value: name }),
+                        ],
+                    }),
+                    { local: true, remote: { amount: 1, timeout: 10 * 1000 } }
+                )
+                .then((results) => {
+                    for (const result of results) {
+                        if (result.results.length > 0) {
+                            result.results[0].value
+                                .getFile(this)
+                                .then((file) => {
+                                    resolve(file);
+                                })
+                                .catch((error) => {
+                                    reject(error);
+                                });
+                        }
                     }
-                }
-            }).catch(() => {
-                resolve(undefined)
-            });
-        })
+                })
+                .catch(() => {
+                    resolve(undefined);
+                });
+        });
     }
 
     // Setup lifecycle, will be invoked on 'open'

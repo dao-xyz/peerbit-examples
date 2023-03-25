@@ -1,14 +1,13 @@
 import { Peerbit } from "@dao-xyz/peerbit";
-import { LSession } from "@dao-xyz/peerbit-test-utils";
+import { LSession, waitForPeers } from "@dao-xyz/peerbit-test-utils";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import { jest } from "@jest/globals";
 import { Post, Room, Lobby } from "..";
-import { serialize } from "@dao-xyz/borsh";
-import { toBase64 } from "@dao-xyz/peerbit-crypto";
 import {
-    DocumentQueryRequest,
-    StringMatchQuery,
+    DocumentQuery,
+    StringMatch,
     Results,
+    StringMatchMethod,
 } from "@dao-xyz/peerbit-document";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";
 
@@ -45,13 +44,21 @@ describe("index", () => {
         const room2 = new Room({ name: "another room" });
         await lobby2.rooms.put(room2);
 
+        await waitForPeers(
+            peer.libp2p,
+            peer2.libp2p,
+            lobby2.address.toString()
+        );
+
         // Peer2 can "query" for rooms if peer2 does not have anything replicated locally
         const results: Results<Room>[] = await lobby1.rooms.index.query(
-            new DocumentQueryRequest({
+            new DocumentQuery({
                 queries: [
-                    new StringMatchQuery({
+                    new StringMatch({
                         key: "name",
                         value: "another",
+                        caseInsensitive: true,
+                        method: StringMatchMethod.contains,
                     }),
                 ],
             }),
@@ -74,6 +81,7 @@ describe("index", () => {
         await room.messages.put(
             new Post({
                 message: "hello world",
+                from: peer2.identity.publicKey,
             })
         );
 
@@ -83,12 +91,5 @@ describe("index", () => {
                 (peer.programs.get(room.address.toString()!)?.program as Room)
                     .messages.index.size === 1
         ); // The "hello world" message has now arrived to the first peer
-    });
-
-    it("can create genisis", async () => {
-        // This does not really test anything but it generates a serialized version of Rooms that one can hardcode in the frontend, so you dont need to load the Room manifest from IPFS on startup
-        const genesis = await peer.open(new Lobby({}));
-        const base64 = toBase64(serialize(genesis));
-        console.log(base64);
     });
 });

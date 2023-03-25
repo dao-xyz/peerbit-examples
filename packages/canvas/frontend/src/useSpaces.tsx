@@ -36,7 +36,7 @@ const { peer } = usePeer();
                 await result.load();
                 setInterval(async () => {
                     await result.canvases.index.query(
-                        new DocumentQueryRequest({ queries: [] }),
+                        new DocumentQuery({ queries: [] }),
                         { remote: { sync: true, amount: 2 } }
                     );
                 }, 2000);

@@ -5,13 +5,11 @@ import Dialog from "@mui/material/Dialog";
 import DialogActions from "@mui/material/DialogActions";
 import DialogContent from "@mui/material/DialogContent";
 import DialogTitle from "@mui/material/DialogTitle";
-import { useChat } from "./ChatContext";
-import { Room } from "@dao-xyz/peerbit-example-browser-chat";
+import { Lobby, Room } from "@dao-xyz/peerbit-example-browser-chat";
 
-export const NewRoomButtom = () => {
+export const NewRoomButtom = (properties: { lobby: Lobby }) => {
     const [open, setOpen] = React.useState(false);
     const [name, setName] = React.useState("");
-    const { lobby: rooms } = useChat();
     const handleClickOpen = () => {
         setOpen(true);
     };
@@ -26,7 +24,7 @@ export const NewRoomButtom = () => {
             alert("No name was given!");
         } else {
             console.log("create room with name: " + nameTrimmed);
-            rooms.rooms
+            properties.lobby.rooms
                 .put(new Room({ name: nameTrimmed }))
                 .then(() => {
                     setName("");

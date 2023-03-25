@@ -185,8 +185,9 @@ export const PeerProvider = ({
                     console.log("Generating new keypair for client");
                 } else {
                     console.log(
-                        "Keypair missmatch with latest keypar message",
-                        keypairMessages
+                        "Keypair missmatch with latest keypair message",
+                        keypairMessages.map((x) => x.publicKey.hashcode()),
+                        keypair.publicKey.hashcode()
                     );
                 }
             }
@@ -230,9 +231,6 @@ export const PeerProvider = ({
                         !inMemory && !inIframe() ? "./blocks" : undefined,
                 },
                 libp2p: await createLibp2p({
-                    connectionManager: {
-                        autoDial: true,
-                    },
                     connectionEncryption: [noise()],
                     peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
 

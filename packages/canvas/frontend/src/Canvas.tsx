@@ -14,7 +14,7 @@ import { Ed25519Keypair, PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { Box, Grid, IconButton } from "@mui/material";
 import iFrameResize from "iframe-resizer";
 import { Add, Clear } from "@mui/icons-material";
-import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import { useNames } from "./useNames.js";
 import { getCanvasKeypair, getCanvasKeypairs } from "./keys.js";
 import { HEIGHT } from "./Header.js";
@@ -70,28 +70,29 @@ export const Canvas = () => {
                         setRects(
                             (
                                 await Promise.all(
-                                    [...canvas.rects.index.index.values()]
-                                        .sort(
-                                            (a, b) =>
-                                                a.value.position.y -
-                                                b.value.position.y
-                                        )
-                                        .map(async (x) => {
+                                    [...canvas.rects.index.index.values()].map(
+                                        async (x) => {
+                                            let doc =
+                                                await canvas.rects.index.getDocument(
+                                                    x
+                                                );
                                             if (isOwner) {
-                                                if (!x.value.keypair) {
+                                                if (!doc.keypair) {
+                                                    console.log(
+                                                        "reset keypair for rect!"
+                                                    );
                                                     // try to find it in memory
                                                     const keypairs =
                                                         await getCanvasKeypairs();
                                                     for (const keypair of keypairs) {
                                                         if (
                                                             keypair.publicKey.equals(
-                                                                x.value
-                                                                    .publicKey
+                                                                doc.publicKey
                                                             )
                                                         ) {
-                                                            x.value.keypair =
+                                                            doc.keypair =
                                                                 keypair;
-                                                            return x.value;
+                                                            return doc;
                                                         }
                                                     }
                                                     console.warn(
@@ -100,7 +101,10 @@ export const Canvas = () => {
                                                     return undefined; // We don't generate a new one, since its meaningless
                                                 }
                                             } else {
-                                                if (!x.value.keypair) {
+                                                console.log(
+                                                    "reset keypair for rect!"
+                                                );
+                                                if (!doc.keypair) {
                                                     const { key: keypair } =
                                                         await getCanvasKeypair();
                                                     /*  const keypair =
@@ -109,13 +113,16 @@ export const Canvas = () => {
                                                          "FREE KEYPAIR",
                                                          keypair.publicKey.hashcode()
                                                      ); */
-                                                    x.value.keypair = keypair;
+                                                    doc.keypair = keypair;
                                                 }
                                             }
-                                            return x.value;
-                                        })
+                                            return doc;
+                                        }
+                                    )
                                 )
-                            ).filter((x) => !!x)
+                            )
+                                .sort((a, b) => a.position.y - b.position.y)
+                                .filter((x) => !!x)
                         );
                     }
                 );
@@ -134,7 +141,7 @@ export const Canvas = () => {
                         console.log(
                             (
                                 await canvas.rects.index.query(
-                                    new DocumentQueryRequest({ queries: [] }),
+                                    new DocumentQuery({ queries: [] }),
                                     { remote: { sync: true } }
                                 )
                             ).length

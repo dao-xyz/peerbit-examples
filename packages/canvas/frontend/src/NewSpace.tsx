@@ -1,4 +1,4 @@
-import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";

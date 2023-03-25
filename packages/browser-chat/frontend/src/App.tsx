@@ -6,7 +6,6 @@ import {
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { ChatProvider } from "./ChatContext";
 import { Content } from "./Context";
 import { resolveSwarmAddress } from "@dao-xyz/peerbit-react";
 import axios from "axios";
@@ -18,13 +17,16 @@ if (import.meta.env.MODE === "development") {
         "/ip4/127.0.0.1/tcp/8002/ws/p2p/12D3KooWBycJFtocweGrU7AvArJbTgrvNxzKUiy8ey8rMLA1A1SG",
     ];
 } else {
-    const swarmAddressees = (
+    const swarmAddressees = [
+        "c134ffe07eeae36ec95917e88b942232324f672f.peerchecker.com",
+    ];
+    /* const swarmAddressees = (
         await axios.get(
             "https://raw.githubusercontent.com/dao-xyz/peerbit-examples/master/demo-relay.env"
         )
     ).data
         .split(/\r?\n/)
-        .filter((x) => x.length > 0);
+        .filter((x) => x.length > 0); */
     try {
         bootstrapAddresses = await Promise.all(
             swarmAddressees.map((s) => resolveSwarmAddress(s))
@@ -65,14 +67,12 @@ export const App = () => {
             bootstrap={bootstrapAddresses}
             dev={import.meta.env.MODE === "development"}
         >
-            <ChatProvider>
-                <ThemeProvider theme={theme}>
-                    <CssBaseline />
-                    <HashRouter basename="/">
-                        <Content />
-                    </HashRouter>
-                </ThemeProvider>
-            </ChatProvider>
+            <ThemeProvider theme={theme}>
+                <CssBaseline />
+                <HashRouter basename="/">
+                    <Content />
+                </HashRouter>
+            </ThemeProvider>
         </PeerProvider>
     );
 };
