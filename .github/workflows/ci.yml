@@ -23,7 +23,7 @@ jobs:
       run: yarn install && yarn build
 
     - name: Deploy stream
-      run: aws s3 sync ./packages/live-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
+      run: aws s3 sync ./packages/live-streaming-canvas/frontend/dist/ s3://stream-dao-xyz-dist --delete
 
     - name: Invalidate cache
       run: aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*';
@@ -39,7 +39,6 @@ jobs:
 
     - name: Invalidate cache
       run: aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';
-
 
     - name: Deploy ml demo
       run: aws s3 sync ./packages/collaborative-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
