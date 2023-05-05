@@ -47,7 +47,9 @@ export class Layout {
     }
 }
 
-export abstract class RectContent {}
+export abstract class RectContent {
+    abstract setup(): Promise<void>;
+}
 
 @variant(0)
 export class IFrameContent extends RectContent {
@@ -62,15 +64,18 @@ export class IFrameContent extends RectContent {
         this.src = properties.src;
         this.resizer = properties.resizer;
     }
+    setup(): Promise<void> {
+        return;
+    }
 }
 
-@variant(0)
-export class Rect<T extends RectContent = any> {
-    @field({ type: fixedArray("u8", 32) })
-    id: Uint8Array;
-
+@variant("rect")
+export class Rect<T extends RectContent = any> extends Program {
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
+
+    @field({ type: PublicSignKey })
+    creator: PublicSignKey;
 
     @field({ type: vec(Layout) })
     layout: Layout[];
@@ -78,24 +83,48 @@ export class Rect<T extends RectContent = any> {
     @field({ type: RectContent })
     content: T;
 
+    @field({ type: Documents<Rect> })
+    children: Documents<Rect>;
+
     // Don't serialize/store
     keypair: Ed25519Keypair;
 
     constructor(properties: {
-        id?: Uint8Array;
+        id?: string;
         layout: Layout[];
-        publicKey: PublicSignKey;
+        creator: PublicSignKey;
         content: T;
         keypair: Ed25519Keypair;
     }) {
+        super(properties);
         this.layout = properties.layout;
-        this.publicKey = properties.publicKey;
+        this.creator = properties.creator;
         this.content = properties.content;
-        this.id = properties.id || randomBytes(32);
         this.keypair = properties.keypair;
+    }
+
+    async setup(): Promise<void> {
+        await this.content.setup();
+        return this.children.setup({
+            type: Rect,
+            canAppend: async (entry) => {
+                /**
+                 * Only allow updates if we created it
+                 *  or from myself (this allows us to modifyo someone elsecanvas locally)
+                 */
+                return (
+                    entry.signatures.find(
+                        (x) =>
+                            x.publicKey.equals(this.creator) ||
+                            x.publicKey.equals(this.identity.publicKey)
+                    ) != null
+                );
+            },
+        });
     }
 }
 
+/*
 @variant(0)
 export class TitleAndDescription {
     @field({ type: "string" })
@@ -109,14 +138,8 @@ export class TitleAndDescription {
         this.description = description;
     }
 }
-
-@variant("canvas")
-export class Canvas extends Program {
-    @field({ type: Documents<Rect> })
-    rects: Documents<Rect>;
-
-    @field({ type: PublicSignKey })
-    key: PublicSignKey;
+ @variant("canvas")
+export class Canvas {
 
     @field({ type: TitleAndDescription })
     info: TitleAndDescription;
@@ -133,26 +156,9 @@ export class Canvas extends Program {
         this.info = properties.info;
     }
 
-    setup(): Promise<void> {
-        return this.rects.setup({
-            type: Rect,
-            canAppend: async (entry) => {
-                /**
-                 * Only allow updates if we created it
-                 *  or from myself (this allows us to modifyo someone elsecanvas locally)
-                 */
-                return (
-                    entry.signatures.find(
-                        (x) =>
-                            x.publicKey.equals(this.key) ||
-                            x.publicKey.equals(this.identity.publicKey)
-                    ) != null
-                );
-            },
-        });
-    }
-}
 
+} */
+/* 
 @variant("spaces")
 export class Spaces extends Program {
     @field({ type: Documents<Rect> })
@@ -200,3 +206,4 @@ export class Spaces extends Program {
         });
     }
 }
+ */

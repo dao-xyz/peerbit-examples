@@ -7,22 +7,10 @@ import {
     RefObject,
 } from "react";
 
-import {
-    getStreamPath,
-    CHAT_APP,
-    STREAMING_APP,
-    getChatPath,
-    getAdressFromKey,
-} from "../routes.js";
+import { getAdressFromKey } from "../routes.js";
 import { usePeer, submitKeypairChange } from "@dao-xyz/peerbit-react";
 import { useParams } from "react-router-dom";
-import {
-    Canvas as CanvasDB,
-    Rect,
-    Layout,
-    RectContent,
-    IFrameContent,
-} from "./db";
+import { Rect, Layout, IFrameContent } from "./db";
 import { Ed25519Keypair, PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { Box, Grid, IconButton, useTheme } from "@mui/material";
 import iFrameResize from "iframe-resizer";
@@ -36,7 +24,6 @@ import "react-resizable/css/styles.css";
 import {
     ResponsiveGridLayout as RGL,
     Layout as RGLayout,
-    WidthProvider,
     calcGridColWidth,
     PositionParams,
     resolveRowHeight,
@@ -74,7 +61,7 @@ let updateRectsTimeout: ReturnType<typeof setTimeout> = undefined;
 export const Canvas = () => {
     const { peer } = usePeer();
     const params = useParams();
-    const myCanvas = useRef<Promise<CanvasDB>>(null);
+    const currentRoot = useRef<Promise<Rect>>(null);
     const [rects, setRects] = useState<Rect[]>([]);
     const rectsRef = useRef<Rect[]>(rects);
 
@@ -99,7 +86,7 @@ export const Canvas = () => {
     const addRect = async (generator: ElementGenerator) => {
         const { key: keypair } = await getCanvasKeypair();
         await setName(name); // Reinitialize names, so that all keypairs get associated with the name
-        const c = await myCanvas.current;
+        const c = await currentRoot.current;
         console.log("new rect");
         let maxY = rectsRef.current
             .map((x) => x.layout)
@@ -109,10 +96,10 @@ export const Canvas = () => {
                 (prev, current, ix) => Math.max(current.y + current.h, prev),
                 -1
             );
-        c.rects.put(
+        c.children.put(
             new Rect({
                 keypair,
-                publicKey: keypair.publicKey,
+                creator: keypair.publicKey,
                 layout: [
                     new Layout({
                         breakpoint: latestBreakpoint.current,
@@ -150,7 +137,7 @@ export const Canvas = () => {
     }, []);
 
     useEffect(() => {
-        if (!peer?.libp2p || !params.key || myCanvas.current) {
+        if (!peer?.libp2p || !params.key || currentRoot.current) {
             return;
         }
 
@@ -165,18 +152,18 @@ export const Canvas = () => {
         setTimeout(() => {
             console.log(peer.libp2p.directblock.peers.size);
         }, 5000);
-        myCanvas.current = peer
-            .open<CanvasDB>(canvasAddress, {
+        currentRoot.current = peer
+            .open<Rect>(canvasAddress, {
                 sync: () => true,
             })
             .then(async (canvas) => {
                 console.log("OPEN!", canvas);
-                const node = canvas.key;
+                const node = canvas.creator;
                 let isOwner = peer.idKey.publicKey.equals(node);
                 console.log("is owner?", isOwner);
                 setIsOwner(isOwner);
                 setIdArgs({ node });
-                canvas.rects.events.addEventListener(
+                canvas.children.events.addEventListener(
                     "change",
                     async (change) => {
                         console.log(
@@ -186,55 +173,54 @@ export const Canvas = () => {
                         updateRects(
                             (
                                 await Promise.all(
-                                    [...canvas.rects.index.index.values()].map(
-                                        async (x) => {
-                                            let doc =
-                                                await canvas.rects.index.getDocument(
-                                                    x
-                                                );
-                                            if (isOwner) {
-                                                if (!doc.keypair) {
-                                                    console.log(
-                                                        "reset keypair for rect!"
-                                                    );
-                                                    // try to find it in memory
-                                                    const keypairs =
-                                                        await getCanvasKeypairs();
-                                                    for (const keypair of keypairs) {
-                                                        if (
-                                                            keypair.publicKey.equals(
-                                                                doc.publicKey
-                                                            )
-                                                        ) {
-                                                            doc.keypair =
-                                                                keypair;
-                                                            return doc;
-                                                        }
-                                                    }
-                                                    console.warn(
-                                                        "Could not find keypair for rect"
-                                                    );
-                                                    return undefined; // We don't generate a new one, since its meaningless
-                                                }
-                                            } else {
+                                    [
+                                        ...canvas.children.index.index.values(),
+                                    ].map(async (x) => {
+                                        let doc =
+                                            await canvas.children.index.getDocument(
+                                                x
+                                            );
+                                        if (isOwner) {
+                                            if (!doc.keypair) {
                                                 console.log(
                                                     "reset keypair for rect!"
                                                 );
-                                                if (!doc.keypair) {
-                                                    const { key: keypair } =
-                                                        await getCanvasKeypair();
-                                                    /*  const keypair =
+                                                // try to find it in memory
+                                                const keypairs =
+                                                    await getCanvasKeypairs();
+                                                for (const keypair of keypairs) {
+                                                    if (
+                                                        keypair.publicKey.equals(
+                                                            doc.publicKey
+                                                        )
+                                                    ) {
+                                                        doc.keypair = keypair;
+                                                        return doc;
+                                                    }
+                                                }
+                                                console.warn(
+                                                    "Could not find keypair for rect"
+                                                );
+                                                return undefined; // We don't generate a new one, since its meaningless
+                                            }
+                                        } else {
+                                            console.log(
+                                                "reset keypair for rect!"
+                                            );
+                                            if (!doc.keypair) {
+                                                const { key: keypair } =
+                                                    await getCanvasKeypair();
+                                                /*  const keypair =
                                                          await Ed25519Keypair.create();
                                                      console.log(
                                                          "FREE KEYPAIR",
                                                          keypair.publicKey.hashcode()
                                                      ); */
-                                                    doc.keypair = keypair;
-                                                }
+                                                doc.keypair = keypair;
                                             }
-                                            return doc;
                                         }
-                                    )
+                                        return doc;
+                                    })
                                 )
                             ).filter((x) => !!x),
                             0
@@ -243,7 +229,7 @@ export const Canvas = () => {
                 );
                 await canvas.load();
 
-                if (canvas.rects.index.size > 0) {
+                if (canvas.children.index.size > 0) {
                     return canvas;
                 }
 
@@ -255,7 +241,7 @@ export const Canvas = () => {
                     setInterval(async () => {
                         console.log(
                             (
-                                await canvas.rects.index.query(
+                                await canvas.children.index.query(
                                     new DocumentQuery({ queries: [] }),
                                     { remote: { sync: true } }
                                 )
@@ -490,7 +476,9 @@ export const Canvas = () => {
 
                         Promise.all(
                             [...toUpdate.values()].map((rect) =>
-                                myCanvas.current.then((c) => c.rects.put(rect))
+                                currentRoot.current.then((c) =>
+                                    c.children.put(rect)
+                                )
                             )
                         )
                             .then(() => {
@@ -564,9 +552,9 @@ export const Canvas = () => {
                                             <IconButton
                                                 size="small"
                                                 onClick={() => {
-                                                    myCanvas.current.then(
+                                                    currentRoot.current.then(
                                                         (canvas) => {
-                                                            canvas.rects.del(
+                                                            canvas.children.del(
                                                                 x.id
                                                             );
                                                         }
