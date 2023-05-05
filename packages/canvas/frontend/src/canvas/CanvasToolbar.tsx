@@ -3,7 +3,7 @@ import DashboardIcon from "@mui/icons-material/Dashboard";
 import ExploreIcon from "@mui/icons-material/Explore";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { useEffect, useRef, useState } from "react";
-import { Canvas, Spaces } from "./dbs/canvas";
+import { Canvas, Spaces } from "./db";
 import { useNavigate } from "react-router-dom";
 import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import QueueIcon from "@mui/icons-material/Queue";
@@ -23,6 +23,7 @@ export const CanvasToolbar = (props: { direction: "column" | "row" }) => {
         if (spaces.current || !peer) {
             return;
         }
+        console.log("open!");
         spaces.current = peer
             .open(new Spaces(), { sync: () => true })
             .then(async (result) => {
@@ -43,7 +44,7 @@ export const CanvasToolbar = (props: { direction: "column" | "row" }) => {
                 setInterval(async () => {
                     await result.canvases.index.query(
                         new DocumentQuery({ queries: [] }),
-                        { remote: { sync: true, amount: 2 } }
+                        { remote: { sync: true } }
                     );
                 }, 2000);
                 return result;

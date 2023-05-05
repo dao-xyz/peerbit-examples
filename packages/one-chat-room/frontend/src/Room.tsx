@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
     Box,
     CircularProgress,
@@ -44,8 +44,7 @@ export const Room = () => {
     const [text, setText] = useState("");
     const [receivers, setRecievers] = useState<string[]>([]);
     const postsRef = useRef<Post[]>([]);
-    const [posts, setPosts] = useState<Post[]>();
-    const [updated, setUpdated] = useState(+new Date());
+    const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const params = useParams();
     const messagesEndRef = useRef(null);
 
@@ -70,36 +69,6 @@ export const Room = () => {
     }, [room?.current?.id, room?.current?.initialized, peerCounter]);
 
     useEffect(() => {
-        if (!room.current) {
-            return;
-        }
-
-        console.log("new posts", postsRef.current.length);
-        let wallTimes = new Map<string, bigint>();
-
-        Promise.all(
-            postsRef.current.map(async (x) => {
-                return {
-                    post: x,
-                    entry: await room.current.messages.store.oplog.get(
-                        room.current.messages.index.index.get(x.id).context.head
-                    ),
-                };
-            })
-        ).then((entries) => {
-            entries.forEach(({ post, entry }) => {
-                wallTimes.set(post.id, entry.metadata.clock.timestamp.wallTime);
-            });
-            setPosts(
-                (postsRef.current = postsRef.current.sort((a, b) =>
-                    Number(wallTimes.get(a.id) - wallTimes.get(b.id))
-                ))
-            );
-            console.log(postsRef.current.map((x) => wallTimes.get(x.id)));
-        });
-    }, [updated]);
-
-    useEffect(() => {
         if (room.current || loading || !params.key || !peer) {
             //('return', rooms, loadedRoomsLocally)
             return;
@@ -112,7 +81,7 @@ export const Room = () => {
             names.current = namesDB;
 
             await peer
-                .open(new RoomDB({ creator: key }))
+                .open(new RoomDB({ creator: key }), { sync: () => true })
                 .then(async (r) => {
                     room.current = r;
 
@@ -127,6 +96,9 @@ export const Room = () => {
                         });
                     };
 
+                    let updateTimeout:
+                        | ReturnType<typeof setTimeout>
+                        | undefined;
                     r.messages.events.addEventListener("change", (e) => {
                         e.detail.added?.forEach((p) => {
                             const ix = postsRef.current.findIndex(
@@ -147,7 +119,37 @@ export const Room = () => {
                                 postsRef.current.splice(ix, 1);
                             }
                         });
-                        setUpdated(+new Date());
+
+                        let wallTimes = new Map<string, bigint>();
+
+                        clearTimeout(updateTimeout);
+                        updateTimeout = setTimeout(async () => {
+                            const entries = await Promise.all(
+                                postsRef.current.map(async (x) => {
+                                    return {
+                                        post: x,
+                                        entry: await room.current.messages.store.oplog.get(
+                                            room.current.messages.index.index.get(
+                                                x.id
+                                            ).context.head
+                                        ),
+                                    };
+                                })
+                            );
+                            entries.forEach(({ post, entry }) => {
+                                wallTimes.set(
+                                    post.id,
+                                    entry.metadata.clock.timestamp.wallTime
+                                );
+                            });
+
+                            postsRef.current.sort((a, b) =>
+                                Number(
+                                    wallTimes.get(a.id) - wallTimes.get(b.id)
+                                )
+                            );
+                            forceUpdate();
+                        }, 5);
                     });
 
                     peer.libp2p.directsub.addEventListener("subscribe", () => {
@@ -185,12 +187,13 @@ export const Room = () => {
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
-    }, [posts?.length]);
+    }, [postsRef.current?.length]);
 
     const createPost = useCallback(async () => {
         if (!room) {
             return;
         }
+        console.log(peer.libp2p.directsub.peers);
         room.current.messages
             .put(new Post({ message: text, from: peer.identity.publicKey }), {
                 reciever: {
@@ -257,9 +260,9 @@ export const Room = () => {
                 padding={1}
                 mb="8px"
             >
-                {posts?.length > 0 ? (
+                {postsRef.current?.length > 0 ? (
                     <Grid container direction="column">
-                        {posts.map((p, ix) => (
+                        {postsRef.current.map((p, ix) => (
                             <Grid
                                 container
                                 item

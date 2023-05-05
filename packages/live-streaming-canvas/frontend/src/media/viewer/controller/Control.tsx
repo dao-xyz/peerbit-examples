@@ -64,7 +64,7 @@ export const Controls = (
     const [muted, setMuted] = useState(false);
     const [prevMuteVolume, setPrevMuteVolume] = useState(1);
     const [volume, setVolume] = useState(0.66);
-    const [isPlaying, setIsPlaying] = useState(false);
+    const [isPlaying, setIsPlaying] = useState(props.isPlaying ?? false);
     const addShowControlsListener = (ref: HTMLElement) => {
         ref.addEventListener("mouseenter", () => {
             setShowControls(true);
@@ -226,7 +226,7 @@ export const Controls = (
             className="controls"
             sx={{ opacity: showControls ? 1 : 0 }}
         >
-            <Grid
+            {/*   TODO   <Grid
                 item
                 display="flex"
                 justifyContent="center"
@@ -242,7 +242,7 @@ export const Controls = (
                         props.setProgress(Number(e.target["value"]))
                     }
                 />
-            </Grid>
+            </Grid> */}
             <Grid
                 container
                 item

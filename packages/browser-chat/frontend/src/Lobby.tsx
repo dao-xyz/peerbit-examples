@@ -63,7 +63,7 @@ export const Lobby = () => {
                     setPeerCount(
                         peer.libp2p.directsub.topics.get(
                             lobby.address.toString()
-                        ).size
+                        ).size + 1
                     );
                 });
                 await lobby.load();

@@ -56,7 +56,7 @@ interface VideoStream {
     open: () => Promise<void>;
 }
 
-let lastVideoFrameTimestamp: number | undefined = undefined;
+let lastVideoFrameTimestamp: bigint | undefined = undefined;
 const openVideoStreamQueue = new PQueue({ concurrency: 1 });
 
 export const Stream = (args: { node: PublicSignKey }) => {
@@ -181,7 +181,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             encoder.close();
                         }
                         if (videoStreamDB) {
-                            console.trace();
                             await Promise.all([
                                 videoStreamDB.close(),
                                 dbs.streams.put(
@@ -276,12 +275,14 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                     }
 
                                     mem += arr.byteLength;
-                                    lastVideoFrameTimestamp = chunk.timestamp;
+                                    lastVideoFrameTimestamp = BigInt(
+                                        chunk.timestamp
+                                    );
                                     await videoStreamDB.chunks.put(
                                         new Chunk({
                                             type: chunk.type,
                                             chunk: arr,
-                                            timestamp: chunk.timestamp,
+                                            timestamp: lastVideoFrameTimestamp,
                                         }),
                                         { nexts: [], unique: true }
                                     );
@@ -543,7 +544,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
             // Set record to <audio> when recording will be finished
             let wavHeader: Uint8Array | undefined = undefined;
-            let lastAudioTimestamp = undefined;
+            let lastAudioTimestamp: bigint = undefined;
             let lastAudioTime = +new Date();
 
             recorder.addEventListener("dataavailable", (e) => {
@@ -563,7 +564,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     let currentTime = +new Date();
                     let timestamp =
                         lastVideoFrameTimestamp ||
-                        (currentTime - lastAudioTime) * 1000 +
+                        BigInt((currentTime - lastAudioTime) * 1000) +
                             lastAudioTimestamp;
                     lastAudioTime = currentTime;
                     audioStreamDB.chunks.put(
@@ -634,11 +635,12 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             videoRef.videoHeight;
                         // console.log('set bitrate', videoEncoder.setting.video.bitrate)
                         encoder.configure({
-                            codec: "av01.0.04M.10",
+                            codec: "av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //"av01.0.04M.10",
                             height: videoEncoder.setting.video.height,
                             width: videoRef.videoWidth * scaler,
                             bitrate: videoEncoder.setting.video.bitrate,
                             latencyMode: "realtime",
+                            bitrateMode: "variable",
                         });
                     }
 
@@ -807,6 +809,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 <div className="container">
                     <div className="video-wrapper">
                         <video
+                            data-iframe-height
                             ref={videoRef}
                             height="auto"
                             width="100%"

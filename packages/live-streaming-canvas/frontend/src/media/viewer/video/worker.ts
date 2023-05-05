@@ -1,25 +1,46 @@
-class WebGLRenderer {
-    #canvas: OffscreenCanvas = null;
-    #ctx = null;
-    pendingFrame: VideoFrame | undefined = undefined;
+import { Renderer } from "./interface";
 
-    /* 
-      static vertexShaderSource = `
-        attribute vec2 xy;
-        varying highp vec2 uv;
-        void main(void) {
-            gl_Position = vec4(xy, 0.0, 1.0);
-            uv = vec2((1.0 + xy.x) / 2.0, (1.0 - xy.y) / 2.0);
-        }
-        `;
-        static fragmentShaderSource = `
-        varying highp vec2 uv;
-        uniform sampler2D texture;
-        void main(void) {
-            gl_FragColor = texture2D(texture, uv);
-        }
-        `;
-        */
+/* const hasWebGL = (canvas: OffscreenCanvas) => !!(canvas.getContext("webgl") || canvas.getContext("webgl2"))
+ */
+class RenderWorker {
+    #canvas: OffscreenCanvas | HTMLCanvasElement = null;
+    #renderer: Renderer;
+    constructor() {
+        this.#renderer = new WebGLRenderer();
+        // Listen for the start request.
+        self.addEventListener("message", (message) => {
+            const data = message.data as
+                | CanvasMessage
+                | FrameMessage
+                | ResizeMessage;
+            if (data.type === "canvas") {
+                this.setup(data.canvas);
+            } else if (data.type === "frame") {
+                this.#renderer.draw(data.frame);
+            } else {
+                this.#renderer.resize(data);
+            }
+        });
+    }
+
+    setup(canvas: OffscreenCanvas) {
+        this.#canvas = canvas;
+        this.#renderer.setup(canvas);
+    }
+
+    get canvas() {
+        return this.#canvas;
+    }
+
+    draw(frame: VideoFrame) {
+        this.#renderer.draw(frame);
+    }
+}
+
+// "webgl" or "webgl2"
+export class WebGLRenderer implements Renderer {
+    #ctx: WebGL2RenderingContext | WebGLRenderingContext = null;
+    #canvas: OffscreenCanvas | HTMLCanvasElement;
     static vertexShaderSource = `
       attribute vec2 xy;
   
@@ -43,46 +64,13 @@ class WebGLRenderer {
       }
     `;
 
-    constructor() {
-        // Listen for the start request.
-        self.addEventListener("message", (message) => {
-            const data = message.data as
-                | CanvasMessage
-                | FrameMessage
-                | ResizeMessage;
-            if (data.type === "canvas") {
-                this.setup(data.canvas);
-            } else if (data.type === "frame") {
-                this.renderFrame(data.frame);
-            } else {
-                this.canvas.width = data.width;
-                this.canvas.height = data.height;
-            }
-        });
-    }
+    pendingFrame: VideoFrame | undefined = undefined;
 
-    renderFrame(frame) {
-        if (!this.pendingFrame) {
-            // Schedule rendering in the next animation frame.
-            requestAnimationFrame(this.renderAnimationFrame.bind(this));
-        } else {
-            // Close the current pending frame before replacing it.
-            this.pendingFrame.close();
-        }
-        // Set or replace the pending frame.
-        this.pendingFrame = frame;
-    }
-
-    renderAnimationFrame() {
-        this.draw(this.pendingFrame);
-        this.pendingFrame = null;
-    }
-
-    setup(canvas: OffscreenCanvas) {
+    setup(canvas: OffscreenCanvas | HTMLCanvasElement) {
         this.#canvas = canvas;
-        const gl = (this.#ctx = canvas.getContext(
-            "webgl2"
-        ) as WebGL2RenderingContext);
+        const gl = (this.#ctx =
+            (canvas.getContext("webgl2") as WebGL2RenderingContext) ||
+            (canvas.getContext("webgl") as WebGLRenderingContext));
         const vertexShader = gl.createShader(gl.VERTEX_SHADER);
         gl.shaderSource(vertexShader, WebGLRenderer.vertexShaderSource);
         gl.compileShader(vertexShader);
@@ -122,17 +110,35 @@ class WebGLRenderer {
         // Create one texture to upload frames to.
         const texture = gl.createTexture();
         gl.bindTexture(gl.TEXTURE_2D, texture);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     }
 
-    get canvas() {
-        return this.#canvas;
+    public resize(data: { width?: number; height?: number }) {
+        if (data.width != null) this.#canvas.width = data.width;
+        if (data.height != null) this.#canvas.height = data.height;
     }
 
-    draw(frame: VideoFrame) {
+    public draw(frame: VideoFrame) {
+        if (!this.pendingFrame) {
+            // Schedule rendering in the next animation frame.
+            requestAnimationFrame(this._renderAnimationFrame.bind(this));
+        } else {
+            // Close the current pending frame before replacing it.
+            this.pendingFrame.close();
+        }
+        // Set or replace the pending frame.
+        this.pendingFrame = frame;
+    }
+
+    private _renderAnimationFrame() {
+        this._draw(this.pendingFrame);
+        this.pendingFrame = null;
+    }
+
+    private _draw(frame: VideoFrame) {
         /*   this.#canvas.width = frame.displayWidth;
           this.#canvas.height = frame.displayHeight;
    */
@@ -159,6 +165,29 @@ class WebGLRenderer {
     }
 }
 
+// "2D" context
+/* class CanvasRenderer implements Renderer {
+    #canvas: OffscreenCanvas
+    #ctx: OffscreenCanvasRenderingContext2D;
+    draw(frame: VideoFrame) {
+         this.#canvas.width = frame.displayWidth;
+          this.#canvas.height = frame.displayHeight; 
+
+        this.#ctx.drawImage(frame,
+            0,
+            0,
+        );
+
+
+        frame.close();
+    }
+    setup(canvas: OffscreenCanvas) {
+        this.#canvas = canvas;
+        this.#ctx = canvas.getContext("2d")
+    }
+}
+ */
+
 export interface FrameMessage {
     type: "frame";
     frame: VideoFrame;
@@ -171,8 +200,8 @@ export interface CanvasMessage {
 
 export interface ResizeMessage {
     type: "size";
-    width: number;
-    height: number;
+    width?: number;
+    height?: number;
 }
 
-new WebGLRenderer();
+new RenderWorker();

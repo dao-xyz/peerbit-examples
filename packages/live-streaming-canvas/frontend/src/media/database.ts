@@ -21,13 +21,13 @@ export class Chunk {
     @field({ type: "string" })
     type: string;
 
-    @field({ type: "u32" })
-    timestamp: number;
+    @field({ type: "u64" })
+    timestamp: bigint;
 
     @field({ type: Uint8Array })
     chunk: Uint8Array;
 
-    constructor(props: { type: string; chunk: Uint8Array; timestamp: number }) {
+    constructor(props: { type: string; chunk: Uint8Array; timestamp: bigint }) {
         this.id = uuid();
         this.type = props.type;
         this.chunk = props.chunk;

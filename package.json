@@ -45,9 +45,9 @@
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}"
     },
     "dependencies": {
-        "@dao-xyz/peerbit": "^0.3.7",
-        "@dao-xyz/peerbit-document": "^0.3.7",
-        "@dao-xyz/peerbit-test-utils": "^0.1.27"
+        "@dao-xyz/peerbit": "^0.5.3",
+        "@dao-xyz/peerbit-document": "^0.5.3",
+        "@dao-xyz/peerbit-test-utils": "^0.2.3"
     },
     "devDependencies": {
         "@types/eslint": "^8.2.1",

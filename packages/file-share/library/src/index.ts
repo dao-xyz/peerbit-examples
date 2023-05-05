@@ -3,9 +3,7 @@ import { Program } from "@dao-xyz/peerbit-program";
 import {
     Documents,
     DocumentIndex,
-    StringMatchMethod,
     DocumentQuery,
-    ResultWithSource,
     StringMatch,
 } from "@dao-xyz/peerbit-document";
 import { sha256Base64Sync } from "@dao-xyz/peerbit-crypto";

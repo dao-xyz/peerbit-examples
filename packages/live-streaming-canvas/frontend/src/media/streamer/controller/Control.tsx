@@ -1,14 +1,5 @@
-import { inIframe, usePeer } from "@dao-xyz/peerbit-react";
+import { useState, useEffect, useCallback } from "react";
 import {
-    useRef,
-    useState,
-    useEffect,
-    useCallback,
-    MutableRefObject,
-} from "react";
-import {
-    Box,
-    Button,
     Grid,
     IconButton,
     ListItemIcon,
@@ -16,8 +7,6 @@ import {
     Menu,
     MenuItem,
     MenuList,
-    OutlinedInput,
-    Select,
     Slider,
     Typography,
 } from "@mui/material";

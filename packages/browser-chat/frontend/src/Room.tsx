@@ -99,7 +99,7 @@ export const Room = () => {
         room.current = undefined;
         setLoading(true);
         const name = getRoomNameFromPath(params.name);
-        peer.open(new RoomDB({ name }))
+        peer.open(new RoomDB({ name }), { sync: () => true })
             .then(async (r) => {
                 room.current = r;
                 r.messages.events.addEventListener("change", async (e) => {

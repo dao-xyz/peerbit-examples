@@ -1,11 +1,11 @@
 import { Routes, Route } from "react-router";
-import { Canvas } from "./Canvas";
+import { Canvas } from "./canvas/Canvas";
 import { Home } from "./Home";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { base64url } from "multiformats/bases/base64";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { NewSpace } from "./NewSpace";
-import { Canvas as CanvasDB } from "./dbs/canvas";
+import { Canvas as CanvasDB } from "./canvas/db";
 import { Address } from "@dao-xyz/peerbit-program";
 
 export const getStreamPath = (node: PublicSignKey) =>

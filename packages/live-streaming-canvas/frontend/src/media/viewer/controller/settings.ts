@@ -1,6 +1,6 @@
 export interface SourceSetting {
     video: { bitrate: number; height: number };
-    audio: Record<string, never>;
+    audio: { bitrate?: number };
 }
 
 interface CameraStream {
