@@ -1304,28 +1304,28 @@
     "@dao-xyz/peerbit-time" "^0.0.22"
     level "^8.0.0"
 
-"@dao-xyz/libp2p-direct-block@^0.2.4":
-  version "0.2.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-block/-/libp2p-direct-block-0.2.4.tgz#016d3243e1a0f902c0586879a4a96ffd1649e477"
-  integrity sha512-cq3b6TxFBIC5ny9ECcWUyb3QDyV344Mx3wolRClhODqZGwaJqVgWJpXOZ0r3x/i8/MiZMdUe5b6aTXggCdV9Zw==
+"@dao-xyz/libp2p-direct-block@^0.2.5":
+  version "0.2.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-block/-/libp2p-direct-block-0.2.5.tgz#340482022f731aa8c512261e0209010de045d927"
+  integrity sha512-0TGQbuoGMbDJgPwm599emVTUyY4BbNz631AevRGyaSCsXFDWnBGfw+QMr45g70Dwv88NewThabaaNgJDWlUfog==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
     "@dao-xyz/lazy-level" "^0.0.5"
-    "@dao-xyz/libp2p-direct-stream" "^0.2.4"
-    "@dao-xyz/peerbit-crypto" "^0.1.12"
+    "@dao-xyz/libp2p-direct-stream" "^0.2.5"
+    "@dao-xyz/peerbit-crypto" "^0.1.13"
     "@ipld/dag-cbor" "^9.0.0"
     abstract-level "^1.0.3"
     libp2p "^0.44.0"
     memory-level "^1.0.0"
 
-"@dao-xyz/libp2p-direct-stream@^0.2.4":
-  version "0.2.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-stream/-/libp2p-direct-stream-0.2.4.tgz#dfa4daa8bc104229dc4125fe8a95e935b7c1558b"
-  integrity sha512-vaD68KPQakclq7L8QMAqRIctT/A7DAi5PUTaZlKnAKPWWKWd+z1AC1QDDPjYbyAg1OXWKn006y75ohNnOuxgqA==
+"@dao-xyz/libp2p-direct-stream@^0.2.5":
+  version "0.2.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-stream/-/libp2p-direct-stream-0.2.5.tgz#aa47960032cc6498aa733190ac4d2047729f467e"
+  integrity sha512-O2UMSR9NgviRESCfKGAErdKwYQ8hkUr0MvJUdtvwibc/d5iONghwubl8NMnWzhpc6xi6VDHhpWlrKVEPm9aUkg==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
     "@dao-xyz/cache" "^0.0.4"
-    "@dao-xyz/peerbit-crypto" "^0.1.12"
+    "@dao-xyz/peerbit-crypto" "^0.1.13"
     "@libp2p/topology" "^4.0.1"
     abstract-level "^1.0.3"
     graphology "^0.25.1"
@@ -1335,12 +1335,12 @@
     uint8arrays "^4.0.2"
     yallist "^4.0.0"
 
-"@dao-xyz/libp2p-direct-sub@^0.2.4":
-  version "0.2.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-sub/-/libp2p-direct-sub-0.2.4.tgz#3e7d42fd137c1713d4153fedc436523068df775f"
-  integrity sha512-S/v2ATFV7Sudhb7TGGQwJYzMGUDl9xWx8127E3dDtz4dOS+GNE3wo7jHQZHFkyBE+jufEgzrh8ZYR6dvuj56Cg==
+"@dao-xyz/libp2p-direct-sub@^0.2.5":
+  version "0.2.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/libp2p-direct-sub/-/libp2p-direct-sub-0.2.5.tgz#f9150d0bd7615a296adbe5f0fe7705fc1b8f08dd"
+  integrity sha512-zDs71u0tlZrMLkQNGDv6nGG20wlj0EXwK5j4EzrLNbLEbQYE9ssr47g03uY+LOhZ+cGhFolZEDSUlGlRPibgmg==
   dependencies:
-    "@dao-xyz/libp2p-direct-stream" "^0.2.4"
+    "@dao-xyz/libp2p-direct-stream" "^0.2.5"
     "@dao-xyz/peerbit-logger" "^0.0.6"
     "@dao-xyz/uint8arrays" "^0.0.3"
     "@libp2p/interfaces" "^3.3.1"
@@ -1417,10 +1417,10 @@
     uint8arraylist "^2.3.3"
     uint8arrays "^4.0.2"
 
-"@dao-xyz/peerbit-crypto@^0.1.12":
-  version "0.1.12"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-crypto/-/peerbit-crypto-0.1.12.tgz#e84fddc95049159a5a30c245f06d83e765f099f3"
-  integrity sha512-lhOrBmjeTHoyjXBqqjCN1+NRKHf3dr78/5aWdLyp8GxyME/T3PX2Kce5FHcMvxVBUJ5RZFuZ6ko4GP2CEUb1lw==
+"@dao-xyz/peerbit-crypto@^0.1.13":
+  version "0.1.13"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-crypto/-/peerbit-crypto-0.1.13.tgz#b0576cae0f2b81a0ca8a8f53b034bae48ee22d3f"
+  integrity sha512-QhqMkNhmtCK4dtL2TJU1iZnUn84P3kPsNyskr0QTrwM8xVHHsI21xr0qlI0rd4F2/iE+kdAw7t91SW9Km5eviQ==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
     "@dao-xyz/uint8arrays" "^0.0.3"
@@ -1429,35 +1429,35 @@
     "@libp2p/peer-id" "^2.0.1"
     libsodium-wrappers "^0.7.10"
 
-"@dao-xyz/peerbit-document@*", "@dao-xyz/peerbit-document@^0.5.4":
-  version "0.5.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-document/-/peerbit-document-0.5.4.tgz#9b8cb685c491663eeaffd4207364bb1262c8d615"
-  integrity sha512-MlQZ9cc7zbhnhIs9DjHWX0KewaaYBcWK1y5Hi4y7ATIPxKAz5SCSOK/03Ud7BXJoAl2EXejKL04Q8Ga7OBd7RQ==
+"@dao-xyz/peerbit-document@*", "@dao-xyz/peerbit-document@^0.5.5":
+  version "0.5.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-document/-/peerbit-document-0.5.5.tgz#fe5794e21dd120f7996d324835447137efb7a766"
+  integrity sha512-k8qUll122mzhmNlRxYBXYUMmDJWaUBstFODgHqzP6qj96+3Bz3DhhdqB+zr5i+P3qOE4vYgTxm2KyUtDDUEr5A==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
-    "@dao-xyz/peerbit-rpc" "^0.5.4"
-    "@dao-xyz/peerbit-store" "^0.5.4"
+    "@dao-xyz/peerbit-rpc" "^0.5.5"
+    "@dao-xyz/peerbit-store" "^0.5.5"
     "@libp2p/interfaces" "^3.3.1"
 
-"@dao-xyz/peerbit-keystore@^0.2.4":
-  version "0.2.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-keystore/-/peerbit-keystore-0.2.4.tgz#16183f4dba1f4cf07cb7273b4d2b0eb1f16224d0"
-  integrity sha512-XdvTIkHgpRjMybOui/MQtMyl4kOXaqPOnSUP8zh2+LP87K70tFyIDklCF6U7PBDd9lbeghn1zdnNIOuT/Fm29A==
+"@dao-xyz/peerbit-keystore@^0.2.5":
+  version "0.2.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-keystore/-/peerbit-keystore-0.2.5.tgz#69b698cfd9bb0429827a1f2852741c364db0d8dc"
+  integrity sha512-nvsCTjQeegwvLlF+w0r9UqkP4HY3r5Nu+Uj+wCHo7A7nS8TTeNrW+sfwH0yOkzXtjtxSxW/UzxO0XuPyaFnuPw==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
     "@dao-xyz/cache" "^0.0.4"
-    "@dao-xyz/peerbit-crypto" "^0.1.12"
+    "@dao-xyz/peerbit-crypto" "^0.1.13"
     "@dao-xyz/peerbit-time" "^0.0.22"
     "@dao-xyz/uint8arrays" "^0.0.3"
     level "^8.0.0"
 
-"@dao-xyz/peerbit-libp2p@^0.2.4":
-  version "0.2.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-libp2p/-/peerbit-libp2p-0.2.4.tgz#6107ad2263e0160b04591cd79d8a91a5bf87f062"
-  integrity sha512-CRkdR3+RXV21um/jhDAOxs8dLunFrIP6o8KJ8Gv9NAnwI/naBuDnG0VP3a1xpsqnXDAjneE7GwVb60YdVKlvMw==
+"@dao-xyz/peerbit-libp2p@^0.2.5":
+  version "0.2.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-libp2p/-/peerbit-libp2p-0.2.5.tgz#c16da3599c56e26a5bfade0f8ad1a7d415268203"
+  integrity sha512-P6RlLtBJJXQNsRv5WeWyFFc5F7Tzy1NxudrBRBWzevyy2kbsEFe9hBMvY1IFz0cNNOnGBf1nog2s+8OssR/F9Q==
   dependencies:
-    "@dao-xyz/libp2p-direct-block" "^0.2.4"
-    "@dao-xyz/libp2p-direct-sub" "^0.2.4"
+    "@dao-xyz/libp2p-direct-block" "^0.2.5"
+    "@dao-xyz/libp2p-direct-sub" "^0.2.5"
     "@dao-xyz/libp2p-noise" "^11.1.3"
     "@libp2p/mplex" "^7.1.3"
     "@libp2p/tcp" "^6.1.4"
@@ -1466,15 +1466,15 @@
     level "^8.0.0"
     libp2p "^0.44.0"
 
-"@dao-xyz/peerbit-log@^0.5.4":
-  version "0.5.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-log/-/peerbit-log-0.5.4.tgz#ed2e0cf964809cd47bba1cf2170386e61329523a"
-  integrity sha512-mY5ZghIOMxnjmBDrsSxriFU7J3AniELFkh+5ACksHFGvscibhn37MHhpILZHhP94Q9G10WtP9pMRm/QopbY05w==
+"@dao-xyz/peerbit-log@^0.5.5":
+  version "0.5.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-log/-/peerbit-log-0.5.5.tgz#d8977c3da42544d83d4d53825545002453fd7acb"
+  integrity sha512-eo19U7uGUHrx9EMO5dF+LBBNgcsp7AGhaaSbT5las2yf51Om0Z0DBW2eUMq4L+A6gy/pDriRLdJtF3IxVBQoMQ==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
     "@dao-xyz/cache" "^0.0.4"
-    "@dao-xyz/libp2p-direct-block" "^0.2.4"
-    "@dao-xyz/peerbit-crypto" "^0.1.12"
+    "@dao-xyz/libp2p-direct-block" "^0.2.5"
+    "@dao-xyz/peerbit-crypto" "^0.1.13"
     "@dao-xyz/peerbit-logger" "^0.0.6"
     json-stringify-deterministic "^1.0.7"
     libp2p "^0.44.0"
@@ -1490,47 +1490,47 @@
   dependencies:
     pino "^8.7.0"
 
-"@dao-xyz/peerbit-program@^0.5.4":
-  version "0.5.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-program/-/peerbit-program-0.5.4.tgz#f906a1fa0ee37ded5299dc32f9d020ac98953508"
-  integrity sha512-VCvcOD1BEEz6ahfakTaDZ9uSQ8157a8dMLpXLqpsBP4NIvR0tKd0Js6JS0MoH4C3yV46VjHQrz6JMspH5W2Lbg==
+"@dao-xyz/peerbit-program@^0.5.5":
+  version "0.5.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-program/-/peerbit-program-0.5.5.tgz#9880d0de834b0e5d9494b9b56ddabfef6939713d"
+  integrity sha512-yC+pS7rpbSc6tNB4hIznjucJvVxNxAtxXkMz3q0f4iSPVY23qlclagcA0pzbMQAoZ2MkrkP4ePVKGDkACMsVdg==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
-    "@dao-xyz/libp2p-direct-sub" "^0.2.4"
-    "@dao-xyz/peerbit-crypto" "^0.1.12"
-    "@dao-xyz/peerbit-libp2p" "^0.2.4"
-    "@dao-xyz/peerbit-store" "^0.5.4"
+    "@dao-xyz/libp2p-direct-sub" "^0.2.5"
+    "@dao-xyz/peerbit-crypto" "^0.1.13"
+    "@dao-xyz/peerbit-libp2p" "^0.2.5"
+    "@dao-xyz/peerbit-store" "^0.5.5"
 
-"@dao-xyz/peerbit-rpc@^0.5.4":
-  version "0.5.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-rpc/-/peerbit-rpc-0.5.4.tgz#17d9e5a7ac0fcc1cc46664fdca8612436b28540f"
-  integrity sha512-D5UtKhJwekhcytAGXyjNjbw07KSBcURiuUCLoCyhumiAY9UIIFJlAg4U0FfCjWEEz/9C6cjSeAaeANGE4yttqg==
+"@dao-xyz/peerbit-rpc@^0.5.5":
+  version "0.5.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-rpc/-/peerbit-rpc-0.5.5.tgz#39f2a28e96a7c7e36c5b3264df248d8912a1bca5"
+  integrity sha512-SPwt10j/2krFEY147+7YDGMVbSve76mZsqAWDzumvSsikXhCk2vDfqGMDvcF2QbE4L0g3MP5FVW2JnwGcDVU/Q==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
-    "@dao-xyz/peerbit-crypto" "^0.1.12"
+    "@dao-xyz/peerbit-crypto" "^0.1.13"
     "@dao-xyz/peerbit-logger" "^0.0.6"
-    "@dao-xyz/peerbit-program" "^0.5.4"
-    "@dao-xyz/peerbit-store" "^0.5.4"
+    "@dao-xyz/peerbit-program" "^0.5.5"
+    "@dao-xyz/peerbit-store" "^0.5.5"
     "@dao-xyz/peerbit-time" "^0.0.22"
 
-"@dao-xyz/peerbit-store@^0.5.4":
-  version "0.5.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-store/-/peerbit-store-0.5.4.tgz#d1a419d1a1759e1f474420b4b919fe139b0a8509"
-  integrity sha512-ZUldAYJXEYbVxeeShphpxd1l8qN5L0/Glsh9borNFshpdUUst+l8Jc0NSAPa4MJPNZD7G6JyA7gLyp0AmcsnSg==
+"@dao-xyz/peerbit-store@^0.5.5":
+  version "0.5.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-store/-/peerbit-store-0.5.5.tgz#2323af54b9a41552e989eee78646b92bd2f39fe8"
+  integrity sha512-cJTAWz04RXoYFtqVfXenuiRDcAaGmb82wLCIvS7XpYS7xVLpLYnjxYXjWBW7uOpra5x3q17lPvFb5Bt1TxXLWg==
   dependencies:
     "@dao-xyz/lazy-level" "^0.0.5"
-    "@dao-xyz/libp2p-direct-block" "^0.2.4"
-    "@dao-xyz/peerbit-log" "^0.5.4"
+    "@dao-xyz/libp2p-direct-block" "^0.2.5"
+    "@dao-xyz/peerbit-log" "^0.5.5"
     p-queue "^7.3.3"
     path-browserify "^1.0.1"
 
-"@dao-xyz/peerbit-test-utils@*", "@dao-xyz/peerbit-test-utils@^0.2.4":
-  version "0.2.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-test-utils/-/peerbit-test-utils-0.2.4.tgz#d4d4cbfe0828f73bc836530fe6c630b4200aefa0"
-  integrity sha512-ISIdYXwsvZWASho28S5SOwjyezN5f0uKy/RLBFbmC9z19jOu/VJXUY6MHHEpREwZ3jw3CaERTDK7c/keMY527w==
+"@dao-xyz/peerbit-test-utils@*", "@dao-xyz/peerbit-test-utils@^0.2.5":
+  version "0.2.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-test-utils/-/peerbit-test-utils-0.2.5.tgz#2543004409224116a3e146920a455db189c3c5cd"
+  integrity sha512-KPkTFGMUqjvAmM5kWUJbzG0i+fJR+TnFX9GFgfHBB0jBzGVoQa12MA9UA6vpfjRGIFwfwNjXKc6vVIuYfwTL8w==
   dependencies:
     "@dao-xyz/libp2p-test-utils" "^0.2.1"
-    "@dao-xyz/peerbit-libp2p" "^0.2.4"
+    "@dao-xyz/peerbit-libp2p" "^0.2.5"
     datastore-level "^9.0.4"
     memory-level "^1.0.0"
 
@@ -1539,18 +1539,18 @@
   resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit-time/-/peerbit-time-0.0.22.tgz#35ced7bf1ba8689d4fe94b921332a5e970b6eaf3"
   integrity sha512-pWb7OaAH1SVuQkKRQ69S6PKn0PfWM3gmoMrIVuKkQ96g8JPLHK4pjICofZyH1WV1Xw/4+fxR5KXy4xT7qwj8OQ==
 
-"@dao-xyz/peerbit@*", "@dao-xyz/peerbit@^0.5.4":
-  version "0.5.4"
-  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit/-/peerbit-0.5.4.tgz#0fd00771e3de2e64aed3219900a370919bc4d48a"
-  integrity sha512-Wz1SS1iPIJgvQLgu38ExCOVKVinUOXaE0TxKHnFSKSA+Fx7mdWlxUc+2DOwhYdouFcQ1wy9mnlK1fFv+oQXuaQ==
+"@dao-xyz/peerbit@*", "@dao-xyz/peerbit@^0.5.5":
+  version "0.5.5"
+  resolved "https://registry.yarnpkg.com/@dao-xyz/peerbit/-/peerbit-0.5.5.tgz#52522b9b7329fff16746439a697a5de9dd7806fc"
+  integrity sha512-zgPxVNPAbVcnEhaR8SzMlB/vuDsC90uTqSELS6zz5utl55iykQmlZAhtA7lJq2pzO18u7qKuVF0HjFD8dKSz9A==
   dependencies:
     "@dao-xyz/borsh" "^5.1.5"
     "@dao-xyz/lazy-level" "^0.0.5"
-    "@dao-xyz/peerbit-crypto" "^0.1.12"
-    "@dao-xyz/peerbit-keystore" "^0.2.4"
+    "@dao-xyz/peerbit-crypto" "^0.1.13"
+    "@dao-xyz/peerbit-keystore" "^0.2.5"
     "@dao-xyz/peerbit-logger" "^0.0.6"
-    "@dao-xyz/peerbit-program" "^0.5.4"
-    "@dao-xyz/peerbit-store" "^0.5.4"
+    "@dao-xyz/peerbit-program" "^0.5.5"
+    "@dao-xyz/peerbit-store" "^0.5.5"
     "@dao-xyz/uint8arrays" "^0.0.3"
     level "^8.0.0"
     memory-level "^1.0.0"
