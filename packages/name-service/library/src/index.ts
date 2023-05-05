@@ -3,10 +3,9 @@ import { AbstractProgram, Program } from "@dao-xyz/peerbit-program";
 import { Store } from "@dao-xyz/peerbit-store";
 import {
     DocumentIndex,
-    DocumentQueryRequest,
+    DocumentQuery,
     Documents,
-    PutOperation,
-    SignedByQuery,
+    StringMatch,
 } from "@dao-xyz/peerbit-document";
 import { PublicSignKey, randomBytes } from "@dao-xyz/peerbit-crypto";
 
@@ -41,6 +40,17 @@ export class Names extends Program {
         await this.names.setup({
             type: Name,
             canAppend: () => true,
+            index: {
+                fields: (doc, entry) => {
+                    return {
+                        id: doc.id,
+                        name: doc.name,
+                        keys: entry.signatures.map((x) =>
+                            x.publicKey.hashcode()
+                        ),
+                    };
+                },
+            },
         });
     }
 
@@ -48,8 +58,10 @@ export class Names extends Program {
         let latestNameTime = 0n;
         let latestName: string | undefined = undefined;
         await this.names.index.query(
-            new DocumentQueryRequest({
-                queries: [new SignedByQuery({ publicKeys: [key] })],
+            new DocumentQuery({
+                queries: [
+                    new StringMatch({ key: "keys", value: key.hashcode() }),
+                ],
             }),
             {
                 onResponse: (response) => {

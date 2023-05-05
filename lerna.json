@@ -3,6 +3,7 @@
         "packages/react-utils",
         "packages/browser-chat/*",
         "packages/live-streaming/*",
+        "packages/live-streaming-canvas/*",
         "packages/name-service/*",
         "packages/canvas/*",
         "packages/one-chat-room/*",

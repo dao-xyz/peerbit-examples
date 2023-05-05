@@ -9,7 +9,7 @@ export const resolveSwarmAddress = async (url: string, timeout = 5000) => {
     if (url.startsWith("/")) {
         return url; // Possible already an swarm address
     }
-    if (url.startsWith("http") == false) {
+    if (url.startsWith("http") === false) {
         url = "https://" + url;
     }
     if (url.endsWith("/")) {
@@ -21,6 +21,12 @@ export const resolveSwarmAddress = async (url: string, timeout = 5000) => {
     }
     if (domain.startsWith("https://")) {
         domain = domain.substring("https://".length);
+    }
+    if (domain.startsWith("localhost")) {
+        return (
+            "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
+            (await axios.get(url + ":8082/peer/id", { timeout })).data
+        );
     }
     return (
         "/dns4/" +

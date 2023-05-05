@@ -1,4 +1,4 @@
-import { field, variant, fixedArray } from "@dao-xyz/borsh";
+import { field, variant, fixedArray, vec } from "@dao-xyz/borsh";
 import {
     DeleteOperation,
     DocumentIndex,
@@ -6,74 +6,92 @@ import {
     PutOperation,
 } from "@dao-xyz/peerbit-document";
 import { PublicSignKey, randomBytes } from "@dao-xyz/peerbit-crypto";
-import { Program } from "@dao-xyz/peerbit-program";
 import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
 import { BORSH_ENCODING } from "@dao-xyz/peerbit-log";
+import { Program } from "@dao-xyz/peerbit-program";
 
 @variant(0)
-export class Position {
-    @field({ type: "u32" }) // TODO i64
+export class Layout {
+    @field({ type: "u32" })
     x: number;
 
-    @field({ type: "u32" }) // TODO i64
+    @field({ type: "u32" })
     y: number;
 
-    @field({ type: "u32" }) // TODO i64
+    @field({ type: "u32" })
     z: number;
 
-    constructor(properties: { x: number; y: number; z: number }) {
+    @field({ type: "u32" })
+    w: number;
+
+    @field({ type: "u32" })
+    h: number;
+
+    @field({ type: "string" })
+    breakpoint: string;
+
+    constructor(properties: {
+        breakpoint: string;
+        x: number;
+        y: number;
+        z: number;
+        w: number;
+        h: number;
+    }) {
+        this.breakpoint = properties.breakpoint;
         this.x = properties.x;
         this.y = properties.y;
         this.z = properties.z;
+        this.w = properties.w;
+        this.h = properties.h;
+    }
+}
+
+export abstract class RectContent {}
+
+@variant(0)
+export class IFrameContent extends RectContent {
+    @field({ type: "string" })
+    src: string; // https://a.cool.thing.com/abc123
+
+    @field({ type: "bool" })
+    resizer: boolean; // if IFrameResizer is installed on the target site
+
+    constructor(properties: { src: string; resizer: boolean }) {
+        super();
+        this.src = properties.src;
+        this.resizer = properties.resizer;
     }
 }
 
 @variant(0)
-export class Size {
-    @field({ type: "u32" })
-    width: number;
-
-    @field({ type: "u32" })
-    height: number;
-
-    constructor(properties: { width: number; height: number }) {
-        this.width = properties.width;
-        this.height = properties.height;
-    }
-}
-
-@variant(0)
-export class Rect {
+export class Rect<T extends RectContent = any> {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
-    @field({ type: Position })
-    position: Position;
+    @field({ type: vec(Layout) })
+    layout: Layout[];
 
-    @field({ type: Size })
-    size: Size;
-
-    @field({ type: "string" })
-    src: string; // https://a.cool.thing.com/abc123
+    @field({ type: RectContent })
+    content: T;
 
     // Don't serialize/store
     keypair: Ed25519Keypair;
 
     constructor(properties: {
-        position: Position;
+        id?: Uint8Array;
+        layout: Layout[];
         publicKey: PublicSignKey;
-        size: Size;
-        src: string;
+        content: T;
         keypair: Ed25519Keypair;
     }) {
-        this.position = properties.position;
-        this.size = properties.size;
+        this.layout = properties.layout;
         this.publicKey = properties.publicKey;
-        this.src = properties.src;
-        this.id = randomBytes(32);
+        this.content = properties.content;
+        this.id = properties.id || randomBytes(32);
         this.keypair = properties.keypair;
     }
 }
@@ -121,10 +139,13 @@ export class Canvas extends Program {
             canAppend: async (entry) => {
                 /**
                  * Only allow updates if we created it
+                 *  or from myself (this allows us to modifyo someone elsecanvas locally)
                  */
                 return (
-                    entry.signatures.find((x) =>
-                        x.publicKey.equals(this.key)
+                    entry.signatures.find(
+                        (x) =>
+                            x.publicKey.equals(this.key) ||
+                            x.publicKey.equals(this.identity.publicKey)
                     ) != null
                 );
             },

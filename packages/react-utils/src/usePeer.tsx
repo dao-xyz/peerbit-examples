@@ -1,27 +1,64 @@
 import React, { useContext, useEffect, useRef } from "react";
-import { multiaddr } from "@multiformats/multiaddr";
+import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
 import { Identity, Peerbit } from "@dao-xyz/peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { createLibp2p } from "libp2p";
 import { supportedKeys } from "@libp2p/crypto/keys";
 import { mplex } from "@libp2p/mplex";
-import { getFreeKeypair, getKeypair, getTabId, inIframe } from "./utils.js";
-import { Libp2p } from "libp2p";
+import {
+    getFreeKeypair,
+    getTabId,
+    inIframe,
+    resolveSwarmAddress,
+} from "./utils.js";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { peerIdFromKeys } from "@libp2p/peer-id";
 import { createLibp2pExtended } from "@dao-xyz/peerbit-libp2p";
-import { Multiaddr } from "@multiformats/multiaddr";
 import { v4 as uuid } from "uuid";
-import { PublicSignKey, Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
+import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
 import { FastMutex } from "./lockstorage.js";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import sodium from "libsodium-wrappers";
+import { circuitRelayTransport } from "libp2p/circuit-relay";
+import { webRTC } from "@dao-xyz/libp2p-webrtc";
+import * as filters from "@libp2p/websockets/filters";
+import axios from "axios";
 
 interface IPeerContext {
     peer: Peerbit | undefined;
     loading: boolean;
 }
+
+type NetworkType = "local" | "remote";
+const resolveBootstrapAddresses = async (network: NetworkType) => {
+    // Bootstrap addresses for network
+    try {
+        let bootstrapAddresses: string[] = [];
+        if (network === "local") {
+            bootstrapAddresses = [
+                await resolveSwarmAddress("http://localhost"),
+            ];
+        } else {
+            const swarmAddressees = (
+                await axios.get(
+                    "https://raw.githubusercontent.com/dao-xyz/peerbit-bootstrap/master/bootstrap.env"
+                )
+            ).data
+                .split(/\r?\n/)
+                .filter((x) => x.length > 0);
+            bootstrapAddresses = await Promise.all(
+                swarmAddressees.map((s) => resolveSwarmAddress(s))
+            );
+        }
+        return bootstrapAddresses;
+    } catch (error: any) {
+        console.error(
+            "Failed to resolve relay node. Please come back later or start the demo locally: " +
+                error?.message
+        );
+    }
+};
 
 export const connectTabs = (peer: Peerbit) => {
     // Cross tab sync when we write
@@ -124,7 +161,7 @@ subscribeToKeypairChange((keypair) => {
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
 export const PeerProvider = ({
-    dev,
+    network,
     bootstrap,
     children,
     inMemory,
@@ -132,7 +169,7 @@ export const PeerProvider = ({
     identity,
     waitForKeypairInIFrame,
 }: {
-    dev?: boolean;
+    network: "local" | "remote";
     inMemory?: boolean;
     keypair?: Ed25519Keypair;
     identity?: Identity;
@@ -185,8 +222,9 @@ export const PeerProvider = ({
                     console.log("Generating new keypair for client");
                 } else {
                     console.log(
-                        "Keypair missmatch with latest keypar message",
-                        keypairMessages
+                        "Keypair missmatch with latest keypair message",
+                        keypairMessages.map((x) => x.publicKey.hashcode()),
+                        keypair.publicKey.hashcode()
                     );
                 }
             }
@@ -218,11 +256,6 @@ export const PeerProvider = ({
             );
 
             identity = identity || nodeId;
-            console.log(
-                "CREATE PEER WITH KEYPAIR",
-                keypair?.publicKey.hashcode(),
-                identity?.publicKey.hashcode()
-            );
 
             let node = await createLibp2pExtended({
                 blocks: {
@@ -230,55 +263,37 @@ export const PeerProvider = ({
                         !inMemory && !inIframe() ? "./blocks" : undefined,
                 },
                 libp2p: await createLibp2p({
-                    connectionManager: {
-                        autoDial: true,
-                    },
                     connectionEncryption: [noise()],
                     peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
-
+                    connectionManager: {
+                        maxConnections: 100,
+                        minConnections: 0,
+                    },
                     streamMuxers: [mplex()],
-                    ...(dev
+                    ...(network === "local"
                         ? {
                               transports: [
                                   // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
                                   webSockets({
-                                      filter: (addrs) => {
-                                          return addrs.filter(
-                                              (addr) =>
-                                                  addr
-                                                      .toString()
-                                                      .indexOf("/ws/") != -1 ||
-                                                  addr
-                                                      .toString()
-                                                      .indexOf("/wss/") != -1
-                                          );
-                                      },
-                                  }),
+                                      filter: filters.all,
+                                  }) /* ,
+                                circuitRelayTransport({ discoverRelays: 1 }),
+                                webRTC({ maxMsgSize: 256 * 1024 }), */,
                               ],
                           }
-                        : { transports: [webSockets()] }),
+                        : {
+                              transports: [
+                                  webSockets({ filter: filters.all }) /* ,
+                                circuitRelayTransport({ discoverRelays: 1 }),
+                                webRTC({ maxMsgSize: 256 * 1024 }), */,
+                              ],
+                          }),
                 }).then((r) => {
+                    console.log(r);
                     return r;
                 }),
             });
             await node.start();
-
-            if (bootstrap && bootstrap?.length > 0) {
-                try {
-                    await Promise.all(
-                        bootstrap
-                            .map((a) =>
-                                typeof a === "string" ? multiaddr(a) : a
-                            )
-                            .map((a) => node.dial(a))
-                    );
-                } catch (error) {
-                    console.error(
-                        "Failed to resolve relay node. Please come back later or start the demo locally"
-                    );
-                    throw error;
-                }
-            }
 
             // We create a new directrory to make tab to tab communication go smoothly
             const newPeer = await Peerbit.create({
@@ -287,6 +302,35 @@ export const PeerProvider = ({
                 identity,
                 limitSigning: true,
             });
+
+            // Resolve bootstrap nodes async (we want to return before this is done)
+            (bootstrap
+                ? Promise.resolve(bootstrap)
+                : resolveBootstrapAddresses(network)
+            )
+                .then(async (bootstrap) => {
+                    if (bootstrap && bootstrap?.length > 0) {
+                        try {
+                            await Promise.all(
+                                bootstrap
+                                    .map((a) =>
+                                        typeof a === "string" ? multiaddr(a) : a
+                                    )
+                                    .map((a) => newPeer.dial(a))
+                            );
+                        } catch (error) {
+                            console.error(
+                                "Failed to resolve relay node. Please come back later or start the demo locally"
+                            );
+                            throw error;
+                        }
+                    }
+                })
+                .catch((err: any) => {
+                    console.error(
+                        "Failed to resolve relay addresses. " + err?.message
+                    );
+                });
 
             // Make sure data flow as expected between tabs and windows locally (offline states)
             connectTabs(newPeer);

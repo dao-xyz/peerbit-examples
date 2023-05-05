@@ -22,6 +22,7 @@
         "react": "*"
     },
     "dependencies": {
+        "@dao-xyz/libp2p-webrtc": "^1.2.0",
         "@dao-xyz/peerbit": "*",
         "@types/react": "^18.0.25",
         "@types/react-dom": "^18.0.8",
@@ -33,8 +34,7 @@
         "@mui/icons-material": "^5.10.16",
         "@emotion/react": "^11.10.5",
         "@emotion/styled": "^11.10.5",
-        "path-browserify": "^1.0.1",
-        "axios": "^1.3.2"
+        "path-browserify": "^1.0.1"
     },
     "devDependencies": {
         "@babel/eslint-parser": "^7.19.1",

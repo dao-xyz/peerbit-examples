@@ -1,8 +1,8 @@
-import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Canvas, TitleAndDescription } from "./dbs/canvas";
+import { Canvas, TitleAndDescription } from "./canvas/db";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { userSpaces } from "./useSpaces";
 import { getCanvasPath } from "./routes";
@@ -17,7 +17,7 @@ export const NewSpace = () => {
 
     const create = async () => {
         let canvas = new Canvas({
-            rootTrust: peer.idKey.publicKey,
+            rootTrust: peer.idIdentity.publicKey,
             info: new TitleAndDescription(name, description),
         });
         canvas = await peer.open(canvas);

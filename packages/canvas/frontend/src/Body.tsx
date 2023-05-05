@@ -2,7 +2,7 @@ import { Box, Grid } from "@mui/material";
 import { useRef } from "react";
 import { HashRouter } from "react-router-dom";
 import { Header, HEIGHT } from "./Header";
-import { CanvasToolbar } from "./CanvasToolbar";
+import { CanvasToolbar } from "./canvas/CanvasToolbar";
 import { BaseRoutes } from "./routes";
 
 export const Body = () => {

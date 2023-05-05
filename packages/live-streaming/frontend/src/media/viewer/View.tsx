@@ -7,7 +7,7 @@ import { waitFor } from "@dao-xyz/peerbit-time";
 import { Box, Button, Grid } from "@mui/material";
 import { audioMimeType } from "../format.js";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
-import { DocumentQueryRequest, Documents } from "@dao-xyz/peerbit-document";
+import { DocumentQuery, Documents } from "@dao-xyz/peerbit-document";
 import { createFirstCluster } from "../webm.js";
 import { delay } from "@dao-xyz/peerbit-time";
 import { Controls } from "../controller/Control.js";
@@ -238,7 +238,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 };
                 setInterval(async () => {
                     const results = await videoStream.streams.index.query(
-                        new DocumentQueryRequest({ queries: [] })
+                        new DocumentQuery({ queries: [] })
                     );
                     const uniqueResults = results
                         .map((x) => x.results)

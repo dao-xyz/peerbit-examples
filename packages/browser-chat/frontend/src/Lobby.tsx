@@ -1,42 +1,78 @@
-import { useEffect, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { Box, Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { NewRoomButtom } from "./NewRoom";
-import { Room } from "@dao-xyz/peerbit-example-browser-chat";
-import { useChat } from "./ChatContext";
 import { useNavigate } from "react-router-dom";
 import { getRoomPath } from "./routes";
 import { usePeer } from "@dao-xyz/peerbit-react";
+import { Lobby as LobbyDB, Room } from "@dao-xyz/peerbit-example-browser-chat";
+import { DocumentIndex, Documents } from "@dao-xyz/peerbit-document";
 
 export const Lobby = () => {
-    const { roomsUpdated, lobby: rooms, loading } = useChat();
     const { loading: loadingPeer } = usePeer();
-    const [list, setList] = useState<Room[]>();
     const navigate = useNavigate();
-
     const { peer } = usePeer();
+    const [lobby, setLobby] = useState<LobbyDB>();
+    const loadingLobby = useRef<Promise<any>>();
+    const rooms = useRef<Room[]>([]);
+    const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
     const [peerCount, setPeerCount] = useState(0);
+
     useEffect(() => {
-        if (!peer?.id || !rooms?.address.toString()) {
+        if (!peer?.id && !loadingLobby.current) {
             return;
         }
-        peer.libp2p.directsub.addEventListener("subscribe", () => {
-            setPeerCount(
-                peer.libp2p.directsub.topics.get(rooms.address.toString()).size
-            );
-        });
-    }, [peer?.id.toString(), rooms?.address.toString()]);
+
+        loadingLobby.current = peer
+            .open(
+                new LobbyDB({
+                    id: "LOBBY",
+                    rooms: new Documents<Room>({
+                        index: new DocumentIndex({ indexBy: "name" }),
+                    }),
+                }),
+                { sync: () => true }
+            )
+            .then(async (lobby) => {
+                setLobby(lobby);
+
+                lobby.rooms.events.addEventListener("change", async (e) => {
+                    e.detail.added?.forEach((p) => {
+                        const ix = rooms.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix === -1) {
+                            rooms.current.push(p);
+                        } else {
+                            rooms.current[ix] = p;
+                        }
+                    });
+                    e.detail.removed?.forEach((p) => {
+                        const ix = rooms.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix !== -1) {
+                            rooms.current.splice(ix, 1);
+                        }
+                    });
+                    console.log(rooms.current);
+                    forceUpdate();
+                });
+
+                peer.libp2p.directsub.addEventListener("subscribe", () => {
+                    setPeerCount(
+                        peer.libp2p.directsub.topics.get(
+                            lobby.address.toString()
+                        ).size + 1
+                    );
+                });
+                await lobby.load();
+            });
+    }, [peer?.id.toString()]);
 
     const goToRoom = (room: Room) => {
         navigate(getRoomPath(room));
     };
-
-    useEffect(() => {
-        if (!rooms?.initialized) {
-            return;
-        }
-        setList([...rooms.rooms.index.index.values()].map((x) => x.value)); // show all rooms
-    }, [roomsUpdated]);
 
     return (
         <Box>
@@ -56,7 +92,7 @@ export const Lobby = () => {
                         <Typography variant="h4">Rooms</Typography>
                     </Grid>
                     <Grid item>
-                        <NewRoomButtom />
+                        <NewRoomButtom lobby={lobby} />
                     </Grid>
                     <Grid
                         item
@@ -70,18 +106,15 @@ export const Lobby = () => {
                     </Grid>
                 </Grid>
 
-                {loading || loadingPeer ? (
+                {loadingPeer ? (
                     <Grid item>
-                        <>
-                            xx peer {String(loading)} {String(loadingPeer)}{" "}
-                        </>{" "}
-                        <CircularProgress size={20} />
+                        <></> <CircularProgress size={20} />
                     </Grid>
                 ) : (
                     <Grid item>
-                        {list?.length > 0 ? (
+                        {rooms.current?.length > 0 ? (
                             <Box>
-                                {list.map((room, ix) => (
+                                {rooms.current.map((room, ix) => (
                                     <Typography key={ix} variant="h5">
                                         <Button
                                             variant="text"

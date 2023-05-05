@@ -7,7 +7,7 @@ import {
     forwardRef,
 } from "react";
 import EditIcon from "@mui/icons-material/Edit";
-import { useNames } from "./useNames";
+import { useNames } from "./names/useNames";
 import { Save } from "@mui/icons-material";
 
 export const HEIGHT = "40px";

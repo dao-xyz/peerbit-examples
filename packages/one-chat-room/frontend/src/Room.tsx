@@ -1,24 +1,22 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
     Box,
     CircularProgress,
     Grid,
     IconButton,
-    OutlinedInput,
     TextField,
     Tooltip,
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import { DocumentQueryRequest, IndexedValue } from "@dao-xyz/peerbit-document";
+import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import { Post, Room as RoomDB } from "./database.js";
 import { usePeer } from "@dao-xyz/peerbit-react";
+import { Names } from "@dao-xyz/peer-names";
 import { Send } from "@mui/icons-material";
 import { getKeyFromPath } from "./routes";
-import { Ed25519PublicKey, EncryptedThing } from "@dao-xyz/peerbit-crypto";
-import LockIcon from "@mui/icons-material/Lock";
+import { Ed25519PublicKey } from "@dao-xyz/peerbit-crypto";
 import PeopleIcon from "@mui/icons-material/People";
-import { Names } from "@dao-xyz/peer-names";
 
 /***
  *  TODO
@@ -35,72 +33,47 @@ const shortName = (name: string) => {
     );
 };
 let namesCache = new Map();
+
 export const Room = () => {
     const { peer, loading: loadingPeer } = usePeer();
     const names = useRef<Names>();
-    const [room, setRoom] = useState<RoomDB>();
+    const room = useRef<RoomDB>();
     const [peerCounter, setPeerCounter] = useState<number>(1);
     const [loading, setLoading] = useState(false);
-    const [identitiesInChatMap, setIdentitiesInChatMap] =
-        useState<Map<string, Ed25519PublicKey>>();
+    const identitiesInChatMap = useRef<Map<string, Ed25519PublicKey>>();
     const [text, setText] = useState("");
     const [receivers, setRecievers] = useState<string[]>([]);
-    const [lastUpdated, setLastUpdate] = useState(0);
-    const [posts, setPosts] = useState<IndexedValue<Post>[]>();
+    const postsRef = useRef<Post[]>([]);
+    const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const params = useParams();
     const messagesEndRef = useRef(null);
-    const inputArea = useRef<HTMLDivElement>(null);
-    const header = useRef<HTMLDivElement>(null);
+
+    const [headerHeight, setHeaderHeight] = useState(0);
+    const [inputHeight, setInputHeight] = useState(0);
+
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     };
-    const refresh = useCallback(() => {
-        setLastUpdate(+new Date());
-    }, [lastUpdated]);
 
     useEffect(() => {
-        if (!room?.id || !room?.initialized) {
+        if (!room?.current?.id || !room?.current?.initialized) {
             return;
         }
-        room.load();
-
-        room.messages.index.query(new DocumentQueryRequest({ queries: [] }), {
-            remote: { sync: true },
-            onResponse: () => {
-                setLastUpdate(+new Date());
-            },
-        });
-    }, [room?.id, room?.initialized]);
-
-    useEffect(() => {
-        if (!room?.initialized) {
-            return;
-        }
-
-        const newPosts = [...room.messages.index.index.values()].sort((a, b) =>
-            Number(
-                a.entry.metadata.clock.timestamp.wallTime -
-                    b.entry.metadata.clock.timestamp.wallTime
-            )
-        );
-        const identityMap = new Map<string, Ed25519PublicKey>();
-        newPosts.forEach((post) => {
-            const id = post.entry.signatures[0].publicKey;
-            if (peer.identity.publicKey.equals(id)) {
-                return; // ignore me
-            }
-            identityMap.set(id.toString(), id as Ed25519PublicKey); // bad assumption only Ed25519PublicKey in chat
-        });
-        setIdentitiesInChatMap(identityMap);
-        setPosts(newPosts); // TODO make more performant and add sort
-    }, [room?.id, lastUpdated]);
+        room?.current.messages.index
+            .query(new DocumentQuery({ queries: [] }), {
+                remote: { sync: true },
+            })
+            .then((x) => {
+                console.log("x", x, room?.current.messages.store["loaded"]);
+            });
+    }, [room?.current?.id, room?.current?.initialized, peerCounter]);
 
     useEffect(() => {
-        if (room || loading || !params.key || !peer) {
+        if (room.current || loading || !params.key || !peer) {
             //('return', rooms, loadedRoomsLocally)
             return;
         }
-        setRoom(undefined);
+        room.current = undefined;
         setLoading(true);
         const key = getKeyFromPath(params.key);
         peer.open(new Names(), { sync: () => true }).then(async (namesDB) => {
@@ -108,26 +81,76 @@ export const Room = () => {
             names.current = namesDB;
 
             await peer
-                .open(new RoomDB({ creator: key }))
-                .then((r) => {
+                .open(new RoomDB({ creator: key }), { sync: () => true })
+                .then(async (r) => {
+                    room.current = r;
+
                     const updateNames = async (p: Post) => {
-                        const pk = r.messages.index.index.get(p.id).entry
-                            .signatures[0].publicKey;
+                        const pk = (
+                            await r.messages.store.oplog.get(
+                                r.messages.index.index.get(p.id).context.head
+                            )
+                        ).signatures[0].publicKey;
                         namesDB.getName(pk).then((name) => {
                             namesCache.set(pk.hashcode(), name);
                         });
                     };
+
+                    let updateTimeout:
+                        | ReturnType<typeof setTimeout>
+                        | undefined;
                     r.messages.events.addEventListener("change", (e) => {
                         e.detail.added?.forEach((p) => {
+                            const ix = postsRef.current.findIndex(
+                                (x) => x.id === p.id
+                            );
+                            if (ix === -1) {
+                                postsRef.current.push(p);
+                            } else {
+                                postsRef.current[ix] = p;
+                            }
                             updateNames(p);
                         });
                         e.detail.removed?.forEach((p) => {
-                            updateNames(p);
+                            const ix = postsRef.current.findIndex(
+                                (x) => x.id === p.id
+                            );
+                            if (ix !== -1) {
+                                postsRef.current.splice(ix, 1);
+                            }
                         });
-                        refresh();
-                    });
 
-                    setRoom(r);
+                        let wallTimes = new Map<string, bigint>();
+
+                        clearTimeout(updateTimeout);
+                        updateTimeout = setTimeout(async () => {
+                            const entries = await Promise.all(
+                                postsRef.current.map(async (x) => {
+                                    return {
+                                        post: x,
+                                        entry: await room.current.messages.store.oplog.get(
+                                            room.current.messages.index.index.get(
+                                                x.id
+                                            ).context.head
+                                        ),
+                                    };
+                                })
+                            );
+                            entries.forEach(({ post, entry }) => {
+                                wallTimes.set(
+                                    post.id,
+                                    entry.metadata.clock.timestamp.wallTime
+                                );
+                            });
+
+                            postsRef.current.sort((a, b) =>
+                                Number(
+                                    wallTimes.get(a.id) - wallTimes.get(b.id)
+                                )
+                            );
+                            forceUpdate();
+                        }, 5);
+                    });
 
                     peer.libp2p.directsub.addEventListener("subscribe", () => {
                         setPeerCounter(
@@ -136,6 +159,7 @@ export const Room = () => {
                             ).size + 1
                         );
                     });
+
                     peer.libp2p.directsub.addEventListener(
                         "unsubscribe",
                         () => {
@@ -146,6 +170,8 @@ export const Room = () => {
                             );
                         }
                     );
+
+                    await r.load();
                 })
                 .catch((e) => {
                     console.error("Failed top open room: " + e.message);
@@ -157,20 +183,23 @@ export const Room = () => {
                     setLoading(false);
                 });
         });
-    }, [params.name, lastUpdated, peer?.id.toString()]);
+    }, [params.name, peer?.id.toString()]);
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
-    }, [posts]);
+    }, [postsRef.current?.length]);
 
     const createPost = useCallback(async () => {
         if (!room) {
             return;
         }
-        room.messages
-            .put(new Post({ message: text }), {
+        console.log(peer.libp2p.directsub.peers);
+        room.current.messages
+            .put(new Post({ message: text, from: peer.identity.publicKey }), {
                 reciever: {
-                    payload: receivers.map((r) => identitiesInChatMap.get(r)),
+                    payload: receivers.map((r) =>
+                        identitiesInChatMap.current.get(r)
+                    ),
                     metadata: [],
                     next: [],
                     signatures: [],
@@ -178,36 +207,22 @@ export const Room = () => {
             })
             .then(() => {
                 setText("");
-                setLastUpdate(+(+new Date()));
             })
             .catch((e) => {
                 console.error("Failed to create message: " + e.message);
                 alert("Failed to create message: " + e.message);
                 throw e;
             });
-    }, [text, room, peer, receivers]);
+    }, [text, room.current?.id, peer, receivers]);
 
-    /* const handleRecieverChange = (
-        event: SelectChangeEvent<typeof receivers>
-    ) => {
-        const {
-            target: { value },
-        } = event;
-        setRecievers(
-            // On autofill we get a stringified value.
-            typeof value === "string" ? value.split(",") : value
-        );
-    }; */
-
-    const getDisplayName = (p: IndexedValue<Post>) => {
-        const name = namesCache.get(p.entry.signatures[0].publicKey.hashcode());
+    const getDisplayName = (p: Post) => {
+        const name = namesCache.get(p.from.hashcode());
         if (name) {
             return name;
         }
-        return shortName(p.entry.signatures[0].publicKey.toString());
+        return shortName(p.from.toString());
     };
-    const hasDisplayName = (p: IndexedValue<Post>) =>
-        namesCache.has(p.entry.signatures[0].publicKey.hashcode());
+    const hasDisplayName = (p: Post) => namesCache.has(p.from.hashcode());
 
     return loading || loadingPeer ? (
         <Box
@@ -222,7 +237,15 @@ export const Room = () => {
         </Box>
     ) : (
         <Grid container direction="column" sx={{ height: "100vh" }}>
-            <Grid item container ref={header} pl={1} pt={1} pb={1} spacing={1}>
+            <Grid
+                item
+                container
+                ref={(node) => node && setHeaderHeight(node.offsetHeight)}
+                pl={1}
+                pt={1}
+                pb={1}
+                spacing={1}
+            >
                 <Grid item>
                     <PeopleIcon />
                 </Grid>
@@ -230,16 +253,16 @@ export const Room = () => {
             </Grid>
             <Grid
                 item
-                height={`calc(100vh - ${
-                    (header.current?.offsetHeight || 0) + "px"
-                }  - ${(inputArea.current?.offsetHeight || 0) + "px"} - 8px)`}
+                height={`calc(100vh - ${(headerHeight || 0) + "px"}  - ${
+                    (inputHeight || 0) + "px"
+                } - 8px)`}
                 sx={{ overflowY: "auto" }}
                 padding={1}
                 mb="8px"
             >
-                {posts?.length > 0 ? (
+                {postsRef.current?.length > 0 ? (
                     <Grid container direction="column">
-                        {posts.map((p, ix) => (
+                        {postsRef.current.map((p, ix) => (
                             <Grid
                                 container
                                 item
@@ -256,9 +279,7 @@ export const Room = () => {
                                     mb={-0.5}
                                 >
                                     <Grid item>
-                                        <Tooltip
-                                            title={p.entry.signatures[0].publicKey.toString()}
-                                        >
+                                        <Tooltip title={p.from.toString()}>
                                             <Typography
                                                 fontStyle={
                                                     !hasDisplayName(p) &&
@@ -266,7 +287,7 @@ export const Room = () => {
                                                 }
                                                 variant="caption"
                                                 color={
-                                                    p.entry.signatures[0].publicKey.equals(
+                                                    p.from.equals(
                                                         peer.identity.publicKey
                                                     )
                                                         ? "primary"
@@ -277,49 +298,9 @@ export const Room = () => {
                                             </Typography>
                                         </Tooltip>
                                     </Grid>
-                                    {p.entry._payload instanceof
-                                        EncryptedThing && (
-                                        <Grid
-                                            item
-                                            display="flex"
-                                            alignItems="center"
-                                        >
-                                            {" "}
-                                            <Tooltip
-                                                title={
-                                                    <span
-                                                        style={{
-                                                            whiteSpace:
-                                                                "pre-line",
-                                                        }}
-                                                    >
-                                                        {(
-                                                            p.entry
-                                                                ._payload as EncryptedThing<any>
-                                                        )._envelope._ks
-                                                            .map((k) =>
-                                                                shortName(
-                                                                    k._recieverPublicKey.toString()
-                                                                )
-                                                            )
-                                                            .join("\n")}
-                                                    </span>
-                                                }
-                                            >
-                                                <IconButton>
-                                                    <LockIcon
-                                                        color="success"
-                                                        sx={{
-                                                            fontSize: "14px",
-                                                        }}
-                                                    />{" "}
-                                                </IconButton>
-                                            </Tooltip>{" "}
-                                        </Grid>
-                                    )}
                                 </Grid>
                                 <Grid item>
-                                    <Typography> {p.value.message}</Typography>
+                                    <Typography> {p.message}</Typography>
                                 </Grid>
                             </Grid>
                         ))}
@@ -329,9 +310,8 @@ export const Room = () => {
                 )}
                 <div ref={messagesEndRef} />
             </Grid>
-
             <Grid
-                ref={inputArea}
+                ref={(node) => node && setInputHeight(node.offsetHeight)}
                 container
                 item
                 direction="row"
@@ -370,78 +350,6 @@ export const Room = () => {
                     </IconButton>
                 </Grid>
             </Grid>
-            {/* <Grid
-            item
-            container
-            justifyContent="space-between"
-            alignItems="center"
-            spacing={1}
-            direction="row"
-            mt={2}
-            mb={2}
-        >
-            <Grid item flex={1} pr={1}>
-                <FormControl sx={{ width: "100%" }}>
-                    <InputLabel id="demo-multiple-chip-label">
-                        Recievers
-                    </InputLabel>
-                    <Select
-                        labelId="recieversl"
-                        id="recievers"
-                        multiple
-                        value={receivers}
-                        onChange={handleRecieverChange}
-                        input={
-                            <OutlinedInput
-                                id="select-multiple-chip"
-                                label="Recievers"
-                            />
-                        }
-                        renderValue={(selected) => (
-                            <Box
-                                sx={{
-                                    display: "flex",
-                                    flexWrap: "wrap",
-                                    gap: 0.5,
-                                }}
-                            >
-                                {selected.map((value) => (
-                                    <Chip
-                                        key={value}
-                                        label={shortName(value)}
-                                    />
-                                ))}
-                            </Box>
-                        )}
-                        MenuProps={MenuProps}
-                    >
-                        {identitiesInChatMap &&
-                            [...identitiesInChatMap.keys()]?.map(
-                                (id) => (
-                                    <MenuItem
-                                        key={id}
-                                        value={id}
-                                        style={getStyles(
-                                            id,
-                                            receivers,
-                                            theme
-                                        )}
-                                    >
-                                        {shortName(id)}
-                                    </MenuItem>
-                                )
-                            )}
-                    </Select>
-                </FormControl>
-            </Grid>
-            <Grid item pr={1}>
-                <KeyIcon
-                    color={
-                        receivers?.length > 0 ? "success" : undefined
-                    }
-                />
-            </Grid>
-        </Grid> */}
         </Grid>
     );
 };

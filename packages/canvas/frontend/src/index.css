@@ -11,3 +11,13 @@ code {
     font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
         monospace;
 }
+
+/* prevent dragging rects with iframe to loose mouse events to the iframe */
+.react-draggable-transparent-selection iframe {
+    pointer-events: none !important;
+}
+
+/* prevent resizing rects with iframe to loose mouse events to the iframe */
+.resizing.react-resizable iframe {
+    pointer-events: none !important;
+}

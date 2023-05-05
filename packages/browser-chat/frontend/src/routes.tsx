@@ -4,7 +4,10 @@ import { Lobby } from "./Lobby";
 import { Room as RoomView } from "./Room";
 export const ROOM = "r/:name";
 export const getRoomPath = (room: string | Room) =>
-    "r/" + (room instanceof Room ? room.name : room);
+    "r/" + encodeURIComponent(room instanceof Room ? room.name : room);
+
+export const getRoomNameFromPath = (roomName: string) =>
+    decodeURIComponent(roomName);
 
 export function BaseRoutes() {
     return (

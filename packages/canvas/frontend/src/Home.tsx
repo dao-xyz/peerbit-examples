@@ -1,11 +1,11 @@
-import { DocumentQueryRequest } from "@dao-xyz/peerbit-document";
+import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Canvas, Spaces } from "./dbs/canvas";
+import { Canvas, Spaces } from "./canvas/db";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { userSpaces } from "./useSpaces";
-import { CanvasPreview } from "./CanvasPreview";
+import { CanvasPreview } from "./canvas/CanvasPreview";
 import { Add } from "@mui/icons-material";
 import { NEW_SPACE } from "./routes";
 
@@ -16,14 +16,15 @@ export const Home = () => {
     const [name, setName] = useState("");
     const [description, setDescription] = useState("");
     const navigate = useNavigate();
+
     useEffect(() => {
         if (!spaces || !peer) {
             return;
         }
         const refresh = () => {
             spaces.canvases.index
-                .query(new DocumentQueryRequest({ queries: [] }), {
-                    remote: { amount: 2 },
+                .query(new DocumentQuery({ queries: [] }), {
+                    remote: {},
                 })
                 .then((results) => {
                     console.log(results);
@@ -51,7 +52,12 @@ export const Home = () => {
                             .map((canvas, ix) => {
                                 return (
                                     <Grid item key={ix}>
-                                        <CanvasPreview canvas={canvas} />
+                                        <CanvasPreview
+                                            canvas={canvas}
+                                            onDelete={() =>
+                                                spaces.canvases.del(canvas.id)
+                                            }
+                                        />
                                     </Grid>
                                 );
                             })}

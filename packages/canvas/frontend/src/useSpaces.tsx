@@ -3,7 +3,7 @@ import { usePeer } from "@dao-xyz/peerbit-react";
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { SignatureWithKey, PreHash } from "@dao-xyz/peerbit-crypto";
 import { getAllKeypairs } from "./keys";
-import { Spaces } from "./dbs/canvas";
+import { Spaces } from "./canvas/db";
 
 /* 
 
@@ -36,7 +36,7 @@ const { peer } = usePeer();
                 await result.load();
                 setInterval(async () => {
                     await result.canvases.index.query(
-                        new DocumentQueryRequest({ queries: [] }),
+                        new DocumentQuery({ queries: [] }),
                         { remote: { sync: true, amount: 2 } }
                     );
                 }, 2000);
@@ -54,6 +54,7 @@ export const userSpaces = () => useContext(SpaceContext);
 export const SpaceProvider = ({ children }: { children: JSX.Element }) => {
     const { peer } = usePeer();
     const [spaces, setSpaces] = useState<Spaces>(undefined);
+    const loading = useRef<Promise<void>>();
     const memo = React.useMemo<ISpaceContext>(
         () => ({
             spaces,
@@ -62,13 +63,18 @@ export const SpaceProvider = ({ children }: { children: JSX.Element }) => {
     );
 
     useEffect(() => {
-        if (spaces || !peer) {
+        if (spaces || !peer || loading.current) {
             return;
         }
-        peer.open(new Spaces(), { sync: () => true }).then(async (result) => {
-            await result.load();
-            setSpaces(result);
-        });
+        loading.current = peer
+            .open(new Spaces(), { sync: () => true })
+            .then(async (result) => {
+                await result.load();
+                setSpaces(result);
+            })
+            .then(() => {
+                loading.current = undefined;
+            });
     }, [peer?.identity?.toString()]);
 
     return (

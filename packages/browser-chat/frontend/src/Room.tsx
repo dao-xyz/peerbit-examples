@@ -1,35 +1,20 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import {
     Box,
     CircularProgress,
     Grid,
     IconButton,
-    OutlinedInput,
     TextField,
-    Tooltip,
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import { useChat } from "./ChatContext";
-import {
-    DocumentQueryRequest,
-    StringMatchQuery,
-    IndexedValue,
-} from "@dao-xyz/peerbit-document";
+import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { Send } from "@mui/icons-material";
-import { useNavigate } from "react-router-dom";
-import InputLabel from "@mui/material/InputLabel";
-import MenuItem from "@mui/material/MenuItem";
-import FormControl from "@mui/material/FormControl";
-import Select, { SelectChangeEvent } from "@mui/material/Select";
-import Chip from "@mui/material/Chip";
-import { Theme, useTheme } from "@mui/material/styles";
-import { Ed25519PublicKey, EncryptedThing } from "@dao-xyz/peerbit-crypto";
-import KeyIcon from "@mui/icons-material/Key";
-import LockIcon from "@mui/icons-material/Lock";
-import { ReplicatorType } from "@dao-xyz/peerbit-program";
+import { Theme } from "@mui/material/styles";
+import { Ed25519PublicKey } from "@dao-xyz/peerbit-crypto";
+import { getRoomNameFromPath } from "./routes";
 
 /***
  *  TODO
@@ -37,6 +22,9 @@ import { ReplicatorType } from "@dao-xyz/peerbit-program";
  *  This is not a best practice way of doing a "room" chat experience
  *
  */
+
+/* 
+TODO add encryption feature
 
 const MENU_ITEM_HEIGHT = 48;
 const MENU_ITEM_PADDING_TOP = 8;
@@ -57,6 +45,7 @@ function getStyles(name: string, recievers: readonly string[], theme: Theme) {
                 : theme.typography.fontWeightMedium,
     };
 }
+ */
 
 const shortName = (name: string) => {
     return (
@@ -67,172 +56,139 @@ const shortName = (name: string) => {
 };
 
 export const Room = () => {
-    const theme = useTheme();
     const { peer, loading: loadingPeer } = usePeer();
-    const {
-        lobby: rooms,
-        loading: loadingRooms,
-        loadedLocally: loadedRoomsLocally,
-        roomsUpdated,
-    } = useChat();
-    const [room, setRoom] = useState<RoomDB>();
     const [loading, setLoading] = useState(false);
     const [identitiesInChatMap, setIdentitiesInChatMap] =
         useState<Map<string, Ed25519PublicKey>>();
 
+    const room = useRef<RoomDB>();
+    const [peerCounter, setPeerCounter] = useState<number>(1);
     const [text, setText] = useState("");
     const [receivers, setRecievers] = useState<string[]>([]);
-    const [lastUpdated, setLastUpdate] = useState(0);
-    const [posts, setPosts] = useState<IndexedValue<Post>[]>();
+    const posts = useRef<Post[]>([]);
     const params = useParams();
-    const navigate = useNavigate();
     const messagesEndRef = useRef(null);
-
+    const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const scrollToBottom = () => {
         messagesEndRef.current?.scrollIntoView({ behavior: "instant" });
     };
 
-    const refresh = useCallback(() => {
-        setLastUpdate(+new Date());
-    }, [lastUpdated]);
-
     useEffect(() => {
-        if (!room?.id || !room?.initialized) {
+        if (!room?.current?.id || !room?.current?.initialized) {
             return;
         }
-        room.load();
-
-        room.messages.index.query(new DocumentQueryRequest({ queries: [] }), {
+        room?.current.messages.index.query(new DocumentQuery({ queries: [] }), {
             remote: { sync: true },
-            onResponse: () => {
-                setLastUpdate(+new Date());
-            },
         });
-    }, [room?.id, room?.initialized]);
+
+        /* const identityMap = new Map<string, Ed25519PublicKey>();
+       newPosts.forEach((post) => {
+           const id = post.entry.signatures[0].publicKey;
+           if (peer.identity.publicKey.equals(id)) {
+               return; // ignore me
+           }
+           identityMap.set(id.toString(), id as Ed25519PublicKey); // bad assumption only Ed25519PublicKey in chat
+       });
+       setIdentitiesInChatMap(identityMap); */
+    }, [room?.current?.id, room?.current?.initialized, peerCounter]);
 
     useEffect(() => {
-        if (!room?.initialized) {
+        if (room.current || !params.name || !peer) {
             return;
         }
-
-        const newPosts = [...room.messages.index.index.values()].sort((a, b) =>
-            Number(
-                a.entry.metadata.clock.timestamp.wallTime -
-                    b.entry.metadata.clock.timestamp.wallTime
-            )
-        );
-        const identityMap = new Map<string, Ed25519PublicKey>();
-        newPosts.forEach((post) => {
-            const id = post.entry.signatures[0].publicKey;
-            if (peer.identity.publicKey.equals(id)) {
-                return; // ignore me
-            }
-            identityMap.set(id.toString(), id as Ed25519PublicKey); // bad assumption only Ed25519PublicKey in chat
-        });
-        setIdentitiesInChatMap(identityMap);
-        setPosts(newPosts); // TODO make more performant and add sort
-    }, [room?.id, lastUpdated]);
-
-    useEffect(() => {
-        if (
-            !rooms ||
-            room ||
-            loading ||
-            !params.name ||
-            !loadedRoomsLocally ||
-            loadingRooms
-        ) {
-            //('return', rooms, loadedRoomsLocally)
-            return;
-        }
-        setRoom(undefined);
-        let gotRoom = false;
+        room.current = undefined;
         setLoading(true);
-        rooms.rooms.index
-            .query(
-                new DocumentQueryRequest({
-                    queries: [
-                        new StringMatchQuery({
-                            key: "name",
-                            value: params.name,
-                        }),
-                    ],
-                }),
-                {
-                    remote:
-                        peer.libp2p.directsub.getSubscribers(
-                            rooms.address.toString()
-                        ).size > 0
-                            ? { sync: true, timeout: 5000 }
-                            : false,
-                    local: true,
-                    onResponse: (response) => {
-                        if (response.results.length > 0) {
-                            gotRoom = true;
-                            const roomToOpen = response.results[0].value;
-                            peer.open(roomToOpen, {
-                                // already opened so the updatecallback will not be applied?
-                                role: new ReplicatorType(),
-                            })
-                                .then((r) => {
-                                    roomToOpen.messages.events.addEventListener(
-                                        "change",
-                                        () => {
-                                            refresh();
-                                        }
-                                    );
-                                    setRoom(r);
-                                })
-                                .catch((e) => {
-                                    console.error(
-                                        "Failed top open room: " + e.message
-                                    );
-                                    alert("Failed top open room: " + e.message);
-
-                                    throw e;
-                                })
-                                .finally(() => {
-                                    setLoading(false);
-                                });
+        const name = getRoomNameFromPath(params.name);
+        peer.open(new RoomDB({ name }), { sync: () => true })
+            .then(async (r) => {
+                room.current = r;
+                r.messages.events.addEventListener("change", async (e) => {
+                    e.detail.added?.forEach((p) => {
+                        const ix = posts.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix === -1) {
+                            posts.current.push(p);
+                        } else {
+                            posts.current[ix] = p;
                         }
-                    },
-                }
-            )
+                    });
+                    e.detail.removed?.forEach((p) => {
+                        const ix = posts.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix !== -1) {
+                            posts.current.splice(ix, 1);
+                        }
+                    });
+
+                    // Sort by time
+                    let wallTimes = new Map<string, bigint>();
+                    await Promise.all(
+                        posts.current.map(async (x) => {
+                            return {
+                                post: x,
+                                entry: await room.current.messages.store.oplog.get(
+                                    room.current.messages.index.index.get(x.id)
+                                        .context.head
+                                ),
+                            };
+                        })
+                    ).then((entries) => {
+                        entries.forEach(({ post, entry }) => {
+                            wallTimes.set(
+                                post.id,
+                                entry.metadata.clock.timestamp.wallTime
+                            );
+                        });
+                    });
+                    posts.current.sort((a, b) =>
+                        Number(wallTimes.get(a.id) - wallTimes.get(b.id))
+                    );
+
+                    forceUpdate();
+                });
+
+                peer.libp2p.directsub.addEventListener("subscribe", () => {
+                    setPeerCounter(
+                        peer.libp2p.directsub.getSubscribers(
+                            r.address.toString()
+                        ).size + 1
+                    );
+                });
+
+                peer.libp2p.directsub.addEventListener("unsubscribe", () => {
+                    setPeerCounter(
+                        peer.libp2p.directsub.getSubscribers(
+                            r.address.toString()
+                        ).size + 1
+                    );
+                });
+
+                await r.load();
+            })
+            .catch((e) => {
+                console.error("Failed top open room: " + e.message);
+                alert("Failed top open room: " + e.message);
+
+                throw e;
+            })
             .finally(() => {
                 setLoading(false);
-                if (!gotRoom && !loadingRooms) {
-                    // Create the room or na? (TODO)
-                    alert(
-                        "Could not find room: " +
-                            params.name +
-                            ". Go back and create it!"
-                    );
-                    navigate("/");
-                }
             });
-    }, [
-        !!rooms?.id,
-        params.name,
-        roomsUpdated,
-        lastUpdated,
-        loadingRooms,
-        loadedRoomsLocally,
-        peer?.id.toString(),
-        rooms?.address &&
-            peer?.libp2p.directsub.getSubscribers(rooms.address.toString())
-                .size,
-    ]);
+    }, [params.name, peer?.id.toString()]);
+
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
-    }, [posts]);
+    }, [posts.current?.length]);
 
     const createPost = useCallback(async () => {
         if (!room) {
             return;
         }
-        room.messages
-            .put(new Post({ message: text }), {
+        room.current.messages
+            .put(new Post({ message: text, from: peer.identity.publicKey }), {
                 reciever: {
                     payload: receivers.map((r) => identitiesInChatMap.get(r)),
                     metadata: [],
@@ -242,7 +198,7 @@ export const Room = () => {
             })
             .then(() => {
                 setText("");
-                setLastUpdate(+(+new Date()));
+                forceUpdate();
             })
             .catch((e) => {
                 console.error("Failed to create message: " + e.message);
@@ -251,6 +207,8 @@ export const Room = () => {
             });
     }, [text, room, peer, receivers]);
 
+    /* TODO add encryption feature
+    
     const handleRecieverChange = (
         event: SelectChangeEvent<typeof receivers>
     ) => {
@@ -261,7 +219,7 @@ export const Room = () => {
             // On autofill we get a stringified value.
             typeof value === "string" ? value.split(",") : value
         );
-    };
+    }; */
 
     return (
         <Box>
@@ -272,7 +230,9 @@ export const Room = () => {
                     </Grid>
                 ) : (
                     <Grid item>
-                        <Typography variant="h4">{room?.name}</Typography>
+                        <Typography variant="h4">
+                            {room.current?.name}
+                        </Typography>
                     </Grid>
                 )}
 
@@ -285,9 +245,9 @@ export const Room = () => {
                     mt={2}
                     mb={2}
                 >
-                    {posts?.length > 0 ? (
+                    {posts.current?.length > 0 ? (
                         <Grid container direction="column">
-                            {posts.map((p, ix) => (
+                            {posts.current.map((p, ix) => (
                                 <Grid
                                     container
                                     item
@@ -308,65 +268,60 @@ export const Room = () => {
                                                 fontStyle="italic"
                                                 variant="caption"
                                                 color={
-                                                    p.entry.signatures[0].publicKey.equals(
+                                                    p.from.equals(
                                                         peer.identity.publicKey
                                                     )
                                                         ? "primary"
                                                         : undefined
                                                 }
                                             >
-                                                {shortName(
-                                                    p.entry.signatures[0].publicKey.toString()
-                                                )}
+                                                {shortName(p.from.toString())}
                                             </Typography>
                                         </Grid>
-                                        {p.entry._payload instanceof
+                                        {/* {p.entry._payload instanceof
                                             EncryptedThing && (
-                                            <Grid
-                                                item
-                                                display="flex"
-                                                alignItems="center"
-                                            >
-                                                {" "}
-                                                <Tooltip
-                                                    title={
-                                                        <span
-                                                            style={{
-                                                                whiteSpace:
-                                                                    "pre-line",
-                                                            }}
-                                                        >
-                                                            {(
-                                                                p.entry
-                                                                    ._payload as EncryptedThing<any>
-                                                            )._envelope._ks
-                                                                .map((k) =>
-                                                                    shortName(
-                                                                        k._recieverPublicKey.toString()
-                                                                    )
-                                                                )
-                                                                .join("\n")}
-                                                        </span>
-                                                    }
+                                                <Grid
+                                                    item
+                                                    display="flex"
+                                                    alignItems="center"
                                                 >
-                                                    <IconButton>
-                                                        <LockIcon
-                                                            color="success"
-                                                            sx={{
-                                                                fontSize:
-                                                                    "14px",
-                                                            }}
-                                                        />{" "}
-                                                    </IconButton>
-                                                </Tooltip>{" "}
-                                            </Grid>
-                                        )}
+                                                    {" "}
+                                                    <Tooltip
+                                                        title={
+                                                            <span
+                                                                style={{
+                                                                    whiteSpace:
+                                                                        "pre-line",
+                                                                }}
+                                                            >
+                                                                {(
+                                                                    p.entry
+                                                                        ._payload as EncryptedThing<any>
+                                                                )._envelope._ks
+                                                                    .map((k) =>
+                                                                        shortName(
+                                                                            k._recieverPublicKey.toString()
+                                                                        )
+                                                                    )
+                                                                    .join("\n")}
+                                                            </span>
+                                                        }
+                                                    >
+                                                        <IconButton>
+                                                            <LockIcon
+                                                                color="success"
+                                                                sx={{
+                                                                    fontSize:
+                                                                        "14px",
+                                                                }}
+                                                            />{" "}
+                                                        </IconButton>
+                                                    </Tooltip>{" "}
+                                                </Grid>
+                                            )} */}
                                     </Grid>
                                     <Grid item>
-                                        <Typography>
-                                            {" "}
-                                            {p.value.message}
-                                        </Typography>
+                                        <Typography> {p.message}</Typography>
                                     </Grid>
                                 </Grid>
                             ))}
@@ -416,6 +371,8 @@ export const Room = () => {
                         </IconButton>
                     </Grid>
                 </Grid>
+                {/* TODO add encryption feature
+                
                 <Grid
                     item
                     container
@@ -487,7 +444,7 @@ export const Room = () => {
                             }
                         />
                     </Grid>
-                </Grid>
+                </Grid> */}
             </Grid>
         </Box>
     );
