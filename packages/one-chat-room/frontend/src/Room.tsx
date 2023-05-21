@@ -59,13 +59,9 @@ export const Room = () => {
         if (!room?.current?.id || !room?.current?.initialized) {
             return;
         }
-        room?.current.messages.index
-            .query(new DocumentQuery({ queries: [] }), {
-                remote: { sync: true },
-            })
-            .then((x) => {
-                console.log("x", x, room?.current.messages.store["loaded"]);
-            });
+        room?.current.messages.index.query(new DocumentQuery({ queries: [] }), {
+            remote: { sync: true },
+        });
     }, [room?.current?.id, room?.current?.initialized, peerCounter]);
 
     useEffect(() => {
@@ -87,7 +83,7 @@ export const Room = () => {
 
                     const updateNames = async (p: Post) => {
                         const pk = (
-                            await r.messages.store.oplog.get(
+                            await r.messages.log.get(
                                 r.messages.index.index.get(p.id).context.head
                             )
                         ).signatures[0].publicKey;
@@ -128,7 +124,7 @@ export const Room = () => {
                                 postsRef.current.map(async (x) => {
                                     return {
                                         post: x,
-                                        entry: await room.current.messages.store.oplog.get(
+                                        entry: await room.current.messages.log.get(
                                             room.current.messages.index.index.get(
                                                 x.id
                                             ).context.head
@@ -152,20 +148,23 @@ export const Room = () => {
                         }, 5);
                     });
 
-                    peer.libp2p.directsub.addEventListener("subscribe", () => {
-                        setPeerCounter(
-                            peer.libp2p.directsub.getSubscribers(
-                                r.address.toString()
-                            ).size + 1
-                        );
-                    });
+                    peer.libp2p.services.pubsub.addEventListener(
+                        "subscribe",
+                        () => {
+                            setPeerCounter(
+                                peer.libp2p.services.pubsub.getSubscribers(
+                                    r.allLogs[0].idString
+                                ).size + 1
+                            );
+                        }
+                    );
 
-                    peer.libp2p.directsub.addEventListener(
+                    peer.libp2p.services.pubsub.addEventListener(
                         "unsubscribe",
                         () => {
                             setPeerCounter(
-                                peer.libp2p.directsub.getSubscribers(
-                                    r.address.toString()
+                                peer.libp2p.services.pubsub.getSubscribers(
+                                    r.allLogs[0].idString
                                 ).size + 1
                             );
                         }
@@ -193,7 +192,7 @@ export const Room = () => {
         if (!room) {
             return;
         }
-        console.log(peer.libp2p.directsub.peers);
+        console.log(peer.libp2p.services.pubsub.peers);
         room.current.messages
             .put(new Post({ message: text, from: peer.identity.publicKey }), {
                 reciever: {

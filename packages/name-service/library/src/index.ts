@@ -1,6 +1,5 @@
-import { field, variant, vec, fixedArray } from "@dao-xyz/borsh";
-import { AbstractProgram, Program } from "@dao-xyz/peerbit-program";
-import { Store } from "@dao-xyz/peerbit-store";
+import { field, variant, fixedArray } from "@dao-xyz/borsh";
+import { Program } from "@dao-xyz/peerbit-program";
 import {
     DocumentIndex,
     DocumentQuery,
@@ -25,11 +24,15 @@ export class Name {
 
 @variant("names")
 export class Names extends Program {
+    @field({ type: Uint8Array })
+    id: Uint8Array;
+
     @field({ type: Documents })
     names: Documents<Name>;
 
-    constructor(properties: { id: string } = { id: "STATIC" }) {
-        super(properties);
+    constructor(properties: { id: Uint8Array } = { id: new Uint8Array(32) }) {
+        super();
+        this.id = properties.id;
         this.names = new Documents({
             index: new DocumentIndex({ indexBy: "id" }),
         });

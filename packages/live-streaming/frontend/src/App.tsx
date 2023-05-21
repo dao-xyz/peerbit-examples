@@ -5,7 +5,7 @@ import {
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { Content } from "./Context";
+import { Content } from "./Content";
 import { PeerProvider } from "@dao-xyz/peerbit-react";
 import blue from "@mui/material/colors/amber";
 import { inIframe } from "@dao-xyz/peerbit-react";
@@ -14,6 +14,11 @@ let theme = createTheme({
     palette: {
         mode: "dark",
         primary: blue,
+        background: inIframe()
+            ? {
+                  default: "transparent",
+              }
+            : {},
     },
     typography: {
         fontFamily: [
@@ -36,6 +41,7 @@ export const App = () => {
     return (
         <PeerProvider
             inMemory={inIframe()}
+            waitForConnnected={true}
             waitForKeypairInIFrame={true}
             network={
                 import.meta.env.MODE === "development" ? "local" : "remote"

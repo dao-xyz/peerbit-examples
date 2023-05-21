@@ -1,4 +1,4 @@
-import React, { useContext, useEffect, useRef } from "react";
+import React, { useContext, useEffect, useRef, useState } from "react";
 import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
 import { Identity, Peerbit } from "@dao-xyz/peerbit";
 import { webSockets } from "@libp2p/websockets";
@@ -25,9 +25,15 @@ import { webRTC } from "@dao-xyz/libp2p-webrtc";
 import * as filters from "@libp2p/websockets/filters";
 import axios from "axios";
 
+export type ConnectionStatus =
+    | "disconnected"
+    | "connected"
+    | "connecting"
+    | "failed";
 interface IPeerContext {
     peer: Peerbit | undefined;
     loading: boolean;
+    status: ConnectionStatus;
 }
 
 type NetworkType = "local" | "remote";
@@ -58,67 +64,6 @@ const resolveBootstrapAddresses = async (network: NetworkType) => {
                 error?.message
         );
     }
-};
-
-export const connectTabs = (peer: Peerbit) => {
-    // Cross tab sync when we write
-    /* 
-    const broadCastDirectSub = new BroadcastChannel(
-        keypair.publicKey.toString() + "/directSub"
-    );
-
-    const processMessageDefault = peer.libp2p.directsub.processMessage.bind(peer.libp2p.directsub);
-    peer.libp2p.directsub.processMessage = (peerId, stream, arr) => {
-        console.log("Send data from tab", peerId.toString(), arr.length);
-        broadCastDirectSub.postMessage({
-            peerId: peerId.toString(),
-            data: arr.subarray(),
-        });
-        return processMessageDefault(peerId, stream, arr);
-    };
-    broadCastDirectSub.onmessage = (message) => {
-        const data = message.data.data;
-        const peerId = peerIdFromString(message.data.peerId);
-        const stream = peer.libp2p.directsub.peers.get(
-            getPublicKeyFromPeerId(peerId).hashcode()
-        );
-        console.log("Got data from tab", peerId.toString(), data.length);
-        processMessageDefault(peerId, stream, new Uint8ArrayList(data));
-    };
-   const broadCastWrite = new BroadcastChannel(
-           keypair.publicKey.toString() + "/onWrite"
-       );
-   
-       const onWriteDefault = peer.onWrite.bind(peer);
-       peer.onWrite = (program, store, entry) => {
-           broadCastWrite.postMessage({
-               program: program.address.toString(),
-               store: store._storeIndex,
-               entry: serialize(entry),
-           });
-           return onWriteDefault(program, store, entry);
-       };
-       broadCastWrite.onmessage = (message) => {
-           peer.programs
-               .get(message.data.program)
-               ?.program?.allStoresMap.get(message.data.store)
-               .sync([deserialize(message.data.entry, Entry)], {
-                   canAppend: () => true,
-                   save: false,
-               });
-       }; */
-    // Cross tab sync when we get messages
-    /* const broadCastOnMessage = new BroadcastChannel(
-        keypair.publicKey.toString() + "/onMessage"
-    );
-    const onMessageDefault = peer._onMessage.bind(peer);
-    peer._onMessage = (message) => {
-        broadCastOnMessage.postMessage(message);
-        return onMessageDefault(message);
-    };
-    broadCastOnMessage.onmessage = (message) => {
-        onMessageDefault(message.data);
-    }; */
 };
 
 if (!window.name) {
@@ -167,10 +112,12 @@ export const PeerProvider = ({
     inMemory,
     keypair,
     identity,
+    waitForConnnected,
     waitForKeypairInIFrame,
 }: {
     network: "local" | "remote";
     inMemory?: boolean;
+    waitForConnnected?: boolean;
     keypair?: Ed25519Keypair;
     identity?: Identity;
     waitForKeypairInIFrame?: boolean;
@@ -179,12 +126,16 @@ export const PeerProvider = ({
 }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
     const [loading, setLoading] = React.useState<boolean>(false);
+    const [connectionState, setConnectionState] =
+        React.useState<ConnectionStatus>("disconnected");
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
             loading,
+            connectionState,
+            status: connectionState,
         }),
-        [loading, peer?.identity?.publicKey.toString()]
+        [loading, connectionState, peer?.identity?.publicKey.toString()]
     );
     const ref = useRef<Promise<Peerbit | void> | null>(null);
 
@@ -257,12 +208,14 @@ export const PeerProvider = ({
 
             identity = identity || nodeId;
 
-            let node = await createLibp2pExtended({
-                blocks: {
-                    directory:
-                        !inMemory && !inIframe() ? "./blocks" : undefined,
-                },
-                libp2p: await createLibp2p({
+            // We create a new directrory to make tab to tab communication go smoothly
+            const newPeer = await Peerbit.create({
+                libp2p: {
+                    addresses: {
+                        listen: [
+                            /*    '/webrtc' */
+                        ],
+                    },
                     connectionEncryption: [noise()],
                     peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
                     connectionManager: {
@@ -272,68 +225,91 @@ export const PeerProvider = ({
                     streamMuxers: [mplex()],
                     ...(network === "local"
                         ? {
+                              connectionGater: {
+                                  denyDialMultiaddr: () => {
+                                      // by default we refuse to dial local addresses from the browser since they
+                                      // are usually sent by remote peers broadcasting undialable multiaddrs but
+                                      // here we are explicitly connecting to a local node so do not deny dialing
+                                      // any discovered address
+                                      return false;
+                                  },
+                              },
                               transports: [
                                   // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
                                   webSockets({
                                       filter: filters.all,
-                                  }) /* ,
-                                circuitRelayTransport({ discoverRelays: 1 }),
-                                webRTC({ maxMsgSize: 256 * 1024 }), */,
+                                  }),
+                                  /*            circuitRelayTransport({ discoverRelays: 1 }),
+                                         webRTC(), */
                               ],
                           }
                         : {
+                              connectionGater: {
+                                  denyDialMultiaddr: () => {
+                                      // by default we refuse to dial local addresses from the browser since they
+                                      // are usually sent by remote peers broadcasting undialable multiaddrs but
+                                      // here we are explicitly connecting to a local node so do not deny dialing
+                                      // any discovered address
+                                      return false;
+                                  },
+                              },
                               transports: [
-                                  webSockets({ filter: filters.all }) /* ,
-                                circuitRelayTransport({ discoverRelays: 1 }),
-                                webRTC({ maxMsgSize: 256 * 1024 }), */,
+                                  webSockets({ filter: filters.all }),
+                                  /*             circuitRelayTransport({ discoverRelays: 1 }),
+                                          webRTC(), */
                               ],
                           }),
-                }).then((r) => {
-                    console.log(r);
-                    return r;
-                }),
-            });
-            await node.start();
-
-            // We create a new directrory to make tab to tab communication go smoothly
-            const newPeer = await Peerbit.create({
-                libp2p: node,
+                },
                 directory: !inMemory ? "./repo" : undefined,
                 identity,
                 limitSigning: true,
             });
 
+            setConnectionState("connecting");
+
             // Resolve bootstrap nodes async (we want to return before this is done)
-            (bootstrap
-                ? Promise.resolve(bootstrap)
-                : resolveBootstrapAddresses(network)
-            )
-                .then(async (bootstrap) => {
-                    if (bootstrap && bootstrap?.length > 0) {
+            const connectFn = async () => {
+                try {
+                    const addresses = await (bootstrap
+                        ? Promise.resolve(bootstrap)
+                        : resolveBootstrapAddresses(network));
+                    if (addresses && addresses?.length > 0) {
                         try {
                             await Promise.all(
-                                bootstrap
+                                addresses
                                     .map((a) =>
                                         typeof a === "string" ? multiaddr(a) : a
                                     )
                                     .map((a) => newPeer.dial(a))
                             );
+                            setConnectionState("connected");
                         } catch (error) {
                             console.error(
                                 "Failed to resolve relay node. Please come back later or start the demo locally"
                             );
+                            setConnectionState("failed");
                             throw error;
                         }
+                    } else {
+                        console.error("No addresses to connect to");
+                        setConnectionState("failed");
                     }
-                })
-                .catch((err: any) => {
+                } catch (err: any) {
                     console.error(
                         "Failed to resolve relay addresses. " + err?.message
                     );
-                });
+                    setConnectionState("failed");
+                }
+            };
+
+            const promise = connectFn();
 
             // Make sure data flow as expected between tabs and windows locally (offline states)
-            connectTabs(newPeer);
+
+            if (waitForConnnected) {
+                await promise;
+            }
+
             setPeer(newPeer);
             setLoading(false);
             return peer;

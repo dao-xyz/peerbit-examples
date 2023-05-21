@@ -1,8 +1,6 @@
 import { Name, Names } from "@dao-xyz/peer-names";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import React, { useContext, useEffect, useRef, useState } from "react";
-import { SignatureWithKey, PreHash } from "@dao-xyz/peerbit-crypto";
-import { getAllKeypairs } from "./keys";
 import { Spaces } from "./canvas/db";
 
 /* 

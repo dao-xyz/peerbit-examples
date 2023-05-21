@@ -1,7 +1,5 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
-import fs from "fs";
-
 // https://vitejs.dev/config/
 export default defineConfig({
     plugins: [react()],
@@ -11,17 +9,4 @@ export default defineConfig({
     define: {
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
-    /*   server: {
-          port: 5801,
-      }, */
-    /* server: fs.existsSync("./.cert/key.pem")
-        ? {
-              port: 5801,
-              https: {
-                  key: fs.readFileSync("./.cert/key.pem"),
-                  cert: fs.readFileSync("./.cert/cert.pem"),
-              },
-              host: "stream.test.xyz",
-          }
-        : undefined, */
 });

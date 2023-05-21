@@ -6,6 +6,7 @@ import { Name, Names } from "..";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";
 import { delay } from "@dao-xyz/peerbit-time";
 import { Ed25519Keypair, PreHash } from "@dao-xyz/peerbit-crypto";
+import { randomBytes } from "@dao-xyz/peerbit-crypto";
 describe("index", () => {
     let session: LSession, peer: Peerbit, peer2: Peerbit;
     jest.setTimeout(60 * 1000);
@@ -23,7 +24,7 @@ describe("index", () => {
 
     it("one name", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
-        const names = await peer.open(new Names({ id: "1" }), {
+        const names = await peer.open(new Names({ id: randomBytes(32) }), {
             role: new ReplicatorType(),
         });
 
@@ -38,7 +39,7 @@ describe("index", () => {
     it("multisig name", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
         let kp = await Ed25519Keypair.create();
-        const names = await peer.open(new Names({ id: "2" }), {
+        const names = await peer.open(new Names({ id: randomBytes(32) }), {
             role: new ReplicatorType(),
         });
 

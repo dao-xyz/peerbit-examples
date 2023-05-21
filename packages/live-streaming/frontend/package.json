@@ -1,5 +1,5 @@
 {
-    "name": "streaming-frontend",
+    "name": "streaming-frontend-canvas",
     "version": "0.1.0",
     "private": true,
     "homepage": "https://stream.peerchecker.com",
@@ -7,7 +7,7 @@
     "scripts": {
         "dev": "vite",
         "start": "vite",
-        "start-remote": "vite --mode staging",
+        "start-remote": "vite --mode staging --config vite.config.remote.ts",
         "build": "tsc && vite build",
         "preview": "vite preview",
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
@@ -16,6 +16,8 @@
         "@dao-xyz/peerbit": "*",
         "@dao-xyz/peerbit-document": "*",
         "@dao-xyz/peerbit-react": "^0.0.1",
+        "extendable-media-recorder": "^7.1.7",
+        "extendable-media-recorder-wav-encoder": "^7.0.84",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "@emotion/react": "^11.10.5",
@@ -27,6 +29,7 @@
     },
     "devDependencies": {
         "@types/dom-mediacapture-transform": "^0.1.4",
+        "@webgpu/types": "^0.1.32",
         "@types/dom-webcodecs": "^0.1.5",
         "@types/react": "^18.0.26",
         "@types/react-dom": "^18.0.9",

@@ -29,11 +29,14 @@ export class Model {
 
 @variant("models")
 export class ModelDatabase extends Program {
+    @field({ type: Uint8Array })
+    id: Uint8Array;
     @field({ type: Documents })
     models: Documents<Model>;
 
-    constructor(properties?: { id: string }) {
-        super(properties);
+    constructor(properties: { id: Uint8Array }) {
+        super();
+        this.id = properties.id;
         this.models = new Documents({
             index: new DocumentIndex({ indexBy: "id" }),
         });

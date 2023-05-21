@@ -16,7 +16,11 @@
         "experimentalDecorators": true,
         "noEmit": true,
         "jsx": "react-jsx",
-        "types": ["@types/dom-webcodecs", "@types/dom-mediacapture-transform"]
+        "types": [
+            "@types/dom-webcodecs",
+            "@types/dom-mediacapture-transform",
+            "@webgpu/types"
+        ]
     },
     "include": ["src"],
     "references": [

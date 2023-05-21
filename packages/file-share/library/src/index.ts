@@ -75,7 +75,7 @@ export class SmallFile extends AbstractFile {
 
     async getFile(files: Files) {
         // Load the file from the block store
-        const block = await files.libp2p.directblock.get(this.id);
+        const block = await files.libp2p.services.blocks.get(this.id);
 
         // Get the file value
         return (block ? await getBlockValue(block) : undefined) as Uint8Array;

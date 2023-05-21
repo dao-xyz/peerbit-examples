@@ -128,7 +128,7 @@ export const Room = () => {
                         posts.current.map(async (x) => {
                             return {
                                 post: x,
-                                entry: await room.current.messages.store.oplog.get(
+                                entry: await room.current.messages.log.get(
                                     room.current.messages.index.index.get(x.id)
                                         .context.head
                                 ),
@@ -149,21 +149,27 @@ export const Room = () => {
                     forceUpdate();
                 });
 
-                peer.libp2p.directsub.addEventListener("subscribe", () => {
-                    setPeerCounter(
-                        peer.libp2p.directsub.getSubscribers(
-                            r.address.toString()
-                        ).size + 1
-                    );
-                });
+                peer.libp2p.services.pubsub.addEventListener(
+                    "subscribe",
+                    () => {
+                        setPeerCounter(
+                            peer.libp2p.services.pubsub.getSubscribers(
+                                r.allLogs[0].idString
+                            ).size + 1
+                        );
+                    }
+                );
 
-                peer.libp2p.directsub.addEventListener("unsubscribe", () => {
-                    setPeerCounter(
-                        peer.libp2p.directsub.getSubscribers(
-                            r.address.toString()
-                        ).size + 1
-                    );
-                });
+                peer.libp2p.services.pubsub.addEventListener(
+                    "unsubscribe",
+                    () => {
+                        setPeerCounter(
+                            peer.libp2p.services.pubsub.getSubscribers(
+                                r.allLogs[0].idString
+                            ).size + 1
+                        );
+                    }
+                );
 
                 await r.load();
             })

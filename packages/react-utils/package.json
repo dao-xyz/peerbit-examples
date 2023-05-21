@@ -22,7 +22,7 @@
         "react": "*"
     },
     "dependencies": {
-        "@dao-xyz/libp2p-webrtc": "^1.2.0",
+        "@dao-xyz/libp2p-webrtc": "^2.0.2",
         "@dao-xyz/peerbit": "*",
         "@types/react": "^18.0.25",
         "@types/react-dom": "^18.0.8",

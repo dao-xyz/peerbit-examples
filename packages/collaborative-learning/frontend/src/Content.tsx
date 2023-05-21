@@ -149,7 +149,7 @@ async function train(
 // predictLoop(video, model, imageNet, condition, statusText);
 
 export const MODEL_ID = "V0";
-export const MODEL_DATABASE_ID = "V0";
+export const MODEL_DATABASE_ID = new Uint8Array(32);
 
 export const Content = () => {
     const { peer } = usePeer();
@@ -174,18 +174,26 @@ export const Content = () => {
         setProcessing(true);
         peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID })).then(
             async (db) => {
-                peer.libp2p.directsub.addEventListener("subscribe", () => {
-                    setSubscribers(
-                        (peer.libp2p.directsub.topics.get(db.address.toString())
-                            ?.size || 0) + 1
-                    );
-                });
-                peer.libp2p.directsub.addEventListener("unsubscribe", () => {
-                    setSubscribers(
-                        (peer.libp2p.directsub.topics.get(db.address.toString())
-                            ?.size || 0) + 1
-                    );
-                });
+                peer.libp2p.services.pubsub.addEventListener(
+                    "subscribe",
+                    () => {
+                        setSubscribers(
+                            (peer.libp2p.services.pubsub.topics.get(
+                                db.address.toString()
+                            )?.size || 0) + 1
+                        );
+                    }
+                );
+                peer.libp2p.services.pubsub.addEventListener(
+                    "unsubscribe",
+                    () => {
+                        setSubscribers(
+                            (peer.libp2p.services.pubsub.topics.get(
+                                db.address.toString()
+                            )?.size || 0) + 1
+                        );
+                    }
+                );
 
                 await db.load();
                 p2pStorage.current = new P2PStorage(db, MODEL_ID);
@@ -290,11 +298,15 @@ export const Content = () => {
 
     const updateModelDate = () => {
         if (p2pStorage.current instanceof P2PStorage) {
-            p2pStorage.current.db.models.index.get(MODEL_ID).then((r) => {
-                setModelDate(
-                    new Date(Number(r.results[0].context.modified / 1000n))
-                );
-            });
+            p2pStorage.current.db.models.index
+                .getDetailed(MODEL_ID)
+                .then((r) => {
+                    setModelDate(
+                        new Date(
+                            Number(r[0]?.results[0].context.modified / 1000n)
+                        )
+                    );
+                });
         } else {
             setModelDate(new Date());
         }

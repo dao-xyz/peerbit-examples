@@ -26,7 +26,7 @@ export const Lobby = () => {
         loadingLobby.current = peer
             .open(
                 new LobbyDB({
-                    id: "LOBBY",
+                    id: new Uint8Array(32), // 0,0,....0 choose this dynamically instead? Now it is static, => same lobby for all
                     rooms: new Documents<Room>({
                         index: new DocumentIndex({ indexBy: "name" }),
                     }),
@@ -59,13 +59,16 @@ export const Lobby = () => {
                     forceUpdate();
                 });
 
-                peer.libp2p.directsub.addEventListener("subscribe", () => {
-                    setPeerCount(
-                        peer.libp2p.directsub.topics.get(
-                            lobby.address.toString()
-                        ).size + 1
-                    );
-                });
+                peer.libp2p.services.pubsub.addEventListener(
+                    "subscribe",
+                    () => {
+                        setPeerCount(
+                            peer.libp2p.services.pubsub.topics.get(
+                                lobby.address.toString()
+                            ).size + 1
+                        );
+                    }
+                );
                 await lobby.load();
             });
     }, [peer?.id.toString()]);

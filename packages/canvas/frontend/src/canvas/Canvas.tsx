@@ -159,11 +159,11 @@ export const Canvas = () => {
         console.log(
             "open canvas address",
             canvasAddress.toString(),
-            peer.libp2p.directblock.publicKey.toString(),
+            peer.libp2p.services.blocks.publicKey.toString(),
             peer.idKey.publicKey.toString()
         );
         setTimeout(() => {
-            console.log(peer.libp2p.directblock.peers.size);
+            console.log(peer.libp2p.services.blocks.peers.size);
         }, 5000);
         myCanvas.current = peer
             .open<CanvasDB>(canvasAddress, {

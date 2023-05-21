@@ -112,6 +112,9 @@ export class TitleAndDescription {
 
 @variant("canvas")
 export class Canvas extends Program {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
     @field({ type: Documents<Rect> })
     rects: Documents<Rect>;
 
@@ -126,6 +129,7 @@ export class Canvas extends Program {
         info: TitleAndDescription;
     }) {
         super();
+        this.id = randomBytes(32);
         this.key = properties.rootTrust;
         this.rects = new Documents({
             index: new DocumentIndex({ indexBy: "id" }),
@@ -155,11 +159,15 @@ export class Canvas extends Program {
 
 @variant("spaces")
 export class Spaces extends Program {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
     @field({ type: Documents<Rect> })
     canvases: Documents<Canvas>;
 
     constructor() {
-        super({ id: "STATIC" });
+        super();
+        this.id = randomBytes(32);
         this.canvases = new Documents({
             index: new DocumentIndex({ indexBy: "id" }),
         });
@@ -183,15 +191,13 @@ export class Spaces extends Program {
                     );
                 } else if (payload instanceof DeleteOperation) {
                     const canvas = await this.canvases.index.get(payload.key);
-                    for (const result of canvas.results) {
-                        const from = result.value.key;
-                        if (
-                            entry.signatures.find((x) =>
-                                x.publicKey.equals(from)
-                            ) != null
-                        ) {
-                            return true;
-                        }
+                    const from = canvas.key;
+                    if (
+                        entry.signatures.find((x) =>
+                            x.publicKey.equals(from)
+                        ) != null
+                    ) {
+                        return true;
                     }
                 }
                 return false;

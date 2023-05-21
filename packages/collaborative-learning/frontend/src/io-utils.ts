@@ -134,9 +134,9 @@ export class P2PStorage implements IOHandler {
                 id: this.modelId,
                 config: modelTopologyAndWeightManifest,
                 weights: new Uint8Array(
-                    modelArtifacts.weightData,
+                    modelArtifacts.weightData as ArrayBuffer, // TODO type check conversion
                     0,
-                    modelArtifacts.weightData.byteLength
+                    (modelArtifacts.weightData as ArrayBuffer).byteLength
                 ),
             })
         );
@@ -147,22 +147,21 @@ export class P2PStorage implements IOHandler {
 
     async load(): Promise<ModelArtifacts> {
         // get the latest model
-        const modelResults = await this.db.models.index.get(this.modelId, {
+        const model = await this.db.models.index.get(this.modelId, {
             remote: true,
         });
 
-        if (!modelResults || modelResults?.results.length === 0) {
+        if (!model) {
             const msg =
                 "Did not find model: " +
                 this.db.address.toString() +
                 ", " +
-                this.db.models.store.oplog.length;
+                this.db.models.log.length;
             throw new Error(msg);
         }
-        const model = modelResults.results[0].value;
-        const modelConfig = model.config;
-        const modelTopology = modelConfig.modelTopology;
-        const weightsManifest = modelConfig.weightsManifest;
+
+        const modelTopology = model.config.modelTopology;
+        const weightsManifest = model.config.weightsManifest;
 
         // We do not allow both modelTopology and weightsManifest to be missing.
         if (modelTopology == null && weightsManifest == null) {
@@ -185,7 +184,7 @@ export class P2PStorage implements IOHandler {
             return [weightSpecs, cp.buffer];
         };
 
-        return getModelArtifactsForJSON(modelConfig, (weightsManifest) =>
+        return getModelArtifactsForJSON(model.config, (weightsManifest) =>
             loadWeights(weightsManifest)
         ); // { modelTopology, weightSpecs, weightData };
     }

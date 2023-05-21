@@ -1,8 +1,9 @@
 import { Peerbit } from "@dao-xyz/peerbit";
-import { LSession, waitForPeers } from "@dao-xyz/peerbit-test-utils";
+import { LSession } from "@dao-xyz/peerbit-test-utils";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import { jest } from "@jest/globals";
 import { Post, Room, Lobby } from "..";
+import { waitForSubscribers } from "@dao-xyz/libp2p-direct-sub";
 import {
     DocumentQuery,
     StringMatch,
@@ -44,14 +45,14 @@ describe("index", () => {
         const room2 = new Room({ name: "another room" });
         await lobby2.rooms.put(room2);
 
-        await waitForPeers(
+        await waitForSubscribers(
             peer.libp2p,
             peer2.libp2p,
             lobby2.address.toString()
         );
 
         // Peer2 can "query" for rooms if peer2 does not have anything replicated locally
-        const results: Results<Room>[] = await lobby1.rooms.index.query(
+        const results: Room[] = await lobby1.rooms.index.query(
             new DocumentQuery({
                 queries: [
                     new StringMatch({
@@ -69,10 +70,9 @@ describe("index", () => {
             }
         );
 
-        expect(results).toHaveLength(1);
-        expect(
-            results[0].results.map((result) => result.value.id)
-        ).toContainAllValues([room2.id]);
+        expect(results.map((result) => result.id)).toContainAllValues([
+            room2.id,
+        ]);
 
         // Open the room so we can write things inside
         await peer2.open(room);

@@ -2,7 +2,7 @@ import { DocumentQuery } from "@dao-xyz/peerbit-document";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Canvas, Spaces } from "./canvas/db";
+import { Canvas } from "./canvas/db";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { userSpaces } from "./useSpaces";
 import { CanvasPreview } from "./canvas/CanvasPreview";
@@ -27,10 +27,7 @@ export const Home = () => {
                     remote: {},
                 })
                 .then((results) => {
-                    console.log(results);
-                    setCanvases(
-                        results.map((x) => x.results.map((y) => y.value)).flat()
-                    );
+                    setCanvases(results);
                 });
         };
         refresh();

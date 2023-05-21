@@ -1,169 +1,350 @@
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { useRef, useState, useEffect, useCallback } from "react";
-import { Chunk, MediaStreamDB, MediaStreamDBs } from "../database.js";
-import { ObserverType, ReplicatorType } from "@dao-xyz/peerbit-program";
-import PQueue from "p-queue";
-import { waitFor } from "@dao-xyz/peerbit-time";
-import { Box, Button, Grid } from "@mui/material";
-import { audioMimeType } from "../format.js";
+import {
+    Chunk,
+    WebcodecsStreamDB,
+    MediaStreamDBs,
+    Track,
+    AudioStreamDB,
+    TrackSource,
+} from "../database.js";
+import { ObserverType } from "@dao-xyz/peerbit-program";
+import { Grid } from "@mui/material";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
-import { DocumentQuery, Documents } from "@dao-xyz/peerbit-document";
-import { createFirstCluster } from "../webm.js";
-import { delay } from "@dao-xyz/peerbit-time";
-import { Controls } from "../controller/Control.js";
-import { Resolution } from "./../controller/settings.js";
-
+import { DocumentQuery, DocumentsChange } from "@dao-xyz/peerbit-document";
 import "./View.css";
 import CatOffline from "/catbye64.png";
-
-const resetSB = async (
-    pb: HTMLAudioElement | HTMLVideoElement,
-    mimeType: string
+import { Controls } from "./controller/Control.js";
+import { ControlFunctions } from "./controller/controls.js";
+import { Resolution } from "../controls/settings.js";
+import { renderer } from "./video/renderer.js";
+const addVideoStreamListener = async (
+    streamDB: WebcodecsStreamDB,
+    play: boolean
 ) => {
-    let sb: SourceBuffer | undefined = undefined;
-    if (!pb) {
-        throw new Error("Missing pb");
+    let latestFrame = +new Date();
+    let pendingFrames: VideoFrame[] = [];
+    let underflow = true;
+    let currentTime = 0;
+    let baseTime: number | undefined = undefined;
+    function calculateTimeUntilNextFrame(timestamp: number) {
+        if (!baseTime) {
+            throw new Error("Basetime not set");
+        }
+
+        let mediaTime = performance.now() - baseTime;
+        return Math.max(0, timestamp / 1000 - mediaTime);
     }
 
-    //clearInterval(syncInterval);
-    const mediaSource = new MediaSource();
-    pb.src = URL.createObjectURL(mediaSource);
-    let ready = false;
-    mediaSource.addEventListener("sourceopen", () => {
-        sb = mediaSource.addSourceBuffer(mimeType); ////'');
-        sb.onerror = (error) => {
-            console.error("sb error", error);
-            //
-        };
-        sb.mode = "sequence";
-        /* 
-                const vend = () =>
-                    pb.buffered.length > 0
-                        ? pb.buffered.end(pb.buffered.length - 1)
-                        : 0; */
-        ready = true;
-        sb.onupdateend = (ev) => {};
+    const renderFrame = async () => {
+        underflow = pendingFrames.length == 0;
+        //  console.log("RENDER FRAME", underflow, !play, pendingFrames.length)
+        if (underflow) return;
+
+        if (!play) {
+            return;
+        }
+
+        let frame = pendingFrames.shift();
+
+        currentTime = frame.timestamp;
+        if (!baseTime) {
+            baseTime = performance.now() - frame.timestamp / 1000;
+        }
+
+        if (document.visibilityState === "hidden") {
+            frame.close();
+        } else {
+            renderer.draw(frame);
+        }
+
+        //  console.log("NEXT FRAME IN", calculateTimeUntilNextFrame(currentTime), frame.duration, currentTime / 1000, baseTime, performance.now() - baseTime)
+        setTimeout(renderFrame, calculateTimeUntilNextFrame(currentTime)); // TODO this can be a cause of LAG sometimes before/after blur events
+    };
+    let decoder: VideoDecoder = new VideoDecoder({
+        error: (e) => {},
+        output: (frame) => {
+            handleFrame(frame);
+        },
     });
 
-    let ret = await waitFor(() => sb);
-    await waitFor(() => ready);
-    return ret;
+    try {
+        decoder.configure(streamDB.decoderDescription);
+    } catch (e) {
+        console.log("config is not valid???", streamDB.decoderDescription);
+        throw e;
+    }
+
+    let waitForKeyFrame = true;
+    const handleFrame = (frame: VideoFrame) => {
+        pendingFrames.push(frame);
+        if (underflow) {
+            renderFrame();
+        }
+    };
+
+    const listener = (change: CustomEvent<DocumentsChange<Chunk>>) => {
+        for (const added of change.detail.added) {
+            const chunk = new EncodedVideoChunk({
+                timestamp: Number(added.timestamp),
+                type: added.type as "key" | "delta",
+                data: added.chunk,
+            });
+
+            if (decoder && decoder.state !== "closed") {
+                if (waitForKeyFrame) {
+                    if (chunk.type !== "key") {
+                        return;
+                    }
+                    waitForKeyFrame = false;
+                }
+                decoder.decode(chunk);
+            }
+        }
+    };
+
+    let cleanup: (() => void) | undefined = undefined;
+    return {
+        close: () => {
+            cleanup?.();
+            if (decoder.state !== "closed") {
+                decoder.close();
+            }
+        },
+        setProgress: (progress: number) => {
+            cleanup?.();
+        },
+        setSpeed: (number) => {
+            // TODO
+        },
+        setLive: () => {
+            console.log("go live video!", streamDB.address.toString());
+            cleanup = () => {
+                console.log("CLEANUP", streamDB.address.toString());
+                streamDB.chunks.events.removeEventListener("change", listener);
+            };
+            streamDB.chunks.events.addEventListener("change", listener);
+        },
+        play: () => {
+            play = true;
+            renderFrame();
+        },
+        pause: () => {
+            play = false;
+        },
+        currentTime: () => currentTime,
+    };
 };
-const addStreamListener = async (
-    chunkDB: Documents<Chunk>,
-    pb: HTMLVideoElement | HTMLAudioElement
+
+const addAudioStreamListener = async (
+    streamDB: AudioStreamDB,
+    play: boolean,
+    currentVideoTime?: () => number
 ) => {
-    let appendQueue = new PQueue({ concurrency: 1 });
+    let pendingFrames: { buffer: AudioBuffer; timestamp: bigint }[] = [];
+    let underflow = true;
+    let audioContext: AudioContext | undefined = undefined;
+    let setVolume: ((value: number) => void) | undefined = undefined;
+    let gainNode: GainNode | undefined = undefined;
 
-    // make sure video plays in background
-    let focused = true;
-    pb.onpause = (ev) => {
-        //  if (!focused) TODO
-        /* {
-            pb.play();
-        } */
+    const stop = () => {
+        if (audioContext) {
+            audioContext.close();
+        }
+        audioContext = undefined;
+        setVolume = undefined;
+        gainNode = undefined;
     };
-    pb.onblur = () => {
-        focused = false;
-    };
-    pb.onfocus = () => {
-        focused = true;
-    };
-
-    pb.onerror = (err) => {
-        console.log(err);
+    setVolume = (volume: number) => {
+        if (gainNode) gainNode.gain.value = volume;
     };
 
-    let firstChunk = new Uint8Array(0);
-    let first = true;
-    let lastMimeType = undefined;
-    let s1 = +new Date();
-    let sb: SourceBuffer | undefined = undefined;
-    const listener = async (evt) => {
-        const chunks: Chunk[] = evt.detail.added;
-        const fn = async () => {
-            for (const chunk of chunks) {
-                if (chunk.type !== lastMimeType) {
-                    lastMimeType = chunk.type;
-                    first = true;
-                    firstChunk = new Uint8Array(0);
-                    sb = await resetSB(pb, lastMimeType);
-                }
+    const setupAudioContext = () => {
+        stop();
+        audioContext = new AudioContext({ sampleRate: streamDB.sampleRate });
+        console.log("HERE");
+        audioContext.onstatechange = () => {
+            console.log("STATE CHANGE", audioContext.state);
 
-                s1 = +new Date();
-                await waitFor(() => sb && sb.updating === false, {
-                    delayInterval: 2,
-                    timeout: 30000,
-                });
-                if (first) {
-                    const firstCluster = createFirstCluster(
-                        chunk.chunk,
-                        firstChunk
-                    );
-                    if (firstCluster.type === "cluster") {
-                        const f = new Uint8Array([
-                            ...chunk.header,
-                            ...firstCluster.cluster,
-                        ]);
-                        //  decoder.decode(f);
-                        first = false;
-
-                        sb?.appendBuffer(f);
-                    } else {
-                        console.log("waiting for first!");
-                        firstChunk = firstCluster.remainder;
-                    }
-                } else {
-                    try {
-                        sb.appendBuffer(
-                            first
-                                ? new Uint8Array([
-                                      ...chunk.header,
-                                      ...chunk.chunk,
-                                  ])
-                                : chunk.chunk
-                        );
-                    } catch (error) {
-                        appendQueue.clear();
-                        first = true;
-                        firstChunk = new Uint8Array(0);
-                        await appendQueue.add(() => resetSB(pb, lastMimeType));
-                    }
-                }
+            if (
+                audioContext.state === "suspended" ||
+                audioContext.state === "closed"
+            ) {
+                play = false;
             }
         };
-        appendQueue.add(fn);
+
+        gainNode = audioContext.createGain();
+        gainNode.connect(audioContext.destination);
     };
 
-    chunkDB.events.addEventListener("change", listener);
-    return () => {
-        chunkDB.events.removeEventListener("change", listener);
-        appendQueue.clear();
+    const mute = () => {}; // we don't do anything with the source, we let the controller set volume to 0
+    const unmute = () => {}; // we don't do anything with the source, we let the controller set volume back to previous volume before mute
+
+    let time = 0;
+    let expectedLatency = 0.1;
+
+    const renderFrame = async () => {
+        if (!time) {
+            // we've not yet started the queue - just queue this up,
+            // leaving a "latency gap" so we're not desperately trying
+            // to keep up.  Note if the network is slow, this is going
+            // to fail.  Latency gap here is 100 ms.
+            time = Math.max(audioContext.currentTime - expectedLatency, 0);
+        }
+
+        // time - audioContext.currentTime should never be negative!
+
+        underflow = pendingFrames.length == 0;
+        if (!play) return;
+        if (underflow) return;
+        if (audioContext.state !== "running") {
+            /* audioContext.resume().then((r) => {
+                renderFrame()
+            }).catch((e) => {}) */
+            return;
+        }
+        if (!underflow) {
+            console.log("PUSH", pendingFrames.length);
+            const frame = pendingFrames.shift();
+            const audioSource = audioContext.createBufferSource();
+            audioSource.buffer = frame.buffer;
+            audioSource.connect(gainNode);
+            audioSource.start(time);
+            let currentLag =
+                (currentVideoTime
+                    ? Math.min(time, currentVideoTime() / 1e6)
+                    : time) - audioContext.currentTime;
+            let lagRatio = currentLag / expectedLatency;
+            let damp = 0.95;
+            const playbackRate = 1 * damp + Math.max(0, lagRatio) * (1 - damp);
+
+            //  let detune = -12 * Math.log2(1 / playbackRate) * 100;
+            // audioSource.detune.value = -detune
+
+            // audioSource.detune.linearRampToValueAtTime(-detune, time)
+            audioSource.playbackRate.value = playbackRate;
+
+            // console.log('AUDIO INFO', audioSource.buffer.duration / playbackRate + time, currentVideoTime?.(), frame.timestamp)
+            time += audioSource.buffer.duration / playbackRate;
+        }
+
+        // Immediately schedule rendering of the next frame
+        requestAnimationFrame(renderFrame);
+    };
+
+    const listener = (change: CustomEvent<DocumentsChange<Chunk>>) => {
+        let resuming = false;
+        if (play) {
+            for (const added of change.detail.added) {
+                // seems like 'decodeAudioData' requires a cloned, 0 offset buffer,
+                // additionally, if we reuse the same array we seem to run into issues where decodeAudioData mutates the original array in someway (?)
+                let zeroOffsetBuffer = new Uint8Array(added.chunk.length);
+                zeroOffsetBuffer.set(added.chunk, 0);
+                audioContext.decodeAudioData(
+                    zeroOffsetBuffer.buffer,
+                    (data) => {
+                        const frame = {
+                            buffer: data,
+                            timestamp: added.timestamp,
+                        };
+                        if (audioContext.state !== "running" && play) {
+                            pendingFrames = [];
+                            pendingFrames.push(frame);
+                            if (!resuming) {
+                                resuming = true;
+                                audioContext
+                                    .resume()
+                                    .then((r) => {
+                                        resuming = false;
+                                        renderFrame();
+                                    })
+                                    .catch((e) => {});
+                            }
+                        } else {
+                            pendingFrames.push(frame);
+                            if (underflow) {
+                                underflow = false;
+                                renderFrame();
+                            }
+                        }
+                    },
+                    (e) => {
+                        console.error("Failed to decode error", e);
+                    }
+                );
+            }
+        }
+    };
+    let cleanup: (() => void) | undefined = undefined;
+    return {
+        close: () => {
+            cleanup?.();
+        },
+        setProgress: (progress: number) => {
+            cleanup?.();
+        },
+        setSpeed: (value: number) => {},
+        setLive: () => {
+            if (!audioContext) {
+                setupAudioContext();
+            }
+            cleanup = () =>
+                streamDB.chunks.events.removeEventListener("change", listener);
+            streamDB.chunks.events.addEventListener("change", listener);
+        },
+        setVolume,
+        mute,
+        unmute,
+        play: () => {
+            (play = true), setupAudioContext();
+            renderFrame();
+        },
+        pause: () => {
+            cleanup();
+            play = false;
+            stop();
+        },
     };
 };
 
 type DBArgs = { db: MediaStreamDBs };
 type IdentityArgs = { node: PublicSignKey };
+type StreamControlFunction = ControlFunctions & {
+    close: () => void;
+};
+type Streams<T extends TrackSource> = {
+    source: T;
+    controls: StreamControlFunction;
+};
 
-let updatingStream: Promise<any>;
+let videoHeight = () => window.innerHeight;
+let videoWidth = () => window.innerWidth;
 
 export const View = (args: DBArgs | IdentityArgs) => {
     const [videoStream, setVideoStream] = useState<MediaStreamDBs | null>();
 
-    const cleanupRef = useRef<() => void>();
-    const videoStreamRef = useRef<HTMLVideoElement>();
-    const streamOptions = useRef<MediaStreamDB[]>([]);
+    /*  const offscreenCanvasRef = useRef<OffscreenCanvas>(); */
+    const canvasRef = useRef<HTMLCanvasElement>();
+    const lastCanvasRef = useRef<HTMLCanvasElement>();
+
+    const videoStreamOptions = useRef<Track<WebcodecsStreamDB>[]>([]);
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
         []
     );
     const [selectedResolutions, setSelectedResolutions] = useState<
         Resolution[]
     >([]);
+    const videoLoadingRef = useRef<Promise<Streams<WebcodecsStreamDB>>>();
+    const currentVideoRef = useRef<Streams<WebcodecsStreamDB>>(null);
+    const audioLoadingRef = useRef<Promise<Streams<AudioStreamDB>>>();
+    const currentAudioRef = useRef<Streams<AudioStreamDB>>(null);
 
-    const currentStreamRef = useRef<Promise<MediaStreamDB>>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const [streamerOnline, setStreamerOnline] = useState(false);
     const { peer } = usePeer();
+    const controls = useRef<StreamControlFunction[]>([]);
+    const [isPlaying, setIsPlaying] = useState(true);
 
     useEffect(() => {
         if (!peer?.libp2p) {
@@ -181,6 +362,11 @@ export const View = (args: DBArgs | IdentityArgs) => {
                         role: new ObserverType(),
                         sync: () => true,
                     }).then((vs) => {
+                        console.log(
+                            "OPENED DB",
+                            idArgs.node.hashcode(),
+                            vs.address.toString()
+                        );
                         setVideoStream(vs);
                     });
                 }
@@ -194,105 +380,299 @@ export const View = (args: DBArgs | IdentityArgs) => {
         (args as IdentityArgs).node?.hashcode(),
     ]);
 
-    const updateStream = async (
-        streamToOpen: MediaStreamDB,
-        playbackRef: HTMLVideoElement
+    const updateVideoStream = async (
+        streamToOpen: Track<WebcodecsStreamDB>
     ) => {
-        const current = await currentStreamRef.current;
-        await updatingStream;
-        if (current) {
-            cleanupRef.current();
-            updatingStream = current.drop();
-            const closeResult = await updatingStream;
+        await videoLoadingRef.current;
+        if (currentVideoRef.current) {
+            currentVideoRef.current.controls.close();
+            currentVideoRef.current.source?.drop();
+            controls.current = controls.current.filter(
+                (x) => x === currentVideoRef.current.controls
+            );
         }
 
-        // get stream with closest bitrate
-        currentStreamRef.current = peer
-            .open(streamToOpen, {
+        videoLoadingRef.current = new Promise((resolve, reject) => {
+            peer.open(streamToOpen.source, {
                 role: new ObserverType(),
                 sync: () => true,
             })
-            .then(async (s) => {
-                console.log("add listener!");
-                setSelectedResolutions([s.info.video.height as Resolution]);
-                await addStreamListener(s.chunks, playbackRef).then(
-                    (cleanup) => (cleanupRef.current = cleanup)
-                );
-                return s;
-            });
+                .then(async (s) => {
+                    setSelectedResolutions([
+                        s.decoderDescription.codedHeight as Resolution,
+                    ]);
+                    return {
+                        video: s,
+                        controls: await addVideoStreamListener(s, isPlaying),
+                    };
+                })
+                .then(({ video, controls: videoFns }) => {
+                    controls.current.push(videoFns);
+                    resolve({ source: video, controls: videoFns });
+                })
+                .catch(reject);
+        });
+
+        return videoLoadingRef.current.then((streams) => {
+            currentVideoRef.current = streams;
+            currentVideoRef.current.controls.setLive();
+        });
+    };
+
+    const updateAudioStream = async (streamToOpen: Track<AudioStreamDB>) => {
+        await audioLoadingRef.current;
+        if (currentAudioRef.current) {
+            currentAudioRef.current.controls.close();
+            await currentAudioRef.current.source?.drop();
+        }
+
+        // get stream with closest bitrate
+        let currentVideoTime: (() => number) | undefined = undefined;
+
+        audioLoadingRef.current = new Promise((resolve, reject) => {
+            peer.open(streamToOpen.source, {
+                role: new ObserverType(),
+                sync: () => true,
+            })
+                .then(async (s) => {
+                    await addAudioStreamListener(
+                        s,
+                        isPlaying,
+                        currentVideoTime
+                    ).then((audioFns) => {
+                        /*   let mergedControls = {
+                              setSpeed: (value) => {
+                                  audioFns.setSpeed(value)
+                                  videoFns.setSpeed(value)
+                              },
+                              setLive: () => {
+                                  audioFns.setLive()
+                                  videoFns.setLive()
+                              },
+                              setProgress: (value) => {
+                                  audioFns.setProgress(value);
+                                  videoFns.setProgress(value)
+                              },
+                              pause: () => {
+                                  audioFns.pause()
+                                  videoFns.pause()
+                                  setIsPlaying(false);
+                              },
+                              play: () => {
+                                  audioFns.play()
+                                  videoFns.play()
+                                  setIsPlaying(true);
+                              },
+                              close: () => {
+                                  audioFns.close()
+                                  videoFns.close()
+                              },
+                              setVolume: audioFns.setVolume,
+                              mute: audioFns.mute,
+                              unmute: audioFns.unmute,
+                            
+                          }; */
+                        controls.current.push(audioFns);
+                        resolve({ source: s, controls: audioFns });
+                    });
+                })
+                .catch(reject);
+        });
+
+        return audioLoadingRef.current.then((streams) => {
+            currentAudioRef.current = streams;
+            currentAudioRef.current.controls.setLive();
+        });
     };
 
     const playbackRefCb = useCallback(
         (node) => {
-            if (cleanupRef.current) {
-                cleanupRef.current();
+            if (currentAudioRef.current) {
+                currentAudioRef.current.source?.close();
             }
-            const playbackRef: HTMLVideoElement = node;
-            if (node instanceof HTMLVideoElement) {
-                videoStreamRef.current = playbackRef as HTMLVideoElement;
+            if (currentVideoRef.current) {
+                currentVideoRef.current.source?.close();
             }
 
-            if (peer && playbackRef && videoStream) {
-                playbackRef.onerror = (error) => {
-                    console.error("pb error", error);
-                };
-                setInterval(async () => {
-                    const results = await videoStream.streams.index.query(
-                        new DocumentQuery({ queries: [] })
-                    );
-                    const uniqueResults = results
-                        .map((x) => x.results)
-                        .flat()
-                        .map((x) => x.value)
-                        .filter(
-                            (v, ix, arr) =>
-                                v.active &&
-                                arr.findIndex((x) => x.id === v.id) === ix
-                        )
-                        .map((x) => x.db);
+            let setVideoSize = () =>
+                renderer.resize({ width: videoWidth(), height: videoHeight() });
 
-                    const newStreams = uniqueResults.filter(
-                        (x) => !streamOptions.current.find((y) => y.id === x.id)
-                    );
+            let newCanvas = false;
+            if (node) {
+                newCanvas = node != lastCanvasRef.current;
+                lastCanvasRef.current = node;
+            }
+            canvasRef.current = node as HTMLCanvasElement;
 
-                    const removedStreams = streamOptions.current.filter(
-                        (x) => !uniqueResults.find((y) => y.id === x.id)
-                    );
+            if (node && newCanvas) {
+                renderer.setup(node);
+                /* let resizeTimer: any = undefined;
+                window.onload = window.onresize = function () {
+                    clearTimeout(resizeTimer);
+                    resizeTimer = setTimeout(() => {
+                        console.log("set size", videoHeight(), videoWidth());
+                        setVideoSize();
+                    }, 100);
+                }; */
+            }
 
-                    const current = await currentStreamRef.current;
-                    let currentIsRemoved = !!removedStreams.find(
-                        (x) => x.id == current?.id
-                    );
+            if (peer && lastCanvasRef.current && videoStream) {
+                let updateStreamChoice = async () => {
+                    {
+                        const activeStreams =
+                            await videoStream.getActiveLocally();
+                        console.log("CHANGE!");
+                        const removedStreams =
+                            videoStreamOptions.current.filter(
+                                (x) => !activeStreams.find((y) => y.id === x.id)
+                            );
 
-                    if (
-                        uniqueResults.length > 0 &&
-                        (streamOptions.current.length === 0 || currentIsRemoved)
-                    ) {
-                        let wantedBitrate = currentIsRemoved
-                            ? current.info.video.bitrate
-                            : 1e5;
-                        uniqueResults.sort(
-                            (a, b) =>
-                                Math.abs(a.info.video.bitrate - wantedBitrate) -
-                                Math.abs(b.info.video.bitrate - wantedBitrate)
+                        await videoLoadingRef.current;
+                        await audioLoadingRef.current;
+
+                        let currentVideoIsRemoved = !!removedStreams.find(
+                            (x) => x.id == currentVideoRef.current?.source.id
                         );
-                        let streamToOpen = uniqueResults[0];
-                        await updateStream(streamToOpen, playbackRef);
+
+                        /*          console.log(
+                                 uniqueResults.map((x) => x.active + "-" + x.id),
+                                 currentVideoIsRemoved,
+                                 videoStreamOptions.current.length
+                             ); */
+
+                        let videoResults = activeStreams.filter(
+                            (x) => x.source instanceof WebcodecsStreamDB
+                        ) as Track<WebcodecsStreamDB>[];
+                        let audioResult = activeStreams.filter(
+                            (x) => x.source instanceof AudioStreamDB
+                        ) as Track<AudioStreamDB>[];
+
+                        console.log(
+                            "CHANGE? ",
+                            videoResults.length,
+                            videoStreamOptions.current.length === 0,
+                            currentVideoIsRemoved
+                        );
+
+                        const currentOptions = videoStreamOptions.current;
+                        videoStreamOptions.current = videoResults;
+                        if (
+                            videoResults.length > 0 &&
+                            (currentOptions.length === 0 ||
+                                currentVideoIsRemoved)
+                        ) {
+                            let wantedHeight = currentVideoIsRemoved
+                                ? currentVideoRef.current.source
+                                      .decoderDescription.codedHeight
+                                : 0;
+                            videoResults.sort(
+                                (a, b) =>
+                                    Math.abs(
+                                        a.source.decoderDescription
+                                            .codedHeight - wantedHeight
+                                    ) -
+                                    Math.abs(
+                                        b.source.decoderDescription
+                                            .codedHeight - wantedHeight
+                                    )
+                            );
+                            let streamToOpen = videoResults[0];
+                            videoHeight = () =>
+                                /*  Math.min(
+                                     (window.innerWidth /
+                                         streamToOpen.source.decoderDescription
+                                             .codedWidth) *
+                                     streamToOpen.source.decoderDescription
+                                         .codedHeight,
+                                     window.innerHeight
+                                 ); */
+                                streamToOpen.source.decoderDescription
+                                    .codedHeight;
+                            videoWidth = () =>
+                                /*  Math.min(
+                                     (window.innerHeight /
+                                         streamToOpen.source.decoderDescription
+                                             .codedHeight) *
+                                     streamToOpen.source.decoderDescription
+                                         .codedWidth,
+                                     window.innerWidth
+                                 ); */
+                                streamToOpen.source.decoderDescription
+                                    .codedWidth;
+
+                            setVideoSize();
+                            /*    console.log(
+                               "update stream!",
+                               streamToOpen.source.decoderDescription.codedWidth,
+                               streamToOpen.source.decoderDescription.codedHeight
+                           ); */
+
+                            console.log(
+                                "IS ACTIVE",
+                                streamToOpen.id,
+                                streamToOpen.active,
+                                currentVideoIsRemoved
+                            );
+                            await updateVideoStream(streamToOpen);
+                            /*    console.log("update stream done");
+                           console.log(
+                               "resolutions options",
+                               videoResults.map(
+                                   (x) => x.source.decoderDescription.codedHeight
+                               )
+                           ); */
+                        }
+                        setResolutionOptions(
+                            [
+                                ...videoResults.map(
+                                    (x) =>
+                                        x.source.decoderDescription.codedHeight
+                                ),
+                            ].sort() as Resolution[]
+                        );
+
+                        if (
+                            audioResult.length > 0 &&
+                            (!currentAudioRef.current ||
+                                !!removedStreams.find(
+                                    (x) =>
+                                        x.id ==
+                                        currentAudioRef.current?.source.id
+                                ))
+                        ) {
+                            /*       console.log(
+                                  "open audio stream",
+                                  audioResult.length,
+                                  currentAudioRef.current
+                              ); */
+
+                            await updateAudioStream(audioResult[0]);
+                        }
+
+                        setStreamerOnline(
+                            peer.libp2p.services.pubsub
+                                .getSubscribers(videoStream.allLogs[0].idString)
+                                .has(videoStream.sender.hashcode())
+                        );
                     }
+                };
+                let updateStreamTimeout:
+                    | ReturnType<typeof setTimeout>
+                    | undefined = undefined;
+                videoStream.streams.events.addEventListener(
+                    "change",
+                    async (_e) => {
+                        clearTimeout(updateStreamTimeout);
+                        updateStreamTimeout = setTimeout(() => {
+                            updateStreamChoice();
+                        }, 50);
+                    }
+                );
 
-                    streamOptions.current = uniqueResults;
-                    setResolutionOptions(
-                        [
-                            ...uniqueResults.map((x) => x.info.video.height),
-                        ].sort() as Resolution[]
-                    );
-
-                    setStreamerOnline(
-                        peer.libp2p.directsub
-                            .getSubscribers(videoStream.address.toString())
-                            .has(videoStream.sender.hashcode())
-                    );
-                }, 1000);
+                videoStream.syncActive();
+                setTimeout(() => {
+                    videoStream.syncActive();
+                }, 3000); // TODO do better for joining peers
             }
         },
         [peer, videoStream]
@@ -301,34 +681,38 @@ export const View = (args: DBArgs | IdentityArgs) => {
     return (
         <Grid container direction="column">
             <Grid item>
-                <div className="container" ref={containerRef}>
+                <div
+                    data-iframe-height
+                    className="container"
+                    ref={containerRef}
+                >
                     <div className="video-wrapper">
-                        <video
+                        <canvas
                             id="stream-playback"
+                            style={{ width: "100%", height: "auto" }}
                             ref={playbackRefCb}
-                            width="100%"
-                            height="100%"
-                            muted
-                            autoPlay
-                            loop
+                            width="300px"
+                            height="300px"
                         />
-                        {streamerOnline && (
+                        {streamerOnline && !!controls && (
                             <Controls
-                                isStreamer={false}
+                                progress={0.3}
                                 selectedResolution={selectedResolutions}
                                 resolutionOptions={resolutionOptions}
-                                videoRef={videoStreamRef.current}
+                                viewRef={canvasRef.current}
                                 onQualityChange={(settings) => {
                                     const setting = settings[0];
                                     if (!setting) {
                                         return;
                                     }
                                     const streamToOpen =
-                                        streamOptions.current.find(
+                                        videoStreamOptions.current.find(
                                             (x) =>
-                                                x.info.video.height ===
+                                                x.source.decoderDescription
+                                                    .codedHeight ===
                                                 setting.video.height
                                         );
+
                                     let videoRef =
                                         document.getElementById(
                                             "stream-playback"
@@ -336,13 +720,45 @@ export const View = (args: DBArgs | IdentityArgs) => {
                                     if (!videoRef) {
                                         return;
                                     }
-                                    return updateStream(
-                                        streamToOpen,
-                                        document.getElementById(
-                                            "stream-playback"
-                                        ) as HTMLVideoElement
-                                    );
+                                    return updateVideoStream(streamToOpen);
                                 }}
+                                isPlaying={isPlaying}
+                                pause={() => {
+                                    setIsPlaying(false);
+                                    controls.current.forEach((c) => c.pause());
+                                }}
+                                play={() => {
+                                    setIsPlaying(true);
+                                    controls.current.forEach((c) => c.play());
+                                }}
+                                setLive={() =>
+                                    controls.current.forEach((c) => c.setLive())
+                                }
+                                setProgress={(p) =>
+                                    controls.current.forEach((c) =>
+                                        c.setProgress(p)
+                                    )
+                                }
+                                setSpeed={(p) =>
+                                    controls.current.forEach((c) =>
+                                        c.setSpeed(p)
+                                    )
+                                }
+                                mute={() =>
+                                    controls.current.forEach(
+                                        (c) => c.mute && c.mute()
+                                    )
+                                }
+                                unmute={() =>
+                                    controls.current.forEach(
+                                        (c) => c.unmute && c.unmute()
+                                    )
+                                }
+                                setVolume={(v) =>
+                                    controls.current.forEach(
+                                        (c) => c.setVolume && c.setVolume(v)
+                                    )
+                                }
                             ></Controls>
                         )}
                         {!streamerOnline && (

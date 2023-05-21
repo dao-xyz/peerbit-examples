@@ -9,6 +9,7 @@ import {
 import { v4 as uuid } from "uuid";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 
+import { sha256Sync } from "@dao-xyz/peerbit-crypto";
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class Post {
     @field({ type: "string" })
@@ -39,14 +40,18 @@ export class Room extends Program {
         creator: PublicSignKey;
         messages?: Documents<Post>;
     }) {
-        super({ id: properties.creator.hashcode() });
+        super();
         this.creator = properties.creator;
         this.messages =
             properties.messages ||
-            new Documents({
+            new Documents<Post>({
                 immutable: false,
                 index: new DocumentIndex({ indexBy: "id" }),
             });
+    }
+
+    get id() {
+        return this.creator.hashcode();
     }
 
     // Setup lifecycle, will be invoked on 'open'
@@ -73,7 +78,7 @@ export class Room extends Program {
                         if (
                             !get ||
                             !entry.signatures.find((x) =>
-                                x.publicKey.equals(get.results[0].value.from)
+                                x.publicKey.equals(get.from)
                             )
                         ) {
                             return false;

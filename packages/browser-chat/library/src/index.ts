@@ -9,6 +9,7 @@ import {
 import { v4 as uuid } from "uuid";
 import { Entry } from "@dao-xyz/peerbit-log";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { randomBytes } from "@dao-xyz/peerbit-crypto";
 
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class Post {
@@ -37,7 +38,7 @@ export class Room extends Program {
     messages: Documents<Post>;
 
     constructor(properties: { name: string; messages?: Documents<Post> }) {
-        super({ id: properties.name });
+        super();
         this.name = properties.name;
         this.messages =
             properties.messages ||
@@ -45,6 +46,10 @@ export class Room extends Program {
                 immutable: false,
                 index: new DocumentIndex({ indexBy: "id" }),
             });
+    }
+
+    get id() {
+        return this.name;
     }
 
     // Setup lifecycle, will be invoked on 'open'
@@ -71,7 +76,7 @@ export class Room extends Program {
                         if (
                             !get ||
                             !entry.signatures.find((x) =>
-                                x.publicKey.equals(get.results[0].value.from)
+                                x.publicKey.equals(get.from)
                             )
                         ) {
                             return false;
@@ -92,15 +97,18 @@ export class Room extends Program {
 
 @variant("lobby")
 export class Lobby extends Program {
+    @field({ type: Uint8Array })
+    id: Uint8Array;
     @field({ type: Documents })
     rooms: Documents<Room>;
 
-    constructor(properties: { id?: string; rooms?: Documents<Room> }) {
-        super(properties);
+    constructor(properties: { id?: Uint8Array; rooms?: Documents<Room> }) {
+        super();
+        this.id = properties.id || randomBytes(32);
         this.rooms =
             properties.rooms ||
             new Documents<Room>({
-                index: new DocumentIndex({ indexBy: "id" }),
+                index: new DocumentIndex({ indexBy: "name" }),
             });
     }
 
