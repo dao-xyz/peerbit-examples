@@ -1,6 +1,5 @@
 import { Peerbit } from "@dao-xyz/peerbit";
 import { LSession } from "@dao-xyz/peerbit-test-utils";
-import { waitFor } from "@dao-xyz/peerbit-time";
 import { jest } from "@jest/globals";
 import { Name, Names } from "..";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";

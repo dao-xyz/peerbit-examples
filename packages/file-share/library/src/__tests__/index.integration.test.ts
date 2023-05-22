@@ -1,10 +1,11 @@
 import { Peerbit } from "@dao-xyz/peerbit";
-import { LSession, waitForPeers } from "@dao-xyz/peerbit-test-utils";
+import { LSession } from "@dao-xyz/peerbit-test-utils";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";
 import { Files } from "..";
 import { ObserverType } from "@dao-xyz/peerbit-program";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
+import { waitForSubscribers } from "@dao-xyz/libp2p-direct-sub";
 
 describe("index", () => {
     let session: LSession, peer: Peerbit, peer2: Peerbit;
@@ -27,7 +28,7 @@ describe("index", () => {
         await filestore.create("tiny file", smallFile);
 
         const filestoreReader = await peer2.open<Files>(filestore.address);
-        await waitForPeers(
+        await waitForSubscribers(
             peer2.libp2p,
             peer.libp2p,
             filestore.address.toString()
@@ -47,7 +48,7 @@ describe("index", () => {
         const filestoreReader = await peer2.open<Files>(filestore.address, {
             role: new ObserverType(),
         });
-        await waitForPeers(
+        await waitForSubscribers(
             peer2.libp2p,
             peer.libp2p,
             filestore.address.toString()
@@ -72,7 +73,7 @@ describe("index", () => {
             expect(filestore.files.index.size).toEqual(3);
 
             const filestoreReader = await peer2.open<Files>(filestore.address);
-            await waitForPeers(
+            await waitForSubscribers(
                 peer2.libp2p,
                 peer.libp2p,
                 filestore.address.toString()
@@ -95,7 +96,7 @@ describe("index", () => {
             expect(filestore.files.index.size).toEqual(57);
 
             const filestoreReader = await peer2.open<Files>(filestore.address);
-            await waitForPeers(
+            await waitForSubscribers(
                 peer2.libp2p,
                 peer.libp2p,
                 filestore.address.toString()

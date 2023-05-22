@@ -76,12 +76,10 @@ export class WebGLRenderer implements Renderer {
         }) as WebGL2RenderingContext);
 
         const vertexShader = gl.createShader(gl.VERTEX_SHADER);
-        const halfFloat = gl.getExtension("OES_texture_half_float");
-        const t2 = gl.getExtension("OES_texture_half_float_linear");
 
-        console.log("HF?", halfFloat, t2);
         gl.shaderSource(vertexShader, WebGLRenderer.vertexShaderSource);
         gl.compileShader(vertexShader);
+
         if (!gl.getShaderParameter(vertexShader, gl.COMPILE_STATUS)) {
             throw gl.getShaderInfoLog(vertexShader);
         }

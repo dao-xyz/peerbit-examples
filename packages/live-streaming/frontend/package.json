@@ -28,6 +28,7 @@
         "@mui/icons-material": "^5.10.16"
     },
     "devDependencies": {
+        "@types/audioworklet": "^0.0.46",
         "@types/dom-mediacapture-transform": "^0.1.4",
         "@webgpu/types": "^0.1.32",
         "@types/dom-webcodecs": "^0.1.5",

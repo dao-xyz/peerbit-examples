@@ -18,6 +18,7 @@
         "jsx": "react-jsx",
         "types": [
             "@types/dom-webcodecs",
+            "@types/audioworklet",
             "@types/dom-mediacapture-transform",
             "@webgpu/types"
         ]

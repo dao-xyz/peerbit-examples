@@ -7,14 +7,13 @@ import { waitForSubscribers } from "@dao-xyz/libp2p-direct-sub";
 import {
     DocumentQuery,
     StringMatch,
-    Results,
     StringMatchMethod,
 } from "@dao-xyz/peerbit-document";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";
+import { delay } from "@dao-xyz/peerbit-time";
 
 describe("index", () => {
     let session: LSession, peer: Peerbit, peer2: Peerbit;
-    jest.setTimeout(60 * 1000);
 
     beforeAll(async () => {
         session = await LSession.connected(2);
@@ -48,7 +47,7 @@ describe("index", () => {
         await waitForSubscribers(
             peer.libp2p,
             peer2.libp2p,
-            lobby2.address.toString()
+            lobby2.rooms.log.idString
         );
 
         // Peer2 can "query" for rooms if peer2 does not have anything replicated locally

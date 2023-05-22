@@ -30,6 +30,8 @@ import { connect } from "extendable-media-recorder-wav-encoder";
 import useVideoPlayer from "./controller/useVideoPlayer";
 import { Controls } from "./controller/Control";
 import PQueue from "p-queue";
+import { WAVEncoder } from "./audio2.js";
+import { arrayBuffer } from "stream/consumers";
 
 let audioEncoderConnect = register(await connect());
 
@@ -43,6 +45,24 @@ if (PACK_PERFECTLY) {
     globalThis.Buffer = Buffer;
 }
 /* globalThis.VSTATS = new Map(); */
+
+const wavEncoder = new WAVEncoder();
+
+function exportFile(wavRawData: Uint8Array) {
+    const link = document.createElement("a");
+    const blob = new Blob([wavRawData], { type: "audio/wav" });
+    const audioURL = URL.createObjectURL(blob);
+    link.style.display = "none";
+    link.href = audioURL;
+    link.download = "sample.wav";
+    document.body.appendChild(link);
+    link.click();
+
+    setTimeout(() => {
+        document.body.removeChild(link);
+        window.URL.revokeObjectURL(audioURL);
+    }, 100);
+}
 
 interface VideoStream {
     video?: {
@@ -395,8 +415,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 /*    if (videoElementRef.src?.length > 0) {
                        return;
                    } */
-                videoElementRef.muted = true;
-                videoElementRef.src = import.meta.env.BASE_URL + "noise.mp4";
+                // videoElementRef.muted = true;
+                videoElementRef.src =
+                    import.meta.env.BASE_URL + "birdsmall.mp4";
                 videoElementRef.load();
                 break;
             case "media":
@@ -514,7 +535,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
         console.log("START!");
         let tempStartId = (startId.current = startId.current + 1);
-        let stream: MediaStream = videoRef.srcObject as any as MediaStream;
         if (videoRef && streamType) {
             // TODO why do we need this here?
             if (
@@ -531,28 +551,104 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
         let audioStreamDB: AudioStreamDB | undefined = undefined;
 
-        // use srcObject
-        if (!stream) {
-            let fps = 0;
-            if (videoRef.captureStream) {
-                stream = videoRef.captureStream(fps);
-            } else if (videoRef.mozCaptureStream) {
-                stream = videoRef.mozCaptureStream(fps);
-            } else {
-                console.error(
-                    "Stream capture is not supported",
-                    videoRef.captureStream
-                );
-                stream = null;
-            }
-        }
+        // Create a MediaElementAudioSourceNode from the video element¨
+        console.log("INIT");
 
+        // const audioContext: AudioContext = new (window.AudioContext || globalThis["webkitAudioContext"])();
+
+        /* const sourceNode = audioContext.createMediaElementSource(videoRef);
+
+        // Create a ScriptProcessorNode to process the audio
+        const scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
+
+        // Connect the sourceNode to the scriptNode
+        sourceNode.connect(scriptNode);
+
+        // Connect the scriptNode to the destination (output)
+        scriptNode.connect(audioContext.destination);
+
+        // Add an event listener to the scriptNode's audioprocess event
+        scriptNode.addEventListener('audioprocess', (event) => {
+            const inputBuffer = event.inputBuffer;
+            const outputBuffer = event.outputBuffer;
+
+            console.log("GOT EVENT", inputBuffer, outputBuffer)
+            // Loop through each channel and copy the audio data
+            for (let channel = 0; channel < outputBuffer.numberOfChannels; channel++) {
+                const inputData = inputBuffer.getChannelData(channel);
+                const outputData = outputBuffer.getChannelData(channel);
+
+                // Copy the audio data from input to output
+                for (let i = 0; i < inputBuffer.length; i++) {
+                    outputData[i] = inputData[i];
+                }
+            }
+        }); */
+
+        await wavEncoder.init(videoRef);
+
+        wavEncoder.play();
+
+        const t = async () => {
+            let lastAudioTimestamp: bigint = 0n;
+            let lastAudioTime = +new Date();
+
+            audioStreamDB = await peer.open(
+                new AudioStreamDB(peer.idKey.publicKey, 48000),
+                {
+                    role: new ReplicatorType(),
+                }
+            );
+
+            const dbs = await mediaStreamDBs.current;
+            await dbs.streams.put(
+                new Track({ active: true, source: audioStreamDB })
+            );
+            /*   let once = false */
+            wavEncoder.node.port.onmessage = (ev) => {
+                const { audioBuffer } = ev.data as { audioBuffer: Uint8Array };
+
+                /*   if (onceA) {
+                      return;
+                  }
+                  onceA = true; */
+                /*           console.log("X", audioBuffer)
+                          exportFile(audioBuffer) */
+                /*    exportFile(audioBuffer);
+                   once = true; */
+                console.log("EV");
+                let currentTime = +new Date();
+                let timestamp =
+                    lastVideoFrameTimestamp ||
+                    BigInt((currentTime - lastAudioTime) * 1000) +
+                        lastAudioTimestamp;
+                lastAudioTime = currentTime;
+                audioStreamDB.chunks.put(
+                    new Chunk({ type: "", chunk: audioBuffer, timestamp }),
+                    {
+                        unique: true,
+                    }
+                );
+                lastAudioTimestamp = timestamp;
+            };
+        };
+        t();
+
+        const stream = videoRef.captureStream();
+        console.log("STREAM! ", stream);
+        let onceA = false;
+        let onceB = false;
         if (stream.getAudioTracks().length > 0) {
             const audioStream = new MediaStream(stream.getAudioTracks());
             await waitFor(
                 () =>
                     audioStream.getAudioTracks()[0].getSettings().sampleRate !==
                     undefined
+            );
+
+            console.log(
+                "RATE",
+                audioStream.getAudioTracks()[0].getSettings().sampleRate
             );
             await audioEncoderConnect;
             const recorder = new EMediaRecorder(audioStream, {
@@ -575,7 +671,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
             // Set record to <audio> when recording will be finished
             let wavHeader: Uint8Array | undefined = undefined;
-            let lastAudioTimestamp: bigint = undefined;
+            let lastAudioTimestamp: bigint = 0n;
             let lastAudioTime = +new Date();
 
             recorder.addEventListener("dataavailable", (e) => {
@@ -598,6 +694,11 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         BigInt((currentTime - lastAudioTime) * 1000) +
                             lastAudioTimestamp;
                     lastAudioTime = currentTime;
+                    if (onceB) {
+                        return;
+                    }
+                    onceB = true;
+                    console.log("Y", uint8array.slice(0, 100));
                     audioStreamDB.chunks.put(
                         new Chunk({ type: "", chunk: uint8array, timestamp }),
                         {
@@ -611,7 +712,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
             });
 
             // Start recording
-            recorder.start(100);
+            recorder.start(8000);
         }
 
         /*   const videoProcessor = new MediaStreamTrackProcessor({
@@ -637,7 +738,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 }
 
                 counter += 1;
-                console.log(counter / ((+new Date() - t0) / 1000));
+                /// console.log(counter / ((+new Date() - t0) / 1000));
                 const frame = new VideoFrame(videoRef);
                 for (const videoEncoder of videoEncoders.current) {
                     const encoder = videoEncoder.encoder();
@@ -709,13 +810,13 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 }
 
                 await frame.close();
-                if (/* false &&  */ "requestVideoFrameCallback" in videoRef) {
+                if ("requestVideoFrameCallback" in videoRef) {
                     videoRef.requestVideoFrameCallback(frameFn);
                 } else {
                     requestAnimationFrame(frameFn);
                 }
             };
-            if (/* false && */ "requestVideoFrameCallback" in videoRef) {
+            if ("requestVideoFrameCallback" in videoRef) {
                 videoRef.requestVideoFrameCallback(frameFn);
             } else {
                 requestAnimationFrame(frameFn);
@@ -865,7 +966,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 <div className="container">
                     <div className="video-wrapper">
                         <video
-                            style={{ pointerEvents: "none" }}
+                            crossOrigin="anonymous" /* Allow createMediaElementSource */
                             data-iframe-height
                             ref={videoRef}
                             height="auto"
@@ -875,7 +976,13 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                     e.currentTarget as HTMLVideoElementWithCaptureStream
                                 )
                             }
-                            onEnded={onEnd}
+                            onPause={() => {
+                                wavEncoder.pause();
+                            }}
+                            onEnded={() => {
+                                onEnd();
+                                wavEncoder.pause();
+                            }}
                             autoPlay
                             loop
                             onClick={() =>
@@ -883,7 +990,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                     ? videoRef.current.play()
                                     : videoRef.current.pause()
                             }
-                            muted={streamType.current.type === "noise"}
+                            muted={
+                                false
+                            } /* {streamType.current.type === "noise"} */
                         ></video>
                         <Controls
                             selectedResolution={

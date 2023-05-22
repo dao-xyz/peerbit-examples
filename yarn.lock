@@ -4770,6 +4770,11 @@
   resolved "https://registry.yarnpkg.com/@tsconfig/node16/-/node16-1.0.4.tgz#0b92dcc0cc1c81f6f306a381f28e31b1a56536e9"
   integrity sha512-vxhUy4J8lyeyinH7Azl1pdd43GJhZH/tP2weN8TntQblOY+A0XbT8DJk1/oCPuOOyg/Ja757rG0CgHcWC8OfMA==
 
+"@types/audioworklet@^0.0.46":
+  version "0.0.46"
+  resolved "https://registry.yarnpkg.com/@types/audioworklet/-/audioworklet-0.0.46.tgz#a03c3a772f92e889bb36e4ca0ee1547abeb98e97"
+  integrity sha512-LWJ9gC7sTsV/r8Vud0+WChc18tSHtYzr0/z4IFVtDuCQ2nsDxWM5yUNsVIN64F5foipNzGTHq3GmnyLhosJ9Fw==
+
 "@types/babel__core@^7.0.0", "@types/babel__core@^7.1.14":
   version "7.20.0"
   resolved "https://registry.yarnpkg.com/@types/babel__core/-/babel__core-7.20.0.tgz#61bc5a4cae505ce98e1e36c5445e4bee060d8891"
