@@ -1,25 +1,20 @@
 import { Peerbit } from "@dao-xyz/peerbit";
 import { LSession } from "@dao-xyz/peerbit-test-utils";
-import { waitFor } from "@dao-xyz/peerbit-time";
-import { jest } from "@jest/globals";
 import { Name, Names } from "..";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";
 import { delay } from "@dao-xyz/peerbit-time";
 import { Ed25519Keypair, PreHash } from "@dao-xyz/peerbit-crypto";
 import { randomBytes } from "@dao-xyz/peerbit-crypto";
+
 describe("index", () => {
-    let session: LSession, peer: Peerbit, peer2: Peerbit;
-    jest.setTimeout(60 * 1000);
+    let peer: Peerbit;
 
     beforeAll(async () => {
-        session = await LSession.connected(2);
-        peer = await Peerbit.create({ libp2p: session.peers[0] });
-        peer2 = await Peerbit.create({ libp2p: session.peers[1] });
-        await delay(2000);
+        peer = await Peerbit.create();
     });
 
     afterAll(async () => {
-        await session.stop();
+        await peer.stop();
     });
 
     it("one name", async () => {

@@ -6,7 +6,7 @@ import {
     DocumentQuery,
     StringMatch,
 } from "@dao-xyz/peerbit-document";
-import { sha256Base64Sync } from "@dao-xyz/peerbit-crypto";
+import { sha256Base64Sync, randomBytes } from "@dao-xyz/peerbit-crypto";
 import {
     createBlock,
     getBlockValue,
@@ -181,11 +181,15 @@ export class LargeFile extends AbstractFile {
 
 @variant("files")
 export class Files extends Program {
+    @field({ type: Uint8Array })
+    id: Uint8Array;
+
     @field({ type: Documents })
     files: Documents<AbstractFile>;
 
-    constructor() {
+    constructor(id: Uint8Array = randomBytes(32)) {
         super();
+        this.id = id;
         this.files = new Documents({
             immutable: false,
             index: new DocumentIndex({ indexBy: "id" }),
@@ -200,7 +204,11 @@ export class Files extends Program {
             file.byteLength > TINY_FILE_SIZE_LIMIT &&
             file.byteLength <= SMALL_FILE_SIZE_LIMIT
         ) {
-            toPut = await SmallFile.create(name, file, this.libp2p.directblock);
+            toPut = await SmallFile.create(
+                name,
+                file,
+                this.libp2p.services.blocks
+            );
         } else {
             toPut = await LargeFile.create(name, file, this);
         }
@@ -240,20 +248,18 @@ export class Files extends Program {
                 )
                 .then((results) => {
                     for (const result of results) {
-                        if (result.results.length > 0) {
-                            result.results[0].value
-                                .getFile(this)
-                                .then((file) => {
-                                    clearTimeout(timout);
-                                    stopSearch && stopSearch();
-                                    resolve(file);
-                                })
-                                .catch((error) => {
-                                    clearTimeout(timout);
-                                    stopSearch && stopSearch();
-                                    reject(error);
-                                });
-                        }
+                        result
+                            .getFile(this)
+                            .then((file) => {
+                                clearTimeout(timout);
+                                stopSearch && stopSearch();
+                                resolve(file);
+                            })
+                            .catch((error) => {
+                                clearTimeout(timout);
+                                stopSearch && stopSearch();
+                                reject(error);
+                            });
                     }
                 });
         });
@@ -277,16 +283,14 @@ export class Files extends Program {
                 )
                 .then((results) => {
                     for (const result of results) {
-                        if (result.results.length > 0) {
-                            result.results[0].value
-                                .getFile(this)
-                                .then((file) => {
-                                    resolve(file);
-                                })
-                                .catch((error) => {
-                                    reject(error);
-                                });
-                        }
+                        result
+                            .getFile(this)
+                            .then((file) => {
+                                resolve(file);
+                            })
+                            .catch((error) => {
+                                reject(error);
+                            });
                     }
                 })
                 .catch(() => {

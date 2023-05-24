@@ -1,29 +1,27 @@
 import { Peerbit } from "@dao-xyz/peerbit";
 import { LSession } from "@dao-xyz/peerbit-test-utils";
 import { waitFor } from "@dao-xyz/peerbit-time";
-import { jest } from "@jest/globals";
 import { Post, Room, Lobby } from "..";
 import { waitForSubscribers } from "@dao-xyz/libp2p-direct-sub";
 import {
     DocumentQuery,
     StringMatch,
-    Results,
     StringMatchMethod,
 } from "@dao-xyz/peerbit-document";
 import { ReplicatorType } from "@dao-xyz/peerbit-program";
 
 describe("index", () => {
-    let session: LSession, peer: Peerbit, peer2: Peerbit;
-    jest.setTimeout(60 * 1000);
+    let peer: Peerbit, peer2: Peerbit;
 
     beforeAll(async () => {
-        session = await LSession.connected(2);
-        peer = await Peerbit.create({ libp2p: session.peers[0] });
-        peer2 = await Peerbit.create({ libp2p: session.peers[1] });
+        peer = await Peerbit.create();
+        peer2 = await Peerbit.create();
+        await peer.dial(peer2);
     });
 
     afterAll(async () => {
-        await session.stop();
+        await peer.stop();
+        await peer2.stop();
     });
 
     it("can post", async () => {
@@ -48,7 +46,7 @@ describe("index", () => {
         await waitForSubscribers(
             peer.libp2p,
             peer2.libp2p,
-            lobby2.address.toString()
+            lobby2.rooms.log.idString
         );
 
         // Peer2 can "query" for rooms if peer2 does not have anything replicated locally
@@ -64,6 +62,7 @@ describe("index", () => {
                 ],
             }),
             {
+                local: true,
                 remote: {
                     timeout: 3000,
                 },
