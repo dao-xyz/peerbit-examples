@@ -11,7 +11,7 @@ import {
 import { ObserverType } from "@dao-xyz/peerbit-program";
 import { Grid } from "@mui/material";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
-import { DocumentQuery, DocumentsChange } from "@dao-xyz/peerbit-document";
+import { DocumentsChange } from "@dao-xyz/peerbit-document";
 import "./View.css";
 import CatOffline from "/catbye64.png";
 import { Controls } from "./controller/Control.js";
@@ -361,6 +361,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                     peer.open(new MediaStreamDBs(idArgs.node), {
                         role: new ObserverType(),
                         sync: () => true,
+                        reset: true, // TODO function without reset
                     }).then((vs) => {
                         console.log(
                             "OPENED DB",
@@ -396,6 +397,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
             peer.open(streamToOpen.source, {
                 role: new ObserverType(),
                 sync: () => true,
+                reset: true, // TODO function without reset
             })
                 .then(async (s) => {
                     setSelectedResolutions([
