@@ -5,11 +5,9 @@ import {
     WebcodecsStreamDB,
     Track,
     MediaStreamDBs,
-    MediaStreamInfo,
-    VideoInfo,
     AudioStreamDB,
 } from "../database";
-import { ReplicatorType, ObserverType } from "@dao-xyz/peerbit-program";
+import { ReplicatorType } from "@dao-xyz/peerbit-program";
 import { Buffer } from "buffer";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import { Grid } from "@mui/material";
@@ -22,18 +20,11 @@ import {
     RESOLUTIONS,
 } from "../controls/settings.js";
 
-import {
-    MediaRecorder as EMediaRecorder,
-    register,
-} from "extendable-media-recorder";
-import { connect } from "extendable-media-recorder-wav-encoder";
-import useVideoPlayer from "./controller/useVideoPlayer";
 import { Controls } from "./controller/Control";
 import PQueue from "p-queue";
-import { WAVEncoder } from "./audio2.js";
-import { arrayBuffer } from "stream/consumers";
-
-let audioEncoderConnect = register(await connect());
+import { WAVEncoder } from "./audio.js";
+import TickWorker from "./tickWorker.js?worker";
+import { NextTick, Stop } from "./tickWorker.js";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
@@ -48,21 +39,14 @@ if (PACK_PERFECTLY) {
 
 const wavEncoder = new WAVEncoder();
 
-function exportFile(wavRawData: Uint8Array) {
-    const link = document.createElement("a");
-    const blob = new Blob([wavRawData], { type: "audio/wav" });
-    const audioURL = URL.createObjectURL(blob);
-    link.style.display = "none";
-    link.href = audioURL;
-    link.download = "sample.wav";
-    document.body.appendChild(link);
-    link.click();
-
-    setTimeout(() => {
-        document.body.removeChild(link);
-        window.URL.revokeObjectURL(audioURL);
-    }, 100);
-}
+let inBackground = false;
+document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+        inBackground = true;
+    } else {
+        inBackground = false;
+    }
+});
 
 interface VideoStream {
     video?: {
@@ -79,11 +63,12 @@ interface VideoStream {
 let lastVideoFrameTimestamp: bigint | undefined = undefined;
 const openVideoStreamQueue = new PQueue({ concurrency: 1 });
 
+const DEFAULT_QUALITY = resolutionToSourceSetting(360);
+
+const clampedFrameRate = (fps: number) => Math.max(Math.min(fps, 60), 1);
 export const Stream = (args: { node: PublicSignKey }) => {
     const streamType = useRef<StreamType>({ type: "noise" });
-    const [quality, setQuality] = useState<SourceSetting[]>([
-        resolutionToSourceSetting(360),
-    ]);
+    const [quality, setQuality] = useState<SourceSetting[]>([DEFAULT_QUALITY]);
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
         []
     );
@@ -91,9 +76,39 @@ export const Stream = (args: { node: PublicSignKey }) => {
     const { peer } = usePeer();
     const mediaStreamDBs = useRef<Promise<MediaStreamDBs>>(null);
     const videoEncoders = useRef<VideoStream[]>([]);
+    const tickWorkerRef = useRef<Worker>();
+    const lastFrameRate = useRef(30);
+    const scheduleFrameFn = useRef<() => void>();
     const startId = useRef(0);
     let videoRef = useRef<HTMLVideoElement>();
 
+    useEffect(() => {
+        if (!tickWorkerRef.current) {
+            tickWorkerRef.current = new TickWorker();
+            let listener = () => {
+                if (document.hidden) {
+                    tickWorkerRef.current.postMessage({
+                        type: "next",
+                        tps: clampedFrameRate(lastFrameRate.current),
+                    } as NextTick);
+                } else {
+                    tickWorkerRef.current.postMessage({ type: "stop" } as Stop);
+                }
+            };
+
+            document.addEventListener("visibilitychange", listener);
+            const tickListener = () => {
+                scheduleFrameFn.current();
+            };
+            tickWorkerRef.current.addEventListener("message", tickListener);
+
+            return () => {
+                document.removeEventListener("visibilitychange", listener);
+                tickWorkerRef.current.terminate();
+                tickWorkerRef.current = undefined;
+            };
+        }
+    }, []);
     useEffect(() => {
         if (videoLoadedOnce.current) {
             return;
@@ -145,14 +160,11 @@ export const Stream = (args: { node: PublicSignKey }) => {
             streamType.current = properties.streamType;
         }
 
-        let qualitySetting = properties.quality || quality;
         let newQualities: SourceSetting[] = [];
 
         await waitFor(() => !!mediaStreamDBs.current);
         const dbs = await mediaStreamDBs.current;
-        //  const allStreams = [...dbs.streams.index.index.values()].filter((x) => x.value.active);
 
-        // console.log('update stream!', properties)
         let newVideoEncoders: VideoStream[] = [];
         let existingVideoEncoders: VideoStream[] = [];
         for (const encoder of videoEncoders.current) {
@@ -182,6 +194,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 });
 
             videoRef.current.srcObject = undefined;
+
+            if (properties.quality.length === 0 && quality.length === 0) {
+                properties.quality = [DEFAULT_QUALITY]; // when changing source with no resolution set, choose the default one
+            }
         }
 
         if (properties.quality) {
@@ -354,43 +370,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
             }
         }
 
-        /*  const encoder = new VideoEncoder({
-             error: (e) => { }, output: async (chunk, metadata) => {
-                 let arr = new Uint8Array(chunk.byteLength);
-                 chunk.copyTo(arr)
-                 if (metadata.decoderConfig) {
-                     // console.log('got frame', chunk.type, arr.length, !!metadata.decoderConfig)
-                     videoStreamDB = peer.open(
-                         new WebcodecsStreamDB(
-                             {
-                                 sender: peer.idKey.publicKey,
-                                 decoderDescription: metadata.decoderConfig
-                             }
-                         ),
-                         {
-                             role: new ReplicatorType(),
-                         }
-                     );
-                     const streamInfo = new Track({ active: true, source: await videoStreamDB });
-                     await dbs.streams.put(
-                         streamInfo
-                     );
-                 }
- 
-                 lastVideoFrameTimestamp = chunk.timestamp;
-                 (await videoStreamDB)!.chunks.put(new Chunk({ type: chunk.type, chunk: arr, timestamp: chunk.timestamp }), {
-                     unique: true,
-                 });
-             }
-         });
- 
-         encoder.configure({
-             codec: 'av01.0.20M.10',
-             height: videoRef.videoHeight,
-             width: videoRef.videoWidth
-         }) */
-
-        // Quality needs to be sorted highest first, so that requesting user media works as expected (bug/feature of chrome?)
+        let qualitySetting = properties.quality || quality;
 
         setQuality(
             [...qualitySetting].sort((a, b) => b.video.height - a.video.height)
@@ -412,18 +392,11 @@ export const Stream = (args: { node: PublicSignKey }) => {
         videoElementRef.pause();
         switch (streamType.current.type) {
             case "noise":
-                /*    if (videoElementRef.src?.length > 0) {
-                       return;
-                   } */
-                // videoElementRef.muted = true;
-                videoElementRef.src =
-                    import.meta.env.BASE_URL + "birdsmall.mp4";
+                videoElementRef.muted = true;
+                videoElementRef.src = import.meta.env.BASE_URL + "noise.mp4";
                 videoElementRef.load();
                 break;
             case "media":
-                /*  if (videoElementRef.src?.length > 0) {
-                     return;
-                 } */
                 videoElementRef.src = streamType.current.src;
                 videoElementRef.load();
                 break;
@@ -453,87 +426,13 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     });
                 videoElementRef.removeAttribute("REQUESTING_DISPLAY_MEDIA");
 
-                //updatingSource.current[ix] = false
                 break;
         }
 
         await waitFor(() => !videoElementRef.paused);
-
-        // stream.getAudioTracks().forEach((t) => stream.removeTrack(t)); // Remove audo tracks, else the MediaRecorder will not work
-
-        //    const allStreams = [...dbs.streams.index.index.values()].filter(x => x.value.active).sort((a, b));
-        /*  let existingMediaRecorder = mediaRecorders.current.find(
-            (x) => x.settings.video.height === s.video.height
-        );
-
-        if (existingMediaRecorder) {
-            existingMediaRecorder.ref = videoRef;
-            existingMediaRecorder.recorder = undefined;
-            existingMediaRecorder.settings = s; 
-        } else */ {
-            // New !
-            /* let videoStreamDB: WebcodecsStreamDB = await peer.open(
-                new WebcodecsStreamDB(
-                    peer.idKey.publicKey,
-                    new MediaStreamInfo({
-                        video: new VideoInfo({
-                            height: videoRef.videoHeight,
-                            width: videoRef.videoWidth,
-                        }),
-                    })
-                ),
-                {
-                    role: new ReplicatorType(),
-                }
-            );
-            let audioStreamDB: AudioStreamDB | undefined = undefined;
-            if (streamType.current.type !== "noise") {
-                videoStreamDB = await peer.open(
-                    new WebcodecsStreamDB(
-                        peer.idKey.publicKey,
-                        
-                    ),
-                    {
-                        role: new ReplicatorType(),
-                    }
-                );
-            } else {
-               
-                audioStreamDB = await peer.open(new AudioStreamDB(peer.idKey.publicKey))
-            } 
-                 const streamInfo = new MediaStreamDBInfo({ active: true, db: videoStreamDB });
-            await dbs.streams.put(
-                streamInfo
-            );
-            */
-            /*   mediaRecorders.current.push({
-                  ref: videoRef,
-                  settings: s,
-                  video: new MediaStreamInfo({
-                      video: {
-                          ...s.video,
-                          height: videoRef.videoHeight,
-                          width: videoRef.videoWidth,
-                      },
-                  })
-              }); */
-        }
     };
 
     const onStart = async (videoRef: HTMLVideoElementWithCaptureStream) => {
-        /*   let existingMediaRecorder = await waitFor(() =>
-              mediaRecorders.current.find(
-                  (x) => x.settings.video.height === sourceSetting.video.height
-              )
-          ); */
-        /*   let existingMediaRecorder = await waitFor(() =>
-              mediaRecorders.current.find(
-                  (x) => x.ref.srcObject === videoRef.srcObject || (x.ref.src && x.ref.src === videoRef.src) // x.settings.video.height === sourceSetting.video.height
-              )
-          );
-   */
-
-        console.log("START!");
         let tempStartId = (startId.current = startId.current + 1);
         if (videoRef && streamType) {
             // TODO why do we need this here?
@@ -550,45 +449,11 @@ export const Stream = (args: { node: PublicSignKey }) => {
         }
 
         let audioStreamDB: AudioStreamDB | undefined = undefined;
-
-        // Create a MediaElementAudioSourceNode from the video element¨
-        console.log("INIT");
-
-        // const audioContext: AudioContext = new (window.AudioContext || globalThis["webkitAudioContext"])();
-
-        /* const sourceNode = audioContext.createMediaElementSource(videoRef);
-
-        // Create a ScriptProcessorNode to process the audio
-        const scriptNode = audioContext.createScriptProcessor(4096, 1, 1);
-
-        // Connect the sourceNode to the scriptNode
-        sourceNode.connect(scriptNode);
-
-        // Connect the scriptNode to the destination (output)
-        scriptNode.connect(audioContext.destination);
-
-        // Add an event listener to the scriptNode's audioprocess event
-        scriptNode.addEventListener('audioprocess', (event) => {
-            const inputBuffer = event.inputBuffer;
-            const outputBuffer = event.outputBuffer;
-
-            console.log("GOT EVENT", inputBuffer, outputBuffer)
-            // Loop through each channel and copy the audio data
-            for (let channel = 0; channel < outputBuffer.numberOfChannels; channel++) {
-                const inputData = inputBuffer.getChannelData(channel);
-                const outputData = outputBuffer.getChannelData(channel);
-
-                // Copy the audio data from input to output
-                for (let i = 0; i < inputBuffer.length; i++) {
-                    outputData[i] = inputData[i];
-                }
+        const encoderInit = wavEncoder.init(videoRef).then(() => {
+            if (!videoRef.muted) {
+                wavEncoder.play();
             }
-        }); */
-
-        await wavEncoder.init(videoRef);
-
-        wavEncoder.play();
-
+        });
         const t = async () => {
             let lastAudioTimestamp: bigint = 0n;
             let lastAudioTime = +new Date();
@@ -604,19 +469,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
             await dbs.streams.put(
                 new Track({ active: true, source: audioStreamDB })
             );
-            /*   let once = false */
+            await encoderInit;
             wavEncoder.node.port.onmessage = (ev) => {
                 const { audioBuffer } = ev.data as { audioBuffer: Uint8Array };
-
-                /*   if (onceA) {
-                      return;
-                  }
-                  onceA = true; */
-                /*           console.log("X", audioBuffer)
-                          exportFile(audioBuffer) */
-                /*    exportFile(audioBuffer);
-                   once = true; */
-                console.log("EV");
                 let currentTime = +new Date();
                 let timestamp =
                     lastVideoFrameTimestamp ||
@@ -634,320 +489,111 @@ export const Stream = (args: { node: PublicSignKey }) => {
         };
         t();
 
-        const stream = videoRef.captureStream();
-        console.log("STREAM! ", stream);
-        let onceA = false;
-        let onceB = false;
-        if (stream.getAudioTracks().length > 0) {
-            const audioStream = new MediaStream(stream.getAudioTracks());
-            await waitFor(
-                () =>
-                    audioStream.getAudioTracks()[0].getSettings().sampleRate !==
-                    undefined
-            );
-
-            console.log(
-                "RATE",
-                audioStream.getAudioTracks()[0].getSettings().sampleRate
-            );
-            await audioEncoderConnect;
-            const recorder = new EMediaRecorder(audioStream, {
-                mimeType: "audio/wav",
-            }); //new AudioRecorderPolyFill(stream)
-
-            audioStreamDB = await peer.open(
-                new AudioStreamDB(
-                    peer.idKey.publicKey,
-                    audioStream.getAudioTracks()[0].getSettings().sampleRate
-                ),
-                {
-                    role: new ReplicatorType(),
-                }
-            );
-            const dbs = await mediaStreamDBs.current;
-            await dbs.streams.put(
-                new Track({ active: true, source: audioStreamDB })
-            );
-
-            // Set record to <audio> when recording will be finished
-            let wavHeader: Uint8Array | undefined = undefined;
-            let lastAudioTimestamp: bigint = 0n;
-            let lastAudioTime = +new Date();
-
-            recorder.addEventListener("dataavailable", (e) => {
-                e.data.arrayBuffer().then((arr) => {
-                    let uint8array: Uint8Array | undefined = undefined;
-                    if (!wavHeader) {
-                        wavHeader = new Uint8Array(arr.slice(0, 44));
-                        uint8array = new Uint8Array(arr);
-                    } else {
-                        let uarr = new Uint8Array(arr);
-                        uint8array = new Uint8Array(
-                            uarr.byteLength + wavHeader.byteLength
-                        );
-                        uint8array.set(wavHeader, 0);
-                        uint8array.set(uarr, wavHeader.byteLength);
-                    }
-                    let currentTime = +new Date();
-                    let timestamp =
-                        lastVideoFrameTimestamp ||
-                        BigInt((currentTime - lastAudioTime) * 1000) +
-                            lastAudioTimestamp;
-                    lastAudioTime = currentTime;
-                    if (onceB) {
-                        return;
-                    }
-                    onceB = true;
-                    console.log("Y", uint8array.slice(0, 100));
-                    audioStreamDB.chunks.put(
-                        new Chunk({ type: "", chunk: uint8array, timestamp }),
-                        {
-                            unique: true,
-                        }
-                    );
-                    lastAudioTimestamp = timestamp;
-                });
-
-                //audio.src = URL.createObjectURL(e.data)
-            });
-
-            // Start recording
-            recorder.start(8000);
-        }
-
-        /*   const videoProcessor = new MediaStreamTrackProcessor({
-              track: stream.getVideoTracks()[0],
-          });
-          const reader = videoProcessor.readable.getReader(); */
         let frameCounter = 0;
-
         let counter = 0;
-        let t0 = +new Date();
-        /*  while (true) */ {
-            /*  const result = await reader.read();
-             if (result.done) {
-                 console.log("Stream done!");
-                 break;
-             }
-             let frame = result.value; */
-            //  console.log(videoRef.videoWidth, videoEncoders.current.map(x => x.setting.video.height))
+        let lastFrame: number | undefined = undefined;
 
-            const frameFn = async () => {
-                if (startId.current !== tempStartId) {
-                    return;
+        const requestFrame = () => {
+            if (!inBackground && "requestVideoFrameCallback" in videoRef) {
+                videoRef.requestVideoFrameCallback(() => frameFn(true));
+            } else {
+                tickWorkerRef.current.postMessage({
+                    type: "next",
+                    tps: clampedFrameRate(lastFrameRate.current),
+                } as NextTick);
+            }
+        };
+
+        const frameFn = async (updateFrameRate: boolean) => {
+            if (startId.current !== tempStartId) {
+                return;
+            }
+
+            if (updateFrameRate) {
+                if (lastFrame != null) {
+                    const now = +new Date();
+                    lastFrameRate.current = 1000 / (now - lastFrame);
                 }
+                lastFrame = +new Date();
+            } else {
+                lastFrame = undefined;
+            }
 
-                counter += 1;
-                /// console.log(counter / ((+new Date() - t0) / 1000));
-                const frame = new VideoFrame(videoRef);
-                for (const videoEncoder of videoEncoders.current) {
-                    const encoder = videoEncoder.encoder();
+            counter += 1;
 
-                    if (encoder.state !== "closed") {
-                        if (
-                            videoEncoder.video &&
-                            (videoEncoder.video.height !==
-                                videoRef.videoHeight ||
-                                videoEncoder.video.width !==
-                                    videoRef.videoWidth)
-                        ) {
-                            // Reinitialize a new stream, size the aspect ratio has changed
-                            let limitedQualities = quality.filter(
-                                (x) => x.video.height <= videoRef.videoHeight
-                            );
-                            if (limitedQualities.length !== quality.length) {
-                                frame.close();
-                                await updateStream({
-                                    streamType: streamType.current,
-                                    quality: limitedQualities,
-                                });
-                                return;
-                            } else {
-                                await videoEncoder.open();
-                            }
-                            //  console.log('resolution change reopen!', videoEncoder.video.height, videoRef.videoHeight)
+            /// console.log(counter / ((+new Date() - t0) / 1000));
+            const frame = new VideoFrame(videoRef);
+            for (const videoEncoder of videoEncoders.current) {
+                const encoder = videoEncoder.encoder();
+
+                if (encoder.state !== "closed") {
+                    if (
+                        videoEncoder.video &&
+                        (videoEncoder.video.height !== videoRef.videoHeight ||
+                            videoEncoder.video.width !== videoRef.videoWidth)
+                    ) {
+                        // Reinitialize a new stream, size the aspect ratio has changed
+                        let limitedQualities = quality.filter(
+                            (x) => x.video.height <= videoRef.videoHeight
+                        );
+                        if (limitedQualities.length !== quality.length) {
+                            frame.close();
+                            await updateStream({
+                                streamType: streamType.current,
+                                quality: limitedQualities,
+                            });
+                            return;
+                        } else {
+                            await videoEncoder.open();
                         }
+                        //  console.log('resolution change reopen!', videoEncoder.video.height, videoRef.videoHeight)
+                    }
 
-                        videoEncoder.video = {
-                            height: videoRef.videoHeight,
-                            width: videoRef.videoWidth,
-                        };
+                    videoEncoder.video = {
+                        height: videoRef.videoHeight,
+                        width: videoRef.videoWidth,
+                    };
 
-                        if (encoder.state === "unconfigured") {
-                            let scaler =
-                                videoEncoder.setting.video.height /
-                                videoRef.videoHeight;
-                            // console.log('set bitrate', videoEncoder.setting.video.bitrate)
-                            encoder.configure({
-                                codec: "av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //"av01.0.04M.10",
-                                height: videoEncoder.setting.video.height,
-                                width: videoRef.videoWidth * scaler,
-                                bitrate: videoEncoder.setting.video.bitrate,
-                                latencyMode: "realtime",
-                                bitrateMode: "variable",
+                    if (encoder.state === "unconfigured") {
+                        let scaler =
+                            videoEncoder.setting.video.height /
+                            videoRef.videoHeight;
+                        // console.log('set bitrate', videoEncoder.setting.video.bitrate)
+                        encoder.configure({
+                            codec: "av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //"av01.0.04M.10",
+                            height: videoEncoder.setting.video.height,
+                            width: videoRef.videoWidth * scaler,
+                            bitrate: videoEncoder.setting.video.bitrate,
+                            latencyMode: "realtime",
+                            bitrateMode: "variable",
+                        });
+                    }
+
+                    if (encoder.state === "configured") {
+                        if (encoder.encodeQueueSize > 2) {
+                            // Too many frames in flight, encoder is overwhelmed
+                            // let's drop this frame.
+                        } else {
+                            frameCounter++;
+                            const insert_keyframe =
+                                Math.round(
+                                    frameCounter / videoEncoders.current.length
+                                ) %
+                                    60 ===
+                                0;
+                            encoder.encode(frame, {
+                                keyFrame: insert_keyframe,
                             });
                         }
-
-                        if (encoder.state === "configured") {
-                            if (encoder.encodeQueueSize > 2) {
-                                // Too many frames in flight, encoder is overwhelmed
-                                // let's drop this frame.
-                            } else {
-                                frameCounter++;
-                                const insert_keyframe =
-                                    Math.round(
-                                        frameCounter /
-                                            videoEncoders.current.length
-                                    ) %
-                                        60 ===
-                                    0;
-                                encoder.encode(frame, {
-                                    keyFrame: insert_keyframe,
-                                });
-                            }
-                        }
                     }
                 }
-
-                await frame.close();
-                if ("requestVideoFrameCallback" in videoRef) {
-                    videoRef.requestVideoFrameCallback(frameFn);
-                } else {
-                    requestAnimationFrame(frameFn);
-                }
-            };
-            if ("requestVideoFrameCallback" in videoRef) {
-                videoRef.requestVideoFrameCallback(frameFn);
-            } else {
-                requestAnimationFrame(frameFn);
             }
-        }
 
-        /* 
-                const audioTrack = stream.getAudioTracks()[0];
-                console.log('audiotrack', audioTrack)
-                const audioContext = new AudioContext()
-                if (audioTrack) {
-                    let mem: Uint8Array[] = []
-                    const audioEncoder = new AudioEncoder({
-                        error: (e) => { console.error(e); throw e }, output: async (chunk, metadata) => {
-                            console.log('got audio chunk!', chunk)
-                            if (chunk.type === 'key' && mem.length > 0) {
-                                audioContext.decodeAudioData(concat(mem).buffer, (d) => {
-                                    console.log('success!', d)
-                                }, (e) => { console.error("FAILED", e) })
-                                mem = [];
-                            }
-                            const chunkArr = new Uint8Array(chunk.byteLength);
-                            chunk.copyTo(chunkArr);
-                            mem.push(chunkArr);
-        
-                        }
-                    });
-                    audioEncoder.configure({
-                        codec: 'pcm-f32-planar',
-                        numberOfChannels: 2,
-                        sampleRate: 48000,
-                    })
-        
-        
-                    const audioProcessor = new MediaStreamTrackProcessor({ track: audioTrack });
-                    const audioReader = audioProcessor.readable.getReader();
-                    while (true) {
-                        const result = await audioReader.read();
-                        if (result.done)
-                            break;
-                        let frame = result.value;
-                        audioEncoder.encode(frame);
-                        frame.close();
-                    }
-                }
-        
-         */
-
-        /* if (stream) {
-            let recorder: MediaRecorder;
-            if (streamType.current.type !== "noise") {
-                const setting = sourceSetting;
-                recorder = new MediaRecorder(stream, {
-                    mimeType: setting.audio
-                        ? videoAudioMimeType
-                        : videoNoAudioMimeType,
-                    videoBitsPerSecond: setting.video.bitrate,
-                });
-            } else {
-                stream.getAudioTracks().forEach((t) => stream.removeTrack(t));
-                recorder = new MediaRecorder(stream, {
-                    mimeType: videoNoAudioMimeType,
-                    videoBitsPerSecond: 1e5,
-                });
-            }
-            existingMediaRecorder.recorder = recorder;
-
-            let first = true;
-            let header: Uint8Array | undefined = undefined;
-            let remainder = new Uint8Array([]);
-            let ts = BigInt(+new Date());
-            let start = +new Date();
-            let counter = 0;
-            recorder.ondataavailable = async (e) => {
-                counter += 1;
-                //  console.log(+new Date - start)
-                start = +new Date();
-                let newArr = new Uint8Array(await e.data.arrayBuffer());
-                if (newArr.length > 0) {
-                    //   console.log(+new Date - start, newArr.length)
-                    start = +new Date();
-                }
-
-                if (first) {
-                    let arr = new Uint8Array(newArr.length + remainder.length);
-                    arr.set(remainder, 0);
-                    arr.set(newArr, remainder.length);
-                    const clusterStartIndices = await getClusterStartIndices(
-                        arr
-                    );
-                    if (clusterStartIndices.length == 1) {
-                        const firstClusterIndex = clusterStartIndices.splice(
-                            0,
-                            1
-                        )[0];
-                        header = arr.slice(0, firstClusterIndex);
-                        newArr = arr.slice(firstClusterIndex);
-                        remainder = new Uint8Array(0);
-                        const chunk = new Chunk(e.data.type, header, arr);
-                        if (
-                            existingMediaRecorder.stream.closed ||
-                            recorder.state === "inactive"
-                        ) {
-                            return;
-                        }
-
-                        existingMediaRecorder.stream.chunks.put(chunk, {
-                            unique: true,
-                        });
-
-                        first = false;
-                    } else {
-                        remainder = newArr;
-                    }
-                } else {
-                    ts = BigInt(+new Date());
-                    const chunk = new Chunk(e.data.type, header, newArr, ts);
-                    if (
-                        existingMediaRecorder.stream.closed ||
-                        recorder.state === "inactive"
-                    ) {
-                        return;
-                    }
-
-                    existingMediaRecorder.stream.chunks.put(chunk, {
-                        unique: true,
-                    });
-                }
-            };
-            recorder.start(1);
-        } */
+            await frame.close();
+            requestFrame();
+        };
+        scheduleFrameFn.current = () => frameFn(false);
+        requestFrame();
     };
     const onEnd = () => {
         return videoEncoders.current.map((x) => x.close());
@@ -990,9 +636,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                     ? videoRef.current.play()
                                     : videoRef.current.pause()
                             }
-                            muted={
-                                false
-                            } /* {streamType.current.type === "noise"} */
+                            muted={streamType.current.type === "noise"}
                         ></video>
                         <Controls
                             selectedResolution={

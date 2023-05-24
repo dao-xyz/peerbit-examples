@@ -8,16 +8,17 @@ import crypto from "crypto";
 import { waitForSubscribers } from "@dao-xyz/libp2p-direct-sub";
 
 describe("index", () => {
-    let session: LSession, peer: Peerbit, peer2: Peerbit;
+    let peer: Peerbit, peer2: Peerbit;
 
     beforeAll(async () => {
-        session = await LSession.connected(2);
-        peer = await Peerbit.create({ libp2p: session.peers[0] });
-        peer2 = await Peerbit.create({ libp2p: session.peers[1] });
+        peer = await Peerbit.create();
+        peer2 = await Peerbit.create();
+        await peer.dial(peer2);
     });
 
     afterAll(async () => {
-        await session.stop();
+        await peer.stop();
+        await peer2.stop();
     });
 
     it("tiny file", async () => {
@@ -31,7 +32,7 @@ describe("index", () => {
         await waitForSubscribers(
             peer2.libp2p,
             peer.libp2p,
-            filestore.address.toString()
+            filestore.allLogs[0].idString
         );
         expect(
             new Uint8Array((await filestoreReader.get("tiny file"))!)
@@ -51,7 +52,7 @@ describe("index", () => {
         await waitForSubscribers(
             peer2.libp2p,
             peer.libp2p,
-            filestore.address.toString()
+            filestore.allLogs[0].idString
         );
         const file = await filestoreReader.get("small file");
         expect(equals(new Uint8Array(file!), smallFile)).toBeTrue();
@@ -76,7 +77,7 @@ describe("index", () => {
             await waitForSubscribers(
                 peer2.libp2p,
                 peer.libp2p,
-                filestore.address.toString()
+                filestore.allLogs[0].idString
             );
             const file = (await filestoreReader.get("large file"))!;
             expect(equals(file!, largeFile)).toBeTrue();
@@ -99,7 +100,7 @@ describe("index", () => {
             await waitForSubscribers(
                 peer2.libp2p,
                 peer.libp2p,
-                filestore.address.toString()
+                filestore.allLogs[0].idString
             );
             const file = (await filestoreReader.get("random large file"))!;
             expect(equals(file!, largeFile)).toBeTrue();

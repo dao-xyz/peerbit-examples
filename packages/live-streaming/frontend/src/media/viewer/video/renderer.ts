@@ -25,7 +25,6 @@ class VideoWorkerRenderer implements Renderer {
         } as ResizeMessage);
     }
     setup(canvas: HTMLCanvasElement) {
-        console.log("SEUTP!", canvas);
         const offscreenCanvas = canvas.transferControlToOffscreen();
         this.#webworker.postMessage(
             {
