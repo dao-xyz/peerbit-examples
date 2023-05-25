@@ -1,8 +1,9 @@
 import { field, variant, option, serialize, fixedArray } from "@dao-xyz/borsh";
 import {
-    sha256Sync,
     sha256Base64Sync,
     PublicSignKey,
+    toBase64,
+    fromBase64,
 } from "@dao-xyz/peerbit-crypto";
 import {
     DocumentIndex,
@@ -12,7 +13,6 @@ import {
 } from "@dao-xyz/peerbit-document";
 import { Program } from "@dao-xyz/peerbit-program";
 import { v4 as uuid } from "uuid";
-import { toBase64, randomBytes } from "@dao-xyz/peerbit-crypto";
 import { write, length } from "@protobufjs/utf8";
 
 const utf8Encode = (value: string) => {
@@ -153,6 +153,26 @@ export class AudioStreamDB extends TrackSource {
     }
 }
 
+const serializeConfig = (config: VideoDecoderConfig) => {
+    const toSerialize = {
+        ...config,
+        ...(config.description
+            ? {
+                  description: toBase64(
+                      new Uint8Array(config.description as ArrayBufferLike)
+                  ),
+              }
+            : {}),
+    };
+    return JSON.stringify(toSerialize);
+};
+const parseConfig = (string: string): VideoDecoderConfig => {
+    const config = JSON.parse(string);
+    if (config.description) {
+        config.description = fromBase64(config.description);
+    }
+    return config;
+};
 @variant(2)
 export class WebcodecsStreamDB extends TrackSource {
     @field({ type: "string" })
@@ -160,13 +180,9 @@ export class WebcodecsStreamDB extends TrackSource {
 
     constructor(props: {
         sender: PublicSignKey;
-        decoderDescription: VideoDecoderConfig | string;
+        decoderDescription: VideoDecoderConfig;
     }) {
-        const decoderDescription =
-            props.decoderDescription &&
-            typeof props.decoderDescription === "string"
-                ? props.decoderDescription
-                : JSON.stringify(props.decoderDescription);
+        const decoderDescription = serializeConfig(props.decoderDescription);
 
         super({
             id:
@@ -185,7 +201,7 @@ export class WebcodecsStreamDB extends TrackSource {
         }
         return (
             this._decoderDescriptionObject ||
-            (this._decoderDescriptionObject = JSON.parse(
+            (this._decoderDescriptionObject = parseConfig(
                 this.decoderConfigJSON
             ))
         );

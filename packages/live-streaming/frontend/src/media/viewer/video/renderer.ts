@@ -1,3 +1,4 @@
+import { isSafari } from "../../utils.js";
 import { Renderer } from "./interface.js";
 import {
     FrameMessage,
@@ -52,8 +53,6 @@ class VideoNonWorkerRenderer implements Renderer {
         this.#render.setup(canvas);
     }
 }
-
-const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
 
 // In the future when webcodecs-webgpu enable by default do import { WebGPUVideoRenderer } from "./webgpu/webgpu.js";
 const renderer = isSafari

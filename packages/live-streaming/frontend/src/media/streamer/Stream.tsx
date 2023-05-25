@@ -25,6 +25,7 @@ import PQueue from "p-queue";
 import { WAVEncoder } from "./audio.js";
 import TickWorker from "./tickWorker.js?worker";
 import { NextTick, Stop } from "./tickWorker.js";
+import { isSafari } from "../utils";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
@@ -236,9 +237,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                     let open = async () => {
                         // console.log('open!')
-                        if (encoder && encoder.state !== "closed") {
+                        /* if (encoder && encoder.state !== "closed") {
                             await encoder.close();
-                        }
+                        } */
 
                         let skip = false;
                         let s0: number | undefined = undefined;
@@ -249,6 +250,8 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 console.error(e);
                             },
                             output: async (chunk, metadata) => {
+                                console.log("PUT VIDOE CHUNK!");
+
                                 if (skip) {
                                     return;
                                 }
@@ -256,6 +259,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 chunk.copyTo(arr);
 
                                 if (metadata.decoderConfig) {
+                                    console.log(metadata.decoderConfig);
                                     const newStreamDB = new WebcodecsStreamDB({
                                         sender: peer.idKey.publicKey,
                                         decoderDescription:
@@ -429,8 +433,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                 break;
         }
-
-        await waitFor(() => !videoElementRef.paused);
     };
 
     const onStart = async (videoRef: HTMLVideoElementWithCaptureStream) => {
@@ -563,13 +565,17 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             videoEncoder.setting.video.height /
                             videoRef.videoHeight;
                         // console.log('set bitrate', videoEncoder.setting.video.bitrate)
+
+                        console.log("CONFIGURE");
                         encoder.configure({
-                            codec: "av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //"av01.0.04M.10",
+                            codec: isSafari
+                                ? "avc1.428020"
+                                : "av01.0.04M.10" /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
                             height: videoEncoder.setting.video.height,
                             width: videoRef.videoWidth * scaler,
-                            bitrate: videoEncoder.setting.video.bitrate,
-                            latencyMode: "realtime",
-                            bitrateMode: "variable",
+                            /* bitrate: videoEncoder.setting.video.bitrate, */
+                            /*   latencyMode: "realtime",
+                              bitrateMode: "variable", */
                         });
                     }
 
@@ -585,6 +591,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 ) %
                                     60 ===
                                 0;
+
                             encoder.encode(frame, {
                                 keyFrame: insert_keyframe,
                             });
