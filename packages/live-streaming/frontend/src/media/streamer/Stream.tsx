@@ -497,7 +497,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
         let framesSinceLastBackground = 0;
         const requestFrame = () => {
             if (!inBackground && "requestVideoFrameCallback" in videoRef) {
-                videoRef.requestVideoFrameCallback(() => frameFn());
+                videoRef.requestVideoFrameCallback(frameFn);
             } else {
                 tickWorkerRef.current.postMessage({
                     type: "next",
@@ -596,7 +596,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
             await frame.close();
             requestFrame();
         };
-        scheduleFrameFn.current = () => frameFn(false);
+        scheduleFrameFn.current = frameFn;
         requestFrame();
     };
     const onEnd = () => {
