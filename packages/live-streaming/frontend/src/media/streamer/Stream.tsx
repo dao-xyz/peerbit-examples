@@ -342,6 +342,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                                  .nodeCount
                                          );
                                      } */
+
                                     await videoStreamDB.chunks.put(
                                         new Chunk({
                                             type: chunk.type,
@@ -493,9 +494,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
         let counter = 0;
         let lastFrame: number | undefined = undefined;
 
+        let framesSinceLastBackground = 0;
         const requestFrame = () => {
             if (!inBackground && "requestVideoFrameCallback" in videoRef) {
-                videoRef.requestVideoFrameCallback(() => frameFn(true));
+                videoRef.requestVideoFrameCallback(() => frameFn());
             } else {
                 tickWorkerRef.current.postMessage({
                     type: "next",
@@ -504,19 +506,21 @@ export const Stream = (args: { node: PublicSignKey }) => {
             }
         };
 
-        const frameFn = async (updateFrameRate: boolean) => {
+        const frameFn = async () => {
             if (startId.current !== tempStartId) {
                 return;
             }
 
-            if (updateFrameRate) {
-                if (lastFrame != null) {
+            if (!inBackground) {
+                if (lastFrame != null && framesSinceLastBackground > 10) {
                     const now = +new Date();
                     lastFrameRate.current = 1000 / (now - lastFrame);
                 }
                 lastFrame = +new Date();
+                framesSinceLastBackground++;
             } else {
                 lastFrame = undefined;
+                framesSinceLastBackground = 0;
             }
 
             counter += 1;
