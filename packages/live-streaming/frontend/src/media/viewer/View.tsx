@@ -18,6 +18,7 @@ import { Controls } from "./controller/Control.js";
 import { ControlFunctions } from "./controller/controls.js";
 import { Resolution } from "../controls/settings.js";
 import { renderer } from "./video/renderer.js";
+import { waitFor } from "@dao-xyz/peerbit-time";
 
 let inBackground = false;
 document.addEventListener("visibilitychange", () => {
@@ -723,10 +724,30 @@ export const View = (args: DBArgs | IdentityArgs) => {
 
                 updateStreamChoice();
 
-                videoStream.syncActive();
-                setTimeout(() => {
-                    videoStream.syncActive();
-                }, 3000); // TODO do better for joining peers
+                // Wait for streamer to be online, then query active
+                waitFor(() =>
+                    peer.libp2p.services.pubsub
+                        .getSubscribers(videoStream.allLogs[0].idString)
+                        .has(videoStream.sender.hashcode())
+                )
+                    .then(() => {
+                        console.log(
+                            "SYNC ?",
+                            peer.libp2p.services.pubsub.routes.nodeCount,
+                            videoStream.syncActive().then((x) => console.log(x))
+                        );
+                    })
+                    .catch((e) => {
+                        console.error("Failed to find streamer");
+                    });
+
+                /*  setTimeout(() => {
+                     console.log("SYNC ?? ", peer.libp2p.services.pubsub.routes.nodeCount, videoStream.syncActive().then(x => console.log(x)))
+                     setTimeout(() => {
+                         console.log("SYNC ?? ", peer.libp2p.services.pubsub.routes.nodeCount, videoStream.syncActive().then(x => console.log(x)))
+                     }, 3000); // TODO do better for joining peers
+                 }, 3000); // TODO do better for joining peers 
+                 */
             }
         },
         [peer, videoStream]
