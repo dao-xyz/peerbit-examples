@@ -40,7 +40,7 @@ theme = responsiveFontSizes(theme);
 export const App = () => {
     return (
         <PeerProvider
-            inMemory={inIframe()}
+            inMemory={true /* inIframe() */} // TODO mobile in memory? Weak devices in memory? https://github.com/dao-xyz/peerbit/issues/18
             waitForConnnected={true}
             waitForKeypairInIFrame={true}
             network={

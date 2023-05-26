@@ -19,6 +19,7 @@ import { ControlFunctions } from "./controller/controls.js";
 import { Resolution } from "../controls/settings.js";
 import { renderer } from "./video/renderer.js";
 import { waitFor } from "@dao-xyz/peerbit-time";
+import PQueue from "p-queue";
 
 let inBackground = false;
 document.addEventListener("visibilitychange", () => {
@@ -273,6 +274,7 @@ const addAudioStreamListener = async (
         //requestAnimationFrame(renderFrame);
     };
 
+    const decodeAudioDataQueue = new PQueue({ concurrency: 1 });
     const listener = (change: CustomEvent<DocumentsChange<Chunk>>) => {
         let resuming = false;
 
@@ -280,40 +282,47 @@ const addAudioStreamListener = async (
             for (const added of change.detail.added) {
                 // seems like 'decodeAudioData' requires a cloned, 0 offset buffer,
                 // additionally, if we reuse the same array we seem to run into issues where decodeAudioData mutates the original array in someway (?)
-                let zeroOffsetBuffer = new Uint8Array(added.chunk.length);
-                zeroOffsetBuffer.set(added.chunk, 0);
-                audioContext?.decodeAudioData(
-                    zeroOffsetBuffer.buffer,
-                    (data) => {
-                        const frame = {
-                            buffer: data,
-                            timestamp: added.timestamp,
-                        };
-                        if (audioContext?.state !== "running" && play) {
-                            pendingFrames = [];
-                            pendingFrames.push(frame);
-                            if (!resuming) {
-                                resuming = true;
-                                audioContext
-                                    ?.resume()
-                                    .then((r) => {
-                                        resuming = false;
-                                        renderFrame();
-                                    })
-                                    .catch((e) => {});
+                if (decodeAudioDataQueue.size > 10) {
+                    decodeAudioDataQueue.clear(); // We can't keep up, clear the queue
+                }
+                decodeAudioDataQueue.add(() => {
+                    let zeroOffsetBuffer = new Uint8Array(added.chunk.length);
+                    zeroOffsetBuffer.set(added.chunk, 0);
+                    audioContext?.decodeAudioData(
+                        zeroOffsetBuffer.buffer,
+                        (data) => {
+                            const frame = {
+                                buffer: data,
+                                timestamp: added.timestamp,
+                            };
+                            console.log("PUSH AUDIO!");
+
+                            if (audioContext?.state !== "running" && play) {
+                                pendingFrames = [];
+                                pendingFrames.push(frame);
+                                if (!resuming) {
+                                    resuming = true;
+                                    audioContext
+                                        ?.resume()
+                                        .then((r) => {
+                                            resuming = false;
+                                            renderFrame();
+                                        })
+                                        .catch((e) => {});
+                                }
+                            } else {
+                                pendingFrames.push(frame);
+                                if (underflow) {
+                                    underflow = false;
+                                    renderFrame();
+                                }
                             }
-                        } else {
-                            pendingFrames.push(frame);
-                            if (underflow) {
-                                underflow = false;
-                                renderFrame();
-                            }
+                        },
+                        (e) => {
+                            console.error("Failed to decode error", e);
                         }
-                    },
-                    (e) => {
-                        console.error("Failed to decode error", e);
-                    }
-                );
+                    );
+                });
             }
         }
     };
@@ -693,12 +702,6 @@ export const View = (args: DBArgs | IdentityArgs) => {
                                         currentAudioRef.current?.source.id
                                 ))
                         ) {
-                            /*       console.log(
-                                  "open audio stream",
-                                  audioResult.length,
-                                  currentAudioRef.current
-                              ); */
-
                             await updateAudioStream(audioResult[0]);
                         }
 
@@ -731,23 +734,11 @@ export const View = (args: DBArgs | IdentityArgs) => {
                         .has(videoStream.sender.hashcode())
                 )
                     .then(() => {
-                        console.log(
-                            "SYNC ?",
-                            peer.libp2p.services.pubsub.routes.nodeCount,
-                            videoStream.syncActive().then((x) => console.log(x))
-                        );
+                        videoStream.syncActive();
                     })
                     .catch((e) => {
                         console.error("Failed to find streamer");
                     });
-
-                /*  setTimeout(() => {
-                     console.log("SYNC ?? ", peer.libp2p.services.pubsub.routes.nodeCount, videoStream.syncActive().then(x => console.log(x)))
-                     setTimeout(() => {
-                         console.log("SYNC ?? ", peer.libp2p.services.pubsub.routes.nodeCount, videoStream.syncActive().then(x => console.log(x)))
-                     }, 3000); // TODO do better for joining peers
-                 }, 3000); // TODO do better for joining peers 
-                 */
             }
         },
         [peer, videoStream]

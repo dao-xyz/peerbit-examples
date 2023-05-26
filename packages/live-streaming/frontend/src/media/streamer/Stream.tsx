@@ -415,6 +415,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         },
                         audio: !!s.audio,
                     });
+
                 videoElementRef.removeAttribute("REQUESTING_DISPLAY_MEDIA");
 
                 break;
