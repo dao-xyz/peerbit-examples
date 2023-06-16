@@ -40,12 +40,7 @@ export class Room extends Program {
     constructor(properties: { name: string; messages?: Documents<Post> }) {
         super();
         this.name = properties.name;
-        this.messages =
-            properties.messages ||
-            new Documents({
-                immutable: false,
-                index: new DocumentIndex({ indexBy: "id" }),
-            });
+        this.messages = properties.messages || new Documents();
     }
 
     get id() {
@@ -105,11 +100,7 @@ export class Lobby extends Program {
     constructor(properties: { id?: Uint8Array; rooms?: Documents<Room> }) {
         super();
         this.id = properties.id || randomBytes(32);
-        this.rooms =
-            properties.rooms ||
-            new Documents<Room>({
-                index: new DocumentIndex({ indexBy: "name" }),
-            });
+        this.rooms = properties.rooms || new Documents<Room>();
     }
 
     // Setup lifecycle, will be invoked on 'open'
@@ -126,6 +117,9 @@ export class Lobby extends Program {
             },
             canOpen: (program) => {
                 return Promise.resolve(true);
+            },
+            index: {
+                key: "name",
             },
         });
     }

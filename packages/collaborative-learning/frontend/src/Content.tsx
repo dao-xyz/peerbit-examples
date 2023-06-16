@@ -201,7 +201,7 @@ export const Content = () => {
                 setProcessing(false);
             }
         );
-    }, [peer?.id.toString()]);
+    }, [peer?.identityHash]);
 
     const enableCam = () => {
         if (!video.current) {
@@ -317,7 +317,7 @@ export const Content = () => {
         if (!peer?.libp2p || !params.node || !params.identity) {
             return;
         }
-    }, [peer?.id, params?.node]);
+    }, [peer?.identityHash, params?.node]);
 
     return (
         <>

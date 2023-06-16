@@ -9,7 +9,7 @@ import {
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import { DocumentQuery } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@dao-xyz/peerbit-document";
 import { Post, Room as RoomDB } from "./database.js";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { Names } from "@dao-xyz/peer-names";
@@ -59,7 +59,7 @@ export const Room = () => {
         if (!room?.current?.id || !room?.current?.initialized) {
             return;
         }
-        room?.current.messages.index.query(new DocumentQuery({ queries: [] }), {
+        room?.current.messages.index.search(new SearchRequest({ query: [] }), {
             remote: { sync: true },
         });
     }, [room?.current?.id, room?.current?.initialized, peerCounter]);
@@ -149,8 +149,19 @@ export const Room = () => {
                     });
 
                     peer.libp2p.services.pubsub.addEventListener(
+                        "peer:reachable",
+                        (e) => {
+                            console.log(
+                                "REACHABLE!",
+                                peer.identityHash,
+                                e.detail.hashcode()
+                            );
+                        }
+                    );
+                    peer.libp2p.services.pubsub.addEventListener(
                         "subscribe",
                         () => {
+                            console.log("SUBSCRIBE!");
                             setPeerCounter(
                                 peer.libp2p.services.pubsub.getSubscribers(
                                     r.allLogs[0].idString
@@ -182,7 +193,7 @@ export const Room = () => {
                     setLoading(false);
                 });
         });
-    }, [params.name, peer?.id.toString()]);
+    }, [params.name, peer?.identityHash]);
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
@@ -255,9 +266,14 @@ export const Room = () => {
                 height={`calc(100vh - ${(headerHeight || 0) + "px"}  - ${
                     (inputHeight || 0) + "px"
                 } - 8px)`}
-                sx={{ overflowY: "auto" }}
+                sx={{ overflowY: "scroll" }}
                 padding={1}
                 mb="8px"
+                onScroll={async (e) => {
+                    if (e.currentTarget.scrollTop === 0) {
+                        // load more elements
+                    }
+                }}
             >
                 {postsRef.current?.length > 0 ? (
                     <Grid container direction="column">

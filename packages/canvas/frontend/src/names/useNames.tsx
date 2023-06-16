@@ -28,9 +28,11 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 console.log("set neam!");
                 setName(name);
                 const keypair = await getAllKeypairs();
-                await names.current.names.put(new Name(name), {
-                    signers: keypair.map((x) => x.signer(PreHash.NONE)),
-                });
+                keypair.map((x) =>
+                    names.current.names.put(new Name(x.publicKey, name), {
+                        signers: [x.signer(PreHash.NONE)],
+                    })
+                );
             },
         }),
         [name, peer?.identity?.publicKey.toString()]
@@ -42,7 +44,7 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 sync: () => true,
                 /*  sync: (entry) => { TODO always sync "my" names
                      for (const s of entry.signatures) {
-                         if (s.publicKey.equals(peer.idKey.publicKey) || s.publicKey.equals(peer.identity.publicKey)) {
+                         if (s.publicKey.equals(peer.identity.publicKey) || s.publicKey.equals(peer.identity.publicKey)) {
                              return true;
                          }
                      }
@@ -52,8 +54,8 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 db.names.events.addEventListener("change", () => {
                     // TODO make this more performant/smarter
                     db.getName(peer.identity.publicKey).then((n) => {
-                        if (name !== n && n) {
-                            setName(n);
+                        if (n && name !== n.name) {
+                            setName(n.name);
                         }
                     });
                 });

@@ -8,11 +8,10 @@ import {
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import { DocumentQuery } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@dao-xyz/peerbit-document";
 import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { Send } from "@mui/icons-material";
-import { Theme } from "@mui/material/styles";
 import { Ed25519PublicKey } from "@dao-xyz/peerbit-crypto";
 import { getRoomNameFromPath } from "./routes";
 
@@ -77,7 +76,7 @@ export const Room = () => {
         if (!room?.current?.id || !room?.current?.initialized) {
             return;
         }
-        room?.current.messages.index.query(new DocumentQuery({ queries: [] }), {
+        room?.current.messages.index.search(new SearchRequest({ query: [] }), {
             remote: { sync: true },
         });
 
@@ -182,7 +181,7 @@ export const Room = () => {
             .finally(() => {
                 setLoading(false);
             });
-    }, [params.name, peer?.id.toString()]);
+    }, [params.name, peer?.identityHash]);
 
     useEffect(() => {
         scrollToBottom();

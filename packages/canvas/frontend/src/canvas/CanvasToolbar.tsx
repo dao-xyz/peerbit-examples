@@ -5,7 +5,7 @@ import { usePeer } from "@dao-xyz/peerbit-react";
 import { useEffect, useRef, useState } from "react";
 import { Canvas, Spaces } from "./db";
 import { useNavigate } from "react-router-dom";
-import { DocumentQuery } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@dao-xyz/peerbit-document";
 import QueueIcon from "@mui/icons-material/Queue";
 
 export const WIDTH = "35px";
@@ -42,8 +42,8 @@ export const CanvasToolbar = (props: { direction: "column" | "row" }) => {
 
                 await result.load();
                 setInterval(async () => {
-                    await result.canvases.index.query(
-                        new DocumentQuery({ queries: [] }),
+                    await result.canvases.index.search(
+                        new SearchRequest({ query: [] }),
                         { remote: { sync: true } }
                     );
                 }, 2000);

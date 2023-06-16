@@ -1,4 +1,4 @@
-import { DocumentQuery } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@dao-xyz/peerbit-document";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -17,7 +17,7 @@ export const NewSpace = () => {
 
     const create = async () => {
         let canvas = new Canvas({
-            rootTrust: peer.idIdentity.publicKey,
+            rootTrust: peer.identity.publicKey,
             info: new TitleAndDescription(name, description),
         });
         canvas = await peer.open(canvas);

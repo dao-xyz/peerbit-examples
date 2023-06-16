@@ -1,4 +1,3 @@
-import { Room } from "./database.js";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { Routes, Route } from "react-router";
 import { Room as RoomView } from "./Room";

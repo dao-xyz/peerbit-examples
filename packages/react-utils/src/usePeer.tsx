@@ -1,6 +1,6 @@
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
-import { Identity, Peerbit } from "@dao-xyz/peerbit";
+import { Peerbit } from "@dao-xyz/peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { createLibp2p } from "libp2p";
 import { supportedKeys } from "@libp2p/crypto/keys";
@@ -111,7 +111,6 @@ export const PeerProvider = ({
     children,
     inMemory,
     keypair,
-    identity,
     waitForConnnected,
     waitForKeypairInIFrame,
 }: {
@@ -119,7 +118,6 @@ export const PeerProvider = ({
     inMemory?: boolean;
     waitForConnnected?: boolean;
     keypair?: Ed25519Keypair;
-    identity?: Identity;
     waitForKeypairInIFrame?: boolean;
     bootstrap?: (Multiaddr | string)[];
     children: JSX.Element;
@@ -196,18 +194,6 @@ export const PeerProvider = ({
                     )
                 ).key;
 
-            const peerId = await peerIdFromKeys(
-                new supportedKeys["ed25519"].Ed25519PublicKey(
-                    nodeId.publicKey.publicKey
-                ).bytes,
-                new supportedKeys["ed25519"].Ed25519PrivateKey(
-                    nodeId.privateKey.privateKey,
-                    nodeId.publicKey.publicKey
-                ).bytes
-            );
-
-            identity = identity || nodeId;
-
             // We create a new directrory to make tab to tab communication go smoothly
             const newPeer = await Peerbit.create({
                 libp2p: {
@@ -217,7 +203,7 @@ export const PeerProvider = ({
                         ],
                     },
                     connectionEncryption: [noise()],
-                    peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+                    peerId: await nodeId.toPeerId(), //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
                     connectionManager: {
                         maxConnections: 100,
                         minConnections: 0,
@@ -240,7 +226,7 @@ export const PeerProvider = ({
                                       filter: filters.all,
                                   }),
                                   /*            circuitRelayTransport({ discoverRelays: 1 }),
-                                         webRTC(), */
+                                     webRTC(), */
                               ],
                           }
                         : {
@@ -256,12 +242,11 @@ export const PeerProvider = ({
                               transports: [
                                   webSockets({ filter: filters.all }),
                                   /*             circuitRelayTransport({ discoverRelays: 1 }),
-                                          webRTC(), */
+                                      webRTC(), */
                               ],
                           }),
                 },
                 directory: !inMemory ? "./repo" : undefined,
-                identity,
                 limitSigning: true,
             });
 

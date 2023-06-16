@@ -2,7 +2,8 @@
     "packages": [
         "packages/react-utils",
         "packages/browser-chat/*",
-        "packages/live-streaming/*",
+        "packages/file-share/*",
+        "packages/live-streming/*",
         "packages/live-streaming-canvas/*",
         "packages/name-service/*",
         "packages/canvas/*",

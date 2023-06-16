@@ -1,11 +1,9 @@
 import { Peerbit } from "@dao-xyz/peerbit";
-import { LSession } from "@dao-xyz/peerbit-test-utils";
-import { ReplicatorType } from "@dao-xyz/peerbit-program";
+import { Replicator } from "@dao-xyz/peerbit-program";
 import { Files } from "..";
-import { ObserverType } from "@dao-xyz/peerbit-program";
+import { Observer } from "@dao-xyz/peerbit-program";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
-import { waitForSubscribers } from "@dao-xyz/libp2p-direct-sub";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -29,11 +27,7 @@ describe("index", () => {
         await filestore.create("tiny file", smallFile);
 
         const filestoreReader = await peer2.open<Files>(filestore.address);
-        await waitForSubscribers(
-            peer2.libp2p,
-            peer.libp2p,
-            filestore.allLogs[0].idString
-        );
+        await filestoreReader.waitFor(peer.libp2p);
         expect(
             new Uint8Array((await filestoreReader.get("tiny file"))!)
         ).toEqual(smallFile);
@@ -47,13 +41,10 @@ describe("index", () => {
         await filestore.create("small file", smallFile);
 
         const filestoreReader = await peer2.open<Files>(filestore.address, {
-            role: new ObserverType(),
+            role: new Observer(),
         });
-        await waitForSubscribers(
-            peer2.libp2p,
-            peer.libp2p,
-            filestore.allLogs[0].idString
-        );
+        await filestoreReader.waitFor(peer.libp2p);
+
         const file = await filestoreReader.get("small file");
         expect(equals(new Uint8Array(file!), smallFile)).toBeTrue();
     });
@@ -62,7 +53,7 @@ describe("index", () => {
         it("will deduplicate chunks", async () => {
             // Peer 1 is subscribing to a replication topic (to start helping the network)
             const filestore = await peer.open(new Files(), {
-                role: new ReplicatorType(),
+                role: new Replicator(),
             });
 
             const largeFile = new Uint8Array(5 * 1e7); // 50 mb
@@ -74,19 +65,16 @@ describe("index", () => {
             expect(filestore.files.index.size).toEqual(3);
 
             const filestoreReader = await peer2.open<Files>(filestore.address);
-            await waitForSubscribers(
-                peer2.libp2p,
-                peer.libp2p,
-                filestore.allLogs[0].idString
-            );
-            const file = (await filestoreReader.get("large file"))!;
+            await filestoreReader.waitFor(peer.libp2p);
+
+            const file = await filestoreReader.get("large file");
             expect(equals(file!, largeFile)).toBeTrue();
         });
 
         it("random file", async () => {
             // Peer 1 is subscribing to a replication topic (to start helping the network)
             const filestore = await peer.open(new Files(), {
-                role: new ReplicatorType(),
+                role: new Replicator(),
             });
 
             const largeFile = crypto.randomBytes(5 * 1e7); // 50 mb
@@ -97,11 +85,8 @@ describe("index", () => {
             expect(filestore.files.index.size).toEqual(57);
 
             const filestoreReader = await peer2.open<Files>(filestore.address);
-            await waitForSubscribers(
-                peer2.libp2p,
-                peer.libp2p,
-                filestore.allLogs[0].idString
-            );
+            await filestoreReader.waitFor(peer.libp2p);
+
             const file = (await filestoreReader.get("random large file"))!;
             expect(equals(file!, largeFile)).toBeTrue();
         });

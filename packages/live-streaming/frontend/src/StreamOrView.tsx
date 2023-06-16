@@ -23,9 +23,9 @@ export const StreamOrView = () => {
         }
 
         const node = getKeyFromStreamKey(params.node);
-        setIsStreamer(peer.idKey.publicKey.equals(node));
+        setIsStreamer(peer.identity.publicKey.equals(node));
         setIdArgs({ node });
-    }, [peer?.id, params?.node]);
+    }, [peer?.identityHash, params?.node]);
 
     return (
         <>

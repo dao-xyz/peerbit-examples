@@ -37,7 +37,7 @@
     "devDependencies": {
         "@dao-xyz/peerbit": "*",
         "@dao-xyz/peerbit-test-utils": "*",
-        "typescript": "^4.9.4"
+        "typescript": "^5.1.3"
     },
     "dependencies": {},
     "peerDependencies": {

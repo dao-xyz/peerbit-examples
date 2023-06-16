@@ -5,10 +5,10 @@ import { useEffect } from "react";
 export const Content = () => {
     const { peer, status } = usePeer();
     useEffect(() => {
-        if (!peer?.id) {
+        if (!peer?.identityHash) {
             return;
         }
-    }, [peer?.id]);
+    }, [peer?.identityHash]);
     return (
         <Grid container sx={{ p: inIframe() ? 0 : 0, height: "100%" }}>
             <Grid item container direction="column">

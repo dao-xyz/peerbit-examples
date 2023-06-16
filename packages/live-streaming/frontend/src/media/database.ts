@@ -8,7 +8,7 @@ import {
 import {
     DocumentIndex,
     Documents,
-    DocumentQuery,
+    SearchRequest,
     BoolQuery,
 } from "@dao-xyz/peerbit-document";
 import { Program } from "@dao-xyz/peerbit-program";
@@ -95,9 +95,7 @@ export abstract class TrackSource extends Program {
         this._id = properties.id;
         this._sender = properties.sender;
         this._timestamp = BigInt(+new Date());
-        this._chunks = new Documents({
-            index: new DocumentIndex({ indexBy: "id" }),
-        });
+        this._chunks = new Documents();
     }
 
     get id() {
@@ -247,9 +245,7 @@ export class MediaStreamDBs extends Program {
         super();
         this.id = sender.bytes;
         this.sender = sender;
-        this.streams = new Documents({
-            index: new DocumentIndex({ indexBy: "id" }),
-        });
+        this.streams = new Documents();
     }
 
     async setup(): Promise<void> {
@@ -270,9 +266,9 @@ export class MediaStreamDBs extends Program {
     }
 
     async syncActive(): Promise<Track<AudioStreamDB | WebcodecsStreamDB>[]> {
-        const results = await this.streams.index.query(
-            new DocumentQuery({
-                queries: [new BoolQuery({ key: "active", value: true })],
+        const results = await this.streams.index.search(
+            new SearchRequest({
+                query: [new BoolQuery({ key: "active", value: true })],
             }),
             { remote: { sync: true }, local: true }
         );
@@ -283,9 +279,9 @@ export class MediaStreamDBs extends Program {
     async getActiveLocally(): Promise<
         Track<AudioStreamDB | WebcodecsStreamDB>[]
     > {
-        const results = await this.streams.index.query(
-            new DocumentQuery({
-                queries: [new BoolQuery({ key: "active", value: true })],
+        const results = await this.streams.index.search(
+            new SearchRequest({
+                query: [new BoolQuery({ key: "active", value: true })],
             }),
             { remote: false, local: true }
         );

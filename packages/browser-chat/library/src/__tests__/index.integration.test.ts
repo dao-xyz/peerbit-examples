@@ -1,14 +1,12 @@
 import { Peerbit } from "@dao-xyz/peerbit";
-import { LSession } from "@dao-xyz/peerbit-test-utils";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import { Post, Room, Lobby } from "..";
-import { waitForSubscribers } from "@dao-xyz/libp2p-direct-sub";
 import {
-    DocumentQuery,
+    SearchRequest,
     StringMatch,
     StringMatchMethod,
 } from "@dao-xyz/peerbit-document";
-import { ReplicatorType } from "@dao-xyz/peerbit-program";
+import { Replicator } from "@dao-xyz/peerbit-program";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -27,12 +25,12 @@ describe("index", () => {
     it("can post", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
         const lobby1 = await peer.open(new Lobby({}), {
-            role: new ReplicatorType(),
+            role: new Replicator(),
         });
 
         // Peer 2 is creating "Rooms" which is a container of "Room"
         const lobby2 = await peer2.open<Lobby>(lobby1.address!, {
-            role: new ReplicatorType(),
+            role: new Replicator(),
         });
 
         // Put 1 Room in Rooms
@@ -42,17 +40,12 @@ describe("index", () => {
         // Another room
         const room2 = new Room({ name: "another room" });
         await lobby2.rooms.put(room2);
-
-        await waitForSubscribers(
-            peer.libp2p,
-            peer2.libp2p,
-            lobby2.rooms.log.idString
-        );
+        await lobby2.rooms.waitFor(peer.libp2p);
 
         // Peer2 can "query" for rooms if peer2 does not have anything replicated locally
-        const results: Room[] = await lobby1.rooms.index.query(
-            new DocumentQuery({
-                queries: [
+        const results: Room[] = await lobby1.rooms.index.search(
+            new SearchRequest({
+                query: [
                     new StringMatch({
                         key: "name",
                         value: "another",

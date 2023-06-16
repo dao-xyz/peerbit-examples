@@ -37,9 +37,7 @@ export class ModelDatabase extends Program {
     constructor(properties: { id: Uint8Array }) {
         super();
         this.id = properties.id;
-        this.models = new Documents({
-            index: new DocumentIndex({ indexBy: "id" }),
-        });
+        this.models = new Documents();
     }
 
     setup(): Promise<void> {

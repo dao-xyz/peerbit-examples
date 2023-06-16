@@ -11,7 +11,7 @@ export const Home = () => {
             <Button
                 disabled={!peer}
                 onClick={() => {
-                    navigate(getPathFromKey(peer.idKey.publicKey));
+                    navigate(getPathFromKey(peer.identity.publicKey));
                 }}
             >
                 Open room

@@ -8,7 +8,7 @@ import {
     AudioStreamDB,
     TrackSource,
 } from "../database.js";
-import { ObserverType } from "@dao-xyz/peerbit-program";
+import { Observer } from "@dao-xyz/peerbit-program";
 import { Grid } from "@mui/material";
 import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { DocumentsChange } from "@dao-xyz/peerbit-document";
@@ -295,7 +295,7 @@ const addAudioStreamListener = async (
                                 buffer: data,
                                 timestamp: added.timestamp,
                             };
-                            console.log("PUSH AUDIO!");
+                            console.log("PUSH FRAME!");
 
                             if (audioContext?.state !== "running" && play) {
                                 pendingFrames = [];
@@ -410,10 +410,10 @@ export const View = (args: DBArgs | IdentityArgs) => {
             } else {
                 const idArgs = args as IdentityArgs;
 
-                if (!peer.idKey.publicKey.equals(idArgs.node)) {
+                if (!peer.identity.publicKey.equals(idArgs.node)) {
                     // Open the VideStream database as a viewer
                     peer.open(new MediaStreamDBs(idArgs.node), {
-                        role: new ObserverType(),
+                        role: new Observer(),
                         sync: () => true,
                         reset: true, // TODO function without reset
                     }).then((vs) => {
@@ -438,7 +438,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                   currentAudioRef.current?.controls.close(); */
         };
     }, [
-        peer?.id,
+        peer?.identityHash,
         (args as DBArgs).db?.id.toString(),
         (args as IdentityArgs).node?.hashcode(),
     ]);
@@ -456,7 +456,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
         }
         videoLoadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen.source, {
-                role: new ObserverType(),
+                role: new Observer(),
                 sync: () => true,
                 reset: true, // TODO function without reset
             })
@@ -494,7 +494,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
 
         audioLoadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen.source, {
-                role: new ObserverType(),
+                role: new Observer(),
                 sync: () => true,
             })
                 .then(async (s) => {

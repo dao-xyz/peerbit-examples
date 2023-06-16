@@ -27,7 +27,7 @@ import { Ed25519Keypair, PublicSignKey } from "@dao-xyz/peerbit-crypto";
 import { Box, Grid, IconButton, useTheme } from "@mui/material";
 import iFrameResize from "iframe-resizer";
 import { Add, Clear } from "@mui/icons-material";
-import { DocumentQuery } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@dao-xyz/peerbit-document";
 import { useNames } from "../names/useNames.js";
 import { getCanvasKeypair, getCanvasKeypairs } from "../keys.js";
 import { HEIGHT } from "../Header.js";
@@ -160,7 +160,7 @@ export const Canvas = () => {
             "open canvas address",
             canvasAddress.toString(),
             peer.libp2p.services.blocks.publicKey.toString(),
-            peer.idKey.publicKey.toString()
+            peer.identity.publicKey.toString()
         );
         setTimeout(() => {
             console.log(peer.libp2p.services.blocks.peers.size);
@@ -172,7 +172,7 @@ export const Canvas = () => {
             .then(async (canvas) => {
                 console.log("OPEN!", canvas);
                 const node = canvas.key;
-                let isOwner = peer.idKey.publicKey.equals(node);
+                let isOwner = peer.identity.publicKey.equals(node);
                 console.log("is owner?", isOwner);
                 setIsOwner(isOwner);
                 setIdArgs({ node });
@@ -255,8 +255,8 @@ export const Canvas = () => {
                     setInterval(async () => {
                         console.log(
                             (
-                                await canvas.rects.index.query(
-                                    new DocumentQuery({ queries: [] }),
+                                await canvas.rects.index.search(
+                                    new SearchRequest({ query: [] }),
                                     { remote: { sync: true } }
                                 )
                             ).length
@@ -265,7 +265,7 @@ export const Canvas = () => {
                 }
                 return canvas;
             });
-    }, [peer?.id.toString()]);
+    }, [peer?.identityHash]);
 
     const onIframe = useCallback(
         (

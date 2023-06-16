@@ -2,8 +2,7 @@ import { field, variant, vec } from "@dao-xyz/borsh";
 import { Program } from "@dao-xyz/peerbit-program";
 import {
     Documents,
-    DocumentIndex,
-    DocumentQuery,
+    SearchRequest,
     StringMatch,
 } from "@dao-xyz/peerbit-document";
 import { sha256Base64Sync, randomBytes } from "@dao-xyz/peerbit-crypto";
@@ -124,54 +123,52 @@ export class LargeFile extends AbstractFile {
         const expectedIds = new Set(this.fileIds);
         const chunks: Map<string, Promise<Uint8Array>> = new Map();
         const waitFor = 10 * 1000;
+        const xxx = await files.files.index.search(
+            new SearchRequest({
+                query: [
+                    new StringMatch({
+                        key: "name",
+                        value: this.id + "/" + this.name,
+                    }),
+                ],
+            }),
+            {
+                local: true,
+                remote: true,
+            }
+        );
 
-        await new Promise<void>((resolve, reject) => {
-            const timout = setTimeout(() => {
-                reject(new Error("Timed out"));
-            }, waitFor);
+        const results = await files.files.index.search(
+            new SearchRequest({
+                query: [
+                    new StringMatch({
+                        key: "name",
+                        value: this.id + "/" + this.name,
+                    }),
+                ],
+            }),
+            {
+                local: true,
+                remote: true,
+            }
+        );
 
-            let stopSearch: () => void;
-            files.files.index.query(
-                new DocumentQuery({
-                    queries: [
-                        new StringMatch({
-                            key: "name",
-                            value: this.id + "/" + this.name,
-                        }),
-                    ],
-                }),
-                {
-                    local: true,
-                    remote: {
-                        timeout: waitFor,
-                        stopper: (stopperFn) => {
-                            stopSearch = stopperFn;
-                        },
-                    },
-                    onResponse: (result) => {
-                        if (result.results.length > 0) {
-                            for (const r of result.results) {
-                                if (chunks.has(r.value.id)) {
-                                    // chunk already added;
-                                }
-                                if (!expectedIds.has(r.value.id)) {
-                                    // chunk is not part of this file
-                                }
-
-                                chunks.set(r.value.id, r.value.getFile(files));
-                            }
-
-                            if (chunks.size === expectedIds.size) {
-                                clearTimeout(timout);
-                                stopSearch && stopSearch();
-                                resolve();
-                            }
-                        }
-                    },
+        if (results.length > 0) {
+            for (const r of results) {
+                if (chunks.has(r.id)) {
+                    // chunk already added;
                 }
-            );
-        });
+                if (!expectedIds.has(r.id)) {
+                    // chunk is not part of this file
+                }
 
+                chunks.set(r.id, r.getFile(files));
+            }
+        }
+
+        if (chunks.size !== expectedIds.size) {
+            throw new Error("Failed to resolve file");
+        }
         const chunkContentResolved: Uint8Array[] = await Promise.all(
             this.fileIds.map((x) => chunks.get(x)!)
         );
@@ -190,10 +187,7 @@ export class Files extends Program {
     constructor(id: Uint8Array = randomBytes(32)) {
         super();
         this.id = id;
-        this.files = new Documents({
-            immutable: false,
-            index: new DocumentIndex({ indexBy: "id" }),
-        });
+        this.files = new Documents();
     }
 
     async create(name: string, file: Uint8Array) {
@@ -231,11 +225,9 @@ export class Files extends Program {
             // query local first, then remote.
             let stopSearch: (() => void) | undefined = undefined;
             this.files.index
-                .query(
-                    new DocumentQuery({
-                        queries: [
-                            new StringMatch({ key: "name", value: name }),
-                        ],
+                .search(
+                    new SearchRequest({
+                        query: [new StringMatch({ key: "name", value: name })],
                     }),
                     {
                         local: true,
@@ -273,11 +265,9 @@ export class Files extends Program {
     async getOne(name: string): Promise<Uint8Array | undefined> {
         return new Promise((resolve, reject) => {
             this.files.index
-                .query(
-                    new DocumentQuery({
-                        queries: [
-                            new StringMatch({ key: "name", value: name }),
-                        ],
+                .search(
+                    new SearchRequest({
+                        query: [new StringMatch({ key: "name", value: name })],
                     }),
                     { local: true, remote: { amount: 1, timeout: 10 * 1000 } }
                 )

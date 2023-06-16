@@ -5,7 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { getRoomPath } from "./routes";
 import { usePeer } from "@dao-xyz/peerbit-react";
 import { Lobby as LobbyDB, Room } from "@dao-xyz/peerbit-example-browser-chat";
-import { DocumentIndex, Documents } from "@dao-xyz/peerbit-document";
+import { Documents } from "@dao-xyz/peerbit-document";
 
 export const Lobby = () => {
     const { loading: loadingPeer } = usePeer();
@@ -19,7 +19,7 @@ export const Lobby = () => {
     const [peerCount, setPeerCount] = useState(0);
 
     useEffect(() => {
-        if (!peer?.id && !loadingLobby.current) {
+        if (!peer?.identityHash && !loadingLobby.current) {
             return;
         }
 
@@ -27,13 +27,12 @@ export const Lobby = () => {
             .open(
                 new LobbyDB({
                     id: new Uint8Array(32), // 0,0,....0 choose this dynamically instead? Now it is static, => same lobby for all
-                    rooms: new Documents<Room>({
-                        index: new DocumentIndex({ indexBy: "name" }),
-                    }),
+                    rooms: new Documents<Room>(),
                 }),
                 { sync: () => true }
             )
             .then(async (lobby) => {
+                console.log("OPEN LOBBY", lobby.address.toString());
                 setLobby(lobby);
 
                 lobby.rooms.events.addEventListener("change", async (e) => {
@@ -61,17 +60,19 @@ export const Lobby = () => {
 
                 peer.libp2p.services.pubsub.addEventListener(
                     "subscribe",
-                    () => {
+                    (e) => {
+                        console.log("SYBSCRIBE", e.detail);
+
                         setPeerCount(
                             peer.libp2p.services.pubsub.topics.get(
-                                lobby.address.toString()
+                                lobby.rooms.log.idString
                             ).size + 1
                         );
                     }
                 );
                 await lobby.load();
             });
-    }, [peer?.id.toString()]);
+    }, [peer?.identityHash]);
 
     const goToRoom = (room: Room) => {
         navigate(getRoomPath(room));

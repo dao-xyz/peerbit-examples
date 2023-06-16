@@ -1,4 +1,4 @@
-import { DocumentQuery } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@dao-xyz/peerbit-document";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
@@ -23,7 +23,7 @@ export const Home = () => {
         }
         const refresh = () => {
             spaces.canvases.index
-                .query(new DocumentQuery({ queries: [] }), {
+                .search(new SearchRequest({ query: [] }), {
                     remote: {},
                 })
                 .then((results) => {
@@ -42,10 +42,14 @@ export const Home = () => {
                 <Typography variant="h4">My stuff</Typography>
             </Grid>
             <Grid item container direction="row" spacing={2}>
-                {canvases.find((x) => x.key.equals(peer.idKey.publicKey)) && (
+                {canvases.find((x) =>
+                    x.key.equals(peer.identity.publicKey)
+                ) && (
                     <Grid item container spacing={2}>
                         {canvases
-                            .filter((x) => x.key.equals(peer.idKey.publicKey))
+                            .filter((x) =>
+                                x.key.equals(peer.identity.publicKey)
+                            )
                             .map((canvas, ix) => {
                                 return (
                                     <Grid item key={ix}>

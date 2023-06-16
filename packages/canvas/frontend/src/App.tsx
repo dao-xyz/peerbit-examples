@@ -105,7 +105,6 @@ export const App = () => {
                 import.meta.env.MODE === "development" ? "local" : "remote"
             }
             keypair={keypair}
-            identity={keypair}
         >
             <NameProvider>
                 <SpaceProvider>

@@ -7,7 +7,7 @@ import {
     MediaStreamDBs,
     AudioStreamDB,
 } from "../database";
-import { ReplicatorType } from "@dao-xyz/peerbit-program";
+import { Replicator } from "@dao-xyz/peerbit-program";
 import { Buffer } from "buffer";
 import { waitFor } from "@dao-xyz/peerbit-time";
 import { Grid } from "@mui/material";
@@ -125,7 +125,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
         }
         //  console.log('setup media stream start!')
         mediaStreamDBs.current = peer
-            .open(new MediaStreamDBs(peer.idKey.publicKey))
+            .open(new MediaStreamDBs(peer.identity.publicKey))
             .then(async (db) => {
                 //  console.log("LOAD")
                 await db.load();
@@ -151,7 +151,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                 return db;
             });
-    }, [peer?.idKey.publicKey.hashcode(), args.node?.hashcode()]);
+    }, [peer?.identity.publicKey.hashcode(), args.node?.hashcode()]);
 
     const updateStream = async (properties: {
         streamType?: StreamType;
@@ -261,7 +261,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 if (metadata.decoderConfig) {
                                     console.log(metadata.decoderConfig);
                                     const newStreamDB = new WebcodecsStreamDB({
-                                        sender: peer.idKey.publicKey,
+                                        sender: peer.identity.publicKey,
                                         decoderDescription:
                                             metadata.decoderConfig,
                                         /*   timestamp: videoStreamDB?.timestamp, ??? */
@@ -281,7 +281,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                                     newStreamDB,
                                                     {
                                                         /*   trim: { type: 'length', to: 10 }, */
-                                                        role: new ReplicatorType(),
+                                                        role: new Replicator(),
                                                     }
                                                 );
                                                 while (videoStreamDB) {
@@ -463,9 +463,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
             let lastAudioTime = +new Date();
 
             audioStreamDB = await peer.open(
-                new AudioStreamDB(peer.idKey.publicKey, 48000),
+                new AudioStreamDB(peer.identity.publicKey, 48000),
                 {
-                    role: new ReplicatorType(),
+                    role: new Replicator(),
                 }
             );
 

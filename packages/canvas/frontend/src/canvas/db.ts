@@ -131,9 +131,7 @@ export class Canvas extends Program {
         super();
         this.id = randomBytes(32);
         this.key = properties.rootTrust;
-        this.rects = new Documents({
-            index: new DocumentIndex({ indexBy: "id" }),
-        });
+        this.rects = new Documents();
         this.info = properties.info;
     }
 
@@ -168,9 +166,7 @@ export class Spaces extends Program {
     constructor() {
         super();
         this.id = randomBytes(32);
-        this.canvases = new Documents({
-            index: new DocumentIndex({ indexBy: "id" }),
-        });
+        this.canvases = new Documents();
     }
 
     setup(): Promise<void> {

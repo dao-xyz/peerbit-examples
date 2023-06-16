@@ -6,15 +6,15 @@ export const CreateStream = () => {
     const { peer } = usePeer();
     const navigate = useNavigate();
     useEffect(() => {
-        if (!peer?.idKey?.publicKey) {
+        if (!peer?.identity.publicKey) {
             return;
         }
-        navigate(getStreamPath(peer.idKey.publicKey));
-    }, [peer?.idKey?.publicKey.hashcode()]);
+        navigate(getStreamPath(peer.identity.publicKey));
+    }, [peer?.identity?.publicKey.hashcode()]);
     return (
         /*  <Grid container spacing={2}>
              <Grid item>
-                 <Button onClick={() => navigate(getStreamPath(peer.identity.publicKey, peer.idKey.publicKey))} endIcon={<VideoCameraFrontIcon />}>
+                 <Button onClick={() => navigate(getStreamPath(peer.identity.publicKey, peer.identity.publicKey))} endIcon={<VideoCameraFrontIcon />}>
                      Start stream
                  </Button>
              </Grid>
