@@ -76,7 +76,7 @@ export class MediaStreamInfo {
     }
 }
 
-@variant("media_stream")
+@variant("track-source")
 export abstract class TrackSource extends Program {
     @field({ type: "string" })
     private _id: string;
@@ -140,7 +140,7 @@ export abstract class TrackSource extends Program {
     }
 }
 
-@variant(0)
+@variant("audio-stream-db")
 export class AudioStreamDB extends TrackSource {
     @field({ type: "u32" })
     sampleRate: number;
@@ -171,7 +171,8 @@ const parseConfig = (string: string): VideoDecoderConfig => {
     }
     return config;
 };
-@variant(2)
+
+@variant("webscodecs-stream-db")
 export class WebcodecsStreamDB extends TrackSource {
     @field({ type: "string" })
     decoderConfigJSON: string;
