@@ -1,4 +1,4 @@
-import { inIframe, usePeer } from "@dao-xyz/peerbit-react";
+import { inIframe, usePeer } from "@peerbit/react";
 import { useRef, useState, useEffect, useCallback } from "react";
 import {
     Chunk,
@@ -7,11 +7,10 @@ import {
     MediaStreamDBs,
     AudioStreamDB,
 } from "../database";
-import { Replicator } from "@dao-xyz/peerbit-program";
 import { Buffer } from "buffer";
-import { waitFor } from "@dao-xyz/peerbit-time";
+import { waitFor } from "@peerbit/time";
 import { Grid } from "@mui/material";
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { PublicSignKey } from "@peerbit/crypto";
 import {
     SourceSetting,
     StreamType,
@@ -81,6 +80,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
     const lastFrameRate = useRef(30);
     const scheduleFrameFn = useRef<() => void>();
     const startId = useRef(0);
+    const [sessionTimestamp, _] = useState(BigInt(+new Date()));
     let videoRef = useRef<HTMLVideoElement>();
 
     useEffect(() => {
@@ -128,26 +128,26 @@ export const Stream = (args: { node: PublicSignKey }) => {
             .open(new MediaStreamDBs(peer.identity.publicKey))
             .then(async (db) => {
                 //  console.log("LOAD")
-                await db.load();
+                /*      await db.load(); */
 
                 //  console.log("LOAD DONE!", [...db.streams.index.index.values()].length, db.streams.index.size);
 
                 // See all previous dbs as inactive, we do this since the last session might have ended unexpectedly
 
-                console.log("INACTIVATE", [...db.streams.index.index.values()]);
-                await Promise.all(
-                    [...db.streams.index.index.values()].map((x) => {
-                        if (x.value.active) {
-                            return db.streams.put(x.value.toInactive());
-                        }
-                    })
-                );
-
-                console.log(
-                    "AFTER DEACTIVE!",
-                    [...db.streams.index.index.values()].length,
-                    db.streams.index.size
-                );
+                /*  console.log("INACTIVATE", [...db.streams.index.index.values()]);
+                 await Promise.all(
+                     [...db.streams.index.index.values()].map((x) => {
+                         if (x.value.active) {
+                             return db.streams.put(x.value.toInactive());
+                         }
+                     })
+                 );
+ 
+                 console.log(
+                     "AFTER DEACTIVE!",
+                     [...db.streams.index.index.values()].length,
+                     db.streams.index.size
+                 ); */
 
                 return db;
             });
@@ -226,7 +226,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 videoStreamDB.close(),
                                 dbs.streams.put(
                                     new Track({
-                                        active: false,
+                                        session: sessionTimestamp,
                                         source: videoStreamDB,
                                     })
                                 ),
@@ -281,7 +281,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                                     newStreamDB,
                                                     {
                                                         /*   trim: { type: 'length', to: 10 }, */
-                                                        role: new Replicator(),
                                                     }
                                                 );
                                                 while (videoStreamDB) {
@@ -299,7 +298,8 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                                                     const streamInfo =
                                                         new Track({
-                                                            active: true,
+                                                            session:
+                                                                sessionTimestamp,
                                                             source: videoStreamDB,
                                                         });
                                                     //   console.log("ACTIVATE NEW TRACK", videoStreamDB.id, videoStreamDB.address.toString())
@@ -463,15 +463,12 @@ export const Stream = (args: { node: PublicSignKey }) => {
             let lastAudioTime = +new Date();
 
             audioStreamDB = await peer.open(
-                new AudioStreamDB(peer.identity.publicKey, 48000),
-                {
-                    role: new Replicator(),
-                }
+                new AudioStreamDB(peer.identity.publicKey, 48000)
             );
 
             const dbs = await mediaStreamDBs.current;
             await dbs.streams.put(
-                new Track({ active: true, source: audioStreamDB })
+                new Track({ session: sessionTimestamp, source: audioStreamDB })
             );
             await encoderInit;
             wavEncoder.node.port.onmessage = (ev) => {

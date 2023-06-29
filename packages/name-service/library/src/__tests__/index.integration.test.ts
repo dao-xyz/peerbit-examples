@@ -1,8 +1,7 @@
-import { Peerbit } from "@dao-xyz/peerbit";
+import { Peerbit } from "peerbit";
 import { Name, Names } from "..";
-import { Replicator } from "@dao-xyz/peerbit-program";
-import { Ed25519Keypair, PreHash } from "@dao-xyz/peerbit-crypto";
-import { randomBytes } from "@dao-xyz/peerbit-crypto";
+import { Ed25519Keypair, PreHash } from "@peerbit/crypto";
+import { randomBytes } from "@peerbit/crypto";
 
 describe("index", () => {
     let peer: Peerbit;
@@ -17,9 +16,7 @@ describe("index", () => {
 
     it("one name", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
-        const names = await peer.open(new Names({ id: randomBytes(32) }), {
-            role: new Replicator(),
-        });
+        const names = await peer.open(new Names({ id: randomBytes(32) }));
 
         await names.names.put(new Name(peer.identity.publicKey, "aa"));
         expect((await names.getName(peer.identity.publicKey))?.name).toEqual(
@@ -38,9 +35,7 @@ describe("index", () => {
     it("multisig name", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
         let kp = await Ed25519Keypair.create();
-        const names = await peer.open(new Names({ id: randomBytes(32) }), {
-            role: new Replicator(),
-        });
+        const names = await peer.open(new Names({ id: randomBytes(32) }));
 
         await names.names.put(new Name(peer.identity.publicKey, "a"), {
             signers: [

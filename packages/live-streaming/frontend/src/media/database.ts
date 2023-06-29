@@ -3,18 +3,24 @@ import {
     sha256Base64Sync,
     PublicSignKey,
     toBase64,
+    sha256Sync,
     fromBase64,
-} from "@dao-xyz/peerbit-crypto";
+} from "@peerbit/crypto";
 import {
     DocumentIndex,
     Documents,
     SearchRequest,
     BoolQuery,
-} from "@dao-xyz/peerbit-document";
-import { Program } from "@dao-xyz/peerbit-program";
+    Sort,
+    SortDirection,
+    IntegerCompare,
+    Compare,
+} from "@peerbit/document";
+import { Program } from "@peerbit/program";
 import { v4 as uuid } from "uuid";
 import { write, length } from "@protobufjs/utf8";
-
+import { Role, SyncFilter } from "@peerbit/shared-log";
+import { concat } from "uint8arrays";
 const utf8Encode = (value: string) => {
     const l = length(value);
     const arr = new Uint8Array(l);
@@ -76,8 +82,10 @@ export class MediaStreamInfo {
     }
 }
 
+type Args = { role?: Role; sync?: SyncFilter };
+
 @variant("track-source")
-export abstract class TrackSource extends Program {
+export abstract class TrackSource extends Program<Args> {
     @field({ type: "string" })
     private _id: string;
 
@@ -95,7 +103,15 @@ export abstract class TrackSource extends Program {
         this._id = properties.id;
         this._sender = properties.sender;
         this._timestamp = BigInt(+new Date());
-        this._chunks = new Documents();
+        this._chunks = new Documents({
+            id: sha256Sync(
+                concat([
+                    new TextEncoder().encode("chunks"),
+                    new TextEncoder().encode(this._id),
+                    sha256Sync(this.sender.bytes),
+                ])
+            ),
+        });
     }
 
     get id() {
@@ -114,8 +130,8 @@ export abstract class TrackSource extends Program {
         return this._chunks;
     }
 
-    async setup(): Promise<void> {
-        await this.chunks.setup({
+    async open(args?: Args): Promise<void> {
+        await this.chunks.open({
             type: Chunk,
             canAppend: async (entry) => {
                 const keys = await entry.getPublicKeys();
@@ -136,6 +152,8 @@ export abstract class TrackSource extends Program {
                     };
                 },
             },
+            role: args?.role,
+            sync: args?.sync,
         });
     }
 }
@@ -212,24 +230,20 @@ export class Track<T extends TrackSource> {
     @field({ type: "string" })
     id: string;
 
-    @field({ type: "bool" })
-    active: boolean;
+    @field({ type: "u64" })
+    session: bigint;
 
     @field({ type: TrackSource })
     source: T;
 
-    constructor(properties: { active: boolean; source: T }) {
-        this.active = properties.active;
+    constructor(properties: { session: bigint; source: T }) {
+        this.session = properties.session;
         this.id = properties.source.id;
         this.source = properties.source;
     }
-
-    toInactive(): Track<T> {
-        return new Track({ active: false, source: this.source });
-    }
 }
 
-@variant("media_streams")
+@variant("media-streams")
 export class MediaStreamDBs extends Program {
     @field({ type: Uint8Array })
     id: Uint8Array;
@@ -246,11 +260,19 @@ export class MediaStreamDBs extends Program {
         super();
         this.id = sender.bytes;
         this.sender = sender;
-        this.streams = new Documents();
+        this.streams = new Documents({
+            id: sha256Sync(
+                concat([
+                    new TextEncoder().encode("media-streams"),
+                    this.id,
+                    sha256Sync(this.sender.bytes),
+                ])
+            ),
+        });
     }
 
-    async setup(): Promise<void> {
-        await this.streams.setup({
+    async open(): Promise<void> {
+        await this.streams.open({
             type: Track,
             canAppend: async (entry) => {
                 const keys = await entry.getPublicKeys();
@@ -267,14 +289,33 @@ export class MediaStreamDBs extends Program {
     }
 
     async syncActive(): Promise<Track<AudioStreamDB | WebcodecsStreamDB>[]> {
-        const results = await this.streams.index.search(
+        const latest = await this.streams.index.search(
             new SearchRequest({
-                query: [new BoolQuery({ key: "active", value: true })],
+                sort: [
+                    new Sort({ key: "session", direction: SortDirection.DESC }),
+                ],
             }),
-            { remote: { sync: true }, local: true }
+            { remote: { sync: true }, local: true, size: 1 }
         );
-        console.log("RESULTS!", results);
-        return results;
+        if (latest.length === 0) {
+            return [];
+        }
+        const tracks = await this.streams.index.search(
+            new SearchRequest({
+                query: [
+                    new IntegerCompare({
+                        compare: Compare.GreaterOrEqual,
+                        key: "session",
+                        value: latest[0].session,
+                    }),
+                ],
+                sort: [
+                    new Sort({ key: "session", direction: SortDirection.DESC }),
+                ],
+            }),
+            { remote: { sync: true }, local: true, size: 1 }
+        );
+        return tracks;
     }
 
     async getActiveLocally(): Promise<

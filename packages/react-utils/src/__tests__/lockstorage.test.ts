@@ -20,7 +20,7 @@ import sinon from "sinon";
 
 import nodelocalstorage from "node-localstorage";
 import { jest } from "@jest/globals";
-import { delay } from "@dao-xyz/peerbit-time";
+import { delay } from "@peerbit/time";
 var LocalStorage = nodelocalstorage.LocalStorage;
 var localStorage = new LocalStorage("./tmp/FastMutex");
 globalThis.localStorage = localStorage;

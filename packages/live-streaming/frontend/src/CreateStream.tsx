@@ -1,4 +1,4 @@
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer } from "@peerbit/react";
 import { useNavigate } from "react-router-dom";
 import { getStreamPath } from "./routes";
 import { useEffect } from "react";

@@ -1,5 +1,5 @@
-import { Name, Names } from "@dao-xyz/peer-names";
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { Name, Names } from "@peerbit/peer-names";
+import { usePeer } from "@peerbit/react";
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { Spaces } from "./canvas/db";
 
@@ -65,9 +65,12 @@ export const SpaceProvider = ({ children }: { children: JSX.Element }) => {
             return;
         }
         loading.current = peer
-            .open(new Spaces(), { sync: () => true })
+            .open(new Spaces(), {
+                args: {
+                    sync: () => true,
+                },
+            })
             .then(async (result) => {
-                await result.load();
                 setSpaces(result);
             })
             .then(() => {

@@ -1,4 +1,4 @@
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { PublicSignKey } from "@peerbit/crypto";
 import { Routes, Route } from "react-router";
 import { Room as RoomView } from "./Room";
 import { base64url } from "multiformats/bases/base64";

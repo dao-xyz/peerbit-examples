@@ -4,8 +4,8 @@ import {
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { releaseKey } from "@dao-xyz/peerbit-react";
-import { PeerProvider } from "@dao-xyz/peerbit-react";
+import { releaseKey } from "@peerbit/react";
+import { PeerProvider } from "@peerbit/react";
 import { Body } from "./Body";
 import { NameProvider } from "./names/useNames";
 import { getRootKeypair } from "./keys";

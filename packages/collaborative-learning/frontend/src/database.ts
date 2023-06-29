@@ -1,5 +1,5 @@
-import { Program } from "@dao-xyz/peerbit-program";
-import { DocumentIndex, Documents } from "@dao-xyz/peerbit-document";
+import { Program } from "@peerbit/program";
+import { DocumentIndex, Documents } from "@peerbit/document";
 import { field, variant } from "@dao-xyz/borsh";
 
 export class Model {
@@ -31,16 +31,17 @@ export class Model {
 export class ModelDatabase extends Program {
     @field({ type: Uint8Array })
     id: Uint8Array;
+
     @field({ type: Documents })
     models: Documents<Model>;
 
     constructor(properties: { id: Uint8Array }) {
         super();
         this.id = properties.id;
-        this.models = new Documents();
+        this.models = new Documents({ id: this.id });
     }
 
-    setup(): Promise<void> {
-        return this.models.setup({ type: Model });
+    open(): Promise<void> {
+        return this.models.open({ type: Model });
     }
 }

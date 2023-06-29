@@ -1,5 +1,5 @@
 {
-    "name": "@peerbit/example-browser-chat",
+    "name": "file-share",
     "version": "0.0.1",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
@@ -11,6 +11,9 @@
     "types": "lib/esm/index.d.ts",
     "exports": {
         "import": "./lib/esm/index.js"
+    },
+    "bin": {
+        "plopp": "./lib/esm/bin.js"
     },
     "files": [
         "lib",
@@ -37,9 +40,14 @@
     "devDependencies": {
         "peerbit": "*",
         "@peerbit/test-utils": "*",
-        "typescript": "^5.1.3"
+        "typescript": "^5.1.3",
+        "@types/yargs": "^17.0.24"
     },
-    "dependencies": {},
+    "dependencies": {
+        "@peerbit/file-share": "^0.0.1",
+        "yargs": "^17.7.2",
+        "chalk": "^5.3.0"
+    },
     "peerDependencies": {
         "peerbit": "*"
     }

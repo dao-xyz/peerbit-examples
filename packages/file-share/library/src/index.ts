@@ -1,27 +1,19 @@
 import { field, variant, vec } from "@dao-xyz/borsh";
-import { Program } from "@dao-xyz/peerbit-program";
-import {
-    Documents,
-    SearchRequest,
-    StringMatch,
-} from "@dao-xyz/peerbit-document";
-import { sha256Base64Sync, randomBytes } from "@dao-xyz/peerbit-crypto";
-import {
-    createBlock,
-    getBlockValue,
-    DirectBlock,
-} from "@dao-xyz/libp2p-direct-block";
+import { Program } from "@peerbit/program";
+import { Documents, SearchRequest, StringMatch, Role } from "@peerbit/document";
+import { sha256Base64Sync, randomBytes } from "@peerbit/crypto";
+import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
 
 abstract class AbstractFile {
     abstract id: string;
     abstract name: string;
-    abstract getFile(files: Files): Promise<Uint8Array>;
+    abstract getFile(files: Files): Promise<Uint8Array | undefined>;
 }
 
 const TINY_FILE_SIZE_LIMIT = 1e3;
 
-@variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
+@variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
     @field({ type: "string" })
     id: string;
@@ -40,13 +32,16 @@ export class TinyFile extends AbstractFile {
     }
 
     async getFile(_files: Files) {
+        if (sha256Base64Sync(this.file) !== this.id) {
+            throw new Error("Hash does not match the file content");
+        }
         return Promise.resolve(this.file);
     }
 }
 
 const SMALL_FILE_SIZE_LIMIT = 1e6 * 9;
 
-@variant(1) // for versioning purposes, we can do @variant(1) when we create a new post type version
+@variant(1) // for versioning purposes
 export class SmallFile extends AbstractFile {
     @field({ type: "string" })
     id: string; // cid
@@ -64,24 +59,21 @@ export class SmallFile extends AbstractFile {
         this.cid = properties.cid;
     }
 
-    static async create(name: string, file: Uint8Array, blocks: DirectBlock) {
+    static async create(node: ProgramClient, name: string, file: Uint8Array) {
         if (file.length > SMALL_FILE_SIZE_LIMIT) {
             throw new Error("To large file for SmallFile");
         }
-        const cid = await blocks.put(await createBlock(file, "raw"));
+        const cid = await node.services.blocks.put(file);
         return new SmallFile({ name, cid });
     }
 
     async getFile(files: Files) {
         // Load the file from the block store
-        const block = await files.libp2p.services.blocks.get(this.id);
-
-        // Get the file value
-        return (block ? await getBlockValue(block) : undefined) as Uint8Array;
+        return await files.node.services.blocks.get(this.id);
     }
 }
 
-@variant(2) // for versioning purposes, we can do @variant(1) when we create a new post type version
+@variant(2) // for versioning purposes
 export class LargeFile extends AbstractFile {
     @field({ type: "string" })
     id: string; // hash
@@ -121,22 +113,7 @@ export class LargeFile extends AbstractFile {
     async getFile(files: Files) {
         // Get all sub files (SmallFiles) and concatinate them in the right order (the order of this.fileIds)
         const expectedIds = new Set(this.fileIds);
-        const chunks: Map<string, Promise<Uint8Array>> = new Map();
-        const waitFor = 10 * 1000;
-        const xxx = await files.files.index.search(
-            new SearchRequest({
-                query: [
-                    new StringMatch({
-                        key: "name",
-                        value: this.id + "/" + this.name,
-                    }),
-                ],
-            }),
-            {
-                local: true,
-                remote: true,
-            }
-        );
+        const chunks: Map<string, Promise<Uint8Array | undefined>> = new Map();
 
         const results = await files.files.index.search(
             new SearchRequest({
@@ -170,14 +147,22 @@ export class LargeFile extends AbstractFile {
             throw new Error("Failed to resolve file");
         }
         const chunkContentResolved: Uint8Array[] = await Promise.all(
-            this.fileIds.map((x) => chunks.get(x)!)
+            this.fileIds.map(async (x) => {
+                const chunkValue = await chunks.get(x);
+                if (!chunkValue) {
+                    throw new Error("Failed to retrieve chunk with id: " + x);
+                }
+                return chunkValue;
+            })
         );
         return concat(chunkContentResolved);
     }
 }
 
+type Args = { role: Role };
+
 @variant("files")
-export class Files extends Program {
+export class Files extends Program<Args> {
     @field({ type: Uint8Array })
     id: Uint8Array;
 
@@ -187,7 +172,7 @@ export class Files extends Program {
     constructor(id: Uint8Array = randomBytes(32)) {
         super();
         this.id = id;
-        this.files = new Documents();
+        this.files = new Documents({ id: this.id });
     }
 
     async create(name: string, file: Uint8Array) {
@@ -198,11 +183,7 @@ export class Files extends Program {
             file.byteLength > TINY_FILE_SIZE_LIMIT &&
             file.byteLength <= SMALL_FILE_SIZE_LIMIT
         ) {
-            toPut = await SmallFile.create(
-                name,
-                file,
-                this.libp2p.services.blocks
-            );
+            toPut = await SmallFile.create(this.node, name, file);
         } else {
             toPut = await LargeFile.create(name, file, this);
         }
@@ -211,87 +192,64 @@ export class Files extends Program {
     }
 
     /**
-     * Get one file
-     * @param name
+     * Get by name
+     * @param id
      * @returns
      */
-    async get(name: string): Promise<Uint8Array | undefined> {
-        return new Promise((resolve, reject) => {
-            const waitFor = 10 * 1000;
-            const timout = setTimeout(() => {
-                reject(new Error("Timed out"));
-            }, waitFor);
+    async getById(
+        id: string
+    ): Promise<{ id: string; name: string; bytes: Uint8Array } | undefined> {
+        const results = await this.files.index.search(
+            new SearchRequest({
+                query: [new StringMatch({ key: "id", value: id })],
+            }),
+            {
+                local: true,
+                remote: {
+                    timeout: 10 * 1000,
+                },
+            }
+        );
 
-            // query local first, then remote.
-            let stopSearch: (() => void) | undefined = undefined;
-            this.files.index
-                .search(
-                    new SearchRequest({
-                        query: [new StringMatch({ key: "name", value: name })],
-                    }),
-                    {
-                        local: true,
-                        remote: {
-                            stopper: (stopper) => {
-                                stopSearch = stopper;
-                            },
-                        },
-                    }
-                )
-                .then((results) => {
-                    for (const result of results) {
-                        result
-                            .getFile(this)
-                            .then((file) => {
-                                clearTimeout(timout);
-                                stopSearch && stopSearch();
-                                resolve(file);
-                            })
-                            .catch((error) => {
-                                clearTimeout(timout);
-                                stopSearch && stopSearch();
-                                reject(error);
-                            });
-                    }
-                });
-        });
+        for (const result of results) {
+            const file = await result.getFile(this);
+            if (file) {
+                return { id: result.id, name: result.name, bytes: file };
+            }
+        }
     }
 
     /**
-     * Get all
+     * Get by name
      * @param name
      * @returns
      */
-    async getOne(name: string): Promise<Uint8Array | undefined> {
-        return new Promise((resolve, reject) => {
-            this.files.index
-                .search(
-                    new SearchRequest({
-                        query: [new StringMatch({ key: "name", value: name })],
-                    }),
-                    { local: true, remote: { amount: 1, timeout: 10 * 1000 } }
-                )
-                .then((results) => {
-                    for (const result of results) {
-                        result
-                            .getFile(this)
-                            .then((file) => {
-                                resolve(file);
-                            })
-                            .catch((error) => {
-                                reject(error);
-                            });
-                    }
-                })
-                .catch(() => {
-                    resolve(undefined);
-                });
-        });
+    async getByName(
+        name: string
+    ): Promise<{ id: string; name: string; bytes: Uint8Array } | undefined> {
+        const results = await this.files.index.search(
+            new SearchRequest({
+                query: [new StringMatch({ key: "name", value: name })],
+            }),
+            {
+                local: true,
+                remote: {
+                    timeout: 10 * 1000,
+                },
+            }
+        );
+
+        for (const result of results) {
+            const file = await result.getFile(this);
+            if (file) {
+                return { id: result.id, name: result.name, bytes: file };
+            }
+        }
     }
 
     // Setup lifecycle, will be invoked on 'open'
-    async setup(): Promise<void> {
-        await this.files.setup({
+    async open(args?: Args): Promise<void> {
+        await this.files.open({
             type: AbstractFile,
             canAppend: async (entry) => {
                 await entry.verifySignatures();
@@ -300,6 +258,7 @@ export class Files extends Program {
             canRead: async (identity) => {
                 return true; // Anyone can query
             },
+            role: args?.role,
         });
     }
 }

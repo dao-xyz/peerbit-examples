@@ -14,7 +14,7 @@ import {
     getChatPath,
     getAdressFromKey,
 } from "../routes.js";
-import { usePeer, submitKeypairChange } from "@dao-xyz/peerbit-react";
+import { usePeer, submitKeypairChange } from "@peerbit/react";
 import { useParams } from "react-router-dom";
 import {
     Canvas as CanvasDB,
@@ -23,11 +23,11 @@ import {
     RectContent,
     IFrameContent,
 } from "./db";
-import { Ed25519Keypair, PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { Ed25519Keypair, PublicSignKey } from "@peerbit/crypto";
 import { Box, Grid, IconButton, useTheme } from "@mui/material";
 import iFrameResize from "iframe-resizer";
 import { Add, Clear } from "@mui/icons-material";
-import { SearchRequest } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@peerbit/document";
 import { useNames } from "../names/useNames.js";
 import { getCanvasKeypair, getCanvasKeypairs } from "../keys.js";
 import { HEIGHT } from "../Header.js";
@@ -159,15 +159,17 @@ export const Canvas = () => {
         console.log(
             "open canvas address",
             canvasAddress.toString(),
-            peer.libp2p.services.blocks.publicKey.toString(),
+            peer.services.blocks.publicKey.toString(),
             peer.identity.publicKey.toString()
         );
         setTimeout(() => {
-            console.log(peer.libp2p.services.blocks.peers.size);
+            console.log(peer.services.blocks.peers.size);
         }, 5000);
         myCanvas.current = peer
             .open<CanvasDB>(canvasAddress, {
-                sync: () => true,
+                args: {
+                    sync: () => true,
+                },
             })
             .then(async (canvas) => {
                 console.log("OPEN!", canvas);
@@ -241,7 +243,6 @@ export const Canvas = () => {
                         );
                     }
                 );
-                await canvas.load();
 
                 if (canvas.rects.index.size > 0) {
                     return canvas;
@@ -265,7 +266,7 @@ export const Canvas = () => {
                 }
                 return canvas;
             });
-    }, [peer?.identityHash]);
+    }, [peer?.identity.publicKey.hashcode()]);
 
     const onIframe = useCallback(
         (

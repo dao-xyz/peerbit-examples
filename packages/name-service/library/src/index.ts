@@ -1,12 +1,13 @@
 import { field, variant, fixedArray } from "@dao-xyz/borsh";
-import { Program } from "@dao-xyz/peerbit-program";
+import { Program } from "@peerbit/program";
 import {
     SearchRequest,
     Documents,
     StringMatch,
     PutOperation,
-} from "@dao-xyz/peerbit-document";
-import { PublicSignKey, randomBytes } from "@dao-xyz/peerbit-crypto";
+} from "@peerbit/document";
+import { Role, SyncFilter } from "@peerbit/shared-log";
+import { PublicSignKey, randomBytes } from "@peerbit/crypto";
 
 @variant(0)
 export class Name {
@@ -22,8 +23,10 @@ export class Name {
     }
 }
 
+type Args = { role?: Role; sync?: SyncFilter };
+
 @variant("names")
-export class Names extends Program {
+export class Names extends Program<Args> {
     @field({ type: Uint8Array })
     id: Uint8Array;
 
@@ -33,12 +36,12 @@ export class Names extends Program {
     constructor(properties: { id: Uint8Array } = { id: new Uint8Array(32) }) {
         super();
         this.id = properties.id;
-        this.names = new Documents();
+        this.names = new Documents({ id: properties.id });
     }
 
     // Setup lifecycle, will be invoked on 'open'
-    async setup(): Promise<void> {
-        await this.names.setup({
+    async open(args?: Args): Promise<void> {
+        await this.names.open({
             type: Name,
             canAppend: (entry) => {
                 return true; //!!entry.signatures.find(x => x.publicKey.equals((entry.payload.getValue() as PutOperation<Name>).value!.publicKey!))
@@ -48,7 +51,7 @@ export class Names extends Program {
                     return {
                         id: doc.id,
                         name: doc.name,
-                        keys: (await this.names.log.get(
+                        keys: (await this.names.log.log.get(
                             context.head
                         ))!.signatures.map((signature) =>
                             signature.publicKey.hashcode()
@@ -56,6 +59,8 @@ export class Names extends Program {
                     };
                 },
             },
+            role: args?.role,
+            sync: args?.sync,
         });
     }
 

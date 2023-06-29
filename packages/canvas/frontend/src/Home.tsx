@@ -1,9 +1,9 @@
-import { SearchRequest } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@peerbit/document";
 import { Button, Grid, TextField, Typography } from "@mui/material";
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Canvas } from "./canvas/db";
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer } from "@peerbit/react";
 import { userSpaces } from "./useSpaces";
 import { CanvasPreview } from "./canvas/CanvasPreview";
 import { Add } from "@mui/icons-material";

@@ -1,8 +1,7 @@
 import { field, variant } from "@dao-xyz/borsh";
-import { Program } from "@dao-xyz/peerbit-program";
+import { Program } from "@peerbit/program";
 import {
     Documents,
-    DocumentIndex,
     PutOperation,
     DeleteOperation,
     IntegerCompare,
@@ -11,9 +10,11 @@ import {
     Sort,
     Compare,
     Query,
-} from "@dao-xyz/peerbit-document";
+} from "@peerbit/document";
 import { v4 as uuid } from "uuid";
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
+import { Role, SyncFilter } from "@peerbit/shared-log";
+import { concat } from "uint8arrays";
 
 const FROM = "from";
 const MESSAGE = "message";
@@ -37,8 +38,13 @@ export class Post {
     }
 }
 
+type Args = {
+    role?: Role;
+    sync?: SyncFilter;
+};
+
 @variant("room")
-export class Room extends Program {
+export class Room extends Program<Args> {
     @field({ type: PublicSignKey })
     creator: PublicSignKey;
 
@@ -51,7 +57,16 @@ export class Room extends Program {
     }) {
         super();
         this.creator = properties.creator;
-        this.messages = properties.messages || new Documents<Post>();
+        this.messages =
+            properties.messages ||
+            new Documents<Post>({
+                id: sha256Sync(
+                    concat([
+                        new TextEncoder().encode("room"),
+                        this.creator.bytes,
+                    ])
+                ),
+            });
     }
 
     get id() {
@@ -59,8 +74,8 @@ export class Room extends Program {
     }
 
     // Setup lifecycle, will be invoked on 'open'
-    async setup(): Promise<void> {
-        await this.messages.setup({
+    async open(args?: Args): Promise<void> {
+        await this.messages.open({
             type: Post,
             canAppend: async (entry) => {
                 await entry.verifySignatures();
@@ -98,14 +113,16 @@ export class Room extends Program {
                 return true; // Anyone can query
             },
             index: {
-                fields: (obj, entry) => {
+                fields: (obj, context) => {
                     return {
                         [FROM]: obj[FROM].bytes,
                         [MESSAGE]: obj[MESSAGE],
-                        [TIMESTAMP]: entry.created,
+                        [TIMESTAMP]: context.created,
                     };
                 },
             },
+            role: args?.role,
+            sync: args?.sync,
         });
     }
 
@@ -161,44 +178,59 @@ export class Room extends Program {
         iterator.close();
         return next;
     }
-    async loadLater() {
-        // get the earlist doc locally, query all docs earlier than this
-        const lastIterator = await this.messages.index.iterate(
-            new SearchRequest({
-                query: [],
-                sort: [
-                    new Sort({
-                        direction: SortDirection.DESC,
-                        key: TIMESTAMP,
-                    }),
-                ],
-            }),
-            {
-                local: true,
-                remote: false,
-            }
-        );
 
-        const latestPost = (await lastIterator.next(1))[0];
-        lastIterator.close();
+    async getTimestamp(id: string) {
+        const docs = await this.messages.index.getDetailed(id, {
+            local: true,
+        });
+        return docs?.[0]?.results[0]?.context.created;
+    }
+
+    async loadLater(than?: bigint) {
+        // get the earlist doc locally, query all docs earlier than this
 
         const query: Query[] = [];
 
-        if (latestPost) {
-            const created = (
-                await this.messages.index.getDetailed(latestPost.id, {
-                    local: true,
-                })
-            )?.[0].results[0]?.context.created;
-            if (created != null) {
-                query.push(
-                    new IntegerCompare({
-                        key: TIMESTAMP,
-                        compare: Compare.Greater,
-                        value: created,
-                    })
-                );
+        if (than == null) {
+            const lastIterator = await this.messages.index.iterate(
+                new SearchRequest({
+                    query: [],
+                    sort: [
+                        new Sort({
+                            direction: SortDirection.DESC,
+                            key: TIMESTAMP,
+                        }),
+                    ],
+                }),
+                {
+                    local: true, // we only query locally too see what we don't have
+                    remote: false,
+                }
+            );
+
+            const latestPost = (await lastIterator.next(1))[0];
+            lastIterator.close();
+
+            if (latestPost) {
+                const created = await this.getTimestamp(latestPost.id);
+                if (created != null) {
+                    query.push(
+                        new IntegerCompare({
+                            key: TIMESTAMP,
+                            compare: Compare.Greater,
+                            value: created,
+                        })
+                    );
+                }
             }
+        } else {
+            query.push(
+                new IntegerCompare({
+                    key: TIMESTAMP,
+                    compare: Compare.Greater,
+                    value: than,
+                })
+            );
         }
 
         const iterator = await this.messages.index.iterate(

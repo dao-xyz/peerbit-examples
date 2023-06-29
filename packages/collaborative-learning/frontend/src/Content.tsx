@@ -1,4 +1,4 @@
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer } from "@peerbit/react";
 import { useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import * as tf from "@tensorflow/tfjs";
@@ -174,34 +174,20 @@ export const Content = () => {
         setProcessing(true);
         peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID })).then(
             async (db) => {
-                peer.libp2p.services.pubsub.addEventListener(
-                    "subscribe",
-                    () => {
-                        setSubscribers(
-                            (peer.libp2p.services.pubsub.topics.get(
-                                db.address.toString()
-                            )?.size || 0) + 1
-                        );
-                    }
-                );
-                peer.libp2p.services.pubsub.addEventListener(
-                    "unsubscribe",
-                    () => {
-                        setSubscribers(
-                            (peer.libp2p.services.pubsub.topics.get(
-                                db.address.toString()
-                            )?.size || 0) + 1
-                        );
-                    }
-                );
+                db.events.addEventListener("join", (e) => {
+                    db.getReady().then((set) => setSubscribers(set.size + 1));
+                });
 
-                await db.load();
+                db.events.addEventListener("leave", (e) => {
+                    db.getReady().then((set) => setSubscribers(set.size + 1));
+                });
+
                 p2pStorage.current = new P2PStorage(db, MODEL_ID);
 
                 setProcessing(false);
             }
         );
-    }, [peer?.identityHash]);
+    }, [peer?.identity.publicKey.hashcode()]);
 
     const enableCam = () => {
         if (!video.current) {
@@ -317,7 +303,7 @@ export const Content = () => {
         if (!peer?.libp2p || !params.node || !params.identity) {
             return;
         }
-    }, [peer?.identityHash, params?.node]);
+    }, [peer?.identity.publicKey.hashcode(), params?.node]);
 
     return (
         <>

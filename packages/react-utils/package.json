@@ -1,5 +1,5 @@
 {
-    "name": "@dao-xyz/peerbit-react",
+    "name": "@peerbit/react",
     "version": "0.0.1",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "module": "lib/esm/index.js",
@@ -23,7 +23,7 @@
     },
     "dependencies": {
         "@dao-xyz/libp2p-webrtc": "^2.0.2",
-        "@dao-xyz/peerbit": "*",
+        "peerbit": "*",
         "@types/react": "^18.0.25",
         "@types/react-dom": "^18.0.8",
         "react": "^18.2.0",

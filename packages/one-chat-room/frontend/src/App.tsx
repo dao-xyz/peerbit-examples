@@ -1,4 +1,4 @@
-import { PeerProvider } from "@dao-xyz/peerbit-react";
+import { PeerProvider } from "@peerbit/react";
 import { HashRouter } from "react-router-dom";
 import {
     createTheme,
@@ -7,7 +7,7 @@ import {
     CssBaseline,
 } from "@mui/material";
 import { Content } from "./Content";
-import { inIframe } from "@dao-xyz/peerbit-react";
+import { inIframe } from "@peerbit/react";
 
 // Theme
 let theme = createTheme({

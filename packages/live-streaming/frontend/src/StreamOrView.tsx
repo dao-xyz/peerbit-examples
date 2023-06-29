@@ -1,10 +1,10 @@
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer } from "@peerbit/react";
 import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
 import { getKeyFromStreamKey } from "./routes";
 import { Stream } from "./media/streamer/Stream";
 import { View } from "./media/viewer/View";
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { PublicSignKey } from "@peerbit/crypto";
 
 export const StreamOrView = () => {
     const { peer } = usePeer();
@@ -25,7 +25,7 @@ export const StreamOrView = () => {
         const node = getKeyFromStreamKey(params.node);
         setIsStreamer(peer.identity.publicKey.equals(node));
         setIdArgs({ node });
-    }, [peer?.identityHash, params?.node]);
+    }, [peer?.identity.publicKey.hashcode(), params?.node]);
 
     return (
         <>

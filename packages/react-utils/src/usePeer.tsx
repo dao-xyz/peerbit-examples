@@ -1,6 +1,6 @@
 import React, { useContext, useEffect, useRef, useState } from "react";
 import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
-import { Peerbit } from "@dao-xyz/peerbit";
+import { Peerbit } from "peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { createLibp2p } from "libp2p";
 import { supportedKeys } from "@libp2p/crypto/keys";
@@ -12,19 +12,16 @@ import {
     resolveSwarmAddress,
 } from "./utils.js";
 import { noise } from "@dao-xyz/libp2p-noise";
-import { peerIdFromKeys } from "@libp2p/peer-id";
-import { createLibp2pExtended } from "@dao-xyz/peerbit-libp2p";
 import { v4 as uuid } from "uuid";
-import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
+import { Ed25519Keypair } from "@peerbit/crypto";
 import { FastMutex } from "./lockstorage.js";
 import { serialize, deserialize } from "@dao-xyz/borsh";
-import { waitFor } from "@dao-xyz/peerbit-time";
+import { waitFor } from "@peerbit/time";
 import sodium from "libsodium-wrappers";
 import { circuitRelayTransport } from "libp2p/circuit-relay";
 import { webRTC } from "@dao-xyz/libp2p-webrtc";
 import * as filters from "@libp2p/websockets/filters";
 import axios from "axios";
-
 export type ConnectionStatus =
     | "disconnected"
     | "connected"
@@ -226,7 +223,7 @@ export const PeerProvider = ({
                                       filter: filters.all,
                                   }),
                                   /*            circuitRelayTransport({ discoverRelays: 1 }),
-                                     webRTC(), */
+                               webRTC(), */
                               ],
                           }
                         : {
@@ -242,7 +239,7 @@ export const PeerProvider = ({
                               transports: [
                                   webSockets({ filter: filters.all }),
                                   /*             circuitRelayTransport({ discoverRelays: 1 }),
-                                      webRTC(), */
+                                webRTC(), */
                               ],
                           }),
                 },

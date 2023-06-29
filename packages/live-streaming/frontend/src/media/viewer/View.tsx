@@ -1,4 +1,4 @@
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer } from "@peerbit/react";
 import { useRef, useState, useEffect, useCallback } from "react";
 import {
     Chunk,
@@ -8,17 +8,15 @@ import {
     AudioStreamDB,
     TrackSource,
 } from "../database.js";
-import { Observer } from "@dao-xyz/peerbit-program";
 import { Grid } from "@mui/material";
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
-import { DocumentsChange } from "@dao-xyz/peerbit-document";
+import { PublicSignKey } from "@peerbit/crypto";
+import { DocumentsChange, Observer } from "@peerbit/document";
 import "./View.css";
 import CatOffline from "/catbye64.png";
 import { Controls } from "./controller/Control.js";
 import { ControlFunctions } from "./controller/controls.js";
 import { Resolution } from "../controls/settings.js";
 import { renderer } from "./video/renderer.js";
-import { waitFor } from "@dao-xyz/peerbit-time";
 import PQueue from "p-queue";
 
 let inBackground = false;
@@ -413,9 +411,11 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 if (!peer.identity.publicKey.equals(idArgs.node)) {
                     // Open the VideStream database as a viewer
                     peer.open(new MediaStreamDBs(idArgs.node), {
-                        role: new Observer(),
-                        sync: () => true,
-                        reset: true, // TODO function without reset
+                        args: {
+                            role: new Observer(),
+                            sync: () => true,
+                        },
+                        // reset: true, // TODO function without reset
                     }).then((vs) => {
                         console.log(
                             "OPENED DB",
@@ -438,7 +438,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                   currentAudioRef.current?.controls.close(); */
         };
     }, [
-        peer?.identityHash,
+        peer?.identity.publicKey.hashcode(),
         (args as DBArgs).db?.id.toString(),
         (args as IdentityArgs).node?.hashcode(),
     ]);
@@ -456,9 +456,11 @@ export const View = (args: DBArgs | IdentityArgs) => {
         }
         videoLoadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen.source, {
-                role: new Observer(),
-                sync: () => true,
-                reset: true, // TODO function without reset
+                args: {
+                    role: new Observer(),
+                    sync: () => true,
+                },
+                /* reset: true, */ // TODO function without reset
             })
                 .then(async (s) => {
                     setSelectedResolutions([
@@ -494,8 +496,10 @@ export const View = (args: DBArgs | IdentityArgs) => {
 
         audioLoadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen.source, {
-                role: new Observer(),
-                sync: () => true,
+                args: {
+                    role: new Observer(),
+                    sync: () => true,
+                },
             })
                 .then(async (s) => {
                     await addAudioStreamListener(
@@ -669,12 +673,12 @@ export const View = (args: DBArgs | IdentityArgs) => {
                                streamToOpen.source.decoderDescription.codedHeight
                            ); */
 
-                            console.log(
-                                "IS ACTIVE",
-                                streamToOpen.id,
-                                streamToOpen.active,
-                                currentVideoIsRemoved
-                            );
+                            /*    console.log(
+                                   "IS ACTIVE",
+                                   streamToOpen.id,
+                                   streamToOpen.sessionTimestamp,
+                                   currentVideoIsRemoved
+                               ); */
                             await updateVideoStream(streamToOpen);
                             /*    console.log("update stream done");
                            console.log(
@@ -705,11 +709,13 @@ export const View = (args: DBArgs | IdentityArgs) => {
                             await updateAudioStream(audioResult[0]);
                         }
 
-                        setStreamerOnline(
-                            peer.libp2p.services.pubsub
-                                .getSubscribers(videoStream.allLogs[0].idString)
-                                .has(videoStream.sender.hashcode())
-                        );
+                        videoStream
+                            .getReady()
+                            .then((set) =>
+                                setStreamerOnline(
+                                    set.has(videoStream.sender.hashcode())
+                                )
+                            );
                     }
                 };
                 let updateStreamTimeout:
@@ -728,11 +734,8 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 updateStreamChoice();
 
                 // Wait for streamer to be online, then query active
-                waitFor(() =>
-                    peer.libp2p.services.pubsub
-                        .getSubscribers(videoStream.allLogs[0].idString)
-                        .has(videoStream.sender.hashcode())
-                )
+                videoStream
+                    .waitFor(videoStream.sender)
                     .then(() => {
                         videoStream.syncActive();
                     })

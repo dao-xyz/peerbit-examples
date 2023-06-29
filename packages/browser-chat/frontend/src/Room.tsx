@@ -8,11 +8,11 @@ import {
     Typography,
 } from "@mui/material";
 import { useParams } from "react-router";
-import { SearchRequest } from "@dao-xyz/peerbit-document";
-import { Post, Room as RoomDB } from "@dao-xyz/peerbit-example-browser-chat";
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { SearchRequest } from "@peerbit/document";
+import { Post, Room as RoomDB } from "@peerbit/example-browser-chat";
+import { usePeer } from "@peerbit/react";
 import { Send } from "@mui/icons-material";
-import { Ed25519PublicKey } from "@dao-xyz/peerbit-crypto";
+import { Ed25519PublicKey, X25519Keypair } from "@peerbit/crypto";
 import { getRoomNameFromPath } from "./routes";
 
 /***
@@ -73,7 +73,7 @@ export const Room = () => {
     };
 
     useEffect(() => {
-        if (!room?.current?.id || !room?.current?.initialized) {
+        if (!room?.current?.id || room?.current?.closed) {
             return;
         }
         room?.current.messages.index.search(new SearchRequest({ query: [] }), {
@@ -89,7 +89,7 @@ export const Room = () => {
            identityMap.set(id.toString(), id as Ed25519PublicKey); // bad assumption only Ed25519PublicKey in chat
        });
        setIdentitiesInChatMap(identityMap); */
-    }, [room?.current?.id, room?.current?.initialized, peerCounter]);
+    }, [room?.current?.id, room?.current?.closed, peerCounter]);
 
     useEffect(() => {
         if (room.current || !params.name || !peer) {
@@ -98,7 +98,7 @@ export const Room = () => {
         room.current = undefined;
         setLoading(true);
         const name = getRoomNameFromPath(params.name);
-        peer.open(new RoomDB({ name }), { sync: () => true })
+        peer.open(new RoomDB({ name }), { args: { sync: () => true } })
             .then(async (r) => {
                 room.current = r;
                 r.messages.events.addEventListener("change", async (e) => {
@@ -127,7 +127,7 @@ export const Room = () => {
                         posts.current.map(async (x) => {
                             return {
                                 post: x,
-                                entry: await room.current.messages.log.get(
+                                entry: await room.current.messages.log.log.get(
                                     room.current.messages.index.index.get(x.id)
                                         .context.head
                                 ),
@@ -148,29 +148,13 @@ export const Room = () => {
                     forceUpdate();
                 });
 
-                peer.libp2p.services.pubsub.addEventListener(
-                    "subscribe",
-                    () => {
-                        setPeerCounter(
-                            peer.libp2p.services.pubsub.getSubscribers(
-                                r.allLogs[0].idString
-                            ).size + 1
-                        );
-                    }
-                );
+                r.events.addEventListener("join", (e) => {
+                    r.getReady().then((set) => setPeerCounter(set.size + 1));
+                });
 
-                peer.libp2p.services.pubsub.addEventListener(
-                    "unsubscribe",
-                    () => {
-                        setPeerCounter(
-                            peer.libp2p.services.pubsub.getSubscribers(
-                                r.allLogs[0].idString
-                            ).size + 1
-                        );
-                    }
-                );
-
-                await r.load();
+                r.events.addEventListener("leave", (e) => {
+                    r.getReady().then((set) => setPeerCounter(set.size + 1));
+                });
             })
             .catch((e) => {
                 console.error("Failed top open room: " + e.message);
@@ -181,7 +165,7 @@ export const Room = () => {
             .finally(() => {
                 setLoading(false);
             });
-    }, [params.name, peer?.identityHash]);
+    }, [params.name, peer?.identity.publicKey.hashcode()]);
 
     useEffect(() => {
         scrollToBottom();
@@ -194,11 +178,19 @@ export const Room = () => {
         }
         room.current.messages
             .put(new Post({ message: text, from: peer.identity.publicKey }), {
-                reciever: {
-                    payload: receivers.map((r) => identitiesInChatMap.get(r)),
-                    metadata: [],
-                    next: [],
-                    signatures: [],
+                encryption: {
+                    // TODO do once for performance
+                    keypair: await X25519Keypair.from(
+                        await peer.keychain.exportByKey(peer.identity.publicKey)
+                    ),
+                    reciever: {
+                        payload: receivers.map((r) =>
+                            identitiesInChatMap.get(r)
+                        ),
+                        metadata: [],
+                        next: [],
+                        signatures: [],
+                    },
                 },
             })
             .then(() => {

@@ -17,7 +17,7 @@ import VideoCallIcon from "@mui/icons-material/VideoCall";
 import ChatIcon from "@mui/icons-material/Chat";
 import { IFrameContent, RectContent } from "./db";
 import { CHAT_APP, getChatPath, getStreamPath, STREAMING_APP } from "../routes";
-import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
+import { Ed25519Keypair } from "@peerbit/crypto";
 
 export type ElementGenerator = (properties: {
     keypair: Ed25519Keypair;

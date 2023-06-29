@@ -1,5 +1,5 @@
 import { Routes, Route } from "react-router";
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { PublicSignKey } from "@peerbit/crypto";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { CreateStream } from "./CreateStream";
 import { StreamOrView } from "./StreamOrView";

@@ -156,7 +156,7 @@ export class P2PStorage implements IOHandler {
                 "Did not find model: " +
                 this.db.address.toString() +
                 ", " +
-                this.db.models.log.length;
+                this.db.models.log.log.length;
             throw new Error(msg);
         }
 

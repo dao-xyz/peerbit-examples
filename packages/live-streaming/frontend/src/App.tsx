@@ -6,9 +6,9 @@ import {
     CssBaseline,
 } from "@mui/material";
 import { Content } from "./Content";
-import { PeerProvider } from "@dao-xyz/peerbit-react";
+import { PeerProvider } from "@peerbit/react";
 import blue from "@mui/material/colors/amber";
-import { inIframe } from "@dao-xyz/peerbit-react";
+import { inIframe } from "@peerbit/react";
 
 let theme = createTheme({
     palette: {

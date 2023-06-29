@@ -1,4 +1,4 @@
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer } from "@peerbit/react";
 import {
     Button,
     Card,

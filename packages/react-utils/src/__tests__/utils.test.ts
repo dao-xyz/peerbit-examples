@@ -1,7 +1,7 @@
 import { getAllKeyPairs, getFreeKeypair, releaseKey } from "../utils";
 import nodelocalstorage from "node-localstorage";
 import { FastMutex } from "../lockstorage";
-import { delay } from "@dao-xyz/peerbit-time";
+import { delay } from "@peerbit/time";
 import { default as sodium } from "libsodium-wrappers";
 import { v4 as uuid } from "uuid";
 var LocalStorage = nodelocalstorage.LocalStorage;

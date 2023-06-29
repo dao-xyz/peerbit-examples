@@ -1,4 +1,4 @@
-import { inIframe, usePeer } from "@dao-xyz/peerbit-react";
+import { inIframe, usePeer } from "@peerbit/react";
 import {
     useRef,
     useState,

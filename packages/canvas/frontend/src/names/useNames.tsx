@@ -1,7 +1,7 @@
-import { Name, Names } from "@dao-xyz/peer-names";
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { Name, Names } from "@peerbit/peer-names";
+import { usePeer } from "@peerbit/react";
 import React, { useContext, useEffect, useRef, useState } from "react";
-import { SignatureWithKey, PreHash } from "@dao-xyz/peerbit-crypto";
+import { SignatureWithKey, PreHash } from "@peerbit/crypto";
 import { getAllKeypairs } from "../keys";
 
 interface INameContext {
@@ -41,7 +41,9 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
     useEffect(() => {
         if (peer) {
             peer.open(new Names(), {
-                sync: () => true,
+                args: {
+                    sync: () => true,
+                },
                 /*  sync: (entry) => { TODO always sync "my" names
                      for (const s of entry.signatures) {
                          if (s.publicKey.equals(peer.identity.publicKey) || s.publicKey.equals(peer.identity.publicKey)) {
@@ -59,7 +61,6 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                         }
                     });
                 });
-                await db.load();
                 console.log("LAOD", db.names.index.size);
                 names.current = db;
             });

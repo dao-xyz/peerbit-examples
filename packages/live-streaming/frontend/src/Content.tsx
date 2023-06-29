@@ -1,14 +1,14 @@
 import { BaseRoutes } from "./routes";
 import { Alert, AlertTitle, Grid, Snackbar, Typography } from "@mui/material";
-import { usePeer, inIframe } from "@dao-xyz/peerbit-react";
+import { usePeer, inIframe } from "@peerbit/react";
 import { useEffect } from "react";
 export const Content = () => {
     const { peer, status } = usePeer();
     useEffect(() => {
-        if (!peer?.identityHash) {
+        if (!peer?.identity.publicKey.hashcode()) {
             return;
         }
-    }, [peer?.identityHash]);
+    }, [peer?.identity.publicKey.hashcode()]);
     return (
         <Grid container sx={{ p: inIframe() ? 0 : 0, height: "100%" }}>
             <Grid item container direction="column">

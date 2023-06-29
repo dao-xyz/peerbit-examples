@@ -1,13 +1,13 @@
 import { Routes, Route } from "react-router";
 import { Canvas } from "./canvas/Canvas";
 import { Home } from "./Home";
-import { PublicSignKey } from "@dao-xyz/peerbit-crypto";
+import { PublicSignKey } from "@peerbit/crypto";
 import { base64url } from "multiformats/bases/base64";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { NewSpace } from "./NewSpace";
 import { Canvas as CanvasDB } from "./canvas/db";
-import { Address } from "@dao-xyz/peerbit-program";
-
+const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 export const getStreamPath = (node: PublicSignKey) =>
     "/s/" + base64url.encode(serialize(node));
 
@@ -15,10 +15,10 @@ export const getChatPath = (node: PublicSignKey) =>
     "/k/" + base64url.encode(serialize(node));
 
 export const getCanvasPath = (canvas: CanvasDB) =>
-    "/k/" + base64url.encode(serialize(canvas.address));
+    "/k/" + base64url.encode(textEncoder.encode(canvas.address));
 
 export const getAdressFromKey = (key: string) =>
-    deserialize(base64url.decode(key), Address);
+    textDecoder.decode(base64url.decode(key));
 
 export const getNameFromPath = (name: string) => decodeURIComponent(name);
 

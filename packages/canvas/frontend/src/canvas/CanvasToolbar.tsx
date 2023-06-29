@@ -1,11 +1,11 @@
 import { Grid, IconButton, Paper } from "@mui/material";
 import DashboardIcon from "@mui/icons-material/Dashboard";
 import ExploreIcon from "@mui/icons-material/Explore";
-import { usePeer } from "@dao-xyz/peerbit-react";
+import { usePeer } from "@peerbit/react";
 import { useEffect, useRef, useState } from "react";
 import { Canvas, Spaces } from "./db";
 import { useNavigate } from "react-router-dom";
-import { SearchRequest } from "@dao-xyz/peerbit-document";
+import { SearchRequest } from "@peerbit/document";
 import QueueIcon from "@mui/icons-material/Queue";
 
 export const WIDTH = "35px";
@@ -25,7 +25,7 @@ export const CanvasToolbar = (props: { direction: "column" | "row" }) => {
         }
         console.log("open!");
         spaces.current = peer
-            .open(new Spaces(), { sync: () => true })
+            .open(new Spaces(), { args: { sync: () => true } })
             .then(async (result) => {
                 result.canvases.events.addEventListener(
                     "change",
@@ -40,7 +40,6 @@ export const CanvasToolbar = (props: { direction: "column" | "row" }) => {
                     }
                 );
 
-                await result.load();
                 setInterval(async () => {
                     await result.canvases.index.search(
                         new SearchRequest({ query: [] }),

@@ -1,4 +1,4 @@
-import { fromHexString } from "@dao-xyz/peerbit-crypto";
+import { fromHexString } from "@peerbit/crypto";
 
 const clusterStartPattern = new Uint8Array([31, 67, 182, 117]);
 const segmedStartPattern = fromHexString("1654AE6B"); //fromHexString("73A4");

@@ -13,9 +13,9 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "@dao-xyz/peerbit": "*",
-        "@dao-xyz/peerbit-document": "*",
-        "@dao-xyz/peerbit-react": "^0.0.1",
+        "peerbit": "*",
+        "@peerbit/document": "*",
+        "@peerbit/react": "^0.0.1",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "@emotion/react": "^11.10.5",

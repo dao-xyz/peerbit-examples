@@ -1,4 +1,4 @@
-import { PeerProvider } from "@dao-xyz/peerbit-react";
+import { PeerProvider } from "@peerbit/react";
 import { HashRouter } from "react-router-dom";
 import {
     createTheme,

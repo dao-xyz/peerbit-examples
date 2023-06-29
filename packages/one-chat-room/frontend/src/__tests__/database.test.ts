@@ -1,8 +1,6 @@
-import { Peerbit } from "@dao-xyz/peerbit";
+import { Peerbit } from "peerbit";
 import { Post, Room } from "../database";
-import { Observer } from "@dao-xyz/peerbit-program";
-import { SearchRequest } from "@dao-xyz/peerbit-document";
-import { delay } from "@dao-xyz/peerbit-time";
+import { Observer } from "@peerbit/document";
 
 describe("Room", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -29,13 +27,17 @@ describe("Room", () => {
         );
 
         const roomObserve = await peer2.open<Room>(room.address, {
-            role: new Observer(),
+            args: {
+                role: new Observer(),
+            },
         });
-        await roomObserve.waitFor(peer.libp2p);
+        await roomObserve.waitFor(peer.identity.publicKey);
         let later = await roomObserve.loadLater();
         expect(later).toHaveLength(2);
+
         later = await roomObserve.loadLater();
         expect(later).toHaveLength(0);
+
         await room.messages.put(
             new Post({ from: peer.identity.publicKey, message: "third" })
         );

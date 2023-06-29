@@ -1,4 +1,4 @@
-import { getFreeKeypair, getAllKeyPairs } from "@dao-xyz/peerbit-react";
+import { getFreeKeypair, getAllKeyPairs } from "@peerbit/react";
 export const getRootKeypair = () => getFreeKeypair("root");
 export const getRootKeypairs = () => getAllKeyPairs("root");
 export const getCanvasKeypair = () => getFreeKeypair("canvas");

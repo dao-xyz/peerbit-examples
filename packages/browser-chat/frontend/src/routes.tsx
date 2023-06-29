@@ -1,4 +1,4 @@
-import { Room } from "@dao-xyz/peerbit-example-browser-chat";
+import { Room } from "@peerbit/example-browser-chat";
 import { Routes, Route } from "react-router";
 import { Lobby } from "./Lobby";
 import { Room as RoomView } from "./Room";

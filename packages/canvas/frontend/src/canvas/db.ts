@@ -1,14 +1,14 @@
 import { field, variant, fixedArray, vec } from "@dao-xyz/borsh";
 import {
     DeleteOperation,
-    DocumentIndex,
     Documents,
     PutOperation,
-} from "@dao-xyz/peerbit-document";
-import { PublicSignKey, randomBytes } from "@dao-xyz/peerbit-crypto";
-import { Ed25519Keypair } from "@dao-xyz/peerbit-crypto";
-import { BORSH_ENCODING } from "@dao-xyz/peerbit-log";
-import { Program } from "@dao-xyz/peerbit-program";
+    Role,
+} from "@peerbit/document";
+import { PublicSignKey, randomBytes } from "@peerbit/crypto";
+import { Ed25519Keypair } from "@peerbit/crypto";
+import { Program } from "@peerbit/program";
+import { SyncFilter } from "@peerbit/shared-log";
 
 @variant(0)
 export class Layout {
@@ -135,8 +135,8 @@ export class Canvas extends Program {
         this.info = properties.info;
     }
 
-    setup(): Promise<void> {
-        return this.rects.setup({
+    open(): Promise<void> {
+        return this.rects.open({
             type: Rect,
             canAppend: async (entry) => {
                 /**
@@ -147,16 +147,17 @@ export class Canvas extends Program {
                     entry.signatures.find(
                         (x) =>
                             x.publicKey.equals(this.key) ||
-                            x.publicKey.equals(this.identity.publicKey)
+                            x.publicKey.equals(this.node.identity.publicKey)
                     ) != null
                 );
             },
         });
     }
 }
+type Args = { role?: Role; sync?: SyncFilter };
 
 @variant("spaces")
-export class Spaces extends Program {
+export class Spaces extends Program<Args> {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
@@ -169,8 +170,8 @@ export class Spaces extends Program {
         this.canvases = new Documents();
     }
 
-    setup(): Promise<void> {
-        return this.canvases.setup({
+    open(args?: Args): Promise<void> {
+        return this.canvases.open({
             type: Canvas,
             canAppend: async (entry) => {
                 // Only allow modifications from author
@@ -178,7 +179,7 @@ export class Spaces extends Program {
                 if (payload instanceof PutOperation) {
                     console.log("VALUE?", payload);
                     const from = (payload as PutOperation<Canvas>).getValue(
-                        BORSH_ENCODING(this.canvases.index.type)
+                        this.canvases.index.valueEncoding
                     ).key;
                     return (
                         entry.signatures.find((x) =>
@@ -199,6 +200,8 @@ export class Spaces extends Program {
                 return false;
             },
             canOpen: () => Promise.resolve(false), // don't open things that appear in the db
+            role: args?.role,
+            sync: args?.sync,
         });
     }
 }

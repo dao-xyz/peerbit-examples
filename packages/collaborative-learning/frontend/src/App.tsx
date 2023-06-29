@@ -5,7 +5,7 @@ import {
     CssBaseline,
 } from "@mui/material";
 import { Content } from "./Content";
-import { PeerProvider } from "@dao-xyz/peerbit-react";
+import { PeerProvider } from "@peerbit/react";
 
 let theme = createTheme({
     palette: {

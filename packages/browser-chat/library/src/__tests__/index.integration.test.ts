@@ -1,12 +1,11 @@
-import { Peerbit } from "@dao-xyz/peerbit";
-import { waitFor } from "@dao-xyz/peerbit-time";
+import { Peerbit } from "peerbit";
+import { waitFor, waitForAsync } from "@peerbit/time";
 import { Post, Room, Lobby } from "..";
 import {
     SearchRequest,
     StringMatch,
     StringMatchMethod,
-} from "@dao-xyz/peerbit-document";
-import { Replicator } from "@dao-xyz/peerbit-program";
+} from "@peerbit/document";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -24,26 +23,22 @@ describe("index", () => {
 
     it("can post", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
-        const lobby1 = await peer.open(new Lobby({}), {
-            role: new Replicator(),
-        });
+        const lobbyFrom1 = await peer.open(new Lobby({}));
 
         // Peer 2 is creating "Rooms" which is a container of "Room"
-        const lobby2 = await peer2.open<Lobby>(lobby1.address!, {
-            role: new Replicator(),
-        });
+        const lobbyFrom2 = await peer2.open<Lobby>(lobbyFrom1.address!);
 
         // Put 1 Room in Rooms
-        const room = new Room({ name: "new room" });
-        await lobby2.rooms.put(room);
+        const roomAFrom2 = new Room({ name: "new room" });
+        await lobbyFrom2.rooms.put(roomAFrom2);
 
         // Another room
-        const room2 = new Room({ name: "another room" });
-        await lobby2.rooms.put(room2);
-        await lobby2.rooms.waitFor(peer.libp2p);
+        const roomBFrom2 = new Room({ name: "another room" });
+        await lobbyFrom2.rooms.put(roomBFrom2);
 
-        // Peer2 can "query" for rooms if peer2 does not have anything replicated locally
-        const results: Room[] = await lobby1.rooms.index.search(
+        // peer 1 will eventually also replicate the room, since both have opened the Lobby as replicators
+        await waitFor(() => lobbyFrom1.rooms.index.size === 2);
+        const results: Room[] = await lobbyFrom1.rooms.index.search(
             new SearchRequest({
                 query: [
                     new StringMatch({
@@ -53,35 +48,30 @@ describe("index", () => {
                         method: StringMatchMethod.contains,
                     }),
                 ],
-            }),
-            {
-                local: true,
-                remote: {
-                    timeout: 3000,
-                },
-            }
-        );
-
-        expect(results.map((result) => result.id)).toContainAllValues([
-            room2.id,
-        ]);
-
-        // Open the room so we can write things inside
-        await peer2.open(room);
-
-        // Put a message
-        await room.messages.put(
-            new Post({
-                message: "hello world",
-                from: peer2.identity.publicKey,
             })
         );
 
-        await waitFor(() => peer.programs.size === 3); // 2 lobbys + 1 room
-        await waitFor(
-            () =>
-                (peer.programs.get(room.address.toString()!)?.program as Room)
-                    .messages.index.size === 1
-        ); // The "hello world" message has now arrived to the first peer
+        expect(results.length).toEqual(1);
+        expect(results[0].id).toEqual(roomBFrom2.id);
+
+        expect(results[0].closed).toBeFalse(); // because peer1 is also a replicator (will open automatically)
+
+        // Put a message
+        const helloWorldPostFrom2 = new Post({
+            message: "hello world",
+            from: peer2.identity.publicKey,
+        });
+        await roomAFrom2.messages.put(helloWorldPostFrom2);
+
+        const roomAfrom1 = (await lobbyFrom1.rooms.index.get(roomAFrom2.id))!;
+
+        const helloWorldPostFrom1 = await waitForAsync(
+            async () =>
+                await roomAfrom1.messages.index.get(helloWorldPostFrom2.id, {
+                    local: true,
+                    remote: false,
+                })
+        );
+        expect(helloWorldPostFrom1!.message).toEqual("hello world");
     });
 });
