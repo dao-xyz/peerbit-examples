@@ -1,6 +1,8 @@
 # Many chat rooms
 ![demo](./demo.gif)
 
+This example showcase how you can create a a lobby where you can enter different chat rooms
+
 ### library
 
 Contains the data controller functionality and access controll. 
