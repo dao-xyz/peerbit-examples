@@ -35,7 +35,7 @@ please put test.txt
 ```
 
 ```sh
-please get ID ./some-folder
+please get HASH ./some-folder
 ```
 
 
