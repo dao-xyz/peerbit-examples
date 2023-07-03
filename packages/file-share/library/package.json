@@ -18,7 +18,6 @@
     "files": [
         "lib",
         "src",
-        "src/nginx-template.conf",
         "!src/**/__tests__",
         "!lib/**/__tests__",
         "LICENSE"
@@ -40,6 +39,7 @@
     },
     "dependencies": {
         "@peerbit/document": "^1.1.8",
-        "peerbit": "^1.1.5"
+        "peerbit": "^1.1.5",
+        "uuid": "^9.0.0"
     }
 }

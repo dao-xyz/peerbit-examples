@@ -18,7 +18,6 @@
     "files": [
         "lib",
         "src",
-        "src/nginx-template.conf",
         "!src/**/__tests__",
         "!lib/**/__tests__",
         "LICENSE"
@@ -27,7 +26,7 @@
         "access": "public"
     },
     "engines": {
-        "node": ">=16.0"
+        "node": ">=16.15.1"
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
