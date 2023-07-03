@@ -62,7 +62,7 @@ const cli = async (args?: string[]) => {
                 console.log(
                     `Id: ${chalk.green(
                         id
-                    )}\n\nFile can now be fetched with:\n\nplopp get ${id}`
+                    )}\n\nFile can now be fetched with:\n\nplease get ${id}`
                 );
             },
         })
