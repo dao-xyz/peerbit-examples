@@ -15,7 +15,7 @@
     "dependencies": {
         "peerbit": "^1.1.5",
         "@peerbit/document": "^1.1.8",
-        "@peerbit/react": "^0.0.2",
+        "@peerbit/react": "*",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-use": "^17.4.0",

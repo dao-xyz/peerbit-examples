@@ -1,4 +1,4 @@
-import { Files } from "@peerbit/file-share";
+import { Files } from "@peerbit/please-lib";
 import { Peerbit } from "peerbit";
 import fs from "fs";
 import * as yargs from "yargs";

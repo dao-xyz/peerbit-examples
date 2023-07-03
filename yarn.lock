@@ -3803,11 +3803,6 @@
     "@peerbit/rpc" "1.0.13"
     "@peerbit/shared-log" "1.1.8"
 
-"@peerbit/file-share@^0.0.2":
-  version "0.0.2"
-  resolved "https://registry.yarnpkg.com/@peerbit/file-share/-/file-share-0.0.2.tgz#bc10928ad4d827db638f7748ecd8d7a3a6be9e9a"
-  integrity sha512-pv8YFboy6FAkOcwSR0XOjTXGVH08EnInkAAp7zt7SJADgFD0QhEd/HKKtXd4FC4FUsHKHICWym3OZkv6CKrBAw==
-
 "@peerbit/lazy-level@1.0.0", "@peerbit/lazy-level@^1.0.0":
   version "1.0.0"
   resolved "https://registry.yarnpkg.com/@peerbit/lazy-level/-/lazy-level-1.0.0.tgz#b2adab6e0aeb88ca7b057d7a024f6ba246153caa"
