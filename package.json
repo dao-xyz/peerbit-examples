@@ -45,11 +45,6 @@
         "lint:fix": "eslint --fix --ext .ts . && yarn fmt",
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}"
     },
-    "dependencies": {
-        "peerbit": "^1.1.5",
-        "@peerbit/document": "^1.1.8",
-        "@peerbit/test-utils": "^1.0.12"
-    },
     "devDependencies": {
         "@types/eslint": "^8.40.2",
         "@types/eslint-plugin-prettier": "^3.1.0",

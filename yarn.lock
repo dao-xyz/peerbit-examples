@@ -3793,7 +3793,7 @@
     "@peerbit/uint8arrays" "3.0.0"
     libsodium-wrappers "^0.7.11"
 
-"@peerbit/document@*", "@peerbit/document@^1.1.8":
+"@peerbit/document@^1.1.8":
   version "1.1.8"
   resolved "https://registry.yarnpkg.com/@peerbit/document/-/document-1.1.8.tgz#65734ae81dee99264a968206111fce221dbb6cb7"
   integrity sha512-9Q8fLzjgp9ZgPlZDKz1JPXqhd0FcCJdNMRO7RYxaq92wkGd+Z+87s4ctFiiAhpr8A2/JoE2ozNq8I18A3wRwnw==
@@ -3802,6 +3802,11 @@
     "@peerbit/program" "1.0.5"
     "@peerbit/rpc" "1.0.13"
     "@peerbit/shared-log" "1.1.8"
+
+"@peerbit/file-share@^0.0.2":
+  version "0.0.2"
+  resolved "https://registry.yarnpkg.com/@peerbit/file-share/-/file-share-0.0.2.tgz#bc10928ad4d827db638f7748ecd8d7a3a6be9e9a"
+  integrity sha512-pv8YFboy6FAkOcwSR0XOjTXGVH08EnInkAAp7zt7SJADgFD0QhEd/HKKtXd4FC4FUsHKHICWym3OZkv6CKrBAw==
 
 "@peerbit/lazy-level@1.0.0", "@peerbit/lazy-level@^1.0.0":
   version "1.0.0"
@@ -3930,7 +3935,7 @@
     memory-level "^1.0.0"
     yallist "^4.0.0"
 
-"@peerbit/test-utils@*", "@peerbit/test-utils@^1.0.12":
+"@peerbit/test-utils@^1.0.12":
   version "1.0.12"
   resolved "https://registry.yarnpkg.com/@peerbit/test-utils/-/test-utils-1.0.12.tgz#68e0ff96a38b418b4abad531528d3b19b7b0806a"
   integrity sha512-VetBn24r8i13/v+ysmGU5hEa3MfIB+LjR0u7x33ZHF0Jc+fWBMRY+88+Ft1PVziCmZj46dRLWFsFJUEliJZIeQ==
@@ -10159,7 +10164,7 @@ pause-stream@0.0.11:
   dependencies:
     through "~2.3"
 
-peerbit@*, peerbit@1.1.5, peerbit@^1.1.5:
+peerbit@1.1.5, peerbit@^1.1.5:
   version "1.1.5"
   resolved "https://registry.yarnpkg.com/peerbit/-/peerbit-1.1.5.tgz#89617e918fb4ba53303fb5ec9230f62f9b398160"
   integrity sha512-8BFWVc6RYvPpswxzNz6GWPQYpfd27oJDaJHmVqR5xhIV7CVsIjbRFjUqtn+aUStm+OB+TNT0FFY4SRdn8fWMmQ==
