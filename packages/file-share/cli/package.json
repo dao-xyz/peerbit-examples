@@ -13,7 +13,7 @@
         "import": "./lib/esm/index.js"
     },
     "bin": {
-        "plopp": "./lib/esm/bin.js"
+        "please": "./lib/esm/bin.js"
     },
     "files": [
         "lib",

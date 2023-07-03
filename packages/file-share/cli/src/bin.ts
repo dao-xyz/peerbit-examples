@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 import { Files } from "@peerbit/please-lib";
 import { Peerbit } from "peerbit";
 import fs from "fs";
