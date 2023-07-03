@@ -39,6 +39,7 @@
     },
     "devDependencies": {
         "peerbit": "*",
+        "@peerbit/network-utils": "^0.0.1",
         "@peerbit/test-utils": "*",
         "typescript": "^5.1.3",
         "@types/yargs": "^17.0.24"

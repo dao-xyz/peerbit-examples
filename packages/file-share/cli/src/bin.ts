@@ -4,8 +4,10 @@ import fs from "fs";
 import * as yargs from "yargs";
 import { Argv } from "yargs";
 import chalk from "chalk";
-import { waitForAsync, delay } from "@peerbit/time";
+import { waitForAsync } from "@peerbit/time";
 import path from "path";
+import { resolveBootstrapAddresses } from "@peerbit/network-utils";
+import { multiaddr } from "@multiformats/multiaddr";
 
 function ensureDirectoryExistence(filePath) {
     const dirname = path.dirname(filePath);
@@ -16,6 +18,11 @@ function ensureDirectoryExistence(filePath) {
     fs.mkdirSync(dirname);
 }
 
+const remoteRelayAddress = await resolveBootstrapAddresses("remote");
+
+const coerceAddresses = (addrs: string | string[]) => {
+    return (Array.isArray(addrs) ? addrs : [addrs]).map(multiaddr);
+};
 const cli = async (args?: string[]) => {
     if (!args) {
         const { hideBin } = await import("yargs/helpers");
@@ -40,14 +47,14 @@ const cli = async (args?: string[]) => {
                     type: "string",
                     describe: "Relay address",
                     defaultDescription: "?",
-                    default:
-                        "/ip4/127.0.0.1/tcp/8001/p2p/12D3KooWA796xdXd4CuAMxB9CNgmxLDpivbmQu8kusqSFFJ7qrqp",
+                    default: remoteRelayAddress,
                 });
                 return yargs;
             },
 
             handler: async (args) => {
-                await peerbit.dial(args.relay);
+                await peerbit.dial(coerceAddresses(args.relay));
+
                 const file = fs.readFileSync(args.path);
                 const id = await files.create(path.basename(args.path), file);
                 console.log(
@@ -80,22 +87,23 @@ const cli = async (args?: string[]) => {
                 });
                 yargs.option("force", {
                     alias: "f",
-                    describe: "Relay address",
+                    describe: "Overwrite existing files",
                     type: "boolean",
                     default: false,
                 });
                 yargs.option("relay", {
                     type: "string",
                     describe: "Relay address",
-                    defaultDescription: "?",
-                    default:
-                        "/ip4/127.0.0.1/tcp/8001/p2p/12D3KooWA796xdXd4CuAMxB9CNgmxLDpivbmQu8kusqSFFJ7qrqp",
+                    defaultDescription:
+                        "Bootstrap addresses for testing purposes",
+                    default: remoteRelayAddress,
                 });
                 return yargs;
             },
 
             handler: async (args) => {
-                await peerbit.dial(args.relay);
+                await peerbit.dial(coerceAddresses(args.relay));
+
                 console.log("Fetching file with id: " + args.id);
 
                 // wait for at least 1 replicator

@@ -30,3 +30,33 @@ export const resolveSwarmAddress = async (url: string, timeout = 5000) => {
         (await axios.get(url + ":9002/peer/id", { timeout })).data
     );
 };
+
+export type NetworkType = "local" | "remote";
+export const resolveBootstrapAddresses = async (network: NetworkType) => {
+    // Bootstrap addresses for network
+    try {
+        let bootstrapAddresses: string[] = [];
+        if (network === "local") {
+            bootstrapAddresses = [
+                await resolveSwarmAddress("http://localhost"),
+            ];
+        } else {
+            const swarmAddressees = (
+                await axios.get(
+                    "https://raw.githubusercontent.com/dao-xyz/peerbit-bootstrap/master/bootstrap.env"
+                )
+            ).data
+                .split(/\r?\n/)
+                .filter((x) => x.length > 0);
+            bootstrapAddresses = await Promise.all(
+                swarmAddressees.map((s) => resolveSwarmAddress(s))
+            );
+        }
+        return bootstrapAddresses;
+    } catch (error: any) {
+        console.error(
+            "Failed to resolve relay node. Please come back later or start the demo locally: " +
+                error?.message
+        );
+    }
+};

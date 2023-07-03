@@ -4,7 +4,7 @@ import { Peerbit } from "peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { mplex } from "@libp2p/mplex";
 import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
-import { resolveSwarmAddress } from "@peerbit/network-utils";
+import { resolveBootstrapAddresses } from "@peerbit/network-utils";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { v4 as uuid } from "uuid";
 import { Ed25519Keypair } from "@peerbit/crypto";
@@ -13,7 +13,6 @@ import { serialize, deserialize } from "@dao-xyz/borsh";
 import { waitFor } from "@peerbit/time";
 import sodium from "libsodium-wrappers";
 import * as filters from "@libp2p/websockets/filters";
-import axios from "axios";
 import { useMount } from "./useMount.js";
 export type ConnectionStatus =
     | "disconnected"
@@ -26,36 +25,6 @@ interface IPeerContext {
     loading: boolean;
     status: ConnectionStatus;
 }
-
-type NetworkType = "local" | "remote";
-const resolveBootstrapAddresses = async (network: NetworkType) => {
-    // Bootstrap addresses for network
-    try {
-        let bootstrapAddresses: string[] = [];
-        if (network === "local") {
-            bootstrapAddresses = [
-                await resolveSwarmAddress("http://localhost"),
-            ];
-        } else {
-            const swarmAddressees = (
-                await axios.get(
-                    "https://raw.githubusercontent.com/dao-xyz/peerbit-bootstrap/master/bootstrap.env"
-                )
-            ).data
-                .split(/\r?\n/)
-                .filter((x) => x.length > 0);
-            bootstrapAddresses = await Promise.all(
-                swarmAddressees.map((s) => resolveSwarmAddress(s))
-            );
-        }
-        return bootstrapAddresses;
-    } catch (error: any) {
-        console.error(
-            "Failed to resolve relay node. Please come back later or start the demo locally: " +
-                error?.message
-        );
-    }
-};
 
 if (!window.name) {
     window.name = uuid();
@@ -222,7 +191,7 @@ export const PeerProvider = ({
                                       filter: filters.all,
                                   }),
                                   /*            circuitRelayTransport({ discoverRelays: 1 }),
-                   webRTC(), */
+                 webRTC(), */
                               ],
                           }
                         : {
@@ -238,7 +207,7 @@ export const PeerProvider = ({
                               transports: [
                                   webSockets({ filter: filters.all }),
                                   /*             circuitRelayTransport({ discoverRelays: 1 }),
-                    webRTC(), */
+                  webRTC(), */
                               ],
                           }),
                 },
