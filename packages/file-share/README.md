@@ -1,4 +1,4 @@
-# File-share utils
+# File share app
 ![demo](./demo.gif)
 
 An example how one can use a Document store to store files.
