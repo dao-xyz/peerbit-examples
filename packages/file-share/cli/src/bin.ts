@@ -23,8 +23,9 @@ function ensureDirectoryExistence(filePath) {
 const remoteRelayAddress = await resolveBootstrapAddresses("remote");
 
 const coerceAddresses = (addrs: string | string[]) => {
-    return (Array.isArray(addrs) ? addrs : [addrs]).map(multiaddr);
+    return (Array.isArray(addrs) ? addrs : [addrs]).map((x) => multiaddr(x));
 };
+
 const cli = async (args?: string[]) => {
     if (!args) {
         const { hideBin } = await import("yargs/helpers");
@@ -55,7 +56,9 @@ const cli = async (args?: string[]) => {
             },
 
             handler: async (args) => {
-                await peerbit.dial(coerceAddresses(args.relay));
+                await Promise.all(
+                    coerceAddresses(args.relay).map((x) => peerbit.dial(x))
+                );
 
                 const file = fs.readFileSync(args.path);
                 const id = await files.create(path.basename(args.path), file);
@@ -104,7 +107,9 @@ const cli = async (args?: string[]) => {
             },
 
             handler: async (args) => {
-                await peerbit.dial(coerceAddresses(args.relay));
+                await Promise.all(
+                    coerceAddresses(args.relay).map((x) => peerbit.dial(x))
+                );
 
                 console.log("Fetching file with id: " + args.id);
 
