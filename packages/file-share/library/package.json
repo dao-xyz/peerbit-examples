@@ -36,10 +36,10 @@
     },
     "devDependencies": {
         "@peerbit/test-utils": "^1.0.12",
-        "peerbit": "^1.1.5",
         "typescript": "^5.1.3"
     },
-    "peerDependencies": {
+    "dependencies": {
+        "@peerbit/document": "^1.1.8",
         "peerbit": "^1.1.5"
     }
 }
