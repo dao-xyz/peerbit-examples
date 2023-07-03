@@ -1,5 +1,6 @@
 # File share app
-![demo](./demo.gif)
+<img src="./demo.gif" width="600" />
+
 
 An example how one can use a Document store to store files.
 
