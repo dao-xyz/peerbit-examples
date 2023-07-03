@@ -15,21 +15,23 @@
 ## Examples 
 
 ### [Chat room](./packages/one-chat-room/)
-![one-chat-room](/packages/one-chat-room/demo.gif)
+[<img src="./packages/one-chat-room/demo.gif" width="600" />](../packages/one-chat-room/)
+
 
 ### [Lobby + chat rooms](./packages/many-chat-rooms/)
-![lobby-chat](/packages/many-chat-rooms/demo.gif)
+[<img src="./packages/many-chat-rooms/demo.gif" width="600" />](../packages/any-chat-rooms/)
 
 ### [Sync files](./packages/many-chat-rooms/)
-![lobby-chat](/packages/file-share/demo.gif)
+[<img src="./packages/file-share/demo.gif" width="600" />](../packages/file-share/)
 
 
+### [Live video streaming](./packages/live-streaming/)
+[<img src="./packages/live-streaming/demo.gif" width="600" />](../packages/video-stream/)
 
-### [Video streaming in a Document store](./packages/live-streaming/)
-![video-stream](/packages/live-streaming/demo.gif)
 
 ### [Collaborative machine learning](./packages/live-streaming/)
-![video-stream](/packages/collaborative-learning/demo.gif)
+[<img src="./packages/collaborative-learning/demo.gif" width="600" />](../packages/collaborative-learning/)
+
 
 
 ## How to run the examples
