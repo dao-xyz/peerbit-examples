@@ -37,7 +37,7 @@
         "clean": "lerna run clean",
         "build": "lerna run build --reject-cycles",
         "build-node": "cd ./packages/node/ && yarn build",
-        "pub": "lerna publish --no-private",
+        "publish": "lerna publish --no-private",
         "test": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.unit.ts ",
         "test:integration": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.integration.ts --forceExit  --detectOpenHandles",
         "fmt": "prettier --write '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
