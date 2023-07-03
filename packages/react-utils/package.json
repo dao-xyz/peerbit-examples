@@ -22,7 +22,8 @@
         "react": "*"
     },
     "dependencies": {
-        "@dao-xyz/libp2p-webrtc": "^2.0.2",
+        "@libp2p/webrtc": "^2.0.11",
+        "@peerbit/network-utils": "^0.0.1",
         "peerbit": "*",
         "@types/react": "^18.0.25",
         "@types/react-dom": "^18.0.8",

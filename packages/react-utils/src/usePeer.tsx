@@ -1,14 +1,10 @@
-import React, { useContext, useEffect, useRef, useState } from "react";
+import React, { useContext } from "react";
 import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { mplex } from "@libp2p/mplex";
-import {
-    getFreeKeypair,
-    getTabId,
-    inIframe,
-    resolveSwarmAddress,
-} from "./utils.js";
+import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
+import { resolveSwarmAddress } from "@peerbit/network-utils";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { v4 as uuid } from "uuid";
 import { Ed25519Keypair } from "@peerbit/crypto";
@@ -178,7 +174,6 @@ export const PeerProvider = ({
                 }
             }
 
-            console.log(`Create peer, already? ${!!peer}`);
             if (peer) {
                 await peer.stop();
                 setPeer(undefined);
@@ -227,7 +222,7 @@ export const PeerProvider = ({
                                       filter: filters.all,
                                   }),
                                   /*            circuitRelayTransport({ discoverRelays: 1 }),
-                           webRTC(), */
+                   webRTC(), */
                               ],
                           }
                         : {
@@ -243,7 +238,7 @@ export const PeerProvider = ({
                               transports: [
                                   webSockets({ filter: filters.all }),
                                   /*             circuitRelayTransport({ discoverRelays: 1 }),
-                            webRTC(), */
+                    webRTC(), */
                               ],
                           }),
                 },

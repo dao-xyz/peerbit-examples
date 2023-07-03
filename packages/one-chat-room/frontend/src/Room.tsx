@@ -18,13 +18,6 @@ import { getKeyFromPath } from "./routes";
 import { Ed25519PublicKey, X25519Keypair } from "@peerbit/crypto";
 import PeopleIcon from "@mui/icons-material/People";
 
-/***
- *  TODO
- *  This view should be written as multipple parts in multiple files/functions
- *  This is not a best practice way of doing a "room" chat experience
- *
- */
-
 const shortName = (name: string) => {
     return (
         name.substring(0, 14) +
@@ -169,12 +162,6 @@ export const Room = () => {
                         existing: "reuse",
                     })
                     .then(async (r) => {
-                        console.log(
-                            "DIR?",
-                            peer.directory,
-                            r.messages.log.log.length,
-                            r.messages.index.size
-                        );
                         room.current = r;
                     })
                     .catch((e) => {

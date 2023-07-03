@@ -1,7 +1,8 @@
 {
     "packages": [
         "packages/react-utils",
-        "packages/browser-chat/*",
+        "packages/network-utils",
+        "packages/many-chat-rooms/*",
         "packages/file-share/*",
         "packages/live-streming/*",
         "packages/live-streaming-canvas/*",

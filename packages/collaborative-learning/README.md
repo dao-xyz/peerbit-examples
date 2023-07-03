@@ -1,5 +1,5 @@
 # P2P Model learning
-
+![demo](./demo.gif)
 
 This project uses Peerbit to share model weights between peers. 
 

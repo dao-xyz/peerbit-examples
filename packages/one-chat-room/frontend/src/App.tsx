@@ -6,8 +6,8 @@ import {
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { Content } from "./Content";
 import { inIframe } from "@peerbit/react";
+import { BaseRoutes } from "./routes";
 
 // Theme
 let theme = createTheme({
@@ -45,7 +45,7 @@ export const App = () => {
             <ThemeProvider theme={theme}>
                 <CssBaseline />
                 <HashRouter basename="/">
-                    <Content />
+                    <BaseRoutes />
                 </HashRouter>
             </ThemeProvider>
         </PeerProvider>

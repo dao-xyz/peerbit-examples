@@ -23,29 +23,24 @@ jobs:
       run: yarn install && yarn build
 
     - name: Deploy stream
-      run: aws s3 sync ./packages/live-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
-
-    - name: Invalidate cache
-      run: aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*';
+      run: |
+        aws s3 sync ./packages/live-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
+        aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*';
 
     - name: Deploy chat
-      run: aws s3 sync ./packages/one-chat-room/frontend/dist/ s3://chat-dao-xyz-dist --delete
+      run: |
+        aws s3 sync ./packages/one-chat-room/frontend/dist/ s3://chat-dao-xyz-dist --delete
+        aws cloudfront create-invalidation --distribution-id E2KS1CGVFT7WAY --paths '/*';
 
-    - name: Invalidate cache
-      run: aws cloudfront create-invalidation --distribution-id E2KS1CGVFT7WAY --paths '/*';
-
-    - name: Deploy demo
-      run: aws s3 sync ./packages/canvas/frontend/dist/ s3://demo-dao-xyz-dist --delete
-
-    - name: Invalidate cache
-      run: aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';
+    - name: Deploy canvas
+      run: |
+        aws s3 sync ./packages/canvas/frontend/dist/ s3://demo-dao-xyz-dist --delete
+        aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';
 
     - name: Deploy ml demo
-      run: aws s3 sync ./packages/collaborative-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
-
-    - name: Invalidate cache
-      run: aws cloudfront create-invalidation --distribution-id E371A736SNF0PO --paths '/*';
-
+      run: | 
+        aws s3 sync ./packages/collaborative-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
+        aws cloudfront create-invalidation --distribution-id E371A736SNF0PO --paths '/*';
 
 
 

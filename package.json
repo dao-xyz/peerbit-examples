@@ -8,6 +8,7 @@
     "workspaces": {
         "packages": [
             "packages/react-utils",
+            "packages/network-utils",
             "packages/browser-chat/*",
             "packages/file-share/*",
             "packages/live-streaming/*",
@@ -45,9 +46,9 @@
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}"
     },
     "dependencies": {
-        "peerbit": "^1.1.3",
-        "@peerbit/document": "^1.1.6",
-        "@peerbit/test-utils": "^1.0.10"
+        "peerbit": "^1.1.5",
+        "@peerbit/document": "^1.1.8",
+        "@peerbit/test-utils": "^1.0.12"
     },
     "devDependencies": {
         "@types/eslint": "^8.40.2",
@@ -60,8 +61,8 @@
         "eslint": "^8.27.0",
         "eslint-config-prettier": "^8.5.0",
         "eslint-plugin-prettier": "^4.2.1",
+        "eslint-config-react-app": "^7.0.1",
         "gh-pages": "^4.0.0",
-        "dotenv": "^16.0.3",
         "jest": "^29.5.0",
         "jest-extended": "^4.0.0",
         "lerna": "^5.5.1",
@@ -70,7 +71,6 @@
         "start-server-and-test": "^1.14.0",
         "ts-jest": "^29.0.3",
         "ts-node": "^10.9.1",
-        "tslib": "^2.4.1",
         "typescript": "^5.1.3",
         "typescript-esm": "^2.0.0",
         "json": "^11.0.0"
