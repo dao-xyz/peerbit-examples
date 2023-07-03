@@ -20,6 +20,11 @@
 ### [Lobby + chat rooms](./packages/many-chat-rooms/)
 ![lobby-chat](/packages/many-chat-rooms/demo.gif)
 
+### [Sync files](./packages/many-chat-rooms/)
+![lobby-chat](/packages/file-share/demo.gif)
+
+
+
 ### [Video streaming in a Document store](./packages/live-streaming/)
 ![video-stream](/packages/live-streaming/demo.gif)
 
