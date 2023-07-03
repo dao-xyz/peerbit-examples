@@ -4,7 +4,7 @@ import fs from "fs";
 import * as yargs from "yargs";
 import { Argv } from "yargs";
 import chalk from "chalk";
-import { delay } from "@peerbit/time";
+import { waitForAsync, delay } from "@peerbit/time";
 import path from "path";
 
 function ensureDirectoryExistence(filePath) {
@@ -97,7 +97,14 @@ const cli = async (args?: string[]) => {
             handler: async (args) => {
                 await peerbit.dial(args.relay);
                 console.log("Fetching file with id: " + args.id);
+
+                // wait for at least 1 replicator
+                await waitForAsync(
+                    async () => (await files.getReady()).size >= 1
+                );
+
                 const file = await files.getById(args.id.trim());
+
                 if (!file) {
                     console.log(chalk.red("ERROR: File not found!"));
                 } else {

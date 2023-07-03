@@ -24,7 +24,6 @@ export const CanvasPreview = (props: {
     } | null>(null);
 
     const handleContextMenu = (event: React.MouseEvent) => {
-        console.log("here!");
         event.preventDefault();
         setContextMenu(
             contextMenu === null
@@ -54,7 +53,9 @@ export const CanvasPreview = (props: {
                 <Button
                     sx={{ minWidth: "100px", minHeight: "100px" }}
                     onClick={async () => {
-                        const db = await peer.open(props.canvas);
+                        const db = await peer.open(props.canvas, {
+                            existing: "reuse",
+                        });
                         navigate(getCanvasPath(db));
                     }}
                 >

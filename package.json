@@ -39,16 +39,15 @@
         "pub": "lerna publish --no-private",
         "test": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.unit.ts ",
         "test:integration": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.integration.ts --forceExit  --detectOpenHandles",
-        "docs": "shx rm -rf docs && NODE_OPTIONS=--max_old_space_size=8192 typedoc && shx cp ./{.nojekyll} docs/",
         "fmt": "prettier --write '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint": "eslint --ext .ts . && prettier --check '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint:fix": "eslint --fix --ext .ts . && yarn fmt",
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}"
     },
     "dependencies": {
-        "peerbit": "^1.0.4",
-        "@peerbit/document": "^1.1.0",
-        "@peerbit/test-utils": "^1.0.5"
+        "peerbit": "^1.1.3",
+        "@peerbit/document": "^1.1.6",
+        "@peerbit/test-utils": "^1.0.10"
     },
     "devDependencies": {
         "@types/eslint": "^8.40.2",
@@ -58,9 +57,6 @@
         "@types/prettier": "^2.4.2",
         "@typescript-eslint/eslint-plugin": "^5.6.0",
         "@typescript-eslint/parser": "^5.6.0",
-        "@types/rimraf": "^3.0.2",
-        "@types/fs-extra": "^9.0.13",
-        "babel-eslint": "^10.1.0",
         "eslint": "^8.27.0",
         "eslint-config-prettier": "^8.5.0",
         "eslint-plugin-prettier": "^4.2.1",
@@ -75,7 +71,6 @@
         "ts-jest": "^29.0.3",
         "ts-node": "^10.9.1",
         "tslib": "^2.4.1",
-        "typedoc": "^0.23.17",
         "typescript": "^5.1.3",
         "typescript-esm": "^2.0.0",
         "json": "^11.0.0"

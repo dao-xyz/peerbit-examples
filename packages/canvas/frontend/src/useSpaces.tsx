@@ -69,6 +69,7 @@ export const SpaceProvider = ({ children }: { children: JSX.Element }) => {
                 args: {
                     sync: () => true,
                 },
+                existing: "reuse",
             })
             .then(async (result) => {
                 setSpaces(result);

@@ -177,7 +177,6 @@ export class Spaces extends Program<Args> {
                 // Only allow modifications from author
                 const payload = await entry.getPayloadValue();
                 if (payload instanceof PutOperation) {
-                    console.log("VALUE?", payload);
                     const from = (payload as PutOperation<Canvas>).getValue(
                         this.canvases.index.valueEncoding
                     ).key;

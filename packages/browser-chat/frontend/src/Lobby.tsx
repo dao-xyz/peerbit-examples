@@ -12,64 +12,55 @@ export const Lobby = () => {
     const navigate = useNavigate();
     const { peer } = usePeer();
     const [lobby, setLobby] = useState<LobbyDB>();
-    const loadingLobby = useRef<Promise<any>>();
     const rooms = useRef<Room[]>([]);
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
     const [peerCount, setPeerCount] = useState(0);
 
     useEffect(() => {
-        if (!peer?.identity.publicKey.hashcode() && !loadingLobby.current) {
+        if (!peer?.identity.publicKey.hashcode()) {
             return;
         }
 
-        loadingLobby.current = peer
-            .open(
-                new LobbyDB({
-                    id: new Uint8Array(32), // 0,0,....0 choose this dynamically instead? Now it is static, => same lobby for all
-                    rooms: new Documents<Room>(),
-                }),
-                { args: { sync: () => true } }
-            )
-            .then(async (lobby) => {
-                console.log("OPEN LOBBY", lobby.address.toString());
-                setLobby(lobby);
+        peer.open(
+            new LobbyDB({
+                id: new Uint8Array(32), // 0,0,....0 choose this dynamically instead? Now it is static, => same lobby for all
+                rooms: new Documents<Room>(),
+            }),
+            { args: { sync: () => true }, existing: "reuse" }
+        ).then(async (lobby) => {
+            setLobby(lobby);
 
-                lobby.rooms.events.addEventListener("change", async (e) => {
-                    e.detail.added?.forEach((p) => {
-                        const ix = rooms.current.findIndex(
-                            (x) => x.id === p.id
-                        );
-                        if (ix === -1) {
-                            rooms.current.push(p);
-                        } else {
-                            rooms.current[ix] = p;
-                        }
-                    });
-                    e.detail.removed?.forEach((p) => {
-                        const ix = rooms.current.findIndex(
-                            (x) => x.id === p.id
-                        );
-                        if (ix !== -1) {
-                            rooms.current.splice(ix, 1);
-                        }
-                    });
-                    console.log(rooms.current);
-                    forceUpdate();
+            lobby.rooms.events.addEventListener("change", async (e) => {
+                e.detail.added?.forEach((p) => {
+                    const ix = rooms.current.findIndex((x) => x.id === p.id);
+                    if (ix === -1) {
+                        rooms.current.push(p);
+                    } else {
+                        rooms.current[ix] = p;
+                    }
                 });
-
-                lobby.rooms.events.addEventListener("join", () => {
-                    lobby.rooms
-                        .getReady()
-                        .then((set) => setPeerCount(set.size + 1));
+                e.detail.removed?.forEach((p) => {
+                    const ix = rooms.current.findIndex((x) => x.id === p.id);
+                    if (ix !== -1) {
+                        rooms.current.splice(ix, 1);
+                    }
                 });
-
-                lobby.rooms.events.addEventListener("leave", () => {
-                    lobby.rooms
-                        .getReady()
-                        .then((set) => setPeerCount(set.size + 1));
-                });
+                forceUpdate();
             });
+
+            lobby.rooms.events.addEventListener("join", () => {
+                lobby.rooms
+                    .getReady()
+                    .then((set) => setPeerCount(set.size + 1));
+            });
+
+            lobby.rooms.events.addEventListener("leave", () => {
+                lobby.rooms
+                    .getReady()
+                    .then((set) => setPeerCount(set.size + 1));
+            });
+        });
     }, [peer?.identity.publicKey.hashcode()]);
 
     const goToRoom = (room: Room) => {

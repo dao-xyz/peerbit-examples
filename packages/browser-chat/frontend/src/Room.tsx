@@ -98,7 +98,10 @@ export const Room = () => {
         room.current = undefined;
         setLoading(true);
         const name = getRoomNameFromPath(params.name);
-        peer.open(new RoomDB({ name }), { args: { sync: () => true } })
+        peer.open(new RoomDB({ name }), {
+            args: { sync: () => true },
+            existing: "reuse",
+        })
             .then(async (r) => {
                 room.current = r;
                 r.messages.events.addEventListener("change", async (e) => {

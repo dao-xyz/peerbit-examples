@@ -77,7 +77,6 @@ export const Controls = (props: {
         });
     };
     useEffect(() => {
-        console.log("view ref!", props.viewRef);
         if (!props.viewRef) {
             return;
         }

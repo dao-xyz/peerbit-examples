@@ -25,7 +25,10 @@ export const CanvasToolbar = (props: { direction: "column" | "row" }) => {
         }
         console.log("open!");
         spaces.current = peer
-            .open(new Spaces(), { args: { sync: () => true } })
+            .open(new Spaces(), {
+                args: { sync: () => true },
+                existing: "reuse",
+            })
             .then(async (result) => {
                 result.canvases.events.addEventListener(
                     "change",

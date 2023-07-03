@@ -15,6 +15,36 @@ describe("Room", () => {
         await peer.stop();
         await peer2.stop();
     });
+    it("earlier", async () => {
+        const room = await peer.open(
+            new Room({ creator: peer.identity.publicKey })
+        );
+        await room.messages.put(
+            new Post({ from: peer.identity.publicKey, message: "first" })
+        );
+        await room.messages.put(
+            new Post({ from: peer.identity.publicKey, message: "second" })
+        );
+
+        const roomObserve = await peer2.open<Room>(room.address, {
+            args: {
+                role: new Observer(),
+            },
+        });
+        await roomObserve.waitFor(peer.identity.publicKey);
+        let earlier = await roomObserve.loadEarlier();
+        expect(earlier).toHaveLength(2);
+
+        earlier = await roomObserve.loadEarlier();
+        expect(earlier).toHaveLength(0);
+
+        await room.messages.put(
+            new Post({ from: peer.identity.publicKey, message: "third" })
+        );
+        earlier = await roomObserve.loadLater();
+        expect(earlier).toHaveLength(1);
+    });
+
     it("later", async () => {
         const room = await peer.open(
             new Room({ creator: peer.identity.publicKey })

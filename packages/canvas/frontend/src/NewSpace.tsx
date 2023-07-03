@@ -20,7 +20,7 @@ export const NewSpace = () => {
             rootTrust: peer.identity.publicKey,
             info: new TitleAndDescription(name, description),
         });
-        canvas = await peer.open(canvas);
+        canvas = await peer.open(canvas, { existing: "reuse" });
         return spaces.canvases.put(canvas).then(() => {
             navigate(getCanvasPath(canvas));
         });

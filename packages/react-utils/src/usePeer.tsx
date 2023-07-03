@@ -2,8 +2,6 @@ import React, { useContext, useEffect, useRef, useState } from "react";
 import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
 import { webSockets } from "@libp2p/websockets";
-import { createLibp2p } from "libp2p";
-import { supportedKeys } from "@libp2p/crypto/keys";
 import { mplex } from "@libp2p/mplex";
 import {
     getFreeKeypair,
@@ -18,10 +16,9 @@ import { FastMutex } from "./lockstorage.js";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { waitFor } from "@peerbit/time";
 import sodium from "libsodium-wrappers";
-import { circuitRelayTransport } from "libp2p/circuit-relay";
-import { webRTC } from "@dao-xyz/libp2p-webrtc";
 import * as filters from "@libp2p/websockets/filters";
 import axios from "axios";
+import { useMount } from "./useMount.js";
 export type ConnectionStatus =
     | "disconnected"
     | "connected"
@@ -29,6 +26,7 @@ export type ConnectionStatus =
     | "failed";
 interface IPeerContext {
     peer: Peerbit | undefined;
+    promise: Promise<void> | undefined;
     loading: boolean;
     status: ConnectionStatus;
 }
@@ -120,26 +118,31 @@ export const PeerProvider = ({
     children: JSX.Element;
 }) => {
     const [peer, setPeer] = React.useState<Peerbit | undefined>(undefined);
+    const [promise, setPromise] = React.useState<Promise<void> | undefined>(
+        undefined
+    );
+
     const [loading, setLoading] = React.useState<boolean>(false);
     const [connectionState, setConnectionState] =
         React.useState<ConnectionStatus>("disconnected");
     const memo = React.useMemo<IPeerContext>(
         () => ({
             peer,
+            promise,
             loading,
             connectionState,
             status: connectionState,
         }),
-        [loading, connectionState, peer?.identity?.publicKey.toString()]
+        [
+            loading,
+            !!promise,
+            connectionState,
+            peer?.identity?.publicKey.toString(),
+        ]
     );
-    const ref = useRef<Promise<Peerbit | void> | null>(null);
 
-    useEffect(() => {
-        if (ref.current) {
-            return;
-        }
+    useMount(() => {
         setLoading(true);
-
         const fn = async (
             keypair: Ed25519Keypair = keypairMessages[
                 keypairMessages.length - 1
@@ -175,6 +178,7 @@ export const PeerProvider = ({
                 }
             }
 
+            console.log(`Create peer, already? ${!!peer}`);
             if (peer) {
                 await peer.stop();
                 setPeer(undefined);
@@ -223,7 +227,7 @@ export const PeerProvider = ({
                                       filter: filters.all,
                                   }),
                                   /*            circuitRelayTransport({ discoverRelays: 1 }),
-                               webRTC(), */
+                           webRTC(), */
                               ],
                           }
                         : {
@@ -239,7 +243,7 @@ export const PeerProvider = ({
                               transports: [
                                   webSockets({ filter: filters.all }),
                                   /*             circuitRelayTransport({ discoverRelays: 1 }),
-                                webRTC(), */
+                            webRTC(), */
                               ],
                           }),
                 },
@@ -294,10 +298,9 @@ export const PeerProvider = ({
 
             setPeer(newPeer);
             setLoading(false);
-            return peer;
         };
-        ref.current = fn(keypair);
-    }, []);
+        setPromise(fn(keypair));
+    });
 
     return <PeerContext.Provider value={memo}>{children}</PeerContext.Provider>;
 };

@@ -100,7 +100,6 @@ export const Canvas = () => {
         const { key: keypair } = await getCanvasKeypair();
         await setName(name); // Reinitialize names, so that all keypairs get associated with the name
         const c = await myCanvas.current;
-        console.log("new rect");
         let maxY = rectsRef.current
             .map((x) => x.layout)
             .flat()
@@ -131,7 +130,6 @@ export const Canvas = () => {
     const updateRects = (newRects: Rect[], timeout = 500) => {
         clearTimeout(updateRectsTimeout);
         updateRectsTimeout = setTimeout(() => {
-            console.log("redraw rects");
             rectsRef.current = newRects;
             setRects(newRects);
             setLayouts(getLayouts(newRects));

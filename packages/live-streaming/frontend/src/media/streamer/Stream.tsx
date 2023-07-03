@@ -74,13 +74,17 @@ export const Stream = (args: { node: PublicSignKey }) => {
     );
     const videoLoadedOnce = useRef(false);
     const { peer } = usePeer();
-    const mediaStreamDBs = useRef<Promise<MediaStreamDBs>>(null);
+    const mediaStreamDBs = useRef<MediaStreamDBs>(null);
     const videoEncoders = useRef<VideoStream[]>([]);
     const tickWorkerRef = useRef<Worker>();
     const lastFrameRate = useRef(30);
     const scheduleFrameFn = useRef<() => void>();
     const startId = useRef(0);
-    const [sessionTimestamp, _] = useState(BigInt(+new Date()));
+    const sessionTimestampRef = useRef(BigInt(+new Date()));
+    const bumpSession = useCallback(() => {
+        sessionTimestampRef.current = BigInt(+new Date());
+    }, []);
+
     let videoRef = useRef<HTMLVideoElement>();
 
     useEffect(() => {
@@ -120,37 +124,16 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
     // TODO
     useEffect(() => {
-        if (!peer?.libp2p || !args.node || mediaStreamDBs.current) {
+        if (!peer?.libp2p || !args.node) {
             return;
         }
         //  console.log('setup media stream start!')
-        mediaStreamDBs.current = peer
-            .open(new MediaStreamDBs(peer.identity.publicKey))
-            .then(async (db) => {
-                //  console.log("LOAD")
-                /*      await db.load(); */
-
-                //  console.log("LOAD DONE!", [...db.streams.index.index.values()].length, db.streams.index.size);
-
-                // See all previous dbs as inactive, we do this since the last session might have ended unexpectedly
-
-                /*  console.log("INACTIVATE", [...db.streams.index.index.values()]);
-                 await Promise.all(
-                     [...db.streams.index.index.values()].map((x) => {
-                         if (x.value.active) {
-                             return db.streams.put(x.value.toInactive());
-                         }
-                     })
-                 );
- 
-                 console.log(
-                     "AFTER DEACTIVE!",
-                     [...db.streams.index.index.values()].length,
-                     db.streams.index.size
-                 ); */
-
-                return db;
-            });
+        peer.open(new MediaStreamDBs(peer.identity.publicKey), {
+            existing: "reuse",
+        }).then(async (db) => {
+            mediaStreamDBs.current = db;
+            return db;
+        });
     }, [peer?.identity.publicKey.hashcode(), args.node?.hashcode()]);
 
     const updateStream = async (properties: {
@@ -162,9 +145,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
         }
 
         let newQualities: SourceSetting[] = [];
-
-        await waitFor(() => !!mediaStreamDBs.current);
-        const dbs = await mediaStreamDBs.current;
 
         let newVideoEncoders: VideoStream[] = [];
         let existingVideoEncoders: VideoStream[] = [];
@@ -182,6 +162,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
         }
 
         if (properties.streamType) {
+            bumpSession();
             videoRef.current.removeAttribute("src");
             (videoRef.current.srcObject as MediaStream)
                 ?.getTracks()
@@ -222,15 +203,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             encoder.close();
                         }
                         if (videoStreamDB) {
-                            await Promise.all([
-                                videoStreamDB.close(),
-                                dbs.streams.put(
-                                    new Track({
-                                        session: sessionTimestamp,
-                                        source: videoStreamDB,
-                                    })
-                                ),
-                            ]);
+                            videoStreamDB.close();
                             videoStreamDB = undefined;
                         }
                     };
@@ -250,8 +223,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 console.error(e);
                             },
                             output: async (chunk, metadata) => {
-                                console.log("PUT VIDOE CHUNK!");
-
                                 if (skip) {
                                     return;
                                 }
@@ -259,7 +230,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 chunk.copyTo(arr);
 
                                 if (metadata.decoderConfig) {
-                                    console.log(metadata.decoderConfig);
                                     const newStreamDB = new WebcodecsStreamDB({
                                         sender: peer.identity.publicKey,
                                         decoderDescription:
@@ -299,11 +269,11 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                                     const streamInfo =
                                                         new Track({
                                                             session:
-                                                                sessionTimestamp,
+                                                                sessionTimestampRef.current,
                                                             source: videoStreamDB,
                                                         });
                                                     //   console.log("ACTIVATE NEW TRACK", videoStreamDB.id, videoStreamDB.address.toString())
-                                                    return dbs.streams.put(
+                                                    return mediaStreamDBs.current.streams.put(
                                                         streamInfo
                                                     );
                                                 }
@@ -360,7 +330,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 }
                             },
                         });
-                        console.log("created encoder", encoder.state);
+                        // console.log("created encoder", encoder.state);
                     };
 
                     open();
@@ -380,10 +350,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
         setQuality(
             [...qualitySetting].sort((a, b) => b.video.height - a.video.height)
         );
-        console.log("set video encoders", [
-            ...newVideoEncoders,
-            ...existingVideoEncoders,
-        ]);
+        /*   console.log("set video encoders", [
+              ...newVideoEncoders,
+              ...existingVideoEncoders,
+          ]); */
         videoEncoders.current = [...newVideoEncoders, ...existingVideoEncoders];
 
         if (!properties.streamType) {
@@ -393,7 +363,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
         let s = quality[0]; // qualities are sorted
         const videoElementRef = videoRef.current;
 
-        console.log("on ref", videoElementRef.src);
         videoElementRef.pause();
         switch (streamType.current.type) {
             case "noise":
@@ -468,7 +437,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
             const dbs = await mediaStreamDBs.current;
             await dbs.streams.put(
-                new Track({ session: sessionTimestamp, source: audioStreamDB })
+                new Track({
+                    session: sessionTimestampRef.current,
+                    source: audioStreamDB,
+                })
             );
             await encoderInit;
             wavEncoder.node.port.onmessage = (ev) => {
@@ -564,7 +536,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             videoRef.videoHeight;
                         // console.log('set bitrate', videoEncoder.setting.video.bitrate)
 
-                        console.log("CONFIGURE");
                         encoder.configure({
                             codec: isSafari
                                 ? "avc1.428020"

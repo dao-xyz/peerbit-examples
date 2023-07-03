@@ -15,6 +15,7 @@ import {
     SortDirection,
     IntegerCompare,
     Compare,
+    SearchOptions,
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import { v4 as uuid } from "uuid";
@@ -288,14 +289,16 @@ export class MediaStreamDBs extends Program {
         });
     }
 
-    async syncActive(): Promise<Track<AudioStreamDB | WebcodecsStreamDB>[]> {
+    async getLatest(
+        options?: SearchOptions<Track<AudioStreamDB | WebcodecsStreamDB>>
+    ): Promise<Track<AudioStreamDB | WebcodecsStreamDB>[]> {
         const latest = await this.streams.index.search(
             new SearchRequest({
                 sort: [
                     new Sort({ key: "session", direction: SortDirection.DESC }),
                 ],
             }),
-            { remote: { sync: true }, local: true, size: 1 }
+            { ...options, size: 1 }
         );
         if (latest.length === 0) {
             return [];
@@ -313,20 +316,8 @@ export class MediaStreamDBs extends Program {
                     new Sort({ key: "session", direction: SortDirection.DESC }),
                 ],
             }),
-            { remote: { sync: true }, local: true, size: 1 }
+            { ...options }
         );
         return tracks;
-    }
-
-    async getActiveLocally(): Promise<
-        Track<AudioStreamDB | WebcodecsStreamDB>[]
-    > {
-        const results = await this.streams.index.search(
-            new SearchRequest({
-                query: [new BoolQuery({ key: "active", value: true })],
-            }),
-            { remote: false, local: true }
-        );
-        return results;
     }
 }

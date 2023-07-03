@@ -44,6 +44,8 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 args: {
                     sync: () => true,
                 },
+                existing: "reuse",
+
                 /*  sync: (entry) => { TODO always sync "my" names
                      for (const s of entry.signatures) {
                          if (s.publicKey.equals(peer.identity.publicKey) || s.publicKey.equals(peer.identity.publicKey)) {

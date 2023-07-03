@@ -172,21 +172,21 @@ export const Content = () => {
             return;
         }
         setProcessing(true);
-        peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID })).then(
-            async (db) => {
-                db.events.addEventListener("join", (e) => {
-                    db.getReady().then((set) => setSubscribers(set.size + 1));
-                });
+        peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID }), {
+            existing: "reuse",
+        }).then(async (db) => {
+            db.events.addEventListener("join", (e) => {
+                db.getReady().then((set) => setSubscribers(set.size + 1));
+            });
 
-                db.events.addEventListener("leave", (e) => {
-                    db.getReady().then((set) => setSubscribers(set.size + 1));
-                });
+            db.events.addEventListener("leave", (e) => {
+                db.getReady().then((set) => setSubscribers(set.size + 1));
+            });
 
-                p2pStorage.current = new P2PStorage(db, MODEL_ID);
+            p2pStorage.current = new P2PStorage(db, MODEL_ID);
 
-                setProcessing(false);
-            }
-        );
+            setProcessing(false);
+        });
     }, [peer?.identity.publicKey.hashcode()]);
 
     const enableCam = () => {

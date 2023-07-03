@@ -126,7 +126,14 @@ export class Room extends Program<Args> {
         });
     }
 
-    async loadEarlier() {
+    async getTimestamp(id: string) {
+        const docs = await this.messages.index.getDetailed(id, {
+            local: true,
+        });
+        return docs?.[0]?.results[0]?.context.created;
+    }
+
+    public async loadEarlier() {
         // get the earlist doc locally, query all docs earlier than this
         const firstIterator = await this.messages.index.iterate(
             new SearchRequest({
@@ -172,21 +179,20 @@ export class Room extends Program<Args> {
                         key: TIMESTAMP,
                     }),
                 ],
-            })
+            }),
+            {
+                remote: {
+                    sync: true,
+                },
+                local: true,
+            }
         );
         const next = await iterator.next(10);
         iterator.close();
         return next;
     }
 
-    async getTimestamp(id: string) {
-        const docs = await this.messages.index.getDetailed(id, {
-            local: true,
-        });
-        return docs?.[0]?.results[0]?.context.created;
-    }
-
-    async loadLater(than?: bigint) {
+    public async loadLater(than?: bigint) {
         // get the earlist doc locally, query all docs earlier than this
 
         const query: Query[] = [];
@@ -247,6 +253,7 @@ export class Room extends Program<Args> {
                 remote: {
                     sync: true,
                 },
+                local: true,
             }
         );
         const next = await iterator.next(10);

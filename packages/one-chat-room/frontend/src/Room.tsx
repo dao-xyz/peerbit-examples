@@ -34,6 +34,16 @@ const shortName = (name: string) => {
 };
 let namesCache = new Map();
 
+function debounce(func, delay) {
+    var timer = 0;
+    return function debouncedFn(args: any) {
+        if (Date.now() - timer > delay) {
+            func(args);
+        }
+        timer = Date.now();
+    };
+}
+
 export const Room = () => {
     const { peer, loading: loadingPeer } = usePeer();
     const names = useRef<Names>();
@@ -72,97 +82,100 @@ export const Room = () => {
         room.current = undefined;
         setLoading(true);
         const key = getKeyFromPath(params.key);
-        peer.open(new Names(), { args: { sync: () => true } }).then(
+        peer.open(new Names(), {
+            args: { sync: () => true },
+            existing: "reuse",
+        }).then(
+            // only sync more recent messages?
             async (namesDB) => {
                 names.current = namesDB;
 
+                const r = new RoomDB({ creator: key });
+
+                const updateNames = async (p: Post) => {
+                    const pk = (
+                        await r.messages.log.log.get(
+                            r.messages.index.index.get(p.id).context.head
+                        )
+                    ).signatures[0].publicKey;
+                    namesDB.getName(pk).then((name) => {
+                        namesCache.set(pk.hashcode(), name);
+                    });
+                };
+
+                let updateTimeout: ReturnType<typeof setTimeout> | undefined;
+                r.messages.events.addEventListener("change", (e) => {
+                    e.detail.added?.forEach((p) => {
+                        const ix = postsRef.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix === -1) {
+                            postsRef.current.push(p);
+                        } else {
+                            postsRef.current[ix] = p;
+                        }
+                        updateNames(p);
+                    });
+                    e.detail.removed?.forEach((p) => {
+                        const ix = postsRef.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix !== -1) {
+                            postsRef.current.splice(ix, 1);
+                        }
+                    });
+
+                    let wallTimes = new Map<string, bigint>();
+
+                    clearTimeout(updateTimeout);
+                    updateTimeout = setTimeout(async () => {
+                        const entries = await Promise.all(
+                            postsRef.current.map(async (x) => {
+                                return {
+                                    post: x,
+                                    entry: await room.current.messages.log.log.get(
+                                        room.current.messages.index.index.get(
+                                            x.id
+                                        ).context.head
+                                    ),
+                                };
+                            })
+                        );
+                        entries.forEach(({ post, entry }) => {
+                            wallTimes.set(
+                                post.id,
+                                entry.metadata.clock.timestamp.wallTime
+                            );
+                        });
+
+                        postsRef.current.sort((a, b) =>
+                            Number(wallTimes.get(a.id) - wallTimes.get(b.id))
+                        );
+                        forceUpdate();
+                    }, 5);
+                });
+
+                r.events.addEventListener("join", (e) => {
+                    r.getReady().then((set) => setPeerCounter(set.size + 1));
+                });
+
+                r.events.addEventListener("leave", (e) => {
+                    r.getReady().then((set) => setPeerCounter(set.size + 1));
+                });
+
                 await peer
-                    .open(new RoomDB({ creator: key }), {
+                    .open(r, {
                         args: { sync: () => true },
+                        existing: "reuse",
                     })
                     .then(async (r) => {
+                        console.log(
+                            "DIR?",
+                            peer.directory,
+                            r.messages.log.log.length,
+                            r.messages.index.size
+                        );
                         room.current = r;
-
-                        const updateNames = async (p: Post) => {
-                            const pk = (
-                                await r.messages.log.log.get(
-                                    r.messages.index.index.get(p.id).context
-                                        .head
-                                )
-                            ).signatures[0].publicKey;
-                            namesDB.getName(pk).then((name) => {
-                                namesCache.set(pk.hashcode(), name);
-                            });
-                        };
-
-                        let updateTimeout:
-                            | ReturnType<typeof setTimeout>
-                            | undefined;
-                        r.messages.events.addEventListener("change", (e) => {
-                            e.detail.added?.forEach((p) => {
-                                const ix = postsRef.current.findIndex(
-                                    (x) => x.id === p.id
-                                );
-                                if (ix === -1) {
-                                    postsRef.current.push(p);
-                                } else {
-                                    postsRef.current[ix] = p;
-                                }
-                                updateNames(p);
-                            });
-                            e.detail.removed?.forEach((p) => {
-                                const ix = postsRef.current.findIndex(
-                                    (x) => x.id === p.id
-                                );
-                                if (ix !== -1) {
-                                    postsRef.current.splice(ix, 1);
-                                }
-                            });
-
-                            let wallTimes = new Map<string, bigint>();
-
-                            clearTimeout(updateTimeout);
-                            updateTimeout = setTimeout(async () => {
-                                const entries = await Promise.all(
-                                    postsRef.current.map(async (x) => {
-                                        return {
-                                            post: x,
-                                            entry: await room.current.messages.log.log.get(
-                                                room.current.messages.index.index.get(
-                                                    x.id
-                                                ).context.head
-                                            ),
-                                        };
-                                    })
-                                );
-                                entries.forEach(({ post, entry }) => {
-                                    wallTimes.set(
-                                        post.id,
-                                        entry.metadata.clock.timestamp.wallTime
-                                    );
-                                });
-
-                                postsRef.current.sort((a, b) =>
-                                    Number(
-                                        wallTimes.get(a.id) -
-                                            wallTimes.get(b.id)
-                                    )
-                                );
-                                forceUpdate();
-                            }, 5);
-                        });
-
-                        r.events.addEventListener("join", (e) => {
-                            r.getReady().then((set) =>
-                                setPeerCounter(set.size + 1)
-                            );
-                        });
-
-                        r.events.addEventListener("leave", (e) => {
-                            r.getReady().then((set) =>
-                                setPeerCounter(set.size + 1)
-                            );
-                        });
                     })
                     .catch((e) => {
                         console.error("Failed top open room: " + e.message);
@@ -185,8 +198,6 @@ export const Room = () => {
         if (!room) {
             return;
         }
-        console.log("POST", room.current.messages.log.replicators());
-
         room.current.messages
             .put(new Post({ message: text, from: peer.identity.publicKey }), {
                 encryption: {
@@ -260,9 +271,29 @@ export const Room = () => {
                 sx={{ overflowY: "scroll" }}
                 padding={1}
                 mb="8px"
+                onWheel={debounce(async (e) => {
+                    if (
+                        e.currentTarget.scrollHeight ===
+                        e.currentTarget.clientHeight
+                    ) {
+                        // No scrollbar visible, but we want to "scroll"
+                        let scrollingTop = e.deltaY < 0;
+                        scrollingTop
+                            ? room.current.loadEarlier()
+                            : room.current.loadLater();
+                    }
+                }, 30)}
                 onScroll={async (e) => {
                     if (e.currentTarget.scrollTop === 0) {
-                        // load more elements
+                        room.current.loadEarlier();
+                    } else if (
+                        Math.abs(
+                            e.currentTarget.scrollHeight -
+                                e.currentTarget.scrollTop -
+                                e.currentTarget.clientHeight
+                        ) < 1
+                    ) {
+                        room.current.loadLater();
                     }
                 }}
             >
