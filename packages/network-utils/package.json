@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/network-utils",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
@@ -24,7 +24,6 @@
     "dependencies": {
         "axios": "^1.4.0"
     },
-    "devDependencies": {},
     "scripts": {
         "clean": "shx rm -rf lib/*",
         "build": "yarn clean && tsc -p tsconfig.json",
