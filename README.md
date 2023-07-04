@@ -21,7 +21,7 @@
 ### [Lobby + chat rooms](./packages/many-chat-rooms/)
 [<img src="./packages/many-chat-rooms/demo.gif" width="600" />](./packages/any-chat-rooms/)
 
-### [Sync files](./packages/many-chat-rooms/)
+### [Sync files](./packages/file-share/)
 [<img src="./packages/file-share/demo.gif" width="600" />](./packages/file-share/)
 
 
