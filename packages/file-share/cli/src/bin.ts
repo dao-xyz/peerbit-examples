@@ -83,13 +83,6 @@ const cli = async (args?: string[]) => {
                     defaultDescription: "Current directory",
                     demandOption: false,
                 });
-                yargs.option("relay", {
-                    type: "string",
-                    describe: "Relay address",
-                    defaultDescription: "?",
-                    default:
-                        "/ip4/127.0.0.1/tcp/8001/p2p/12D3KooWA796xdXd4CuAMxB9CNgmxLDpivbmQu8kusqSFFJ7qrqp",
-                });
                 yargs.option("force", {
                     alias: "f",
                     describe: "Overwrite existing files",
