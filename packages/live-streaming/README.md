@@ -9,4 +9,14 @@ This app is running from Browser to Browser. A relay is hosted in a datacenter t
 ## How it works
 This app showcase what kind of TPS and data throughput you can get with a Document store. The streamer records their stream, and every 50ms create a video chunk, which is inserted into the document store. This chunk is then replicated on peers that also have opened the database. These peers are subcribing to change events on the document store. Each change event will contain one or more chunk which they can append to a video stream (which shows up on the screen)
 
-See [database schema](./frontend/src/database.ts) to learn about how the database is setup.
+See [database schema](./frontend/src/media/database.ts) to learn about how the database is setup.
+
+## To run with remote relay
+```sh
+yarn start-remote
+```
+
+## To run locally 
+```sh
+yarn start
+```
