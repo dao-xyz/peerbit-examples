@@ -245,7 +245,7 @@ export class Track<T extends TrackSource> {
 }
 
 @variant("media-streams")
-export class MediaStreamDBs extends Program {
+export class MediaStreamDBs extends Program<Args> {
     @field({ type: Uint8Array })
     id: Uint8Array;
 
@@ -272,7 +272,7 @@ export class MediaStreamDBs extends Program {
         });
     }
 
-    async open(): Promise<void> {
+    async open(args?: Args): Promise<void> {
         await this.streams.open({
             type: Track,
             canAppend: async (entry) => {
@@ -286,6 +286,8 @@ export class MediaStreamDBs extends Program {
                 return false;
             },
             canOpen: (_) => Promise.resolve(false), // dont open subdbs by opening this db
+            role: args?.role,
+            sync: args?.sync,
         });
     }
 

@@ -700,16 +700,12 @@ export const View = (args: DBArgs | IdentityArgs) => {
             videoStream.streams.events.addEventListener(
                 "change",
                 async (_e) => {
-                    console.log("MBY STREAM CHOICE CHANGE?");
                     clearTimeout(updateStreamTimeout);
                     updateStreamTimeout = setTimeout(() => {
                         updateStreamChoice();
                     }, 50);
                 }
             );
-
-            console.log("???");
-            updateStreamChoice();
 
             // Wait for streamer to be online, then query active
             if (videoStream.closed) {
@@ -719,6 +715,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
             videoStream
                 .waitFor(videoStream.sender)
                 .then(() => {
+                    updateStreamChoice();
                     videoStream.getLatest({ remote: { sync: true } });
                 })
                 .catch((e) => {

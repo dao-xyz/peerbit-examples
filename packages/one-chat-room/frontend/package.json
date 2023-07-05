@@ -13,8 +13,8 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "peerbit": "^1.1.5",
-        "@peerbit/document": "^1.1.8",
+        "peerbit": "^1.1.6",
+        "@peerbit/document": "^1.1.9",
         "@peerbit/peer-names": "^0.0.1",
         "@peerbit/react": "*",
         "react": "^18.2.0",

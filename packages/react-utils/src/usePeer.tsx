@@ -191,23 +191,14 @@ export const PeerProvider = ({
                                       filter: filters.all,
                                   }),
                                   /*            circuitRelayTransport({ discoverRelays: 1 }),
-                 webRTC(), */
+               webRTC(), */
                               ],
                           }
                         : {
-                              connectionGater: {
-                                  denyDialMultiaddr: () => {
-                                      // by default we refuse to dial local addresses from the browser since they
-                                      // are usually sent by remote peers broadcasting undialable multiaddrs but
-                                      // here we are explicitly connecting to a local node so do not deny dialing
-                                      // any discovered address
-                                      return false;
-                                  },
-                              },
                               transports: [
-                                  webSockets({ filter: filters.all }),
+                                  webSockets({ filter: filters.wss }),
                                   /*             circuitRelayTransport({ discoverRelays: 1 }),
-                  webRTC(), */
+                webRTC(), */
                               ],
                           }),
                 },

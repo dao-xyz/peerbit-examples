@@ -292,30 +292,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                     lastVideoFrameTimestamp = BigInt(
                                         chunk.timestamp
                                     );
-                                    /*  const peers = [
-                                         ...peer.libp2p.services.pubsub.peers.keys(),
-                                     ];
-                                     if (peers.length > 1) {
-                                         console.log(
-                                             peers.length,
-                                             peer.libp2p.services.pubsub.routes.getPath(
-                                                 peer.libp2p.services.pubsub
-                                                     .publicKeyHash,
-                                                 peers[0]
-                                             )?.length,
-                                             peer.libp2p.services.pubsub.routes.getPath(
-                                                 peer.libp2p.services.pubsub
-                                                     .publicKeyHash,
-                                                 peers[1]
-                                             )?.length
-                                         );
-                                     } else {
-                                         console.log(
-                                             peers,
-                                             peer.libp2p.services.pubsub.routes
-                                                 .nodeCount
-                                         );
-                                     } */
 
                                     await videoStreamDB.chunks.put(
                                         new Chunk({
@@ -535,16 +511,15 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             videoEncoder.setting.video.height /
                             videoRef.videoHeight;
                         // console.log('set bitrate', videoEncoder.setting.video.bitrate)
-
                         encoder.configure({
                             codec: isSafari
                                 ? "avc1.428020"
                                 : "av01.0.04M.10" /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
                             height: videoEncoder.setting.video.height,
                             width: videoRef.videoWidth * scaler,
-                            /* bitrate: videoEncoder.setting.video.bitrate, */
-                            /*   latencyMode: "realtime",
-                              bitrateMode: "variable", */
+                            bitrate: videoEncoder.setting.video.bitrate,
+                            /*          latencyMode: "realtime",
+                                     bitrateMode: "variable", */
                         });
                     }
 

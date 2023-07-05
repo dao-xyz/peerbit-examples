@@ -35,7 +35,7 @@ import {
     StreamType,
     Resolution,
     resolutionToSourceSetting,
-} from "./settings.js";
+} from "./../../controls/settings.js";
 import VideoCameraFrontIcon from "@mui/icons-material/VideoCameraFront";
 import OndemandVideoIcon from "@mui/icons-material/OndemandVideo";
 import PresentToAllIcon from "@mui/icons-material/PresentToAll";
