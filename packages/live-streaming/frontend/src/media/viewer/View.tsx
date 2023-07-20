@@ -403,7 +403,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
     const [isPlaying, setIsPlaying] = useState(true);
 
     useEffect(() => {
-        if (!peer?.libp2p) {
+        if (!peer) {
             return;
         }
         if ((args as DBArgs).db) {

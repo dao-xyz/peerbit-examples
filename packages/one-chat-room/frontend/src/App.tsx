@@ -6,7 +6,6 @@ import {
     ThemeProvider,
     CssBaseline,
 } from "@mui/material";
-import { inIframe } from "@peerbit/react";
 import { BaseRoutes } from "./routes";
 
 // Theme
@@ -39,8 +38,6 @@ export const App = () => {
             network={
                 import.meta.env.MODE === "development" ? "local" : "remote"
             }
-            waitForKeypairInIFrame={inIframe()}
-            inMemory={inIframe()}
         >
             <ThemeProvider theme={theme}>
                 <CssBaseline />

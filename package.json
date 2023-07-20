@@ -11,10 +11,11 @@
             "packages/network-utils",
             "packages/browser-chat/*",
             "packages/file-share/*",
+            "packages/text-document/*",
             "packages/live-streaming/*",
             "packages/live-streaming-canvas/*",
             "packages/name-service/*",
-            "packages/canvas/*",
+            "packages/social-media-app/*",
             "packages/one-chat-room/*",
             "packages/collaborative-learning/*"
         ],
@@ -28,7 +29,7 @@
         ]
     },
     "engines": {
-        "node": ">=16.0"
+        "node": ">=16.15.1"
     },
     "publishConfig": {
         "access": "public"

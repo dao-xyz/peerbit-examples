@@ -1,0 +1,149 @@
+@import "@yaireo/tagify/dist/tagify.css";
+
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+        'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+        sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+    font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+        monospace;
+}
+
+/* prevent dragging rects with iframe to loose mouse events to the iframe */
+.react-draggable-transparent-selection iframe {
+    pointer-events: none !important;
+}
+
+/* prevent resizing rects with iframe to loose mouse events to the iframe */
+.resizing.react-resizable iframe {
+    pointer-events: none !important;
+}
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+@tailwind variants;
+
+.customLook {
+    --tag-bg: #0052BF;
+    --tag-hover: #CE0078;
+    --tag-text-color: #FFF;
+    --tags-border-color: silver;
+    --tag-border-radius: 25px;
+    --tag-text-color--edit: #111;
+    --tag-remove-bg: var(--tag-hover);
+    --tag-pad: .6em 1em;
+    --tag-inset-shadow-size: 1.35em;
+    --tag-remove-btn-bg--hover: black;
+
+    display: inline-block;
+    min-width: 0;
+    border: none;
+}
+
+.customLook .tagify__tag {
+    margin-top: 0;
+}
+
+/* Do not show the "remove tag" (x) button when only a single tag remains */
+.customLook .tagify__tag:only-of-type .tagify__tag__removeBtn {
+    display: none;
+}
+
+.customLook .tagify__tag__removeBtn {
+    opacity: 0;
+    transform: translateX(-6px) scale(.5);
+    margin-left: -3ch;
+    transition: .12s;
+}
+
+.customLook .tagify__tag:hover .tagify__tag__removeBtn {
+    transform: none;
+    opacity: 1;
+    margin-left: -1ch;
+}
+
+.customLook+button {
+    color: #0052BF;
+    font: bold 1.4em/1.65 Arial;
+    border: 0;
+    background: none;
+    box-shadow: 0 0 0 2px inset currentColor;
+    border-radius: 50%;
+    width: 1.65em;
+    height: 1.65em;
+    cursor: pointer;
+    outline: none;
+    transition: .1s ease-out;
+    margin: 0 0 0 5px;
+    vertical-align: top;
+}
+
+.customLook+button:hover {
+    box-shadow: 0 0 0 5px inset currentColor;
+}
+
+.customLook .tagify__input {
+    display: none;
+}
+
+
+
+.content-container {
+    height: calc(100vh - theme('spacing.7'));
+}
+
+.tagify {
+    --tag-bg: transparent;
+    --tag-border-radius: 0.75rem;
+    --tag-hover: theme('colors.primary.200');
+    border-radius:  0.75rem;
+/*     --tags-border-color: transparent; */
+}
+/* .tagify__input
+{
+    @apply before:opacity-100 !important
+} */
+
+.tagify__tag {
+    @apply border-neutral-500 border-solid border-[1px] rounded-xl
+}
+
+.btn {
+    @apply font-bold py-2 px-4 rounded;
+}
+
+
+
+.btn-icon {
+    @apply py-2 px-2 rounded-md;
+}
+
+.btn-icon:hover {
+    @apply  bg-primary-200
+}
+
+.btn-icon:focus {
+    @apply bg-primary-400
+}
+
+
+.btn-icon-sx > * {
+    @apply w-4 h-4
+}
+
+.btn-icon-md > * {
+    @apply w-6 h-6
+}
+.btn-icon-lg > * {
+    @apply w-6 h-6
+}
+
+.btn-icon-lg > * {
+    @apply w-8 h-8
+}

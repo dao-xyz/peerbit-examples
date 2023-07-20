@@ -18,7 +18,7 @@ export const StreamOrView = () => {
 
     // TODO
     useEffect(() => {
-        if (!peer?.libp2p || !params.node || !params.node) {
+        if (!peer || !params.node || !params.node) {
             return;
         }
 

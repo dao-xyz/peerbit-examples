@@ -13,8 +13,8 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "peerbit": "^1.1.6",
-        "@peerbit/document": "^1.1.9",
+        "peerbit": "^1.1.7",
+        "@peerbit/document": "^2.0.0",
         "@peerbit/react": "*",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
@@ -32,9 +32,9 @@
         "@types/dom-webcodecs": "^0.1.5",
         "@types/react": "^18.0.26",
         "@types/react-dom": "^18.0.9",
-        "@vitejs/plugin-react": "^3.0.0",
+        "@vitejs/plugin-react": "^4.0.3",
         "typescript": "^5.1.3",
-        "vite": "^4.3.9",
+        "vite": "^4.4.4",
         "gh-pages": "^4.0.0"
     },
     "browserslist": {
