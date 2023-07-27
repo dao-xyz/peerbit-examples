@@ -19,17 +19,17 @@
 
 
 ### [Lobby + chat rooms](./packages/many-chat-rooms/)
-[<img src="./packages/many-chat-rooms/demo.gif" width="600" />](./packages/any-chat-rooms/)
+[<img src="./packages/many-chat-rooms/demo.gif" width="600" />](./packages/many-chat-rooms/)
 
 ### [Sync files](./packages/file-share/)
 [<img src="./packages/file-share/demo.gif" width="600" />](./packages/file-share/)
 
 
 ### [Live video streaming](./packages/live-streaming/)
-[<img src="./packages/live-streaming/demo.gif" width="600" />](./packages/video-stream/)
+[<img src="./packages/live-streaming/demo.gif" width="600" />](./packages/live-streaming/)
 
 
-### [Collaborative machine learning](./packages/live-streaming/)
+### [Collaborative machine learning](./packages/collaborative-learning/)
 [<img src="./packages/collaborative-learning/demo.gif" width="600" />](./packages/collaborative-learning/)
 
 
