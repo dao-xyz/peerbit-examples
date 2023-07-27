@@ -2,7 +2,7 @@
 
 ## [Application is live here](https://stream.dao.xyz)
 
-Due to the use of WebCodecs API, this app does not yet work on Firefox, and some mobile phones.
+Due to the use of WebCodecs API, this app does not yet work on Firefox ([soon?](https://groups.google.com/a/mozilla.org/g/dev-platform/c/3g0fnn6682A)), and some mobile phones.
 
 Learn more here: https://caniuse.com/webcodecs
 
