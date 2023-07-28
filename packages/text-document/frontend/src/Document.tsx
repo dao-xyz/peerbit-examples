@@ -22,14 +22,14 @@ export const Document = () => {
         })
             .then((d) => {
                 d.string.events.addEventListener("change", async () => {
-                    testAreaRef.current.innerText = await d.string.getValue();
+                    testAreaRef.current.value = await d.string.getValue();
                     forceUpdate();
                 });
 
                 doc.current = d;
                 // initial value
                 d.string.getValue().then((v) => {
-                    testAreaRef.current.innerText = v;
+                    testAreaRef.current.value = v;
                     forceUpdate();
                 });
             })
