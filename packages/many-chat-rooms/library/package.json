@@ -34,12 +34,12 @@
         "test:integration": "node ../../../node_modules/.bin/jest test -c  ../../../jest.config.integration.ts --runInBand --forceExit"
     },
     "devDependencies": {
-        "peerbit": "^1.1.7",
-        "@peerbit/test-utils": "^1.0.14",
+        "peerbit": "^1",
+        "@peerbit/test-utils": "^1",
         "typescript": "^5.1.3"
     },
     "dependencies": {},
     "peerDependencies": {
-        "peerbit": "^1.1.7"
+        "peerbit": "^1"
     }
 }

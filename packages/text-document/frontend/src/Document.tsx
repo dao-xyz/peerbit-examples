@@ -21,9 +21,15 @@ export const Document = () => {
             existing: "reuse",
         })
             .then((d) => {
-                return d.string.getValue().then((v) => {
+                d.string.events.addEventListener("change", async () => {
+                    testAreaRef.current.innerText = await d.string.getValue();
+                    forceUpdate();
+                });
+
+                doc.current = d;
+                // initial value
+                d.string.getValue().then((v) => {
                     testAreaRef.current.innerText = v;
-                    doc.current = d;
                     forceUpdate();
                 });
             })

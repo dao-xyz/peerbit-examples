@@ -32,7 +32,7 @@
         "@types/react": "^18.0.25",
         "@types/react-dom": "^18.0.8",
         "path-browserify": "^1.0.1",
-        "peerbit": "^1.1.7",
+        "peerbit": "^1",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-router-dom": "^6.8.0",
@@ -43,7 +43,6 @@
         "@babel/plugin-syntax-dynamic-import": "^7.8.3",
         "@babel/plugin-transform-typescript": "^7.20.2",
         "@types/sinon": "^10.0.13",
-        "gh-pages": "^4.0.0",
         "node-localstorage": "^2.2.1",
         "sinon": "^15.0.1"
     },
