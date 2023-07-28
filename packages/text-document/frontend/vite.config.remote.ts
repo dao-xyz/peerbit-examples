@@ -17,7 +17,8 @@ export default defineConfig({
                   key: fs.readFileSync("./.cert/key.pem"),
                   cert: fs.readFileSync("./.cert/cert.pem"),
               },
-              host: "meet.dao.xyz",
+              host: "text.test.xyz",
+              port: 5803,
           }
         : undefined,
 });

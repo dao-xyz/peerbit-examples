@@ -2,8 +2,7 @@ import { useEffect, useRef, useState, forwardRef } from "react";
 import { useNames } from "./names/useNames";
 import { MdSave, MdEdit } from "react-icons/md";
 import { Path } from "./room/Path";
-
-export const HEIGHT = "40px";
+import { PiUserCircleThin } from "react-icons/pi";
 export const Header = forwardRef((props: any, ref) => {
     let [showInput, setShowInput] = useState(false);
     let inputRef = useRef<HTMLInputElement>();
@@ -48,19 +47,13 @@ export const Header = forwardRef((props: any, ref) => {
     return (
         <div
             ref={ref as any}
-            className="flex flex-row items-center w-full h-10 m-2"
-            /*   sx={{
-          width: "100%",
-          height: HEIGHT,
-          display: "flex",
-          alignItems: "center",
-      }} */
+            className="flex flex-row w-full pl-4 pr-4 pt-2 pb-2 items-center"
         >
-            <Path></Path>
-            <div className="ml-auto p-1">
+            <span className="opacity-50">dao | xyz</span>
+            <div className="ml-auto">
                 {!showInput && (
                     <div
-                        className="flex flex-row items-center p-1 cursor-pointer"
+                        className="flex flex-row items-center cursor-pointer"
                         onClick={() => {
                             setShowInput(true);
                         }}
@@ -69,11 +62,10 @@ export const Header = forwardRef((props: any, ref) => {
                             {name ? (
                                 <span>{name || ""}</span>
                             ) : (
-                                <span className="italic">Anonymous</span>
+                                <button className="btn-icon btn-icon-md">
+                                    <PiUserCircleThin />
+                                </button>
                             )}{" "}
-                        </div>
-                        <div className="ml-1">
-                            <MdEdit className="w-6 h-6" />
                         </div>
                     </div>
                 )}

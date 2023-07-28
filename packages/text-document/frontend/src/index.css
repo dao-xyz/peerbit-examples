@@ -102,9 +102,10 @@ code {
     --tag-bg: transparent;
     --tag-border-radius: 0.75rem;
     --tag-hover: theme('colors.primary.200');
-    border-radius:  0.75rem;
-/*     --tags-border-color: transparent; */
+    border-radius: 0.75rem;
+    /*     --tags-border-color: transparent; */
 }
+
 /* .tagify__input
 {
     @apply before:opacity-100 !important
@@ -125,7 +126,7 @@ code {
 }
 
 .btn-icon:hover {
-    @apply  bg-primary-200
+    @apply bg-primary-200
 }
 
 .btn-icon:focus {
@@ -133,17 +134,18 @@ code {
 }
 
 
-.btn-icon-sx > * {
+.btn-icon-sx>* {
     @apply w-4 h-4
 }
 
-.btn-icon-md > * {
-    @apply w-6 h-6
-}
-.btn-icon-lg > * {
+.btn-icon-md>* {
     @apply w-6 h-6
 }
 
-.btn-icon-lg > * {
+.btn-icon-lg>* {
+    @apply w-6 h-6
+}
+
+.btn-icon-lg>* {
     @apply w-8 h-8
 }

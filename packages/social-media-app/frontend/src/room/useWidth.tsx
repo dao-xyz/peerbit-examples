@@ -26,7 +26,7 @@ export default function useWidth(initialWidth: number) {
         return () => {
             window.removeEventListener("resize", onWindowResize);
         };
-    }, []);
+    }, [ref.current]);
 
     return { ref, width };
 }

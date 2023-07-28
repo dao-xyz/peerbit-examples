@@ -14,7 +14,7 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "@peerbit/string": "^2.0.1",
+        "@peerbit/string": "^2.0.2",
         "peerbit": "^1.1.7",
         "@peerbit/react": "*",
         "react": "^18.2.0",

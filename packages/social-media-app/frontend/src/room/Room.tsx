@@ -7,16 +7,15 @@ import {
     RefObject,
 } from "react";
 
-import { getAdressFromKey } from "../routes.js";
+import { TEXT_APP, getAdressFromKey } from "../routes.js";
 import { usePeer } from "@peerbit/react";
-import { useLocation, useParams } from "react-router-dom";
 import {
     Room as RoomDB,
     Element,
     Layout,
     IFrameContent,
+    ElementContent,
 } from "@dao-xyz/social";
-import { Ed25519Keypair, PublicSignKey } from "@peerbit/crypto";
 import iFrameResize from "iframe-resizer";
 import { SearchRequest } from "@peerbit/document";
 import { useNames } from "../names/useNames.js";
@@ -29,11 +28,12 @@ import {
     PositionParams,
     resolveRowHeight,
 } from "react-grid-layout-next";
-import { AddElement, ElementGenerator } from "./AddElement.js";
 import useWidth from "./useWidth.js";
-import { MdAdd, MdClear, MdOpenWith } from "react-icons/md";
+import { equals } from "uint8arrays";
+
 import "./Canvas.css";
-import { useRooms } from "../useRooms.js";
+import { AddElement } from "./AddElement.js";
+import { Frame } from "./Frame.js";
 const ReactGridLayout = /* WidthProvider */ RGL;
 
 const cols = { md: 10, xxs: 10 };
@@ -54,21 +54,24 @@ const getLayouts = (rects: Element[]) => {
             arr.push({ ...layout, i: String(ix) });
         }
     }
-    console.log("getLayouts", breakpointsToLayouts);
     return breakpointsToLayouts;
 };
 
 let updateRectsTimeout: ReturnType<typeof setTimeout> = undefined;
 
-export const Room = (properties: { room: RoomDB }) => {
+export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
     const { peer } = usePeer();
     const myCanvas = useRef<Promise<RoomDB>>(null);
     const [rects, setRects] = useState<Element[]>([]);
+
+    const pendingRef = useRef<Element[]>([]);
+
     const rectsRef = useRef<Element[]>(rects);
 
     const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
         new Map()
     );
+
     const [layouts, setLayouts] = useState<Record<string, RGLayout>>({});
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
     const { name, setName } = useNames();
@@ -78,10 +81,16 @@ export const Room = (properties: { room: RoomDB }) => {
     const latestBreakpoint = useRef<"xxs" | "md">("md"); // needs to be the highest breakpoint to work correctl with width resize into lower breakpoints where layout does not exist
 
     const { width: gridLayoutWidth, ref: gridLayoutRef } = useWidth(0); // we choose 0 so that the initial layout will be optimized for 0 width (xxs)
+    const addRect = async (
+        content: ElementContent,
+        pending = false /* generator: ElementGenerator */
+    ) => {
+        // await setName(name); // Reinitialize names, so that all keypairs get associated with the name
 
-    const addRect = async (generator: ElementGenerator) => {
-        await setName(name); // Reinitialize names, so that all keypairs get associated with the name
+        console.log("CANVAS REF?", myCanvas.current);
+
         const c = await myCanvas.current;
+
         let maxY = rectsRef.current
             .map((x) => x.location)
             .flat()
@@ -90,25 +99,77 @@ export const Room = (properties: { room: RoomDB }) => {
                 (prev, current, ix) => Math.max(current.y + current.h, prev),
                 -1
             );
-        c.elements.put(
-            new Element({
-                publicKey: peer.identity.publicKey,
-                location: [
-                    new Layout({
-                        breakpoint: latestBreakpoint.current,
-                        x: 0,
-                        y: maxY + 1,
-                        z: 0,
-                        w: 20,
-                        h: 500,
-                    }),
-                ],
-                content: generator({ keypair: peer.identity }),
-            })
-        );
+        let element = new Element({
+            publicKey: peer.identity.publicKey,
+            location: [
+                new Layout({
+                    breakpoint: latestBreakpoint.current,
+                    x: 0,
+                    y: maxY != null ? maxY + 1 : 0,
+                    z: 0,
+                    w: 20,
+                    h: 500,
+                }),
+            ],
+            content, //generator({ keypair: peer.identity }),
+        });
+        console.log("ADD RECT!");
+        if (pending) {
+            if (
+                pendingRef.current &&
+                pendingRef.current.find((x) => equals(x.id, element.id))
+            ) {
+                throw new Error("Already have an pending element");
+            }
+            if (pendingRef.current.length > 0) {
+                throw new Error("unexpevteds");
+            }
+            pendingRef.current.push(element);
+        } else {
+            c.elements.put(element);
+        }
     };
 
-    const updateRects = (newRects: Element[], timeout = 500) => {
+    const savePending = async () => {
+        if (!pendingRef.current) {
+            throw new Error("Missing pending element");
+        }
+        const c = await myCanvas.current;
+
+        await pendingRef.current.map((x) => c.elements.put(x));
+        pendingRef.current = undefined;
+        return pendingRef.current;
+    };
+
+    const updateRects = async (newRects?: Element[], timeout = 500) => {
+        if (!newRects) {
+            newRects = (
+                await Promise.all(
+                    [...properties.room.elements.index.index.values()].map(
+                        async (x) => {
+                            let doc =
+                                await properties.room.elements.index.getDocument(
+                                    x
+                                );
+                            return doc;
+                        }
+                    )
+                )
+            ).filter((x) => !!x);
+            if (pendingRef.current) {
+                for (const pending of pendingRef.current) {
+                    if (!newRects.find((x) => equals(x.id, pending.id))) {
+                        console.log(
+                            "COULD NOT FIND ",
+                            pending.id,
+                            "FROM",
+                            newRects
+                        );
+                        newRects.push(pending);
+                    }
+                }
+            }
+        }
         clearTimeout(updateRectsTimeout);
         updateRectsTimeout = setTimeout(() => {
             rectsRef.current = newRects;
@@ -128,10 +189,18 @@ export const Room = (properties: { room: RoomDB }) => {
         };
     }, []);
 
+    const reset = () => {
+        pendingRef.current = [];
+        setRects([]);
+        rectsRef.current = [];
+        resizeSizes.current = new Map();
+    };
     useEffect(() => {
-        if (!peer || !properties.room || myCanvas.current) {
+        if (!peer || !properties.room /* || myCanvas.current */) {
             return;
         }
+        reset();
+
         myCanvas.current = peer
             .open<RoomDB>(properties.room, {
                 args: {
@@ -139,75 +208,26 @@ export const Room = (properties: { room: RoomDB }) => {
                 },
                 existing: "reuse",
             })
-            .then(async (canvas) => {
-                console.log("OPEN!", canvas);
-                const node = canvas.key;
+            .then(async (room) => {
+                console.log("OPEN!", room);
+                const node = room.key;
+
                 let isOwner = peer.identity.publicKey.equals(node);
-                console.log("is owner?", isOwner);
+
                 setIsOwner(isOwner);
-                canvas.elements.events.addEventListener(
+                room.elements.events.addEventListener(
                     "change",
                     async (change) => {
                         console.log(
                             "SET RECT AFTER CHANGE!",
                             change.detail.added.map((x) => x.location)
                         );
-                        updateRects(
-                            (
-                                await Promise.all(
-                                    [
-                                        ...canvas.elements.index.index.values(),
-                                    ].map(async (x) => {
-                                        let doc =
-                                            await canvas.elements.index.getDocument(
-                                                x
-                                            );
-                                        if (isOwner) {
-                                            /*  if (!doc.keypair) {
-                                                     console.log(
-                                                         "reset keypair for rect!"
-                                                     );
-                                                     // try to find it in memory
-                                                     const keypairs =
-                                                         await getCanvasKeypairs();
-                                                     for (const keypair of keypairs) {
-                                                         if (
-                                                             keypair.publicKey.equals(
-                                                                 doc.publicKey
-                                                             )
-                                                         ) {
-                                                             doc.keypair =
-                                                                 keypair;
-                                                             return doc;
-                                                         }
-                                                     }
-                                                     console.warn(
-                                                         "Could not find keypair for rect"
-                                                     );
-                                                     return undefined; // We don't generate a new one, since its meaningless
-                                                 } */
-                                        } else {
-                                            /*  console.log(
-                                                     "reset keypair for rect!"
-                                                 );
-                                                 if (!doc.keypair) {
-                                                     const { key: keypair } =
-                                                         await getCanvasKeypair();
-                                                   
-                                                     doc.keypair = keypair;
-                                                 } */
-                                        }
-                                        return doc;
-                                    })
-                                )
-                            ).filter((x) => !!x),
-                            0
-                        );
+                        updateRects(undefined, 0);
                     }
                 );
 
-                if (canvas.elements.index.size > 0) {
-                    return canvas;
+                if (room.elements.index.size > 0) {
+                    return room;
                 }
 
                 if (isOwner) {
@@ -218,7 +238,7 @@ export const Room = (properties: { room: RoomDB }) => {
                     setInterval(async () => {
                         console.log(
                             (
-                                await canvas.elements.index.search(
+                                await room.elements.index.search(
                                     new SearchRequest({ query: [] }),
                                     { remote: { sync: true } }
                                 )
@@ -226,8 +246,20 @@ export const Room = (properties: { room: RoomDB }) => {
                         );
                     }, 2000);
                 }
-                return canvas;
+                return room;
             });
+
+        myCanvas.current.then(() => {
+            console.log("ADD RECT", TEXT_APP);
+            if (pendingRef.current.length === 0) {
+                addRect(
+                    new IFrameContent({ src: TEXT_APP, resizer: false }),
+                    true
+                ).then(() => {
+                    updateRects();
+                });
+            }
+        });
     }, [peer?.identity.publicKey.hashcode(), properties?.room?.address]);
 
     const onIframe = useCallback(
@@ -316,21 +348,23 @@ export const Room = (properties: { room: RoomDB }) => {
         },
         [rects]
     );
+    console.log(pendingRef.current, rects);
     return (
         <div
-            className="flex flex-row w-full"
+            className="flex flex-row w-full p-2"
             onClick={() => {
                 setFocused(undefined);
             }}
         >
             <div
                 ref={gridLayoutRef}
+                className="w-full h-screen"
                 /*  item
-         sx={{
-             overflowY: "scroll",
-             height: `calc(100vh - ${HEIGHT})`,
-             width: "100%", //`calc(100% - 275px)`,
-         }} */
+ sx={{
+     overflowY: "scroll",
+     height: `calc(100vh - ${HEIGHT})`,
+     width: "100%", //`calc(100% - 275px)`,
+ }} */
             >
                 <ReactGridLayout
                     width={gridLayoutWidth}
@@ -342,7 +376,6 @@ export const Room = (properties: { room: RoomDB }) => {
                     allowOverlap
                     breakpoints={{ md: 768, xxs: 0 }}
                     onResizeStart={(e) => {
-                        console.log("FOCUSING", e.layout);
                         setFocused(Number(e.item.i));
                         dragging.current = true;
                     }}
@@ -361,28 +394,23 @@ export const Room = (properties: { room: RoomDB }) => {
                     onBreakpointChange={(b, c) => {
                         clearTimeout(updateRectsTimeout);
                     }}
+                    isResizable={properties.editMode}
                     resizeHandles={["s", "w", "e", "n", "sw", "nw", "se", "ne"]}
                     draggableHandle=".drag-handle-element"
                     draggableCancel=".canvas-react-resizable-handle" // We need to cancel drag events, when we drag the resize handle, passing the class solves this
                     resizeHandle={(axis, ref) => (
                         <div
                             ref={ref as RefObject<HTMLDivElement>}
-                            className={` canvas-react-resizable-handle canvas-react-resizable-handle-${axis}`}
+                            className={`canvas-react-resizable-handle canvas-react-resizable-handle-${axis}`}
                         ></div>
                     )}
                     onLayoutChange={({ breakpoint, layout: layouts }) => {
-                        console.log(
-                            "layout change",
-                            breakpoint,
-                            layouts.map((x) => x.x)
-                        );
                         let toUpdate = new Map<string, Element>();
                         let change = false;
                         latestBreakpoint.current = breakpoint as "xxs" | "md";
                         //    console.log('layout change!')
                         for (const [i, l] of layouts.entries()) {
                             // Shrink to fit content (TODO optioanly)
-                            console.log("shinkt!?", i, resizeSizes);
                             let rz = resizeSizes.current.get(i);
                             if (rz) {
                                 let c = cols[breakpoint];
@@ -416,14 +444,6 @@ export const Room = (properties: { room: RoomDB }) => {
                                 }
                             }
                         }
-                        /* 
-                                                if (change) {
-                                                    console.log('update!')
-                                                    updateRects(rects)
-                                                    forceUpdate()
-                                                    // return;
-                                                }
-                         */
 
                         for (const [i, layout] of layouts.entries()) {
                             const rect =
@@ -437,6 +457,8 @@ export const Room = (properties: { room: RoomDB }) => {
                                 z: 0,
                                 ...layout,
                             });
+                            console.log("LAYOUT CHANGE", layout);
+
                             if (layoutIndex === -1) {
                                 rect.location.push(newLayout);
                             } else {
@@ -462,121 +484,32 @@ export const Room = (properties: { room: RoomDB }) => {
                 >
                     {rects.map((x, ix) => {
                         return (
-                            <div
-                                ref={(ref) => {
-                                    ref?.querySelector<HTMLElement>(
-                                        "#frame-" + ix
-                                    )?.addEventListener("mouseenter", () => {
-                                        ref.querySelector<HTMLElement>(
-                                            "#header-" + ix
-                                        ).style.opacity = "1";
-                                    });
-
-                                    ref?.querySelector<HTMLElement>(
-                                        "#frame-" + ix
-                                    )?.addEventListener("mouseleave", () => {
-                                        ref.querySelector<HTMLElement>(
-                                            "#header-" + ix
-                                        ).style.opacity = "0";
-                                    });
-                                }}
-                                onClick={(e) => {
-                                    console.log("set focued", ix);
-                                    setFocused(ix);
-                                    e.stopPropagation();
-                                }}
-                                key={ix}
-                                className={
-                                    "flex flex-col cursor-pointer relative w-full wm-full drag-handle-element " +
-                                    (ix !== focused
-                                        ? "react-resizable-hide"
-                                        : "")
-                                }
-                                /*   sx={{
-                              cursor: "pointer",
-                              position: "relative",
-                              width: "100%",
-                              maxWidth: "100%",
-                              border:
-                                  `${rectBorderWidth}px ` +
-                                  (focused === ix
-                                      ? `${theme.palette.action.disabled} solid`
-                                      : `${theme.palette.divider} solid`),
-                          }} */
-                            >
-                                {focused === ix && (
-                                    <div
-                                        id={"header-" + ix}
-                                        className="flex w-full justify-end absolute top-0 opacity-100"
-                                        /*  item
-                                 container
-                                 alignItems="right"
-                                 width="100%"
-                                 display="flex"
-                                 justifyContent="right"
-                                 position="absolute"
-                                 sx={{ top: "0px", opacity: 1 }} */
-                                    >
-                                        <div>
-                                            <button
-                                                onClick={() => {
-                                                    myCanvas.current.then(
-                                                        (canvas) => {
-                                                            canvas.elements.del(
-                                                                x.id
-                                                            );
-                                                        }
-                                                    );
-                                                }}
-                                            >
-                                                <MdClear className="h-4 w-4" />
-                                            </button>
-                                        </div>
-                                        <div>
-                                            <button className="drag-handle-element">
-                                                <MdOpenWith className="h-4 w-4" />
-                                            </button>
-                                        </div>
-                                    </div>
-                                )}
-                                <div
-                                    id={"frame-" + ix}
-                                    className="w-full h-full"
-                                >
-                                    {x.content instanceof IFrameContent ? (
-                                        <iframe
-                                            onLoad={(event) =>
-                                                onIframe(event, x, ix)
-                                            }
-                                            onBlur={() => {
-                                                console.log(
-                                                    "blured iframe",
-                                                    ix
-                                                );
-                                            }}
-                                            style={{
-                                                width: "100%",
-                                                height: "100%",
-                                                border: 0,
-                                            }}
-                                            src={x.content.src}
-                                            allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
-                                        ></iframe>
-                                    ) : (
-                                        <>UNSUPPORTED</>
-                                    )}
-                                </div>
+                            <div key={ix}>
+                                <Frame
+                                    delete={() =>
+                                        myCanvas.current.then((canvas) => {
+                                            canvas.elements.del(x.id);
+                                        })
+                                    }
+                                    editMode={properties.editMode}
+                                    element={x}
+                                    index={ix}
+                                    onLoad={(event) => onIframe(event, x, ix)}
+                                    pending={
+                                        !!pendingRef.current.find((p) =>
+                                            equals(p.id, x.id)
+                                        )
+                                    }
+                                ></Frame>
                             </div>
                         );
                     })}
                 </ReactGridLayout>
 
-                {isOwner && (
-                    /*  <IconButton size="large" onClick={addRect}>
-                         <Add />
-                     </IconButton> */
+                {/*  {isOwner && (
+        
                     <AddElement onContent={addRect} />
-                )}
+                )} */}
             </div>
             {/*  <Grid
                 item

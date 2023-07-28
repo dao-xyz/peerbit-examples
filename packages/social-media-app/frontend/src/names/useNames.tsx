@@ -40,13 +40,22 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
 
     useEffect(() => {
         if (peer) {
-            peer.open(new Names(), {
-                args: {
-                    sync: () => true,
-                },
-                existing: "reuse",
+            peer.open(
+                new Names({
+                    // Hardcoded random id that will be the same for every session
+                    id: new Uint8Array([
+                        207, 170, 86, 93, 156, 169, 74, 169, 163, 162, 0, 15,
+                        119, 226, 208, 171, 225, 141, 59, 126, 8, 143, 98, 255,
+                        106, 254, 219, 127, 193, 125, 16, 42,
+                    ]),
+                }),
+                {
+                    args: {
+                        sync: () => true,
+                    },
+                    existing: "reuse",
 
-                /*  sync: (entry) => { TODO always sync "my" names
+                    /*  sync: (entry) => { TODO always sync "my" names
                      for (const s of entry.signatures) {
                          if (s.publicKey.equals(peer.identity.publicKey) || s.publicKey.equals(peer.identity.publicKey)) {
                              return true;
@@ -54,7 +63,8 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                      }
                      return false;
                  } */
-            }).then(async (db) => {
+                }
+            ).then(async (db) => {
                 db.names.events.addEventListener("change", () => {
                     // TODO make this more performant/smarter
                     db.getName(peer.identity.publicKey).then((n) => {

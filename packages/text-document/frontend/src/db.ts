@@ -1,12 +1,10 @@
 import { Program } from "@peerbit/program";
 import { DString } from "@peerbit/string";
 import { field, variant, vec } from "@dao-xyz/borsh";
-import { PublicSignKey, randomBytes } from "@peerbit/crypto";
+import { randomBytes } from "@peerbit/crypto";
 
 @variant("text_document")
 export class CollaborativeTextDocument extends Program {
-
-
     @field({ type: DString })
     string: DString;
 

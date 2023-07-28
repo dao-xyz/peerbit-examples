@@ -1,19 +1,20 @@
 import { usePeer } from "@peerbit/react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Room } from "@dao-xyz/social";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import Tags from "@yaireo/tagify/dist/react.tagify";
 import "./path.css";
 import Tagify from "@yaireo/tagify";
+import { getRoomByPath } from "../routes";
+import { getRoomPathFromURL, useRooms } from "../useRooms";
 
 // Tagify settings object
 const baseTagifySettings = {
-    blacklist: ["xxx", "yyy", "zzz"],
-    maxTags: 6,
     onChangeAfterBlur: false,
     addTagOnBlur: false,
     //backspace: "edit",
-    placeholder: "type a path",
+    duplicates: true,
+    placeholder: "Search",
     dropdown: {
         enabled: 1, // show suggestion after 1 typed character
         fuzzySearch: false, // match only suggestions that starts with the typed characters
@@ -26,25 +27,52 @@ export const HEIGHT = "35px";
 export const Path = () => {
     const { peer } = usePeer();
     const navigate = useNavigate();
-    let [canvases, setCanvases] = useState<Room[]>([]);
+    const location = useLocation();
     const [textInput, setTextInput] = useState("");
     const handleTextInputChange = (event) => {
         setTextInput(event.target.value);
     };
+    const {} = useRooms();
 
     const [tagifySettings, setTagifySettings] = useState([]);
-    const tagifyRef1 = useRef<Tagify>();
+
+    const tagifyRef = useRef<Tagify>();
 
     const [tagifyProps, setTagifyProps] = useState({});
 
-    const onChange = useCallback((e) => {
-        //console.log("CHANGED:", e.detail.value)
-    }, []);
-
     // access Tagify internal methods example:
     const clearAll = () => {
-        tagifyRef1.current && tagifyRef1.current.removeAllTags();
+        tagifyRef.current &&
+            tagifyRef.current.removeAllTags({ withoutChangeEvent: true });
     };
+
+    const onChange = (e) => {
+        const path = getRoomPathFromURL(location.pathname);
+        console.log("COMP START", path, tagifyRef.current);
+
+        const newPath = tagifyRef.current.value.map((x) => x.value);
+        let eq = newPath.length === path.length;
+        if (eq) {
+            for (let i = 0; i < newPath.length; i++) {
+                if (newPath[i] !== path[i]) {
+                    eq = false;
+                    break;
+                }
+            }
+        }
+
+        if (!eq) {
+            navigate(
+                getRoomByPath(tagifyRef.current.value.map((x) => x.value)),
+                {}
+            );
+        }
+    };
+
+    useEffect(() => {
+        tagifyRef.current.removeAllTags({ withoutChangeEvent: true });
+        tagifyRef.current.addTags(getRoomPathFromURL(location.pathname), true);
+    }, [location.pathname]);
 
     const settings = {
         ...baseTagifySettings,
@@ -53,9 +81,10 @@ export const Path = () => {
 
     return (
         <Tags
-            tagifyRef={tagifyRef1}
+            tagifyRef={tagifyRef}
             settings={{
                 ...settings,
+
                 templates: {
                     tag(tagData: any, _ref: Tagify) {
                         let _s = _ref.settings;
@@ -99,33 +128,21 @@ export const Path = () => {
                 },
             }}
             className="customLook"
-            defaultValue="🌍,My things,Dog memes"
+            defaultValue=""
             autoFocus={true}
             {...tagifyProps}
-            whitelist={[{ value: "hello" }, { value: "world" }]}
             onChange={onChange}
             onInput={(e) => {
                 const currentText: string =
-                    tagifyRef1.current["state"].inputText.trim();
+                    tagifyRef.current["state"].inputText.trim();
                 if (currentText.length > 1 && currentText.endsWith("/")) {
                     // insert path
-                    tagifyRef1.current.addTags(
+                    tagifyRef.current.addTags(
                         currentText.substring(0, currentText.length - 1)
                     );
-                    tagifyRef1.current.DOM.input.innerHTML = "";
+                    tagifyRef.current.DOM.input.innerHTML = "";
                 }
             }}
-            onEditInput={(e) => console.log("onEditInput", e)}
-            onEditBeforeUpdate={() => console.log`onEditBeforeUpdate`}
-            onEditUpdated={() => console.log("onEditUpdated")}
-            onEditStart={() => console.log("onEditStart")}
-            onEditKeydown={(e) => console.log("onEditKeydown")}
-            onDropdownShow={() => console.log("onDropdownShow")}
-            onDropdownHide={() => console.log("onDropdownHide")}
-            onDropdownSelect={() => console.log("onDropdownSelect")}
-            onDropdownScroll={() => console.log("onDropdownScroll")}
-            onDropdownNoMatch={() => console.log("onDropdownNoMatch")}
-            onDropdownUpdated={() => console.log("onDropdownUpdated")}
         />
     );
 };

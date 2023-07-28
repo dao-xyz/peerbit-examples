@@ -1,9 +1,12 @@
 import { releaseKey } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
-import { Body } from "./Body";
 import { NameProvider } from "./names/useNames";
 import { getRootKeypair } from "./keys";
 import { RoomProvider } from "./useRooms";
+import { HashRouter } from "react-router-dom";
+import { Header } from "./Header";
+import { BaseRoutes } from "./routes";
+import { AppProvider } from "./useApps";
 
 /* 
  "&::-webkit-scrollbar, & *::-webkit-scrollbar": {
@@ -65,9 +68,24 @@ export const App = () => {
             host={true}
         >
             <NameProvider>
-                <RoomProvider>
-                    <Body />
-                </RoomProvider>
+                <HashRouter basename="/">
+                    <AppProvider>
+                        <RoomProvider>
+                            <div className="bg-white dark:bg-slate-800d">
+                                <Header></Header>
+
+                                <div
+                                    /* className={`flex-row h-[calc(100vh - ${HEIGHT}] w-full`} */
+                                    className="content-container"
+                                >
+                                    <div className="w-full">
+                                        <BaseRoutes />
+                                    </div>
+                                </div>
+                            </div>
+                        </RoomProvider>
+                    </AppProvider>
+                </HashRouter>
             </NameProvider>
         </PeerProvider>
     );

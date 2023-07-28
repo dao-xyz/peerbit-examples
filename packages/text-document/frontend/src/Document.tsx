@@ -1,22 +1,40 @@
 import { PeerProvider, usePeer } from "@peerbit/react";
-import { useEffect, useRef } from "react";
+import { useEffect, useReducer, useRef } from "react";
 import { CollaborativeTextDocument } from "./db";
 import { Range } from "@peerbit/string";
 import diff from "fast-diff";
 
 export const Document = () => {
     const doc = useRef<CollaborativeTextDocument>();
+    const testAreaRef = useRef<HTMLTextAreaElement>();
+    const loadingRef = useRef(false);
+    const [_, forceUpdate] = useReducer((x) => x + 1, 0);
+
     const { peer } = usePeer();
     useEffect(() => {
         console.log(peer);
-        peer?.open(
-            new CollaborativeTextDocument({ id: new Uint8Array(32) })
-        ).then((d) => {
-            doc.current = d;
-        });
+        if (loadingRef.current || !peer) {
+            return;
+        }
+        loadingRef.current = true;
+        peer?.open(new CollaborativeTextDocument({ id: new Uint8Array(32) }), {
+            existing: "reuse",
+        })
+            .then((d) => {
+                return d.string.getValue().then((v) => {
+                    testAreaRef.current.innerText = v;
+                    doc.current = d;
+                    forceUpdate();
+                });
+            })
+            .finally(() => {
+                loadingRef.current = false;
+            });
     }, [peer?.peerId.toString()]);
+
     return (
         <textarea
+            ref={testAreaRef}
             disabled={!doc.current}
             onInput={async (e) => {
                 try {
@@ -27,23 +45,29 @@ export const Document = () => {
                     let diffs = diff(oldContent, content, start);
                     let pos = 0;
                     for (let i = 0; i < diffs.length; i++) {
-                        let d = diffs[i];
-                        if (d[0] === 0) {
+                        let diff = diffs[i];
+                        if (diff[0] === 0) {
                             // EQUAL
-                            pos += d[1].length;
-                        } else if (d[0] === -1) {
+                            pos += diff[1].length;
+                        } else if (diff[0] === -1) {
                             // DELETE
                             await doc.current.string.add(
                                 "",
-                                new Range({ offset: pos, length: d[1].length })
+                                new Range({
+                                    offset: pos,
+                                    length: diff[1].length,
+                                })
                             );
                         } else {
                             // INSERT
                             await doc.current.string.add(
-                                d[1],
-                                new Range({ offset: pos, length: d[1].length })
+                                diff[1],
+                                new Range({
+                                    offset: pos,
+                                    length: diff[1].length,
+                                })
                             );
-                            pos += d[1].length;
+                            pos += diff[1].length;
                         }
                     }
                 } catch (error) {

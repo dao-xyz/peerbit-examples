@@ -4,30 +4,27 @@ import { useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { Room } from "@dao-xyz/social";
 import { Room as RoomView } from "./Room.js";
+import { Toolbar } from "./Toolbar.js";
 export const Rooms = () => {
     const { peer } = usePeer();
-    const { root } = useRooms();
-    const location = useLocation();
-
-    const [rooms, setRooms] = useState<Room[]>([]);
+    const { root, location } = useRooms();
+    const [editMode, setEditMode] = useState(false);
 
     useEffect(() => {
         if (!peer || !root) {
             return;
         }
-
-        const path = location.pathname.split("/");
-        const roomPath = path.splice(0, 1);
-
-        root.getCreateRoomByPath(roomPath).then((result) => {
-            setRooms(result);
-        });
     }, [peer?.identity.publicKey.hashcode(), root]);
 
     return (
         <>
-            {rooms.map((room, ix) => (
-                <RoomView key={ix} room={room}></RoomView>
+            <Toolbar
+                onEditModeChange={(edit) => {
+                    setEditMode(edit);
+                }}
+            />
+            {location.map((room, ix) => (
+                <RoomView key={ix} room={room} editMode={editMode}></RoomView>
             ))}
         </>
     );

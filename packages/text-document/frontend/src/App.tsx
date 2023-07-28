@@ -4,10 +4,13 @@ import { Document } from "./Document";
 export const App = () => {
     return (
         <PeerProvider
-            network={
-                import.meta.env.MODE === "development" ? "local" : "remote"
-            }
-            host={true}
+            iframe={{ type: "proxy", targetOrigin: "*" }}
+            top={{
+                type: "node",
+                network:
+                    import.meta.env.MODE === "development" ? "local" : "remote",
+                host: true,
+            }}
         >
             <Document />
         </PeerProvider>
