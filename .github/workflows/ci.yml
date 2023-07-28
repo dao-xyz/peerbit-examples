@@ -32,9 +32,9 @@ jobs:
         aws s3 sync ./packages/one-chat-room/frontend/dist/ s3://chat-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E2KS1CGVFT7WAY --paths '/*';
 
-    - name: Deploy canvas
+    - name: Deploy social media app
       run: |
-        aws s3 sync ./packages/canvas/frontend/dist/ s3://demo-dao-xyz-dist --delete
+        aws s3 sync ./packages/social-media-app/frontend/dist/ s3://demo-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';
 
     - name: Deploy ml demo
