@@ -300,7 +300,7 @@ export const Content = () => {
 
     // TODO
     useEffect(() => {
-        if (!peer?.libp2p || !params.node || !params.identity) {
+        if (!peer || !params.node || !params.identity) {
             return;
         }
     }, [peer?.identity.publicKey.hashcode(), params?.node]);

@@ -42,6 +42,8 @@ jobs:
         aws s3 sync ./packages/collaborative-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E371A736SNF0PO --paths '/*';
 
-
-
+    - name: Deploy text
+      run: | 
+        aws s3 sync ./packages/text-document/frontend/dist/ s3://text-dao-xyz-dist --delete
+        aws cloudfront create-invalidation --distribution-id E20VZBTENI3CAA --paths '/*';
 

@@ -124,7 +124,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
     // TODO
     useEffect(() => {
-        if (!peer?.libp2p || !args.node) {
+        if (!peer || !args.node) {
             return;
         }
         //  console.log('setup media stream start!')

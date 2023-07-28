@@ -21,6 +21,10 @@
 ### [Lobby + chat rooms](./packages/many-chat-rooms/)
 [<img src="./packages/many-chat-rooms/demo.gif" width="600" />](./packages/many-chat-rooms/)
 
+### [Collaborative text document](./packages/text-document/)
+[<img src="./packages/text-document/demo.gif" width="600" />](./packages/text-document/)
+
+
 ### [Sync files](./packages/file-share/)
 [<img src="./packages/file-share/demo.gif" width="600" />](./packages/file-share/)
 

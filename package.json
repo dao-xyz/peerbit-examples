@@ -11,10 +11,11 @@
             "packages/network-utils",
             "packages/browser-chat/*",
             "packages/file-share/*",
+            "packages/text-document/*",
             "packages/live-streaming/*",
             "packages/live-streaming-canvas/*",
             "packages/name-service/*",
-            "packages/canvas/*",
+            "packages/social-media-app/*",
             "packages/one-chat-room/*",
             "packages/collaborative-learning/*"
         ],
@@ -28,7 +29,7 @@
         ]
     },
     "engines": {
-        "node": ">=16.0"
+        "node": ">=16.15.1"
     },
     "publishConfig": {
         "access": "public"
@@ -57,7 +58,6 @@
         "eslint-config-prettier": "^8.5.0",
         "eslint-plugin-prettier": "^4.2.1",
         "eslint-config-react-app": "^7.0.1",
-        "gh-pages": "^4.0.0",
         "jest": "^29.5.0",
         "jest-extended": "^4.0.0",
         "lerna": "^5.5.1",
