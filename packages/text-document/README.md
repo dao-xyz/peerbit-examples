@@ -1,4 +1,4 @@
-# Collaborative text document
+# Collaborative text document (WIP 🚧)
 
 ![demo](./demo.gif)
 
