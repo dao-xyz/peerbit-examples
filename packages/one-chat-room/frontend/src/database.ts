@@ -82,11 +82,12 @@ export class Room extends Program<Args> {
                     const post = operation.value;
                     if (
                         !entry.signatures.find((x) =>
-                            x.publicKey.equals(post.from)
+                            x.publicKey.equals(post!.from)
                         )
                     ) {
                         return false;
                     }
+                    return true;
                 } else if (operation instanceof DeleteOperation) {
                     const get = await this.messages.index.get(operation.key);
                     if (
@@ -97,7 +98,9 @@ export class Room extends Program<Args> {
                     ) {
                         return false;
                     }
+                    return true;
                 }
+                return false;
             },
 
             index: {

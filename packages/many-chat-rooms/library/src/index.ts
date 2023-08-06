@@ -69,11 +69,12 @@ export class Room extends Program<Args> {
                     const post = operation.value;
                     if (
                         !context.entry.signatures.find((x) =>
-                            x.publicKey.equals(post.from)
+                            x.publicKey.equals(post!.from)
                         )
                     ) {
                         return false;
                     }
+                    return true;
                 } else if (operation instanceof DeleteOperation) {
                     const get = await this.messages.index.get(operation.key);
                     if (
@@ -84,10 +85,14 @@ export class Room extends Program<Args> {
                     ) {
                         return false;
                     }
+                    return true;
                 }
+                return false;
             },
-            canRead: async (identity) => {
-                return true; // Anyone can query
+            index: {
+                canRead: async (identity) => {
+                    return true; // Anyone can query
+                },
             },
             role: args?.role,
             sync: args?.sync,
@@ -119,6 +124,8 @@ export class Lobby extends Program<Args> {
             },
 
             index: {
+                key: "name",
+
                 canRead: (post, publicKey) => {
                     return Promise.resolve(true); // Anyone can search for rooms
                 },
@@ -129,9 +136,6 @@ export class Lobby extends Program<Args> {
                 // this means it should be handled in a special way (replication etc). This extra functionality needs requires peers to consider this additional security
                 // boundary
                 return Promise.resolve(true);
-            },
-            index: {
-                key: "name",
             },
             role: args?.role,
             sync: args?.sync,
