@@ -64,37 +64,27 @@ export class Room extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.messages.open({
             type: Post,
-            canAppend: async (entry) => {
-                await entry.verifySignatures();
-                try {
-                    const payload = await entry.getPayloadValue();
-                    if (payload instanceof PutOperation) {
-                        const post = payload.getValue(
-                            this.messages.index.valueEncoding
-                        );
-                        if (
-                            !entry.signatures.find((x) =>
-                                x.publicKey.equals(post.from)
-                            )
-                        ) {
-                            return false;
-                        }
-                    } else if (payload instanceof DeleteOperation) {
-                        const get = await this.messages.index.get(payload.key);
-                        if (
-                            !get ||
-                            !entry.signatures.find((x) =>
-                                x.publicKey.equals(get.from)
-                            )
-                        ) {
-                            return false;
-                        }
+            canPerform: async (operation, context) => {
+                if (operation instanceof PutOperation) {
+                    const post = operation.value;
+                    if (
+                        !context.entry.signatures.find((x) =>
+                            x.publicKey.equals(post.from)
+                        )
+                    ) {
+                        return false;
                     }
-                } catch (error) {
-                    console.error(error);
-                    throw error;
+                } else if (operation instanceof DeleteOperation) {
+                    const get = await this.messages.index.get(operation.key);
+                    if (
+                        !get ||
+                        !context.entry.signatures.find((x) =>
+                            x.publicKey.equals(get.from)
+                        )
+                    ) {
+                        return false;
+                    }
                 }
-                return true; // no verification as of now
             },
             canRead: async (identity) => {
                 return true; // Anyone can query
@@ -124,12 +114,14 @@ export class Lobby extends Program<Args> {
         await this.rooms.open({
             type: Room,
 
-            canAppend: (entry) => {
+            canPerform: (entry) => {
                 return Promise.resolve(true); // Anyone can create rooms
             },
 
-            canRead: (identity) => {
-                return Promise.resolve(true); // Anyone can search for rooms
+            index: {
+                canRead: (post, publicKey) => {
+                    return Promise.resolve(true); // Anyone can search for rooms
+                },
             },
             canOpen: (program) => {
                 // Control whether someone can create a "room", which itself is a program with replication

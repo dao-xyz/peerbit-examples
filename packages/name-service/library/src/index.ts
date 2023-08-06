@@ -43,8 +43,8 @@ export class Names extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.names.open({
             type: Name,
-            canAppend: (entry) => {
-                return true; //!!entry.signatures.find(x => x.publicKey.equals((entry.payload.getValue() as PutOperation<Name>).value!.publicKey!))
+            canPerform: (operation, context) => {
+                return Promise.resolve(true); // Anyone can create rooms
             },
             index: {
                 fields: async (doc, context) => {

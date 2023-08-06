@@ -137,7 +137,7 @@ export const Room = () => {
                         entries.forEach(({ post, entry }) => {
                             wallTimes.set(
                                 post.id,
-                                entry.metadata.clock.timestamp.wallTime
+                                entry.meta.clock.timestamp.wallTime
                             );
                         });
 
@@ -194,12 +194,11 @@ export const Room = () => {
                     ),
 
                     // Set reciever of message parts
-                    reciever: {
+                    receiver: {
                         payload: receivers.map((r) =>
                             identitiesInChatMap.current.get(r)
                         ),
-                        metadata: [],
-                        next: [],
+                        meta: [],
                         signatures: [],
                     },
                 },

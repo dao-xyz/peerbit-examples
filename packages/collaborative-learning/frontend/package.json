@@ -14,7 +14,7 @@
     },
     "dependencies": {
         "peerbit": "^1",
-        "@peerbit/document": "^2",
+        "@peerbit/document": "^3",
         "@tensorflow/tfjs": "^4.2.0",
         "@peerbit/react": "*",
         "react": "^18.2.0",

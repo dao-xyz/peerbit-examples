@@ -8,7 +8,6 @@
     "workspaces": {
         "packages": [
             "packages/react-utils",
-            "packages/network-utils",
             "packages/browser-chat/*",
             "packages/file-share/*",
             "packages/text-document/*",
@@ -39,8 +38,7 @@
         "build": "lerna run build --reject-cycles",
         "build-node": "cd ./packages/node/ && yarn build",
         "pub": "lerna publish --no-private",
-        "test": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.unit.ts ",
-        "test:integration": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.integration.ts --forceExit  --detectOpenHandles",
+        "test": "node --experimental-vm-modules ./node_modules/.bin/jest test -c jest.config.ts ",
         "fmt": "prettier --write '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint": "eslint --ext .ts . && prettier --check '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint:fix": "eslint --fix --ext .ts . && yarn fmt",

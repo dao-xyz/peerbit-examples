@@ -22,7 +22,6 @@
         "react": "*"
     },
     "dependencies": {
-        "@peerbit/network-utils": "^0.0.2",
         "@peerbit/proxy-window": "^1.0.1",
         "@emotion/react": "^11.10.5",
         "@emotion/styled": "^11.10.5",

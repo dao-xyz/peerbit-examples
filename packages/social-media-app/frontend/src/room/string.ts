@@ -7,6 +7,7 @@ import {
     Role,
     SearchRequest,
     Sort,
+    CanPerform,
     SortDirection,
 } from "@peerbit/document";
 import { PublicSignKey, randomBytes } from "@peerbit/crypto";
@@ -28,7 +29,7 @@ class StringElement {
     }
 }
 
-type Args = { canAppend: CanAppend<Operation<StringElement>> };
+type Args = { canPerform: CanPerform<StringElement> };
 
 /**
  * A simple, last write wins string
@@ -45,7 +46,7 @@ export class EditableString extends Program<Args> {
     open(args?: Args): Promise<void> {
         return this.versions.open({
             type: StringElement,
-            canAppend: args.canAppend,
+            canPerform: args.canPerform,
             index: {
                 fields: (obj, context) => {
                     return {

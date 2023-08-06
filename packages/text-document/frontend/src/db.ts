@@ -15,7 +15,7 @@ export class CollaborativeTextDocument extends Program {
 
     open(args?: any): Promise<void> {
         return this.string.open({
-            canAppend: () => true,
+            canPerform: () => true,
         });
     }
 }

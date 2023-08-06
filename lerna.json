@@ -1,7 +1,6 @@
 {
     "packages": [
         "packages/react-utils",
-        "packages/network-utils",
         "packages/many-chat-rooms/*",
         "packages/file-share/*",
         "packages/text-document/*",

@@ -100,7 +100,7 @@ export class Room extends Program {
 
     async open(): Promise<void> {
         /*  await this.name.open({
-             canAppend: async (entry) => {
+             canPerform: async (operation, { entry }) => {
                  // Only allow updates from the creator
                  return (
                      entry.signatures.find(
@@ -113,7 +113,7 @@ export class Room extends Program {
      */
         return this.elements.open({
             type: Element,
-            canAppend: async (entry) => {
+            canPerform: async (operation, { entry }) => {
                 /**
                  * Only allow updates if we created it
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
@@ -267,7 +267,7 @@ export class Spaces extends Program<Args> {
     open(args?: Args): Promise<void> {
         return this.canvases.open({
             type: Canvas,
-            canAppend: async (entry) => {
+            canPerform: async (operation, { entry }) => {
                 // Only allow modifications from author
                 const payload = await entry.getPayloadValue();
                 if (payload instanceof PutOperation) {

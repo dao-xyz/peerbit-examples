@@ -5,13 +5,10 @@ import { webSockets } from "@libp2p/websockets";
 import { DirectSub } from "@peerbit/pubsub";
 import { mplex } from "@libp2p/mplex";
 import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
-import { resolveBootstrapAddresses } from "@peerbit/network-utils";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { v4 as uuid } from "uuid";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { FastMutex } from "./lockstorage.js";
-import { serialize, deserialize } from "@dao-xyz/borsh";
-import { waitFor } from "@peerbit/time";
 import sodium from "libsodium-wrappers";
 import * as filters from "@libp2p/websockets/filters";
 import { useMount } from "./useMount.js";
@@ -152,14 +149,14 @@ export const PeerProvider = (options: PeerOptions) => {
                                           filter: filters.all,
                                       }),
                                       /*            circuitRelayTransport({ discoverRelays: 1 }),
-               webRTC(), */
+           webRTC(), */
                                   ],
                               }
                             : {
                                   transports: [
                                       webSockets({ filter: filters.wss }),
                                       /*             circuitRelayTransport({ discoverRelays: 1 }),
-                webRTC(), */
+            webRTC(), */
                                   ],
                               }),
 
@@ -182,32 +179,20 @@ export const PeerProvider = (options: PeerOptions) => {
                 // Resolve bootstrap nodes async (we want to return before this is done)
                 const connectFn = async () => {
                     try {
-                        const addresses = await (nodeOptions.bootstrap
-                            ? Promise.resolve(nodeOptions.bootstrap)
-                            : resolveBootstrapAddresses(nodeOptions.network));
-                        if (addresses && addresses?.length > 0) {
-                            try {
-                                await Promise.all(
-                                    addresses
-                                        .map((a) =>
-                                            typeof a === "string"
-                                                ? multiaddr(a)
-                                                : a
+                        if (nodeOptions.network === "local") {
+                            await newPeer.dial(
+                                "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
+                                    (await (
+                                        await fetch(
+                                            "http://localhost:8082/peer/id"
                                         )
-                                        .map((a) => newPeer.dial(a))
-                                );
-                                setConnectionState("connected");
-                            } catch (error) {
-                                console.error(
-                                    "Failed to resolve relay node. Please come back later or start the demo locally"
-                                );
-                                setConnectionState("failed");
-                                throw error;
-                            }
+                                    ).text())
+                            );
                         } else {
-                            console.error("No addresses to connect to");
-                            setConnectionState("failed");
+                            // TODO fix types. When proxy client this will not be available
+                            await newPeer["bootstrap"]?.();
                         }
+                        setConnectionState("connected");
                     } catch (err: any) {
                         console.error(
                             "Failed to resolve relay addresses. " + err?.message

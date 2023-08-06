@@ -251,13 +251,7 @@ export class Files extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.files.open({
             type: AbstractFile,
-            canAppend: async (entry) => {
-                await entry.verifySignatures();
-                return true; // no verification as of now
-            },
-            canRead: async (identity) => {
-                return true; // Anyone can query
-            },
+            // TODO add ACL
             role: args?.role,
         });
     }

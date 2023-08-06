@@ -8,7 +8,6 @@ import { Argv } from "yargs";
 import chalk from "chalk";
 import { waitForAsync } from "@peerbit/time";
 import path from "path";
-import { resolveBootstrapAddresses } from "@peerbit/network-utils";
 import { multiaddr } from "@multiformats/multiaddr";
 
 function ensureDirectoryExistence(filePath) {
@@ -19,8 +18,6 @@ function ensureDirectoryExistence(filePath) {
     ensureDirectoryExistence(dirname);
     fs.mkdirSync(dirname);
 }
-
-const remoteRelayAddress = await resolveBootstrapAddresses("remote");
 
 const coerceAddresses = (addrs: string | string[]) => {
     return (Array.isArray(addrs) ? addrs : [addrs]).map((x) => multiaddr(x));
@@ -50,15 +47,17 @@ const cli = async (args?: string[]) => {
                     type: "string",
                     describe: "Relay address",
                     defaultDescription: "?",
-                    default: remoteRelayAddress,
+                    default: undefined,
                 });
                 return yargs;
             },
 
             handler: async (args) => {
-                await Promise.all(
-                    coerceAddresses(args.relay).map((x) => peerbit.dial(x))
-                );
+                if (args.relay) {
+                    await Promise.all(
+                        coerceAddresses(args.relay).map((x) => peerbit.dial(x))
+                    );
+                }
 
                 const file = fs.readFileSync(args.path);
                 const id = await files.create(path.basename(args.path), file);
@@ -94,15 +93,17 @@ const cli = async (args?: string[]) => {
                     describe: "Relay address",
                     defaultDescription:
                         "Bootstrap addresses for testing purposes",
-                    default: remoteRelayAddress,
+                    default: undefined,
                 });
                 return yargs;
             },
 
             handler: async (args) => {
-                await Promise.all(
-                    coerceAddresses(args.relay).map((x) => peerbit.dial(x))
-                );
+                if (args.relay) {
+                    await Promise.all(
+                        coerceAddresses(args.relay).map((x) => peerbit.dial(x))
+                    );
+                }
 
                 console.log("Fetching file with id: " + args.id);
 

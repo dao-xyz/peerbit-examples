@@ -299,7 +299,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                             chunk: arr,
                                             timestamp: lastVideoFrameTimestamp,
                                         }),
-                                        { nexts: [], unique: true }
+                                        { meta: { next: [] }, unique: true }
                                     );
 
                                     //   console.log(mem / ((+new Date) - s0) * 1000)

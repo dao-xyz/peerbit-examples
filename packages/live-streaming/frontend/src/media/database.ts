@@ -134,8 +134,8 @@ export abstract class TrackSource extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.chunks.open({
             type: Chunk,
-            canAppend: async (entry) => {
-                const keys = await entry.getPublicKeys();
+            canPerform: async (_operation, context) => {
+                const keys = await context.entry.getPublicKeys();
                 // Only append if chunks are signed by sender/streamer
                 for (const key of keys) {
                     if (key.equals(this.sender)) {
@@ -275,7 +275,7 @@ export class MediaStreamDBs extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.streams.open({
             type: Track,
-            canAppend: async (entry) => {
+            canPerform: async (opeation, { entry }) => {
                 const keys = await entry.getPublicKeys();
                 // Only append if chunks are signed by sender/streamer
                 for (const key of keys) {
