@@ -14,7 +14,7 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "@dao-xyz/social": "^0.0.1",
+        "@dao-xyz/social": "^0.0.2",
         "react-grid-layout-next": "^2.2.0",
         "@peerbit/peer-names": "^0.0.1",
         "iframe-resizer": "^4.3.4",
