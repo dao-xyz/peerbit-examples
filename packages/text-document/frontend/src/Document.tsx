@@ -4,6 +4,12 @@ import { CollaborativeTextDocument } from "./db";
 import { Range } from "@peerbit/string";
 import diff from "fast-diff";
 
+// A random ID, but unique for this app
+const ID = new Uint8Array([
+    30, 222, 227, 78, 164, 10, 61, 8, 21, 176, 122, 5, 79, 110, 115, 255, 233,
+    253, 92, 76, 146, 158, 46, 212, 14, 162, 30, 94, 1, 134, 99, 174,
+]);
+
 export const Document = () => {
     const doc = useRef<CollaborativeTextDocument>();
     const testAreaRef = useRef<HTMLTextAreaElement>();
@@ -17,7 +23,7 @@ export const Document = () => {
             return;
         }
         loadingRef.current = true;
-        peer?.open(new CollaborativeTextDocument({ id: new Uint8Array(32) }), {
+        peer?.open(new CollaborativeTextDocument({ id: ID }), {
             existing: "reuse",
         })
             .then((d) => {

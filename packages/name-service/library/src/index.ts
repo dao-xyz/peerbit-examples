@@ -25,6 +25,12 @@ export class Name {
 
 type Args = { role?: Role; sync?: SyncFilter };
 
+// A random ID, but unique for this app
+const ID = new Uint8Array([
+    30, 222, 227, 76, 164, 10, 61, 8, 21, 176, 122, 5, 79, 110, 115, 255, 233,
+    253, 92, 76, 146, 158, 46, 212, 14, 162, 30, 94, 1, 134, 99, 174,
+]);
+
 @variant("names")
 export class Names extends Program<Args> {
     @field({ type: Uint8Array })
@@ -33,7 +39,7 @@ export class Names extends Program<Args> {
     @field({ type: Documents })
     names: Documents<Name>;
 
-    constructor(properties: { id: Uint8Array } = { id: new Uint8Array(32) }) {
+    constructor(properties: { id: Uint8Array } = { id: ID }) {
         super();
         this.id = properties.id;
         this.names = new Documents({ id: properties.id });

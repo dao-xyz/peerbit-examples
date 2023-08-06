@@ -23,6 +23,12 @@ const coerceAddresses = (addrs: string | string[]) => {
     return (Array.isArray(addrs) ? addrs : [addrs]).map((x) => multiaddr(x));
 };
 
+// A random ID, but unique for this app
+const ID = new Uint8Array([
+    30, 221, 227, 76, 164, 10, 61, 8, 21, 176, 122, 5, 79, 110, 115, 255, 233,
+    253, 92, 76, 146, 158, 46, 212, 14, 162, 30, 94, 1, 134, 99, 174,
+]);
+
 const cli = async (args?: string[]) => {
     if (!args) {
         const { hideBin } = await import("yargs/helpers");
@@ -30,7 +36,7 @@ const cli = async (args?: string[]) => {
     }
 
     const peerbit = await Peerbit.create();
-    const files = await peerbit.open(new Files(new Uint8Array(32)));
+    const files = await peerbit.open(new Files(ID));
 
     return yargs
         .default(args)

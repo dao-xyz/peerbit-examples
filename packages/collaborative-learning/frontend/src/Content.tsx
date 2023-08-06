@@ -149,7 +149,12 @@ async function train(
 // predictLoop(video, model, imageNet, condition, statusText);
 
 export const MODEL_ID = "V0";
-export const MODEL_DATABASE_ID = new Uint8Array(32);
+// A random ID, but unique for this app
+
+export const MODEL_DATABASE_ID = new Uint8Array([
+    31, 222, 227, 76, 164, 10, 61, 8, 21, 176, 122, 5, 79, 110, 115, 255, 233,
+    253, 92, 76, 146, 158, 46, 212, 14, 162, 30, 94, 1, 134, 99, 174,
+]);
 
 export const Content = () => {
     const { peer } = usePeer();
