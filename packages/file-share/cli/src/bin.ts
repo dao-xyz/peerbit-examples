@@ -63,6 +63,8 @@ const cli = async (args?: string[]) => {
                     await Promise.all(
                         coerceAddresses(args.relay).map((x) => peerbit.dial(x))
                     );
+                } else {
+                    await peerbit.bootstrap();
                 }
 
                 const file = fs.readFileSync(args.path);
@@ -109,6 +111,8 @@ const cli = async (args?: string[]) => {
                     await Promise.all(
                         coerceAddresses(args.relay).map((x) => peerbit.dial(x))
                     );
+                } else {
+                    await peerbit.bootstrap();
                 }
 
                 console.log("Fetching file with id: " + args.id);
