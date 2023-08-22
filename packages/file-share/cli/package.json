@@ -44,7 +44,7 @@
     "dependencies": {
         "@peerbit/please-lib": "^0.0.6",
         "chalk": "^5.3.0",
-        "peerbit": "^1",
+        "peerbit": "^2",
         "yargs": "^17.7.2"
     }
 }

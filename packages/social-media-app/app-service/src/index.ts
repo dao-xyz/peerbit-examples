@@ -14,7 +14,7 @@ export class RequestURL {
 }
 
 @variant(0)
-export class ResponseApp {
+export class SimpleWebManifest {
     @field({ type: option("string") })
     title?: string;
 
@@ -27,7 +27,7 @@ export class ResponseApp {
     @field({ type: option("string") })
     icon?: string;
 
-    @field({ type: "u32" })
+    @field({ type: "string" })
     url: string;
 
     constructor(properties: {
@@ -40,11 +40,23 @@ export class ResponseApp {
         this.title = properties.title;
         this.icon = properties.icon;
         this.url = properties.url;
+        this.metaTitle = properties.metaTitle;
+        this.metaDescription = properties.metaDescription;
     }
 }
 
-const resolveAppFromUrl = async (address: string): Promise<ResponseApp> => {
-    const txt = await (await fetch(address + "/index.html")).text();
+const resolveAppFromUrl = async (
+    address: string
+): Promise<SimpleWebManifest> => {
+    const timeout = 3000;
+    const controller = new AbortController();
+    const id = setTimeout(() => controller.abort(), timeout);
+    const txt = await (
+        await fetch(address + "/index.html", {
+            signal: controller.signal,
+        })
+    ).text();
+    clearTimeout(id);
     const htmlDoc = parse(txt);
     const head = (
         htmlDoc.childNodes.find((x) => x.nodeName === "html") as any
@@ -77,7 +89,7 @@ const resolveAppFromUrl = async (address: string): Promise<ResponseApp> => {
         )[0]
         ?.attrs.find((x) => x.name === "href").value;
 
-    return new ResponseApp({
+    return new SimpleWebManifest({
         title,
         metaTitle,
         metaDescription,
@@ -86,12 +98,16 @@ const resolveAppFromUrl = async (address: string): Promise<ResponseApp> => {
     });
 };
 
-type Args = { server: boolean };
+const isNode = typeof window === undefined || typeof window === "undefined";
+
+type Args = {
+    server?: boolean;
+};
 
 @variant("app-preview")
 export class AppPreview extends Program<Args> {
     @field({ type: RPC })
-    rpc: RPC<RequestURL, ResponseApp>;
+    rpc: RPC<RequestURL, SimpleWebManifest>;
 
     constructor() {
         super();
@@ -100,20 +116,30 @@ export class AppPreview extends Program<Args> {
 
     open(args?: Args): Promise<void> {
         return this.rpc.open({
-            responseType: ResponseApp,
+            responseType: SimpleWebManifest,
             queryType: RequestURL,
             topic: "request-app-preview",
-            responseHandler: args?.server
-                ? async (query, context) => {
-                      return resolveAppFromUrl(query.url);
-                  }
-                : undefined,
+            responseHandler:
+                args?.server ?? isNode
+                    ? async (query, _context) => {
+                          return resolveAppFromUrl(query.url);
+                      }
+                    : undefined,
         });
     }
 
-    async resolve(url: string): Promise<ResponseApp | undefined> {
+    async resolve(
+        url: string,
+        timeout = 1000
+    ): Promise<SimpleWebManifest | undefined> {
+        try {
+            new URL(url);
+        } catch (error) {
+            return undefined;
+        }
         const response = await this.rpc.request(new RequestURL({ url }), {
             amount: 1,
+            timeout,
         });
         return response[0]?.response;
     }

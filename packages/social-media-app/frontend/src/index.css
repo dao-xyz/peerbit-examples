@@ -95,6 +95,26 @@ code {
  */
 
 
+/*
+@layer base {
+    input {
+        @apply font-sans,
+        /
+        dark: text-white;
+        @apply bg-netrual-50,
+        bg-neutral-950; 
+
+    }
+
+ 
+}*/
+
+/* @layer base {
+    input {
+        @apply text-primary-500;
+    }
+} */
+
 .content-container {
     height: calc(100vh - theme('spacing.7'));
 }

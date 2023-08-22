@@ -3,9 +3,6 @@ import { Fragment, useState } from "react";
 import { Combobox, Transition } from "@headlessui/react";
 
 import { MdCheck, MdClear, MdOpenWith } from "react-icons/md";
-import { HiCheck } from "react-icons/hi";
-import { BiWorld } from "react-icons/bi";
-import { useApps } from "../useApps";
 import { AppSelect } from "./AppSelect";
 
 export const Frame = (properties: {
@@ -13,6 +10,7 @@ export const Frame = (properties: {
     element: Element;
     index: number;
     editMode: boolean;
+    replace: (url: string) => void;
     onLoad: (event: React.SyntheticEvent<HTMLIFrameElement, Event>) => void;
     delete(): void;
 }) => {
@@ -37,7 +35,11 @@ export const Frame = (properties: {
                     id={"header-" + properties.index}
                     className="flex w-full justify-end opacity-100"
                 >
-                    <AppSelect />
+                    <AppSelect
+                        onSelected={(app) => {
+                            properties.replace(app.url);
+                        }}
+                    />
 
                     <button
                         className="btn-icon btn-icon-sx"
@@ -53,9 +55,6 @@ export const Frame = (properties: {
                         }}
                     >
                         <MdClear className="h-4 w-4" />
-                    </button>
-                    <button className="btn-icon btn-icon-sx">
-                        <MdCheck className="h-4 w-4" />
                     </button>
 
                     <button className="btn-icon btn-icon-sx drag-handle-element">

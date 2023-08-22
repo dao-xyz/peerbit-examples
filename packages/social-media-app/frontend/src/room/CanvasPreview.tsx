@@ -7,12 +7,10 @@ import {
     MenuItem,
     Typography,
 } from "@mui/material";
-import { useNavigate } from "react-router-dom";
 import { Room } from "@dao-xyz/social";
 import { useState } from "react";
 
 export const RoomPreview = (props: { room: Room; onDelete?: () => void }) => {
-    const navigate = useNavigate();
     const { peer } = usePeer();
     const [contextMenu, setContextMenu] = useState<{
         mouseX: number;

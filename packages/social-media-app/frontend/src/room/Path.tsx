@@ -1,6 +1,5 @@
 import { usePeer } from "@peerbit/react";
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Room } from "@dao-xyz/social";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Tags from "@yaireo/tagify/dist/react.tagify";
 import "./path.css";

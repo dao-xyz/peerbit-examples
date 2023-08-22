@@ -71,7 +71,7 @@ export const App = () => {
                 <HashRouter basename="/">
                     <AppProvider>
                         <RoomProvider>
-                            <div className="bg-white dark:bg-slate-800d">
+                            <div className="text-slate-900 dark:text-white; bg-netrual-50 dark:bg-neutral-950">
                                 <Header></Header>
 
                                 <div

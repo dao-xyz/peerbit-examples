@@ -7,7 +7,7 @@ import {
     RefObject,
 } from "react";
 
-import { TEXT_APP, getAdressFromKey } from "../routes.js";
+import { TEXT_APP } from "../routes.js";
 import { usePeer } from "@peerbit/react";
 import {
     Room as RoomDB,
@@ -30,10 +30,9 @@ import {
 } from "react-grid-layout-next";
 import useWidth from "./useWidth.js";
 import { equals } from "uint8arrays";
-
 import "./Canvas.css";
-import { AddElement } from "./AddElement.js";
 import { Frame } from "./Frame.js";
+
 const ReactGridLayout = /* WidthProvider */ RGL;
 
 const cols = { md: 10, xxs: 10 };
@@ -113,7 +112,6 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
             ],
             content, //generator({ keypair: peer.identity }),
         });
-        console.log("ADD RECT!");
         if (pending) {
             if (
                 pendingRef.current &&
@@ -122,7 +120,7 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
                 throw new Error("Already have an pending element");
             }
             if (pendingRef.current.length > 0) {
-                throw new Error("unexpevteds");
+                throw new Error("Unpexted dangling rect");
             }
             pendingRef.current.push(element);
         } else {
@@ -348,7 +346,6 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
         },
         [rects]
     );
-    console.log(pendingRef.current, rects);
     return (
         <div
             className="flex flex-row w-full p-2"
@@ -360,11 +357,11 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
                 ref={gridLayoutRef}
                 className="w-full h-screen"
                 /*  item
- sx={{
-     overflowY: "scroll",
-     height: `calc(100vh - ${HEIGHT})`,
-     width: "100%", //`calc(100% - 275px)`,
- }} */
+sx={{
+overflowY: "scroll",
+height: `calc(100vh - ${HEIGHT})`,
+width: "100%", //`calc(100% - 275px)`,
+}} */
             >
                 <ReactGridLayout
                     width={gridLayoutWidth}
@@ -494,6 +491,41 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
                                     editMode={properties.editMode}
                                     element={x}
                                     index={ix}
+                                    replace={(url) => {
+                                        myCanvas.current.then(
+                                            async (canvas) => {
+                                                let pendingElement =
+                                                    pendingRef.current.find(
+                                                        (pending) =>
+                                                            equals(
+                                                                pending.id,
+                                                                x.id
+                                                            )
+                                                    );
+                                                let fromPending =
+                                                    !!pendingElement;
+                                                let element =
+                                                    pendingElement ||
+                                                    (await canvas.elements.index.get(
+                                                        x.id
+                                                    ));
+                                                (
+                                                    element.content as IFrameContent
+                                                ).src = url;
+                                                console.log(
+                                                    "UPDATED ELEMENT",
+                                                    element
+                                                );
+                                                if (!fromPending) {
+                                                    await canvas.elements.put(
+                                                        element
+                                                    );
+                                                } else {
+                                                    forceUpdate(); // because pendingrefs is a ref so we need to do change detection manually
+                                                }
+                                            }
+                                        );
+                                    }}
                                     onLoad={(event) => onIframe(event, x, ix)}
                                     pending={
                                         !!pendingRef.current.find((p) =>

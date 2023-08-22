@@ -39,7 +39,7 @@
     },
     "dependencies": {
         "@peerbit/document": "^3",
-        "peerbit": "^1",
+        "peerbit": "^2",
         "uuid": "^9.0.0"
     }
 }

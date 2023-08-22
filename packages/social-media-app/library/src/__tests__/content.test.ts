@@ -1,8 +1,8 @@
 import { LSession } from "@peerbit/test-utils";
-import { Room, RoomContent } from "..";
+import { Room, RoomContent } from "../content.js";
 import { SearchRequest } from "@peerbit/document";
 
-describe("index", () => {
+describe("content", () => {
     describe("room", () => {
         let session: LSession;
 

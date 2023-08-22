@@ -7,7 +7,7 @@ import { CHAT_APP, getChatPath, getStreamPath, STREAMING_APP } from "../routes";
 import { Identity } from "@peerbit/crypto";
 import Tags from "@yaireo/tagify/dist/react.tagify";
 import { IoMdSend } from "react-icons/io";
-import { App, useApps } from "../useApps";
+import { useApps } from "../useApps";
 import Tagify from "@yaireo/tagify";
 
 export type ElementGenerator = (properties: {
