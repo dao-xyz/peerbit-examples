@@ -49,5 +49,5 @@ jobs:
 
     - name: Deploy files
       run: | 
-        aws s3 sync ./packages/text-document/frontend/dist/ s3://files-dao-xyz-dist --delete
+        aws s3 sync ./packages/file-share/frontend/dist/ s3://files-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E20VZBTENI3CAA --paths '/*';
