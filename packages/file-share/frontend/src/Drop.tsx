@@ -46,11 +46,6 @@ export const Drop = () => {
             if (!isHost) {
                 setWaitingForHost(true);
                 forceUpdate();
-                console.log(
-                    "IS NOT HOST!",
-                    f.rootKey.hashcode(),
-                    peer.identity.publicKey.hashcode()
-                );
                 await f.waitFor(f.rootKey).catch(() => {
                     alert("Host is not online");
                 });
@@ -105,7 +100,7 @@ export const Drop = () => {
         });
         console.log("FETCH FILE DONE");
         var blob = new Blob([bytes]);
-        console.log("DOANLOAD FILE");
+        console.log("DOWNLOAD FILE");
         var link = document.createElement("a");
         link.href = window.URL.createObjectURL(blob);
         var fileName = file.name;
@@ -158,19 +153,18 @@ export const Drop = () => {
         if (!isHost) {
             return;
         }
-        console.log("File(s) in drop zone");
 
         // Prevent default behavior (Prevent file from being opened)
         ev.preventDefault();
     }
-    console.log(waitingForHost);
+
     return (
         <div
             onDrop={dropHandler}
             onDragOver={dragOverHandler}
             className="flex flex-col h-[calc(100% - 40px)] items-center w-screen h-full "
         >
-            <div className="max-w-3xl flex flex-col p-4">
+            <div className="max-w-3xl w-full flex flex-col p-4">
                 {isHost && (
                     <div className="flex flex-row   items-center gap-3">
                         <div className="flex flex-col">
@@ -275,14 +269,6 @@ export const Drop = () => {
                                                             .removeById(x.id)
                                                             .then(() => {
                                                                 updateList();
-                                                                console.log(
-                                                                    "DONE DELETED",
-                                                                    filesRef
-                                                                        .current
-                                                                        .files
-                                                                        .index
-                                                                        .size
-                                                                );
                                                             })
                                                             .catch((error) => {
                                                                 alert(
@@ -302,7 +288,7 @@ export const Drop = () => {
                         </ul>
                     </div>
                 ) : (
-                    <span className="italic">No files found</span>
+                    <span className="italic">No files available</span>
                 )}
             </div>
         </div>
