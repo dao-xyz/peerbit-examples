@@ -1,5 +1,5 @@
 import { usePeer } from "@peerbit/react";
-import { useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router-dom";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import { Observer, Replicator } from "@peerbit/document";
@@ -9,9 +9,12 @@ import {
     MdArrowBack,
     MdUploadFile,
 } from "react-icons/md";
+
 const isMobile = "ontouchstart" in window;
 
 export const Drop = () => {
+    const navigate = useNavigate();
+
     const { peer } = usePeer();
     const filesRef = useRef<Files>(undefined);
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
@@ -215,7 +218,10 @@ export const Drop = () => {
                 )}
                 {!isHost && (
                     <div className="flex flex-row items-center">
-                        <button className="w-fit btn flex flex-row items-center p-2">
+                        <button
+                            className="w-fit btn flex flex-row items-center p-2"
+                            onClick={() => navigate("/")}
+                        >
                             <MdArrowBack size={20} className="mr-2" />{" "}
                             <span>Upload your own files</span>
                         </button>

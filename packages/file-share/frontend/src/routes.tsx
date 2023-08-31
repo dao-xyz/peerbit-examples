@@ -16,6 +16,7 @@ export function BaseRoutes() {
     return (
         <Routes>
             <Route path={STREAM} element={<Drop />} />
+            <Route path={"/#"} element={<CreateDrop />} />
             <Route path={"/"} element={<CreateDrop />} />
         </Routes>
     );
