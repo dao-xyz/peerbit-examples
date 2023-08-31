@@ -3,7 +3,14 @@ import { useParams } from "react-router-dom";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import { Observer, Replicator } from "@peerbit/document";
-import { MdDownload, MdDeleteForever, MdArrowBack } from "react-icons/md";
+import {
+    MdDownload,
+    MdDeleteForever,
+    MdArrowBack,
+    MdUploadFile,
+} from "react-icons/md";
+const isMobile = "ontouchstart" in window;
+
 export const Drop = () => {
     const { peer } = usePeer();
     const filesRef = useRef<Files>(undefined);
@@ -113,30 +120,30 @@ export const Drop = () => {
                 // If dropped items aren't files, reject them
                 if (item.kind === "file") {
                     const file: File = item.getAsFile();
-                    var reader = new FileReader();
-                    reader.readAsArrayBuffer(file);
-                    reader.onload = function () {
-                        var arrayBuffer = reader.result;
-                        var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
-                        filesRef.current
-                            .add(file.name, bytes)
-                            .then((d) => {
-                                console.log("ADDED", d);
-                            })
-                            .then(() => {
-                                updateList();
-                            });
-                    };
+                    addFile([file]);
                 }
             });
         } else {
             // Use DataTransfer interface to access the file(s)
             [...ev.dataTransfer.files].forEach((file, i) => {
-                console.log(`… file[${i}].name = ${file.name}`);
+                addFile([file]);
             });
         }
     }
 
+    const addFile = async (files: FileList | File[]) => {
+        for (const file of files) {
+            var reader = new FileReader();
+            reader.readAsArrayBuffer(file);
+            reader.onload = function () {
+                var arrayBuffer = reader.result;
+                var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
+                filesRef.current.add(file.name, bytes).then(() => {
+                    updateList();
+                });
+            };
+        }
+    };
     function dragOverHandler(ev) {
         if (!isHost) {
             return;
@@ -155,15 +162,50 @@ export const Drop = () => {
             <div className="w-screen max-w-3xl h-screen flex flex-col p-4">
                 {isHost && (
                     <div className="flex flex-row items-center gap-3">
-                        <span className="italic">Drop a file anywhere</span>
-                        <img
-                            width={40}
-                            className="invert scale-x-[-1] ml-auto"
-                            src="arrow.svg"
-                        />
-                        <span>
-                            Copy the url to share your files with friends
-                        </span>
+                        <div className="flex flex-col">
+                            <input
+                                type="file"
+                                id="imgupload"
+                                className="hidden"
+                                onChange={(e) => {
+                                    addFile(e.target?.files);
+                                }}
+                            />
+                            <button
+                                className="w-fit btn btn-icon flex flex-row items-center p-2 gap-2"
+                                onClick={() => {
+                                    document
+                                        .getElementById("imgupload")
+                                        .click();
+                                }}
+                            >
+                                Upload <MdUploadFile size={20} />
+                            </button>
+                            {isMobile ? (
+                                <></>
+                            ) : (
+                                <span className="italic pl-2 text-xs">
+                                    or drop a file anywhere
+                                </span>
+                            )}
+                        </div>
+                        {!isMobile ? (
+                            <>
+                                <img
+                                    width={40}
+                                    className="invert scale-x-[-1] ml-auto"
+                                    src="arrow.svg"
+                                />
+                                <span>
+                                    Copy the url to share your files with
+                                    friends
+                                </span>
+                            </>
+                        ) : (
+                            <span className="ml-auto italic">
+                                Copy the url to share your files with friends
+                            </span>
+                        )}
                     </div>
                 )}
                 {!isHost && (
