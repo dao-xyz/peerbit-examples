@@ -1,5 +1,4 @@
 import { PeerProvider, usePeer } from "@peerbit/react";
-import { DropArea } from "./Fetch";
 import { BaseRoutes } from "./routes";
 import { HashRouter } from "react-router-dom";
 
