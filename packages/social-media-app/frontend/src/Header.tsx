@@ -2,8 +2,11 @@ import { useEffect, useRef, useState, forwardRef } from "react";
 import { useNames } from "./names/useNames";
 import { MdSave, MdEdit } from "react-icons/md";
 import { Path } from "./room/Path";
+import { MdOutlineDarkMode, MdOutlineLightMode } from "react-icons/md";
 import { PiUserCircleThin } from "react-icons/pi";
+
 export const Header = forwardRef((props: any, ref) => {
+    const [theme, setTheme] = useState<"dark" | "light">(localStorage.theme);
     let [showInput, setShowInput] = useState(false);
     let inputRef = useRef<HTMLInputElement>();
     const { name, setName } = useNames();
@@ -45,12 +48,36 @@ export const Header = forwardRef((props: any, ref) => {
     };
 
     return (
-        <div
-            ref={ref as any}
-            className="flex flex-row w-full pl-4 pr-4 pt-2 pb-2 items-center"
-        >
-            <span className="opacity-50">dao | xyz</span>
-            <div className="ml-auto">
+        <div ref={ref as any} className="flex flex-row w-full p-2 items-center">
+            <span className="icon leading-[10px] ml-2 mr-2 text-neutral-500 dark:text-neutral-400 font-[monospace]">
+                DAO
+                <br />
+                XYZ
+            </span>
+            <div className="ml-2 mr-2 flex-1">
+                <Path></Path>
+            </div>
+            <button
+                className="btn-icon btn-icon-md"
+                onClick={() => {
+                    localStorage.theme =
+                        localStorage.theme === "dark" ? "light" : "dark";
+                    if (localStorage.theme === "dark") {
+                        setTheme("dark");
+                        document.documentElement.classList.add("dark");
+                    } else {
+                        setTheme("light");
+                        document.documentElement.classList.remove("dark");
+                    }
+                }}
+            >
+                {theme === "dark" ? (
+                    <MdOutlineLightMode />
+                ) : (
+                    <MdOutlineDarkMode />
+                )}
+            </button>
+            <div>
                 {!showInput && (
                     <div
                         className="flex flex-row items-center cursor-pointer"
@@ -69,6 +96,7 @@ export const Header = forwardRef((props: any, ref) => {
                         </div>
                     </div>
                 )}
+
                 {showInput && (
                     <div className="flex-row items-center p-1">
                         <div>

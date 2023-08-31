@@ -5,6 +5,7 @@ import {
     useCallback,
     useReducer,
     RefObject,
+    forwardRef,
 } from "react";
 
 import { TEXT_APP } from "../routes.js";
@@ -32,7 +33,8 @@ import useWidth from "./useWidth.js";
 import { equals } from "uint8arrays";
 import "./Canvas.css";
 import { Frame } from "./Frame.js";
-
+import { Toolbar } from "./Toolbar.js";
+import { sha256Base64Sync } from "@peerbit/crypto";
 const ReactGridLayout = /* WidthProvider */ RGL;
 
 const cols = { md: 10, xxs: 10 };
@@ -58,15 +60,13 @@ const getLayouts = (rects: Element[]) => {
 
 let updateRectsTimeout: ReturnType<typeof setTimeout> = undefined;
 
-export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
+export const Room = (properties: { room: RoomDB }) => {
     const { peer } = usePeer();
     const myCanvas = useRef<Promise<RoomDB>>(null);
     const [rects, setRects] = useState<Element[]>([]);
-
+    const [editMode, setEditMode] = useState(false);
     const pendingRef = useRef<Element[]>([]);
-
     const rectsRef = useRef<Element[]>(rects);
-
     const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
         new Map()
     );
@@ -75,18 +75,36 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
     const { name, setName } = useNames();
     const [focused, setFocused] = useState<number>();
+    const [active, setActive] = useState<Set<number>>(new Set());
+
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const dragging = useRef(false);
     const latestBreakpoint = useRef<"xxs" | "md">("md"); // needs to be the highest breakpoint to work correctl with width resize into lower breakpoints where layout does not exist
 
+    /* useEffect(() => {
+
+    let mult = properties.editMode ? 1 : -1
+    for (const rect of rects) {
+        for (const l of rect.location) {
+            console.log("???", l.x, l.y)
+            l.y = l.y + 5 * mult;
+            l.h = l.h - 10 * mult;
+            l.x = l.x + 5 * mult;
+            l.w = l.w - 10 * mult;
+        }
+    }
+    updateRects(rects, 0)
+    forceUpdate()
+}, [properties.editMode]) */
+
     const { width: gridLayoutWidth, ref: gridLayoutRef } = useWidth(0); // we choose 0 so that the initial layout will be optimized for 0 width (xxs)
     const addRect = async (
         content: ElementContent,
-        pending = false /* generator: ElementGenerator */
+        properties: {
+            pending: boolean;
+        } = { pending: false }
     ) => {
         // await setName(name); // Reinitialize names, so that all keypairs get associated with the name
-
-        console.log("CANVAS REF?", myCanvas.current);
 
         const c = await myCanvas.current;
 
@@ -98,6 +116,7 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
                 (prev, current, ix) => Math.max(current.y + current.h, prev),
                 -1
             );
+        console.log("CALCUCATE MAX Y", maxY, rectsRef.current.length);
         let element = new Element({
             publicKey: peer.identity.publicKey,
             location: [
@@ -112,8 +131,9 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
             ],
             content, //generator({ keypair: peer.identity }),
         });
-        if (pending) {
-            if (
+
+        if (properties.pending) {
+            /* if (
                 pendingRef.current &&
                 pendingRef.current.find((x) => equals(x.id, element.id))
             ) {
@@ -121,8 +141,9 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
             }
             if (pendingRef.current.length > 0) {
                 throw new Error("Unpexted dangling rect");
-            }
+            } */
             pendingRef.current.push(element);
+            console.log("PUSH PENDING", pendingRef.current.length);
         } else {
             c.elements.put(element);
         }
@@ -134,16 +155,22 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
         }
         const c = await myCanvas.current;
 
-        await pendingRef.current.map((x) => c.elements.put(x));
-        pendingRef.current = undefined;
+        await Promise.all(pendingRef.current.map((x) => c.elements.put(x)));
+        forceUpdate();
+        pendingRef.current = [];
         return pendingRef.current;
     };
 
     const updateRects = async (newRects?: Element[], timeout = 500) => {
         if (!newRects) {
+            if (!properties.room.elements.index.index) {
+                console.error(properties.room.elements.index.closed);
+                throw new Error("WTF");
+                return;
+            }
             newRects = (
                 await Promise.all(
-                    [...properties.room.elements.index.index.values()].map(
+                    [...properties.room.elements.index.index?.values()].map(
                         async (x) => {
                             let doc =
                                 await properties.room.elements.index.getDocument(
@@ -169,6 +196,11 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
             }
         }
         clearTimeout(updateRectsTimeout);
+
+        /*         rectsRef.current = newRects;
+                setRects(newRects);
+                setLayouts(getLayouts(newRects)); */
+
         updateRectsTimeout = setTimeout(() => {
             rectsRef.current = newRects;
             setRects(newRects);
@@ -176,89 +208,30 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
         }, timeout);
     };
 
-    useEffect(() => {
-        const unfocusListener = () => {
-            setFocused(undefined);
-        };
-
-        window.addEventListener("focus", unfocusListener);
-        return () => {
-            window.removeEventListener("focus", unfocusListener);
-        };
-    }, []);
-
     const reset = () => {
         pendingRef.current = [];
         setRects([]);
         rectsRef.current = [];
         resizeSizes.current = new Map();
     };
-    useEffect(() => {
-        if (!peer || !properties.room /* || myCanvas.current */) {
-            return;
-        }
-        reset();
 
-        myCanvas.current = peer
-            .open<RoomDB>(properties.room, {
-                args: {
-                    sync: () => true,
-                },
-                existing: "reuse",
-            })
-            .then(async (room) => {
-                console.log("OPEN!", room);
-                const node = room.key;
-
-                let isOwner = peer.identity.publicKey.equals(node);
-
-                setIsOwner(isOwner);
-                room.elements.events.addEventListener(
-                    "change",
-                    async (change) => {
-                        console.log(
-                            "SET RECT AFTER CHANGE!",
-                            change.detail.added.map((x) => x.location)
-                        );
-                        updateRects(undefined, 0);
-                    }
-                );
-
-                if (room.elements.index.size > 0) {
-                    return room;
-                }
-
-                if (isOwner) {
-                    //addRect();
-                    /*     const { key: keypair2 } = await getFreeKeypair('canvas')
-                    canvas.elements.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) })) */
-                } else {
-                    setInterval(async () => {
-                        console.log(
-                            (
-                                await room.elements.index.search(
-                                    new SearchRequest({ query: [] }),
-                                    { remote: { sync: true } }
-                                )
-                            ).length
-                        );
-                    }, 2000);
-                }
-                return room;
-            });
-
-        myCanvas.current.then(() => {
-            console.log("ADD RECT", TEXT_APP);
-            if (pendingRef.current.length === 0) {
-                addRect(
-                    new IFrameContent({ src: TEXT_APP, resizer: false }),
-                    true
-                ).then(() => {
-                    updateRects();
-                });
-            }
+    const insertDefault = () => {
+        return addRect(new IFrameContent({ src: TEXT_APP, resizer: false }), {
+            pending: true,
+        }).then(() => {
+            updateRects();
         });
-    }, [peer?.identity.publicKey.hashcode(), properties?.room?.address]);
+    };
+
+    const removePending = (ix: number) => {
+        const spliced = pendingRef.current.splice(ix, 1);
+        if (spliced.length > 0) {
+            rectsRef.current.splice(
+                rectsRef.current.findIndex((x) => x === spliced[0]),
+                1
+            );
+        }
+    };
 
     const onIframe = useCallback(
         (node, rect: { content: IFrameContent }, i?: number) => {
@@ -289,6 +262,7 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
                                 let rzh = Number(e.height);
                                 if (i != null) {
                                     let change = false;
+
                                     rectsRef.current[i].location?.forEach(
                                         (l, lx) => {
                                             let c = cols[l.breakpoint];
@@ -301,6 +275,7 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
                                                 maxRows,
                                                 rowHeight,
                                             };
+
                                             const { /*  w, */ h } = calcWH(
                                                 positionParams,
                                                 rzw,
@@ -308,12 +283,14 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
                                                 l.x,
                                                 l.y
                                             );
+
                                             console.log(
                                                 "new w,h",
                                                 h,
                                                 lx,
                                                 rzh + rectBorderWidth * 2
                                             );
+
                                             if (/* w !== l.w || */ h !== l.h) {
                                                 // l.w = w;
 
@@ -346,204 +323,368 @@ export const Room = (properties: { room: RoomDB; editMode: boolean }) => {
         },
         [rects]
     );
+
+    useEffect(() => {
+        function handleClickOutside(event) {
+            setActive(new Set());
+        }
+        // Bind the event listener
+        document.addEventListener("mousedown", handleClickOutside);
+        return () => {
+            // Unbind the event listener on clean up
+            document.removeEventListener("mousedown", handleClickOutside);
+        };
+    }, []);
+
+    useEffect(() => {
+        const unfocusListener = () => {
+            setFocused(undefined);
+        };
+
+        window.addEventListener("focus", unfocusListener);
+        return () => {
+            window.removeEventListener("focus", unfocusListener);
+        };
+    }, []);
+
+    useEffect(() => {
+        console.log("RESET?");
+        if (!peer || !properties.room) {
+            return;
+        }
+        reset();
+
+        myCanvas.current = peer
+            .open<RoomDB>(properties.room, {
+                args: {
+                    sync: () => true,
+                },
+                existing: "reuse",
+            })
+            .then(async (room) => {
+                console.log("OPEN!", room.address, room.elements.index.size);
+                const node = room.key;
+
+                let isOwner = peer.identity.publicKey.equals(node);
+
+                setIsOwner(isOwner);
+                room.elements.events.addEventListener(
+                    "change",
+                    async (change) => {
+                        console.log(
+                            "SET RECT AFTER CHANGE!",
+                            change.detail.added.map((x) => x.location)
+                        );
+                        updateRects(undefined, 0);
+                    }
+                );
+
+                /*  if (room.elements.index.size > 0) {
+                     return room;
+                 } */
+
+                updateRects().then(() => {
+                    if (isOwner) {
+                        //addRect();
+                        // const { key: keypair2 } = await getFreeKeypair('canvas')
+                        // canvas.elements.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) }))
+                    } else {
+                        setInterval(async () => {
+                            console.log(
+                                (
+                                    await room.elements.index.search(
+                                        new SearchRequest({ query: [] }),
+                                        { remote: { sync: true } }
+                                    )
+                                ).length
+                            );
+                        }, 2000);
+                    }
+                });
+
+                return room;
+            });
+    }, [
+        peer?.identity.publicKey.hashcode(),
+        properties?.room.closed || properties?.room?.address,
+    ]);
+
     return (
-        <div
-            className="flex flex-row w-full p-2"
-            onClick={() => {
-                setFocused(undefined);
-            }}
-        >
+        <div className="overflow-scroll h-[100%]">
+            <div className="sticky top-0">
+                <Toolbar
+                    title={
+                        properties.room.name ? properties.room.name : "Unnamed"
+                    }
+                    subtitle={sha256Base64Sync(properties.room.id)}
+                    onEditModeChange={(edit) => {
+                        setEditMode(edit);
+                    }}
+                    onSave={() => {
+                        savePending();
+                    }}
+                    onNew={() => {
+                        insertDefault();
+                    }}
+                    unsavedCount={pendingRef.current.length}
+                />
+            </div>
             <div
-                ref={gridLayoutRef}
-                className="w-full h-screen"
-                /*  item
+                className={`flex flex-row w-full`}
+                onClick={() => {
+                    setFocused(undefined);
+                }}
+            >
+                <div
+                    ref={gridLayoutRef}
+                    className="w-full"
+                    /*  item
 sx={{
 overflowY: "scroll",
 height: `calc(100vh - ${HEIGHT})`,
 width: "100%", //`calc(100% - 275px)`,
 }} */
-            >
-                <ReactGridLayout
-                    width={gridLayoutWidth}
-                    className="layout"
-                    cols={cols}
-                    rowHeight={rowHeight}
-                    margin={margin}
-                    containerPadding={containerPadding}
-                    allowOverlap
-                    breakpoints={{ md: 768, xxs: 0 }}
-                    onResizeStart={(e) => {
-                        setFocused(Number(e.item.i));
-                        dragging.current = true;
-                    }}
-                    onResizeStop={() => {
-                        dragging.current = false;
-                    }}
-                    onDragStart={(e) => {
-                        setFocused(Number(e.item.i));
-                        dragging.current = true;
-                    }}
-                    onDragStop={() => {
-                        dragging.current = false;
-                    }}
-                    layouts={layouts}
-                    useCSSTransforms={true}
-                    onBreakpointChange={(b, c) => {
-                        clearTimeout(updateRectsTimeout);
-                    }}
-                    isResizable={properties.editMode}
-                    resizeHandles={["s", "w", "e", "n", "sw", "nw", "se", "ne"]}
-                    draggableHandle=".drag-handle-element"
-                    draggableCancel=".canvas-react-resizable-handle" // We need to cancel drag events, when we drag the resize handle, passing the class solves this
-                    resizeHandle={(axis, ref) => (
-                        <div
-                            ref={ref as RefObject<HTMLDivElement>}
-                            className={`canvas-react-resizable-handle canvas-react-resizable-handle-${axis}`}
-                        ></div>
-                    )}
-                    onLayoutChange={({ breakpoint, layout: layouts }) => {
-                        let toUpdate = new Map<string, Element>();
-                        let change = false;
-                        latestBreakpoint.current = breakpoint as "xxs" | "md";
-                        //    console.log('layout change!')
-                        for (const [i, l] of layouts.entries()) {
-                            // Shrink to fit content (TODO optioanly)
-                            let rz = resizeSizes.current.get(i);
-                            if (rz) {
-                                let c = cols[breakpoint];
-                                const positionParams = {
-                                    cols: c,
-                                    containerPadding,
-                                    containerWidth: gridLayoutWidth,
-                                    margin,
-                                    maxRows,
-                                    rowHeight,
-                                };
-                                const { w, h } = calcWH(
-                                    positionParams,
-                                    rz.width,
-                                    rz.height + rectBorderWidth * 2,
-                                    l.x,
-                                    l.y
-                                );
-                                console.log(
-                                    "new w,h",
-                                    w,
-                                    h,
-                                    "FROM HEGIHT: " +
-                                        (rz.height + rectBorderWidth * 2)
-                                );
-                                if (/* w !== l.w || */ h !== l.h) {
-                                    // l.w = w;
+                    // ${properties.editMode ? 'p-3' : 'p-0'}`
+                >
+                    <ReactGridLayout
+                        width={gridLayoutWidth}
+                        className={`layout`}
+                        cols={cols}
+                        rowHeight={rowHeight}
+                        margin={margin}
+                        containerPadding={containerPadding}
+                        allowOverlap
+                        breakpoints={{ md: 768, xxs: 0 }}
+                        onResizeStart={(e) => {
+                            setFocused(Number(e.item.i));
+                            dragging.current = true;
+                        }}
+                        onResizeStop={() => {
+                            dragging.current = false;
+                        }}
+                        onDragStart={(e) => {
+                            setFocused(Number(e.item.i));
+                            dragging.current = true;
+                        }}
+                        onDragStop={() => {
+                            dragging.current = false;
+                        }}
+                        layouts={layouts}
+                        useCSSTransforms={true}
+                        onBreakpointChange={(b, c) => {
+                            clearTimeout(updateRectsTimeout);
+                        }}
+                        isResizable={editMode}
+                        resizeHandles={[
+                            "s",
+                            "w",
+                            "e",
+                            "n",
+                            "sw",
+                            "nw",
+                            "se",
+                            "ne",
+                        ]}
+                        draggableHandle=".drag-handle-element"
+                        draggableCancel=".canvas-react-resizable-handle" // We need to cancel drag events, when we drag the resize handle, passing the class solves this
+                        resizeHandle={(axis, ref) => (
+                            <div
+                                ref={ref as RefObject<HTMLDivElement>}
+                                className={`canvas-react-resizable-handle canvas-react-resizable-handle-${axis}`}
+                            ></div>
+                        )}
+                        onLayoutChange={({ breakpoint, layout: layouts }) => {
+                            let toUpdate = new Map<string, Element>();
+                            let change = false;
+                            latestBreakpoint.current = breakpoint as
+                                | "xxs"
+                                | "md";
+                            //    console.log('layout change!')
+                            for (const [i, l] of layouts.entries()) {
+                                // Shrink to fit content (TODO optioanly)
+                                let rz = resizeSizes.current.get(i);
+                                if (rz) {
+                                    let c = cols[breakpoint];
+                                    const positionParams = {
+                                        cols: c,
+                                        containerPadding,
+                                        containerWidth: gridLayoutWidth,
+                                        margin,
+                                        maxRows,
+                                        rowHeight,
+                                    };
+                                    const { w, h } = calcWH(
+                                        positionParams,
+                                        rz.width,
+                                        rz.height + rectBorderWidth * 2,
+                                        l.x,
+                                        l.y
+                                    );
+                                    console.log(
+                                        "new w,h",
+                                        w,
+                                        h,
+                                        "FROM HEGIHT: " +
+                                            (rz.height + rectBorderWidth * 2)
+                                    );
+                                    if (/* w !== l.w || */ h !== l.h) {
+                                        // l.w = w;
 
-                                    l.h = h;
-                                    change = true;
+                                        l.h = h;
+                                        change = true;
+                                    }
                                 }
                             }
-                        }
 
-                        for (const [i, layout] of layouts.entries()) {
-                            const rect =
-                                toUpdate.get(layout.i) ||
-                                rects[Number(layout.i)];
-                            let layoutIndex = rect.location.findIndex(
-                                (l) => l.breakpoint === breakpoint
-                            );
-                            let newLayout = new Layout({
-                                breakpoint,
-                                z: 0,
-                                ...layout,
-                            });
-                            console.log("LAYOUT CHANGE", layout);
+                            for (const [i, layout] of layouts.entries()) {
+                                const rect =
+                                    toUpdate.get(layout.i) ||
+                                    rects[Number(layout.i)];
+                                let layoutIndex = rect.location.findIndex(
+                                    (l) => l.breakpoint === breakpoint
+                                );
+                                let newLayout = new Layout({
+                                    breakpoint,
+                                    z: 0,
+                                    ...layout,
+                                });
 
-                            if (layoutIndex === -1) {
-                                rect.location.push(newLayout);
-                            } else {
-                                rect.location[layoutIndex] = newLayout;
+                                if (layoutIndex === -1) {
+                                    rect.location.push(newLayout);
+                                } else {
+                                    rect.location[layoutIndex] = newLayout;
+                                }
+                                toUpdate.set(layout.i, rect);
                             }
-                            toUpdate.set(layout.i, rect);
-                        }
 
-                        Promise.all(
-                            [...toUpdate.values()].map((rect) =>
-                                myCanvas.current.then((c) =>
-                                    c.elements.put(rect)
-                                )
-                            )
-                        )
-                            .then(() => {
-                                // console.log('layout change saved', breakpoint, layouts);
-                            })
-                            .catch((e) => {
-                                console.error("Failed to update layout", e);
-                            });
-                    }}
-                >
-                    {rects.map((x, ix) => {
-                        return (
-                            <div key={ix}>
-                                <Frame
-                                    delete={() =>
-                                        myCanvas.current.then((canvas) => {
-                                            canvas.elements.del(x.id);
-                                        })
+                            Promise.all(
+                                [...toUpdate.values()].map((rect) => {
+                                    if (pendingRef.current.includes(rect)) {
+                                        return;
                                     }
-                                    editMode={properties.editMode}
-                                    element={x}
-                                    index={ix}
-                                    replace={(url) => {
-                                        myCanvas.current.then(
-                                            async (canvas) => {
-                                                let pendingElement =
-                                                    pendingRef.current.find(
-                                                        (pending) =>
-                                                            equals(
-                                                                pending.id,
-                                                                x.id
+                                    return myCanvas.current.then((c) =>
+                                        c.elements.put(rect)
+                                    );
+                                })
+                            )
+                                .then(() => {
+                                    // console.log('layout change saved', breakpoint, layouts);
+                                })
+                                .catch((e) => {
+                                    console.error("Failed to update layout", e);
+                                });
+                        }}
+                    >
+                        {rects.map((x, ix) => {
+                            return (
+                                <div key={ix}>
+                                    <Frame
+                                        active={active.has(ix)}
+                                        setActive={(v) => {
+                                            if (v) {
+                                                setActive(
+                                                    (previousState) =>
+                                                        new Set(
+                                                            previousState.add(
+                                                                ix
                                                             )
-                                                    );
-                                                let fromPending =
-                                                    !!pendingElement;
-                                                let element =
-                                                    pendingElement ||
-                                                    (await canvas.elements.index.get(
-                                                        x.id
-                                                    ));
-                                                (
-                                                    element.content as IFrameContent
-                                                ).src = url;
-                                                console.log(
-                                                    "UPDATED ELEMENT",
-                                                    element
+                                                        )
                                                 );
-                                                if (!fromPending) {
-                                                    await canvas.elements.put(
+                                            } else {
+                                                setActive(
+                                                    (prev) =>
+                                                        new Set(
+                                                            [...prev].filter(
+                                                                (x) => x !== ix
+                                                            )
+                                                        )
+                                                );
+                                            }
+                                        }}
+                                        delete={() => {
+                                            const pendingIndex =
+                                                pendingRef.current.indexOf(x);
+                                            if (pendingIndex != -1) {
+                                                removePending(ix);
+                                                if (
+                                                    pendingRef.current
+                                                        .length === 0
+                                                ) {
+                                                    // insertDefault()
+                                                    updateRects();
+                                                } else {
+                                                    updateRects();
+                                                }
+                                            } else {
+                                                myCanvas.current.then(
+                                                    (canvas) => {
+                                                        canvas.elements
+                                                            .del(x.id)
+                                                            .then(() => {
+                                                                updateRects();
+                                                            });
+                                                    }
+                                                );
+                                            }
+                                        }}
+                                        editMode={editMode}
+                                        element={x}
+                                        index={ix}
+                                        replace={(url) => {
+                                            myCanvas.current.then(
+                                                async (canvas) => {
+                                                    let pendingElement =
+                                                        pendingRef.current.find(
+                                                            (pending) =>
+                                                                equals(
+                                                                    pending.id,
+                                                                    x.id
+                                                                )
+                                                        );
+                                                    let fromPending =
+                                                        !!pendingElement;
+                                                    let element =
+                                                        pendingElement ||
+                                                        (await canvas.elements.index.get(
+                                                            x.id
+                                                        ));
+                                                    (
+                                                        element.content as IFrameContent
+                                                    ).src = url;
+                                                    console.log(
+                                                        "UPDATED ELEMENT",
                                                         element
                                                     );
-                                                } else {
-                                                    forceUpdate(); // because pendingrefs is a ref so we need to do change detection manually
+                                                    if (!fromPending) {
+                                                        await canvas.elements.put(
+                                                            element
+                                                        );
+                                                    } else {
+                                                        forceUpdate(); // because pendingrefs is a ref so we need to do change detection manually
+                                                    }
                                                 }
-                                            }
-                                        );
-                                    }}
-                                    onLoad={(event) => onIframe(event, x, ix)}
-                                    pending={
-                                        !!pendingRef.current.find((p) =>
-                                            equals(p.id, x.id)
-                                        )
-                                    }
-                                ></Frame>
-                            </div>
-                        );
-                    })}
-                </ReactGridLayout>
+                                            );
+                                        }}
+                                        onLoad={(event) =>
+                                            onIframe(event, x, ix)
+                                        }
+                                        pending={
+                                            !!pendingRef.current.find((p) =>
+                                                equals(p.id, x.id)
+                                            )
+                                        }
+                                    ></Frame>
+                                </div>
+                            );
+                        })}
+                    </ReactGridLayout>
 
-                {/*  {isOwner && (
+                    {/*  {isOwner && (
         
                     <AddElement onContent={addRect} />
                 )} */}
-            </div>
-            {/*  <Grid
+                </div>
+                {/*  <Grid
                 item
                 sx={{
                     width: "250px",
@@ -589,6 +730,7 @@ width: "100%", //`calc(100% - 275px)`,
                     ></iframe>
                 )}
             </Grid> */}
+            </div>
         </div>
     );
 };

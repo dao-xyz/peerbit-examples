@@ -57,8 +57,33 @@ window.onbeforeunload = function () {
     releaseKey(rootKeyPath);
 };
 
+const setTheme = () => {
+    // On page load or when changing themes, best to add inline in `head` to avoid FOUC
+    if (
+        localStorage.theme === "dark" ||
+        (!("theme" in localStorage) &&
+            window.matchMedia("(prefers-color-scheme: dark)").matches)
+    ) {
+        document.documentElement.classList.add("dark");
+    } else {
+        document.documentElement.classList.remove("dark");
+    }
+    /* 
+      // Whenever the user explicitly chooses light mode
+      localStorage.theme = 'light'
+  
+      // Whenever the user explicitly chooses dark mode
+      localStorage.theme = 'dark'
+  
+      // Whenever the user explicitly chooses to respect the OS preference
+      localStorage.removeItem('theme') */
+
+    /* document.documentElement.classList.remove('dark') */
+};
 console.log(keypair.publicKey.toString());
+const HEIGHT = 50;
 export const App = () => {
+    setTheme();
     return (
         <PeerProvider
             network={
@@ -66,23 +91,24 @@ export const App = () => {
             }
             keypair={keypair}
             host={true}
+            inMemory={false}
         >
             <NameProvider>
                 <HashRouter basename="/">
                     <AppProvider>
                         <RoomProvider>
-                            <div className="text-slate-900 dark:text-white; bg-netrual-50 dark:bg-neutral-950">
+                            <>
                                 <Header></Header>
 
                                 <div
-                                    /* className={`flex-row h-[calc(100vh - ${HEIGHT}] w-full`} */
+                                    /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
+                                    /*  */
+                                    /*   */
                                     className="content-container"
                                 >
-                                    <div className="w-full">
-                                        <BaseRoutes />
-                                    </div>
+                                    <BaseRoutes />
                                 </div>
-                            </div>
+                            </>
                         </RoomProvider>
                     </AppProvider>
                 </HashRouter>

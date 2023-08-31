@@ -1,57 +1,66 @@
 import { IFrameContent, Element } from "@dao-xyz/social";
-import { Fragment, useState } from "react";
-import { Combobox, Transition } from "@headlessui/react";
-
-import { MdCheck, MdClear, MdOpenWith } from "react-icons/md";
+import {
+    MdClear,
+    MdOpenWith,
+    MdAddReaction,
+    MdOpenInBrowser,
+    MdSave,
+} from "react-icons/md";
 import { AppSelect } from "./AppSelect";
 
 export const Frame = (properties: {
     pending: boolean;
     element: Element;
     index: number;
+    active: boolean;
+    setActive: (value: boolean) => void;
     editMode: boolean;
     replace: (url: string) => void;
     onLoad: (event: React.SyntheticEvent<HTMLIFrameElement, Event>) => void;
     delete(): void;
 }) => {
-    const [focused, setFocused] = useState(false);
-
     return (
         <div
-            onClick={(e) => {
-                setFocused(true);
-                e.stopPropagation();
+            onBlur={() => {
+                console.log("BLUR!");
+                //setFocused(false)
             }}
             // border-4 border-solid border-primary-300
             className={
-                "flex flex-col  w-full h-full max-w-full" /*  +
+                `flex flex-col w-full h-full max-w-full bg-neutral-100 dark:bg-neutral-800 group ${
+                    properties.pending
+                        ? "border-solid border-2 border-primary-400"
+                        : ""
+                }` /*  +
         (!properties.editMode
             ? "react-resizable-hide "
             : "") + (pendingRef.current.find(p => equals(p.id, x.id)) ? "pending" : "") */
             }
         >
-            {((properties.editMode && focused) || properties.pending) && (
+            {/* {properties.editMode || properties.pending ? (
                 <div
                     id={"header-" + properties.index}
-                    className="flex w-full justify-end opacity-100"
+                    className={` w-full justify-end z-10 hidden group-hover:flex`}
                 >
-                    <AppSelect
-                        onSelected={(app) => {
-                            properties.replace(app.url);
-                        }}
-                    />
+                    <div className="m-1 w-full">
+                        <AppSelect
+                            onSelected={(app) => {
+                                properties.replace(app.url);
+                            }}
+                        />
+                    </div>
 
                     <button
                         className="btn-icon btn-icon-sx"
                         onClick={() => {
                             properties.delete();
-                            /* myCanvas.current.then(
+                             myCanvas.current.then(
                             (canvas) => {
                                 canvas.elements.del(
                                     x.id
                                 );
                             }
-                        ); */
+                        ); 
                         }}
                     >
                         <MdClear className="h-4 w-4" />
@@ -61,7 +70,65 @@ export const Frame = (properties: {
                         <MdOpenWith className="h-4 w-4" />
                     </button>
                 </div>
+            ) : (
+                <div> </div>
+            )} */}
+            {!properties.active && (
+                <div
+                    className={`absolute w-full h-full flex opacity-0 group-hover:opacity-100  backdrop-blur-sm group-hover:bg-primary-200/40 group-hover:dark:bg-primary-600/40`}
+                >
+                    <div className="flex flex-col w-full h-full">
+                        <div
+                            id={"header-" + properties.index}
+                            className={`w-full justify-end z-10 hidden group-hover:flex`}
+                        >
+                            <div className="m-1 w-full">
+                                <AppSelect
+                                    onSelected={(app) => {
+                                        properties.replace(app.url);
+                                    }}
+                                />
+                            </div>
+
+                            <button
+                                className="btn-icon btn-icon-sx"
+                                onClick={() => {
+                                    properties.delete();
+                                }}
+                            >
+                                <MdClear className="h-4 w-4" />
+                            </button>
+
+                            <button className="btn-icon btn-icon-sx  drag-handle-element">
+                                <MdOpenWith className="h-4 w-4" />
+                            </button>
+                        </div>
+                        <div className="flex flex-row h-full w-full">
+                            {properties.pending ? (
+                                <button className="w-6/12 h-full flex justify-center items-center  btn">
+                                    <span className="mr-2 text-xl">Save</span>{" "}
+                                    <MdSave size={30} />
+                                </button>
+                            ) : (
+                                <button className="w-6/12 h-full flex justify-center items-center  btn">
+                                    <span className="mr-2 text-xl">Relate</span>{" "}
+                                    <MdAddReaction size={30} />
+                                </button>
+                            )}
+                            <button
+                                className="w-6/12 h-full flex justify-center items-center btn"
+                                onClick={() => {
+                                    properties.setActive(true);
+                                }}
+                            >
+                                <span className="mr-2 text-xl">Open</span>{" "}
+                                <MdOpenInBrowser size={30} />
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
+
             <div id={"frame-" + properties.index} className="w-full h-full">
                 {properties.element.content instanceof IFrameContent ? (
                     <iframe
@@ -79,7 +146,7 @@ export const Frame = (properties: {
                         allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
                     ></iframe>
                 ) : (
-                    <>UNSUPPORTED</>
+                    <>UNSUPPORTED {typeof properties.element.content}</>
                 )}
             </div>
         </div>

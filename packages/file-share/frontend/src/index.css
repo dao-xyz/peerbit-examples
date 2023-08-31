@@ -14,35 +14,11 @@ code {
         monospace;
 }
 
-/* prevent dragging rects with iframe to loose mouse events to the iframe */
-.react-draggable-transparent-selection iframe {
-    pointer-events: none !important;
-}
-
-/* prevent resizing rects with iframe to loose mouse events to the iframe */
-.resizing.react-resizable iframe {
-    pointer-events: none !important;
-}
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 @tailwind variants;
-
-
-/*
-@layer base {
-    input {
-        @apply font-sans,
-        /
-        dark: text-white;
-        @apply bg-netrual-50,
-        bg-neutral-950; 
-
-    }
-
- 
-}*/
 
 @layer base {
 
@@ -63,15 +39,7 @@ code {
         @apply text-neutral-950;
         @apply dark:text-neutral-50;
     }
-}
 
-
-@layer components {
-    .icon {
-        @apply text-neutral-950;
-        @apply dark:text-neutral-50;
-    }
-       
     .btn {
         @apply  py-2 px-4 rounded;
     }
@@ -153,55 +121,4 @@ code {
         @apply w-8 h-8
     }
    
- 
-    .content-container {
-        height: calc(100vh - 50px);
-    }
-   
-    
- 
 }
-
-
-.tagify {
- /*    flex-wrap: nowrap;
-    overflow: auto; */
-    border-radius: 1rem;
-    display: flex;
-    align-items: center;
-
-    --tag-bg: transparent;
-    --tag-border-radius: 0.75rem;
-    --tag-hover:  theme('colors.primary.200');
-    --tags-focus-border-color: theme('colors.primary.400');
-    --placeholder-color:  theme('colors.neutral.400');
-    /*     --tags-border-color: transparent; */
-}
-
-/* .tags-input > * 
-{
-    width: calc(100vw - 150px);
-} */
-.tagify__tag {
-    @apply border-neutral-200 dark:border-neutral-400 border-solid border-[2px] rounded-xl;
-}
-.tagify__tag__removeBtn
-{
-  @apply dark:text-white
-}
-
-
-.react-grid-placeholder {
-    @apply bg-secondary-400 !important
-}
-
-.tagify__tag-text, .tagify__input {
-	white-space: nowrap !important;
-} 
-
-
-/* .tagify__input
-{
-    @apply before:opacity-100 !important
-} */
-

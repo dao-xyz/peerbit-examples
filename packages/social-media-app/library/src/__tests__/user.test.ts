@@ -1,5 +1,6 @@
 import { LSession } from "@peerbit/test-utils";
 import { BrowsingHistory } from "../user.js";
+import { SimpleWebManifest } from "@dao-xyz/app-service";
 
 describe("user", () => {
     let session: LSession;
@@ -17,7 +18,9 @@ describe("user", () => {
                 rootTrust: session.peers[0].identity.publicKey,
             });
             await session.peers[0].open(history);
-            await history.insert({ url: "https://example.com" });
+            await history.insert(
+                new SimpleWebManifest({ url: "https://example.com" })
+            );
             expect(history.visits.index.size).toEqual(1);
 
             // close and reload

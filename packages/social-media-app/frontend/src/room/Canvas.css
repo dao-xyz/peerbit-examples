@@ -7,6 +7,9 @@
 
 }
 
+.react-grid-item:hover {
+    z-index: 1000 !important;
+}
 .react-resizable-hide .canvas-react-resizable-handle {
     display: none;
 }
@@ -60,8 +63,10 @@
 
 .react-grid-item>.canvas-react-resizable-handle.canvas-react-resizable-handle-n {
     top: -10px;
+    margin-left: -5px;
 }
 
 .react-grid-item>.canvas-react-resizable-handle.canvas-react-resizable-handle-s {
     bottom: -10px;
+    margin-left: -5px;
 }

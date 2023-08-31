@@ -35,7 +35,7 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 );
             },
         }),
-        [name, peer?.identity?.publicKey.toString()]
+        [name, peer?.identity?.publicKey?.hashcode()]
     );
 
     useEffect(() => {
@@ -77,7 +77,7 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 names.current = db;
             });
         }
-    }, [peer?.identity.publicKey]);
+    }, [peer?.identity.publicKey.hashcode()]);
 
     return <NameContext.Provider value={memo}>{children}</NameContext.Provider>;
 };

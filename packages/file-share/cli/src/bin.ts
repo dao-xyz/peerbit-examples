@@ -36,7 +36,7 @@ const cli = async (args?: string[]) => {
     }
 
     const peerbit = await Peerbit.create();
-    const files = await peerbit.open(new Files(ID));
+    const files = await peerbit.open(new Files({ id: ID }));
 
     return yargs
         .default(args)
@@ -68,7 +68,7 @@ const cli = async (args?: string[]) => {
                 }
 
                 const file = fs.readFileSync(args.path);
-                const id = await files.create(path.basename(args.path), file);
+                const id = await files.add(path.basename(args.path), file);
                 console.log(
                     `Id: ${chalk.green(
                         id

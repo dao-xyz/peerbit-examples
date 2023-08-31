@@ -1,14 +1,23 @@
-import { field, variant, vec } from "@dao-xyz/borsh";
+import { field, variant, vec, option } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
-import { Documents, SearchRequest, StringMatch, Role } from "@peerbit/document";
-import { sha256Base64Sync, randomBytes } from "@peerbit/crypto";
+import {
+    Documents,
+    SearchRequest,
+    StringMatch,
+    Role,
+    StringMatchMethod,
+    Or,
+    ByteMatchQuery,
+} from "@peerbit/document";
+import { PublicSignKey, sha256Base64Sync, randomBytes } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
 
-abstract class AbstractFile {
+export abstract class AbstractFile {
     abstract id: string;
     abstract name: string;
     abstract getFile(files: Files): Promise<Uint8Array | undefined>;
+    abstract delete(files: Files): Promise<void>;
 }
 
 const TINY_FILE_SIZE_LIMIT = 1e3;
@@ -37,10 +46,15 @@ export class TinyFile extends AbstractFile {
         }
         return Promise.resolve(this.file);
     }
+
+    async delete(): Promise<void> {
+        // Do nothing, since no releated files where created
+    }
 }
 
 const SMALL_FILE_SIZE_LIMIT = 1e6 * 9;
 
+// TODO Do we really need this if we have TinyFile and LargeFile?
 @variant(1) // for versioning purposes
 export class SmallFile extends AbstractFile {
     @field({ type: "string" })
@@ -71,6 +85,10 @@ export class SmallFile extends AbstractFile {
         // Load the file from the block store
         return await files.node.services.blocks.get(this.id);
     }
+
+    async delete(files: Files): Promise<void> {
+        return await files.node.services.blocks.rm(this.id);
+    }
 }
 
 @variant(2) // for versioning purposes
@@ -97,7 +115,7 @@ export class LargeFile extends AbstractFile {
         const id = sha256Base64Sync(file);
         for (let i = 0; i < Math.ceil(file.byteLength / segmetSize); i++) {
             fileIds.push(
-                await files.create(
+                await files.add(
                     id + "/" + name,
                     file.subarray(
                         i * segmetSize,
@@ -108,6 +126,21 @@ export class LargeFile extends AbstractFile {
         }
 
         return new LargeFile({ id, name, fileIds });
+    }
+
+    async delete(files: Files) {
+        const allFiles = await files.files.index.search(
+            new SearchRequest({
+                query: [
+                    new Or(
+                        this.fileIds.map(
+                            (x) => new StringMatch({ key: "id", value: x })
+                        )
+                    ),
+                ],
+            })
+        );
+        await Promise.all(allFiles.map((x) => x.delete(files)));
     }
 
     async getFile(files: Files) {
@@ -166,16 +199,20 @@ export class Files extends Program<Args> {
     @field({ type: Uint8Array })
     id: Uint8Array;
 
+    @field({ type: option(PublicSignKey) })
+    rootKey?: PublicSignKey;
+
     @field({ type: Documents })
     files: Documents<AbstractFile>;
 
-    constructor(id: Uint8Array = randomBytes(32)) {
+    constructor(properties: { id?: Uint8Array; rootKey?: PublicSignKey } = {}) {
         super();
-        this.id = id;
+        this.id = properties.id || randomBytes(32);
+        this.rootKey = properties.rootKey;
         this.files = new Documents({ id: this.id });
     }
 
-    async create(name: string, file: Uint8Array) {
+    async add(name: string, file: Uint8Array) {
         let toPut: AbstractFile;
         if (file.byteLength <= TINY_FILE_SIZE_LIMIT) {
             toPut = new TinyFile({ name, file });
@@ -191,6 +228,31 @@ export class Files extends Program<Args> {
         return toPut.id;
     }
 
+    async remove(name: string) {
+        const files = await this.files.index.search(
+            new SearchRequest({
+                query: new StringMatch({
+                    key: ["name"],
+                    value: name,
+                    caseInsensitive: false,
+                    method: StringMatchMethod.exact,
+                }),
+            }),
+            { local: true, remote: false }
+        );
+        for (const file of files) {
+            await file.delete(this);
+            await this.files.del(file.id);
+        }
+    }
+
+    async list() {
+        const files = await this.files.index.search(new SearchRequest(), {
+            local: true,
+            remote: true,
+        });
+        return files;
+    }
     /**
      * Get by name
      * @param id
@@ -253,6 +315,22 @@ export class Files extends Program<Args> {
             type: AbstractFile,
             // TODO add ACL
             role: args?.role,
+            canPerform: async (operation, context) => {
+                if (!this.rootKey) {
+                    return true;
+                }
+                return !!(await context.entry.getSignatures()).find((x) =>
+                    x.publicKey.equals(this.rootKey!)
+                );
+            },
+            /*  index: {
+                 fields: (doc) => {
+                     return {
+                         "id": doc.id,
+                         "name": doc.name
+                     }
+                 }
+             } */
         });
     }
 }

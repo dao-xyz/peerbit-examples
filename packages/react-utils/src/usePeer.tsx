@@ -3,6 +3,7 @@ import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { DirectSub } from "@peerbit/pubsub";
+
 import { mplex } from "@libp2p/mplex";
 import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
 import { noise } from "@dao-xyz/libp2p-noise";
@@ -83,7 +84,7 @@ export const PeerProvider = (options: PeerOptions) => {
             loading,
             !!promise,
             connectionState,
-            peer?.identity?.publicKey.toString(),
+            peer?.identity?.publicKey?.hashcode(),
         ]
     );
 
@@ -149,14 +150,14 @@ export const PeerProvider = (options: PeerOptions) => {
                                           filter: filters.all,
                                       }),
                                       /*            circuitRelayTransport({ discoverRelays: 1 }),
-           webRTC(), */
+         webRTC(), */
                                   ],
                               }
                             : {
                                   transports: [
                                       webSockets({ filter: filters.wss }),
                                       /*             circuitRelayTransport({ discoverRelays: 1 }),
-            webRTC(), */
+          webRTC(), */
                                   ],
                               }),
 

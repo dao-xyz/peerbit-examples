@@ -50,6 +50,7 @@ export const RoomPreview = (props: { room: Room; onDelete?: () => void }) => {
                         const db = await peer.open(props.room, {
                             existing: "reuse",
                         });
+
                         /*  navigate(getCanvasPath(db)); */
                     }}
                 >

@@ -22,6 +22,7 @@ export const getRoomPathFromURL = (pathname: string): string[] => {
 
 export const RoomContext = React.createContext<IRoomContext>({} as any);
 export const useRooms = () => useContext(RoomContext);
+const ROOM_ID_SEED = new TextEncoder().encode("dao | xyz");
 export const RoomProvider = ({ children }: { children: JSX.Element }) => {
     const { peer } = usePeer();
     const [root, setRoot] = useState<Room>(undefined);
@@ -44,21 +45,35 @@ export const RoomProvider = ({ children }: { children: JSX.Element }) => {
             return;
         }
 
-        root.getCreateRoomByPath(getRoomPathFromURL(location.pathname)).then(
-            (result) => {
+        const roomPath = getRoomPathFromURL(location.pathname);
+
+        document.title = roomPath.join(" / ") || "dao | xyz";
+        root.getCreateRoomByPath(roomPath)
+            .then((result) => {
                 setRooms(result);
                 forceUpdate();
-            }
-        );
+            })
+            .catch((e) => {
+                console.error(e);
+            })
+            .finally(() => {
+                console.log("RSOLVED ROOM?");
+            });
     }, [root?.address, location.pathname]);
 
     useEffect(() => {
         if (root || !peer || loading.current) {
             return;
         }
-        peer.open(new Room({ rootTrust: peer.identity.publicKey }), {
-            existing: "reuse",
-        })
+        peer.open(
+            new Room({
+                seed: ROOM_ID_SEED,
+                rootTrust: peer.identity.publicKey,
+            }),
+            {
+                existing: "reuse",
+            }
+        )
             .then(async (result) => {
                 setRoot(result);
             })

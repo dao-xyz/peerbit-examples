@@ -1,4 +1,4 @@
-import { field, variant, fixedArray, vec } from "@dao-xyz/borsh";
+import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
     Documents,
     SearchRequest,
@@ -7,6 +7,8 @@ import {
 } from "@peerbit/document";
 import { PublicSignKey, randomBytes } from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
+import { sha256Sync } from "@peerbit/crypto";
+import { concat } from "uint8arrays";
 
 @variant(0)
 export class Layout {
@@ -78,9 +80,6 @@ export class Element<T extends ElementContent = any> {
 
 @variant("room")
 export class Room extends Program {
-    @field({ type: fixedArray("u8", 32) })
-    id: Uint8Array;
-
     @field({ type: Documents<Element> })
     elements: Documents<Element>;
 
@@ -90,12 +89,32 @@ export class Room extends Program {
     @field({ type: "string" })
     name: string;
 
-    constructor(properties: { rootTrust: PublicSignKey; name?: string }) {
+    @field({ type: option(fixedArray("u8", 32)) })
+    parentId?: Uint8Array;
+
+    constructor(
+        properties: ({ parentId: Uint8Array } | { seed: Uint8Array }) & {
+            rootTrust: PublicSignKey;
+            name?: string;
+        }
+    ) {
         super();
-        this.id = randomBytes(32);
         this.key = properties.rootTrust;
-        this.elements = new Documents();
         this.name = properties.name ?? "";
+        this.parentId = properties["parentId"];
+        const elementsId = sha256Sync(
+            concat([
+                new TextEncoder().encode("room"),
+                new TextEncoder().encode(this.name),
+                this.key.bytes,
+                properties["parentId"] || properties["seed"],
+            ])
+        );
+        this.elements = new Documents({ id: elementsId });
+    }
+
+    get id(): Uint8Array {
+        return this.elements.log.log.id;
     }
 
     async open(): Promise<void> {
@@ -145,17 +164,18 @@ export class Room extends Program {
             let room = results.rooms[0] || this;
             for (let i = results.path.length; i < path.length; i++) {
                 const newRoom = new Room({
+                    parentId: this.id,
                     rootTrust: this.node.identity.publicKey,
                     name: path[i],
                 });
-                room.elements.put(
+                await room.elements.put(
                     new Element<RoomContent>({
                         location: [],
                         publicKey: this.node.identity.publicKey,
                         content: new RoomContent({ room: newRoom }),
                     })
                 );
-                room = await this.node.open(newRoom);
+                room = await this.node.open(newRoom, { existing: "reuse" });
             }
             rooms = [room];
         }
@@ -169,7 +189,13 @@ export class Room extends Program {
         const visitedPath: string[] = [];
         for (const name of path) {
             const newRooms: Room[] = [];
-            for (const parent of rooms) {
+            for (let parent of rooms) {
+                if (parent.closed) {
+                    parent = await this.node.open(parent, {
+                        existing: "reuse",
+                    });
+                }
+
                 newRooms.push(
                     ...(await parent.findRoomsByName(name)).map(
                         (x) => x.content.room

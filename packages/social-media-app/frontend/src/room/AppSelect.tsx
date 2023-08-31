@@ -63,11 +63,12 @@ export const AppSelect = (properties: {
             onChange={(v) => {
                 setSelected(v);
                 properties.onSelected(v);
+                console.log("INSERT!", v);
                 appHistory.insert(v);
             }}
         >
-            <div className="w-full relative mt-1">
-                <div className="flex flex-row items-center relative w-full text-left bg-white rounded-lg shadow-md cursor-default focus:outline-none focus-visible:ring-2 focus-visible:ring-opacity-75 focus-visible:ring-white focus-visible:ring-offset-teal-300 focus-visible:ring-offset-2 sm:text-sm overflow-hidden">
+            <div className="w-full relative ">
+                <div className="flex flex-row items-center relative w-full text-left  rounded-lg shadow-md cursor-default focus:outline-none focus-visible:ring-2 focus-visible:ring-opacity-75 focus-visible:ring-white focus-visible:ring-offset-teal-300 focus-visible:ring-offset-2 sm:text-sm overflow-hidden">
                     <div className="absolute top-2 left-2">
                         {" "}
                         <Transition
@@ -85,7 +86,7 @@ export const AppSelect = (properties: {
                                     src={selected.icon}
                                 ></img>
                             ) : (
-                                <AiOutlineQuestionCircle className="w-5 h-5" />
+                                <AiOutlineQuestionCircle className="w-5 h-5 icon" />
                             )}
                         </Transition>
                     </div>
@@ -105,7 +106,6 @@ export const AppSelect = (properties: {
                                 : person["title"] || person["url"];
                         }}
                         onChange={(event) => {
-                            console.log("CHANGE", event.target.value);
                             let eventTargetValue = event.target.value;
                             setQuery(eventTargetValue);
                             setLoadingApp(true);
@@ -168,19 +168,23 @@ export const AppSelect = (properties: {
                                 )}
                             </Combobox.Option>
                         ))}
-                        {/*  {query.length > 0 && (
+                        {query.length > 0 && (
                             <Combobox.Option
                                 className={({ active, selected }) =>
-                                    `cursor-default select-none relative py-2 pl-10 pr-4 ${active
-                                        ? "text-white bg-secondary-200"
-                                        : "text-gray-900"
-                                    }  ${selected && "bg-primary-200"}`
+                                    `cursor-default select-none relative py-2 pl-10 pr-4 ${
+                                        active
+                                            ? "bg-primary-400; dark: bg-primary-600"
+                                            : "text-gray-900"
+                                    }  ${
+                                        selected &&
+                                        "bg-primary-600; dark: bg-primary-200"
+                                    }`
                                 }
                                 value={selected}
                             >
                                 {query}
                             </Combobox.Option>
-                        )} */}
+                        )}
                     </Combobox.Options>
                 </Transition>
             </div>
