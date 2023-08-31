@@ -228,7 +228,18 @@ export class Files extends Program<Args> {
         return toPut.id;
     }
 
-    async remove(name: string) {
+    async removeById(id: string) {
+        const file = await this.files.index.get(id, {
+            local: true,
+            remote: false,
+        });
+        if (file) {
+            await file.delete(this);
+            await this.files.del(file.id);
+        }
+    }
+
+    async removeByName(name: string) {
         const files = await this.files.index.search(
             new SearchRequest({
                 query: new StringMatch({

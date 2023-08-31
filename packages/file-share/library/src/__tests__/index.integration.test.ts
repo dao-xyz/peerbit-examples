@@ -34,7 +34,7 @@ describe("index", () => {
             )
         ).toEqual(smallFile);
 
-        await filestore.remove("tiny file");
+        await filestore.removeById("tiny file");
         expect(await filestoreReader.getByName("tiny file")).toBeUndefined();
     });
 
@@ -55,7 +55,7 @@ describe("index", () => {
         const file = await filestoreReader.getByName("small file");
         expect(equals(new Uint8Array(file!.bytes), smallFile)).toBeTrue();
 
-        await filestore.remove("small file");
+        await filestore.removeById("small file");
         expect(await filestoreReader.getByName("small file")).toBeUndefined();
 
         // TODO check that block is removed
@@ -102,7 +102,7 @@ describe("index", () => {
             ))!;
             expect(equals(file!.bytes, largeFile)).toBeTrue();
 
-            await filestore.remove("random large file");
+            await filestore.removeById("random large file");
             expect(
                 await filestoreReader.getByName("random large file")
             ).toBeUndefined();

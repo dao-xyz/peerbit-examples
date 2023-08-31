@@ -3,7 +3,7 @@ import { useParams } from "react-router-dom";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import { Observer, Replicator } from "@peerbit/document";
-import { MdDownload } from "react-icons/md";
+import { MdDownload, MdDeleteForever } from "react-icons/md";
 export const Drop = () => {
     const { peer } = usePeer();
     const filesRef = useRef<Files>(undefined);
@@ -123,34 +123,65 @@ export const Drop = () => {
         <div
             onDrop={dropHandler}
             onDragOver={dragOverHandler}
-            className="w-screen h-screen flex flex-col bg-neutral-200 dark:bg-black flex justify-center items-center transition-all"
+            className="flex flex-col items-center"
         >
-            {isHost && <span>Drop a file</span>}
-            <br></br>
-            {list?.length > 0 ? (
-                <div className="flex justify-start flex-col">
-                    <h1 className="text-xl">Files ({list.length})</h1>
-                    <ul>
-                        {list.map((x, ix) => {
-                            return (
-                                <li key={ix}>
-                                    <button
-                                        onClick={() => {
-                                            download(x);
-                                        }}
-                                        className="flex flex-row border border-1 items-center mt-3 btn btn-elevated"
+            <div className="w-screen max-w-xl h-screen flex flex-col p-4">
+                {isHost && <span className="italic">Drop a file anywhere</span>}
+                <br></br>
+                {list?.length > 0 ? (
+                    <div className="flex justify-start flex-col">
+                        <h1 className="text-xl">Files ({list.length}):</h1>
+                        <ul>
+                            {list.map((x, ix) => {
+                                return (
+                                    <li
+                                        className="flex flex-row items-center gap-3"
+                                        key={ix}
                                     >
                                         <span>{x.name}</span>
-                                        <MdDownload className="ml-2" />
-                                    </button>
-                                </li>
-                            );
-                        })}
-                    </ul>
-                </div>
-            ) : (
-                <span className="italic">No files found</span>
-            )}
+                                        <button
+                                            onClick={() => {
+                                                download(x);
+                                            }}
+                                            className="ml-auto flex flex-row border border-1 items-center p-2 btn btn-elevated"
+                                        >
+                                            <MdDownload />
+                                        </button>
+                                        {isHost && (
+                                            <button
+                                                onClick={() => {
+                                                    filesRef.current
+                                                        .removeById(x.id)
+                                                        .then(() => {
+                                                            updateList();
+                                                            console.log(
+                                                                "DONE DELETED",
+                                                                filesRef.current
+                                                                    .files.index
+                                                                    .size
+                                                            );
+                                                        })
+                                                        .catch((error) => {
+                                                            alert(
+                                                                "Failed to delete: " +
+                                                                    error.message
+                                                            );
+                                                        });
+                                                }}
+                                                className="flex flex-row border border-1 items-center p-2 btn btn-elevated"
+                                            >
+                                                <MdDeleteForever />
+                                            </button>
+                                        )}
+                                    </li>
+                                );
+                            })}
+                        </ul>
+                    </div>
+                ) : (
+                    <span className="italic">No files found</span>
+                )}
+            </div>
         </div>
     );
 };
