@@ -16,11 +16,12 @@ import { concat } from "uint8arrays";
 export abstract class AbstractFile {
     abstract id: string;
     abstract name: string;
+    abstract size: number;
     abstract getFile(files: Files): Promise<Uint8Array | undefined>;
     abstract delete(files: Files): Promise<void>;
 }
 
-const TINY_FILE_SIZE_LIMIT = 1e3;
+const TINY_FILE_SIZE_LIMIT = 1e6 * 9; // 1e3;
 
 @variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
@@ -32,6 +33,10 @@ export class TinyFile extends AbstractFile {
 
     @field({ type: Uint8Array })
     file: Uint8Array; // 10 mb imit
+
+    get size() {
+        return this.file.byteLength;
+    }
 
     constructor(properties: { name: string; file: Uint8Array }) {
         super();
@@ -51,7 +56,7 @@ export class TinyFile extends AbstractFile {
         // Do nothing, since no releated files where created
     }
 }
-
+/* 
 const SMALL_FILE_SIZE_LIMIT = 1e6 * 9;
 
 // TODO Do we really need this if we have TinyFile and LargeFile?
@@ -65,6 +70,7 @@ export class SmallFile extends AbstractFile {
 
     @field({ type: "string" })
     cid: string; // store file separately in a block store, like IPFS
+
 
     constructor(properties: { name: string; cid: string }) {
         super();
@@ -89,7 +95,7 @@ export class SmallFile extends AbstractFile {
     async delete(files: Files): Promise<void> {
         return await files.node.services.blocks.rm(this.id);
     }
-}
+} */
 
 @variant(2) // for versioning purposes
 export class LargeFile extends AbstractFile {
@@ -102,21 +108,30 @@ export class LargeFile extends AbstractFile {
     @field({ type: vec("string") })
     fileIds: string[];
 
-    constructor(properties: { id: string; name: string; fileIds: string[] }) {
+    @field({ type: "u32" })
+    size: number;
+
+    constructor(properties: {
+        id: string;
+        name: string;
+        fileIds: string[];
+        size: number;
+    }) {
         super();
         this.id = properties.id;
         this.name = properties.name;
         this.fileIds = properties.fileIds;
+        this.size = properties.size;
     }
 
     static async create(name: string, file: Uint8Array, files: Files) {
-        const segmetSize = SMALL_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
+        const segmetSize = TINY_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
         const fileIds: string[] = [];
         const id = sha256Base64Sync(file);
         for (let i = 0; i < Math.ceil(file.byteLength / segmetSize); i++) {
             fileIds.push(
                 await files.add(
-                    id + "/" + name,
+                    name + "/" + i,
                     file.subarray(
                         i * segmetSize,
                         Math.min((i + 1) * segmetSize, file.length)
@@ -125,44 +140,35 @@ export class LargeFile extends AbstractFile {
             );
         }
 
-        return new LargeFile({ id, name, fileIds });
+        return new LargeFile({ id, name, fileIds, size: file.length });
     }
 
-    async delete(files: Files) {
+    private async fetchChunks(files: Files) {
+        const expectedIds = new Set(this.fileIds);
         const allFiles = await files.files.index.search(
             new SearchRequest({
                 query: [
                     new Or(
-                        this.fileIds.map(
+                        [...expectedIds].map(
                             (x) => new StringMatch({ key: "id", value: x })
                         )
                     ),
                 ],
             })
         );
-        await Promise.all(allFiles.map((x) => x.delete(files)));
+        return allFiles;
+    }
+    async delete(files: Files) {
+        await Promise.all(
+            (await this.fetchChunks(files)).map((x) => x.delete(files))
+        );
     }
 
     async getFile(files: Files) {
         // Get all sub files (SmallFiles) and concatinate them in the right order (the order of this.fileIds)
-        const expectedIds = new Set(this.fileIds);
         const chunks: Map<string, Promise<Uint8Array | undefined>> = new Map();
-
-        const results = await files.files.index.search(
-            new SearchRequest({
-                query: [
-                    new StringMatch({
-                        key: "name",
-                        value: this.id + "/" + this.name,
-                    }),
-                ],
-            }),
-            {
-                local: true,
-                remote: true,
-            }
-        );
-
+        const expectedIds = new Set(this.fileIds);
+        const results = await this.fetchChunks(files);
         if (results.length > 0) {
             for (const r of results) {
                 if (chunks.has(r.id)) {
@@ -216,12 +222,12 @@ export class Files extends Program<Args> {
         let toPut: AbstractFile;
         if (file.byteLength <= TINY_FILE_SIZE_LIMIT) {
             toPut = new TinyFile({ name, file });
-        } else if (
+        } /* else if (
             file.byteLength > TINY_FILE_SIZE_LIMIT &&
             file.byteLength <= SMALL_FILE_SIZE_LIMIT
         ) {
             toPut = await SmallFile.create(this.node, name, file);
-        } else {
+        }  */ else {
             toPut = await LargeFile.create(name, file, this);
         }
         await this.files.put(toPut);
@@ -229,10 +235,7 @@ export class Files extends Program<Args> {
     }
 
     async removeById(id: string) {
-        const file = await this.files.index.get(id, {
-            local: true,
-            remote: false,
-        });
+        const file = await this.files.index.get(id);
         if (file) {
             await file.delete(this);
             await this.files.del(file.id);
@@ -248,8 +251,7 @@ export class Files extends Program<Args> {
                     caseInsensitive: false,
                     method: StringMatchMethod.exact,
                 }),
-            }),
-            { local: true, remote: false }
+            })
         );
         for (const file of files) {
             await file.delete(this);
@@ -334,14 +336,15 @@ export class Files extends Program<Args> {
                     x.publicKey.equals(this.rootKey!)
                 );
             },
-            /*  index: {
-                 fields: (doc) => {
-                     return {
-                         "id": doc.id,
-                         "name": doc.name
-                     }
-                 }
-             } */
+            index: {
+                fields: (doc) => {
+                    return {
+                        id: doc.id,
+                        name: doc.name,
+                        size: doc.size,
+                    };
+                },
+            },
         });
     }
 }
