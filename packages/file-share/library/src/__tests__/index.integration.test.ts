@@ -38,28 +38,28 @@ describe("index", () => {
         expect(await filestoreReader.getByName("tiny file")).toBeUndefined();
     });
 
-    /*  it("small file", async () => {
-         // Peer 1 is subscribing to a replication topic (to start helping the network)
-         const filestore = await peer.open(new Files());
- 
-         const smallFile = new Uint8Array(2 * 1e6); // 2 mb
-         await filestore.add("small file", smallFile);
- 
-         const filestoreReader = await peer2.open<Files>(filestore.address, {
-             args: {
-                 role: new Observer(),
-             },
-         });
-         await filestoreReader.waitFor(peer.identity.publicKey);
- 
-         const file = await filestoreReader.getByName("small file");
-         expect(equals(new Uint8Array(file!.bytes), smallFile)).toBeTrue();
- 
-         await filestore.removeById("small file");
-         expect(await filestoreReader.getByName("small file")).toBeUndefined();
- 
-         // TODO check that block is removed
-     }); */
+    it("small file", async () => {
+        // Peer 1 is subscribing to a replication topic (to start helping the network)
+        const filestore = await peer.open(new Files());
+
+        const smallFile = new Uint8Array(2 * 1e6); // 2 mb
+        await filestore.add("small file", smallFile);
+
+        const filestoreReader = await peer2.open<Files>(filestore.address, {
+            args: {
+                role: new Observer(),
+            },
+        });
+        await filestoreReader.waitFor(peer.identity.publicKey);
+
+        const file = await filestoreReader.getByName("small file");
+        expect(equals(new Uint8Array(file!.bytes), smallFile)).toBeTrue();
+
+        await filestore.removeByName("small file");
+        expect(await filestoreReader.getByName("small file")).toBeUndefined();
+
+        // TODO check that block is removed
+    });
 
     describe("large file", () => {
         it("will deduplicate chunks", async () => {

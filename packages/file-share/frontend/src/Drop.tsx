@@ -3,13 +3,16 @@ import { useParams } from "react-router-dom";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import { Observer, Replicator } from "@peerbit/document";
-import { MdDownload, MdDeleteForever } from "react-icons/md";
+import { MdDownload, MdDeleteForever, MdArrowBack } from "react-icons/md";
 export const Drop = () => {
     const { peer } = usePeer();
     const filesRef = useRef<Files>(undefined);
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const params = useParams();
     const [list, setList] = useState<AbstractFile[]>([]);
+    const [chunkMap, setChunkMap] = useState<Map<string, AbstractFile[]>>(
+        new Map()
+    );
     const [isHost, setIsHost] = useState<boolean>();
 
     useEffect(() => {
@@ -33,6 +36,11 @@ export const Drop = () => {
             filesRef.current = f;
             setIsHost(isHost);
             if (!isHost) {
+                console.log(
+                    "IS NOT HOST!",
+                    f.rootKey.hashcode(),
+                    peer.identity.publicKey.hashcode()
+                );
                 await f.waitFor(f.rootKey).catch(() => {
                     alert("Host is not online");
                 });
@@ -57,12 +65,31 @@ export const Drop = () => {
                 filesRef.current.files.log.topic
             )
         );
-        setList(list);
+
+        let chunkMap = new Map();
+        setList(list.filter((x) => !x.parentId));
+        for (const element of list) {
+            if (element.parentId) {
+                let arr = chunkMap.get(element.parentId);
+                if (!arr) {
+                    arr = [];
+                    chunkMap.set(element.parentId, arr);
+                }
+                arr.push(element);
+            }
+        }
+        setChunkMap(chunkMap);
         forceUpdate();
     };
     const download = async (file: AbstractFile) => {
-        const bytes = await file.getFile(filesRef.current);
+        console.log("FETCH FILE START");
+        const bytes = await file.getFile(filesRef.current).catch((e) => {
+            console.error(e);
+            throw e;
+        });
+        console.log("FETCH FILE DONE");
         var blob = new Blob([bytes]);
+        console.log("DOANLOAD FILE");
         var link = document.createElement("a");
         link.href = window.URL.createObjectURL(blob);
         var fileName = file.name;
@@ -125,57 +152,91 @@ export const Drop = () => {
             onDragOver={dragOverHandler}
             className="flex flex-col items-center"
         >
-            <div className="w-screen max-w-xl h-screen flex flex-col p-4">
-                {isHost && <span className="italic">Drop a file anywhere</span>}
+            <div className="w-screen max-w-3xl h-screen flex flex-col p-4">
+                {isHost && (
+                    <div className="flex flex-row items-center gap-3">
+                        <span className="italic">Drop a file anywhere</span>
+                        <img
+                            width={40}
+                            className="invert scale-x-[-1] ml-auto"
+                            src="arrow.svg"
+                        />
+                        <span>
+                            Copy the url to share your files with friends
+                        </span>
+                    </div>
+                )}
+                {!isHost && (
+                    <button className="w-fit btn flex flex-row items-center p-2">
+                        <MdArrowBack size={20} className="mr-2" />{" "}
+                        <span>Upload your own files</span>
+                    </button>
+                )}
                 <br></br>
                 {list?.length > 0 ? (
                     <div className="flex justify-start flex-col">
                         <h1 className="text-xl">Files ({list.length}):</h1>
                         <ul>
-                            {list.map((x, ix) => {
-                                return (
-                                    <li
-                                        className="flex flex-row items-center gap-3"
-                                        key={ix}
-                                    >
-                                        <span>{x.name}</span>
-                                        <button
-                                            onClick={() => {
-                                                download(x);
-                                            }}
-                                            className="ml-auto flex flex-row border border-1 items-center p-2 btn btn-elevated"
+                            {list
+                                .filter((x) => !x.parentId)
+                                .map((x, ix) => {
+                                    return (
+                                        <li
+                                            className="flex flex-row items-center gap-3"
+                                            key={ix}
                                         >
-                                            <MdDownload />
-                                        </button>
-                                        {isHost && (
+                                            <span className="max-w-xs">
+                                                {x.name}
+                                            </span>
+                                            <span className="ml-auto font-mono">
+                                                {Math.round(x.size / 3000) +
+                                                    " kb"}
+                                            </span>
+                                            {chunkMap.has(x.id) && (
+                                                <span className="font-mono">
+                                                    ({chunkMap.get(x.id).length}{" "}
+                                                    chunks)
+                                                </span>
+                                            )}
                                             <button
                                                 onClick={() => {
-                                                    filesRef.current
-                                                        .removeById(x.id)
-                                                        .then(() => {
-                                                            updateList();
-                                                            console.log(
-                                                                "DONE DELETED",
-                                                                filesRef.current
-                                                                    .files.index
-                                                                    .size
-                                                            );
-                                                        })
-                                                        .catch((error) => {
-                                                            alert(
-                                                                "Failed to delete: " +
-                                                                    error.message
-                                                            );
-                                                        });
+                                                    download(x);
                                                 }}
                                                 className="flex flex-row border border-1 items-center p-2 btn btn-elevated"
                                             >
-                                                <MdDeleteForever />
+                                                <MdDownload />
                                             </button>
-                                        )}
-                                    </li>
-                                );
-                            })}
+                                            {isHost && (
+                                                <button
+                                                    onClick={() => {
+                                                        filesRef.current
+                                                            .removeById(x.id)
+                                                            .then(() => {
+                                                                updateList();
+                                                                console.log(
+                                                                    "DONE DELETED",
+                                                                    filesRef
+                                                                        .current
+                                                                        .files
+                                                                        .index
+                                                                        .size
+                                                                );
+                                                            })
+                                                            .catch((error) => {
+                                                                alert(
+                                                                    "Failed to delete: " +
+                                                                        error.message
+                                                                );
+                                                            });
+                                                    }}
+                                                    className="flex flex-row border border-1 items-center p-2 btn btn-elevated"
+                                                >
+                                                    <MdDeleteForever />
+                                                </button>
+                                            )}
+                                        </li>
+                                    );
+                                })}
                         </ul>
                     </div>
                 ) : (

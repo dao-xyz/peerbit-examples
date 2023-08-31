@@ -17,11 +17,12 @@ export abstract class AbstractFile {
     abstract id: string;
     abstract name: string;
     abstract size: number;
+    abstract parentId?: string;
     abstract getFile(files: Files): Promise<Uint8Array | undefined>;
     abstract delete(files: Files): Promise<void>;
 }
 
-const TINY_FILE_SIZE_LIMIT = 1e6 * 9; // 1e3;
+const TINY_FILE_SIZE_LIMIT = 1e3;
 
 @variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
@@ -34,15 +35,23 @@ export class TinyFile extends AbstractFile {
     @field({ type: Uint8Array })
     file: Uint8Array; // 10 mb imit
 
+    @field({ type: option("string") })
+    parentId?: string;
+
     get size() {
         return this.file.byteLength;
     }
 
-    constructor(properties: { name: string; file: Uint8Array }) {
+    constructor(properties: {
+        name: string;
+        file: Uint8Array;
+        parentId?: string;
+    }) {
         super();
         this.id = sha256Base64Sync(properties.file);
         this.name = properties.name;
         this.file = properties.file;
+        this.parentId = properties.parentId;
     }
 
     async getFile(_files: Files) {
@@ -56,7 +65,7 @@ export class TinyFile extends AbstractFile {
         // Do nothing, since no releated files where created
     }
 }
-/* 
+
 const SMALL_FILE_SIZE_LIMIT = 1e6 * 9;
 
 // TODO Do we really need this if we have TinyFile and LargeFile?
@@ -71,20 +80,37 @@ export class SmallFile extends AbstractFile {
     @field({ type: "string" })
     cid: string; // store file separately in a block store, like IPFS
 
+    @field({ type: "u32" })
+    size: number;
 
-    constructor(properties: { name: string; cid: string }) {
+    @field({ type: option("string") })
+    parentId?: string;
+
+    constructor(properties: {
+        name: string;
+        cid: string;
+        size: number;
+        parentId?: string;
+    }) {
         super();
         this.id = properties.cid;
         this.name = properties.name;
         this.cid = properties.cid;
+        this.size = properties.size;
+        this.parentId = properties.parentId;
     }
 
-    static async create(node: ProgramClient, name: string, file: Uint8Array) {
+    static async create(
+        node: ProgramClient,
+        name: string,
+        file: Uint8Array,
+        parentId?: string
+    ) {
         if (file.length > SMALL_FILE_SIZE_LIMIT) {
             throw new Error("To large file for SmallFile");
         }
         const cid = await node.services.blocks.put(file);
-        return new SmallFile({ name, cid });
+        return new SmallFile({ name, cid, size: file.byteLength, parentId });
     }
 
     async getFile(files: Files) {
@@ -95,7 +121,7 @@ export class SmallFile extends AbstractFile {
     async delete(files: Files): Promise<void> {
         return await files.node.services.blocks.rm(this.id);
     }
-} */
+}
 
 @variant(2) // for versioning purposes
 export class LargeFile extends AbstractFile {
@@ -125,7 +151,7 @@ export class LargeFile extends AbstractFile {
     }
 
     static async create(name: string, file: Uint8Array, files: Files) {
-        const segmetSize = TINY_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
+        const segmetSize = SMALL_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
         const fileIds: string[] = [];
         const id = sha256Base64Sync(file);
         for (let i = 0; i < Math.ceil(file.byteLength / segmetSize); i++) {
@@ -135,12 +161,18 @@ export class LargeFile extends AbstractFile {
                     file.subarray(
                         i * segmetSize,
                         Math.min((i + 1) * segmetSize, file.length)
-                    )
+                    ),
+                    id
                 )
             );
         }
 
         return new LargeFile({ id, name, fileIds, size: file.length });
+    }
+
+    get parentId() {
+        // Large file can never have a parent
+        return undefined;
     }
 
     private async fetchChunks(files: Files) {
@@ -166,11 +198,13 @@ export class LargeFile extends AbstractFile {
 
     async getFile(files: Files) {
         // Get all sub files (SmallFiles) and concatinate them in the right order (the order of this.fileIds)
+
+        const allChunks = await this.fetchChunks(files);
+
         const chunks: Map<string, Promise<Uint8Array | undefined>> = new Map();
         const expectedIds = new Set(this.fileIds);
-        const results = await this.fetchChunks(files);
-        if (results.length > 0) {
-            for (const r of results) {
+        if (allChunks.length > 0) {
+            for (const r of allChunks) {
                 if (chunks.has(r.id)) {
                     // chunk already added;
                 }
@@ -218,16 +252,19 @@ export class Files extends Program<Args> {
         this.files = new Documents({ id: this.id });
     }
 
-    async add(name: string, file: Uint8Array) {
+    async add(name: string, file: Uint8Array, parentId?: string) {
         let toPut: AbstractFile;
         if (file.byteLength <= TINY_FILE_SIZE_LIMIT) {
-            toPut = new TinyFile({ name, file });
-        } /* else if (
+            toPut = new TinyFile({ name, file, parentId });
+        } else if (
             file.byteLength > TINY_FILE_SIZE_LIMIT &&
             file.byteLength <= SMALL_FILE_SIZE_LIMIT
         ) {
-            toPut = await SmallFile.create(this.node, name, file);
-        }  */ else {
+            toPut = await SmallFile.create(this.node, name, file, parentId);
+        } else {
+            if (parentId) {
+                throw new Error("Unexpected that a LargeFile to have a parent");
+            }
             toPut = await LargeFile.create(name, file, this);
         }
         await this.files.put(toPut);
@@ -342,6 +379,7 @@ export class Files extends Program<Args> {
                         id: doc.id,
                         name: doc.name,
                         size: doc.size,
+                        parentId: doc.parentId,
                     };
                 },
             },
