@@ -154,20 +154,21 @@ export class LargeFile extends AbstractFile {
         const segmetSize = SMALL_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
         const fileIds: string[] = [];
         const id = sha256Base64Sync(file);
+        const fileSize = file.byteLength;
         for (let i = 0; i < Math.ceil(file.byteLength / segmetSize); i++) {
             fileIds.push(
                 await files.add(
                     name + "/" + i,
                     file.subarray(
                         i * segmetSize,
-                        Math.min((i + 1) * segmetSize, file.length)
+                        Math.min((i + 1) * segmetSize, file.byteLength)
                     ),
                     id
                 )
             );
         }
 
-        return new LargeFile({ id, name, fileIds, size: file.length });
+        return new LargeFile({ id, name, fileIds, size: fileSize });
     }
 
     get parentId() {

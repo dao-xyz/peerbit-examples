@@ -21,6 +21,7 @@ export const Drop = () => {
         new Map()
     );
     const [isHost, setIsHost] = useState<boolean>();
+    const [waitingForHost, setWaitingForHost] = useState<boolean>(false);
 
     useEffect(() => {
         if (!peer?.identity.publicKey) {
@@ -43,6 +44,8 @@ export const Drop = () => {
             filesRef.current = f;
             setIsHost(isHost);
             if (!isHost) {
+                setWaitingForHost(true);
+                forceUpdate();
                 console.log(
                     "IS NOT HOST!",
                     f.rootKey.hashcode(),
@@ -51,10 +54,16 @@ export const Drop = () => {
                 await f.waitFor(f.rootKey).catch(() => {
                     alert("Host is not online");
                 });
+                setWaitingForHost(false);
             }
 
+            f.files.events.addEventListener("change", async () => {
+                await updateList();
+            });
+
             await updateList();
-            // TODO
+
+            // TODO remove
             setTimeout(async () => {
                 await updateList();
             }, 3000);
@@ -138,6 +147,7 @@ export const Drop = () => {
             reader.onload = function () {
                 var arrayBuffer = reader.result;
                 var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
+                console.log(bytes);
                 filesRef.current.add(file.name, bytes).then(() => {
                     updateList();
                 });
@@ -153,15 +163,16 @@ export const Drop = () => {
         // Prevent default behavior (Prevent file from being opened)
         ev.preventDefault();
     }
+    console.log(waitingForHost);
     return (
         <div
             onDrop={dropHandler}
             onDragOver={dragOverHandler}
-            className="flex flex-col items-center"
+            className="flex flex-col h-[calc(100% - 40px)] items-center w-screen h-full "
         >
-            <div className="w-screen max-w-3xl h-screen flex flex-col p-4">
+            <div className="max-w-3xl flex flex-col p-4">
                 {isHost && (
-                    <div className="flex flex-row items-center gap-3">
+                    <div className="flex flex-row   items-center gap-3">
                         <div className="flex flex-col">
                             <input
                                 type="file"
@@ -209,10 +220,19 @@ export const Drop = () => {
                     </div>
                 )}
                 {!isHost && (
-                    <button className="w-fit btn flex flex-row items-center p-2">
-                        <MdArrowBack size={20} className="mr-2" />{" "}
-                        <span>Upload your own files</span>
-                    </button>
+                    <div className="flex flex-row items-center">
+                        <button className="w-fit btn flex flex-row items-center p-2">
+                            <MdArrowBack size={20} className="mr-2" />{" "}
+                            <span>Upload your own files</span>
+                        </button>
+                        {waitingForHost ? (
+                            <div className="italic ml-auto">
+                                Waiting for host...
+                            </div>
+                        ) : (
+                            <div className="italic ml-auto">Connected</div>
+                        )}
+                    </div>
                 )}
                 <br></br>
                 {list?.length > 0 ? (
@@ -231,7 +251,7 @@ export const Drop = () => {
                                                 {x.name}
                                             </span>
                                             <span className="ml-auto font-mono">
-                                                {Math.round(x.size / 3000) +
+                                                {Math.round(x.size / 1000) +
                                                     " kb"}
                                             </span>
                                             {chunkMap.has(x.id) && (

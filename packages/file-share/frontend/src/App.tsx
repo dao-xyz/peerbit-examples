@@ -1,6 +1,7 @@
 import { PeerProvider, usePeer } from "@peerbit/react";
 import { BaseRoutes } from "./routes";
 import { HashRouter } from "react-router-dom";
+import { Footer } from "./Footer";
 
 document.documentElement.classList.add("dark");
 export const App = () => {
@@ -14,9 +15,12 @@ export const App = () => {
                 host: true,
             }}
         >
-            <HashRouter basename="/">
-                <BaseRoutes />
-            </HashRouter>
+            <div className="h-screen">
+                <HashRouter basename="/">
+                    <BaseRoutes />
+                </HashRouter>
+                <Footer />
+            </div>
         </PeerProvider>
     );
 };
