@@ -31,7 +31,6 @@ export const Drop = () => {
                 });
             }
             filesRef.current = f;
-
             setIsHost(isHost);
             if (!isHost) {
                 await f.waitFor(f.rootKey).catch(() => {
@@ -40,6 +39,7 @@ export const Drop = () => {
             }
 
             await updateList();
+            // TODO
             setTimeout(async () => {
                 await updateList();
             }, 3000);
@@ -91,9 +91,14 @@ export const Drop = () => {
                     reader.onload = function () {
                         var arrayBuffer = reader.result;
                         var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
-                        filesRef.current.add(file.name, bytes).then((d) => {
-                            console.log("ADDED", d);
-                        });
+                        filesRef.current
+                            .add(file.name, bytes)
+                            .then((d) => {
+                                console.log("ADDED", d);
+                            })
+                            .then(() => {
+                                updateList();
+                            });
                     };
                 }
             });
