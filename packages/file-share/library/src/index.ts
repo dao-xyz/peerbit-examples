@@ -12,6 +12,7 @@ import {
 import { PublicSignKey, sha256Base64Sync, randomBytes } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
+import { sha256Sync } from "@peerbit/crypto";
 
 export abstract class AbstractFile {
     abstract id: string;
@@ -250,7 +251,11 @@ export class Files extends Program<Args> {
         super();
         this.id = properties.id || randomBytes(32);
         this.rootKey = properties.rootKey;
-        this.files = new Documents({ id: this.id });
+        this.files = new Documents({
+            id: sha256Sync(
+                concat([this.id, this.rootKey?.bytes || new Uint8Array(0)])
+            ),
+        });
     }
 
     async add(name: string, file: Uint8Array, parentId?: string) {
