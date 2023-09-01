@@ -2,6 +2,8 @@ import { usePeer } from "@peerbit/react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
+import * as Toggle from "@radix-ui/react-toggle";
+
 import { Observer, Replicator } from "@peerbit/document";
 import {
     MdDownload,
@@ -9,7 +11,7 @@ import {
     MdArrowBack,
     MdUploadFile,
 } from "react-icons/md";
-
+import { FaSeedling } from "react-icons/fa";
 const isMobile = "ontouchstart" in window;
 
 export const Drop = () => {
@@ -23,9 +25,28 @@ export const Drop = () => {
     const [chunkMap, setChunkMap] = useState<Map<string, AbstractFile[]>>(
         new Map()
     );
+    const [replicationSet, setReplicationSet] = useState<Set<string>>(
+        new Set()
+    );
     const [isHost, setIsHost] = useState<boolean>();
     const [waitingForHost, setWaitingForHost] = useState<boolean>(false);
+    const [role, setRole] = useState<"replicator" | "observer">("observer");
+    const [replicatorCount, setReplicatorCount] = useState(0);
 
+    console.log(role);
+
+    const updateSeeders = () => {
+        setReplicatorCount(
+            filesRef.current.files.log.getReplicatorsSorted().length
+        );
+    };
+    const updateRole = async (type: "replicator" | "observer") => {
+        setRole(type);
+        await filesRef.current.files.log.updateRole(
+            type === "observer" ? new Observer() : new Replicator()
+        );
+        updateSeeders();
+    };
     useEffect(() => {
         if (!peer?.identity.publicKey) {
             return;
@@ -35,25 +56,31 @@ export const Drop = () => {
             existing: "reuse",
             args: { role: new Observer() },
         }).then(async (f) => {
-            const isHost =
-                !f.rootKey || f.rootKey.equals(peer.identity.publicKey);
-            if (isHost && f.files.log.role instanceof Replicator === false) {
-                await f.close();
-                f = await peer.open<Files>(f.clone(), {
-                    existing: "reuse",
-                    args: { role: new Replicator() },
-                });
-            }
+            const isTrusted =
+                !f.trustGraph ||
+                (await f.trustGraph.isTrusted(peer.identity.publicKey));
+
+            console.log("IS TRUSTED?", isTrusted);
             filesRef.current = f;
-            setIsHost(isHost);
-            if (!isHost) {
-                setWaitingForHost(true);
-                forceUpdate();
-                await f.waitFor(f.rootKey).catch(() => {
-                    alert("Host is not online");
-                });
-                setWaitingForHost(false);
+            console.log("IS TRUSTED?", isTrusted);
+
+            if (isTrusted) {
+                // by default open as replicator
+                await updateRole("replicator");
             }
+
+            setIsHost(isTrusted);
+            if (!isTrusted) {
+                /*   setWaitingForHost(true);
+                  forceUpdate();
+                  await f.waitFor(f.rootKey).catch(() => {
+                      alert("Host is not online");
+                  });
+                  setWaitingForHost(false); */
+            }
+            f.files.log.events.addEventListener("join", () => {
+                updateSeeders();
+            });
 
             f.files.events.addEventListener("change", async () => {
                 await updateList();
@@ -71,17 +98,12 @@ export const Drop = () => {
 
     const updateList = async () => {
         const list = await filesRef.current.list();
-        console.log(
-            "???",
-            list,
-            filesRef.current.files.log.role,
-            peer.services.pubsub.getSubscribers(
-                filesRef.current.files.log.topic
-            )
-        );
-
         let chunkMap = new Map();
-        setList(list.filter((x) => !x.parentId));
+        setList(
+            list
+                .filter((x) => !x.parentId)
+                .sort((a, b) => a.name.localeCompare(b.name))
+        );
         for (const element of list) {
             if (element.parentId) {
                 let arr = chunkMap.get(element.parentId);
@@ -93,6 +115,9 @@ export const Drop = () => {
             }
         }
         setChunkMap(chunkMap);
+
+        // Get replication set
+        setReplicationSet(new Set(filesRef.current.files.index.index.keys()));
         forceUpdate();
     };
     const download = async (file: AbstractFile) => {
@@ -138,6 +163,12 @@ export const Drop = () => {
         }
     }
 
+    const getReplicatedChunksCount = (file: AbstractFile) => {
+        return [...(chunkMap.get(file.id)?.values() || [])].filter((y) =>
+            replicationSet.has(y.id)
+        )?.length;
+    };
+
     const addFile = async (files: FileList | File[]) => {
         for (const file of files) {
             var reader = new FileReader();
@@ -167,73 +198,75 @@ export const Drop = () => {
             onDragOver={dragOverHandler}
             className="flex flex-col h-[calc(100% - 40px)] items-center w-screen h-full "
         >
-            <div className="max-w-3xl w-full flex flex-col p-4">
-                {isHost && (
-                    <div className="flex flex-row   items-center gap-3">
-                        <div className="flex flex-col">
-                            <input
-                                type="file"
-                                id="imgupload"
-                                className="hidden"
-                                onChange={(e) => {
-                                    addFile(e.target?.files);
-                                }}
-                            />
-                            <button
-                                className="w-fit btn btn-icon flex flex-row items-center p-2 gap-2"
-                                onClick={() => {
-                                    document
-                                        .getElementById("imgupload")
-                                        .click();
-                                }}
-                            >
-                                Upload <MdUploadFile size={20} />
-                            </button>
-                            {isMobile ? (
-                                <></>
-                            ) : (
-                                <span className="italic pl-2 text-xs">
-                                    or drop a file anywhere
-                                </span>
-                            )}
-                        </div>
-                        {!isMobile ? (
-                            <>
-                                <img
-                                    width={40}
-                                    className="invert scale-x-[-1] ml-auto"
-                                    src="arrow.svg"
-                                />
-                                <span>
-                                    Copy the url to share your files with
-                                    friends
-                                </span>
-                            </>
-                        ) : (
-                            <span className="ml-auto italic">
-                                Copy the url to share your files with friends
+            <div className="max-w-3xl w-full flex flex-col p-4  ">
+                <div className="flex flex-row gap-4 items-center">
+                    <div className="flex flex-col ">
+                        <h1 className="text-3xl italic">
+                            {filesRef.current?.name}
+                        </h1>
+                        <span className="font-mono text-xs">
+                            Seeders:{" "}
+                            <span className="!text-green-400">
+                                {replicatorCount}
                             </span>
-                        )}
+                        </span>
+                        <span className="italice text-xs ">
+                            Copy the URL to share all files
+                        </span>
                     </div>
-                )}
-                {!isHost && (
-                    <div className="flex flex-row items-center">
-                        <button
-                            className="w-fit btn flex flex-row items-center p-2"
-                            onClick={() => navigate("/")}
+
+                    <div className="ml-auto flex flex-row items-end gap-2 align-items: center">
+                        {isHost && (
+                            <>
+                                <input
+                                    type="file"
+                                    id="imgupload"
+                                    className="hidden"
+                                    onChange={(e) => {
+                                        addFile(e.target?.files);
+                                    }}
+                                />
+                                <button
+                                    className="w-fit btn btn-elevated flex flex-row items-center gap-2"
+                                    onClick={() => {
+                                        document
+                                            .getElementById("imgupload")
+                                            .click();
+                                    }}
+                                >
+                                    <span className="hidden sm:block">
+                                        Upload
+                                    </span>{" "}
+                                    <MdUploadFile size={20} />
+                                </button>
+                            </>
+                        )}
+                        {!isHost && (
+                            <button
+                                className="w-fit btn btn-elevated flex flex-row items-center p-2"
+                                onClick={() => navigate("/")}
+                            >
+                                <MdArrowBack size={20} className="mr-2" />{" "}
+                                <span>Upload your own files</span>
+                            </button>
+                        )}
+                        <Toggle.Root
+                            onPressedChange={(e) => {
+                                updateRole(
+                                    role === "observer"
+                                        ? "replicator"
+                                        : "observer"
+                                );
+                            }}
+                            pressed={role === "replicator"}
+                            className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2"
+                            aria-label="Toggle italic"
                         >
-                            <MdArrowBack size={20} className="mr-2" />{" "}
-                            <span>Upload your own files</span>
-                        </button>
-                        {waitingForHost ? (
-                            <div className="italic ml-auto">
-                                Waiting for host...
-                            </div>
-                        ) : (
-                            <div className="italic ml-auto">Connected</div>
-                        )}
+                            <span className="hidden sm:block">Seed</span>
+                            <FaSeedling className="text-green-400" size={20} />
+                        </Toggle.Root>
                     </div>
-                )}
+                </div>
                 <br></br>
                 {list?.length > 0 ? (
                     <div className="flex justify-start flex-col">
@@ -244,22 +277,28 @@ export const Drop = () => {
                                 .map((x, ix) => {
                                     return (
                                         <li
-                                            className="flex flex-row items-center gap-3"
+                                            className="flex flex-row items-center gap-3 mb-3"
                                             key={ix}
                                         >
                                             <span className="max-w-xs">
                                                 {x.name}
                                             </span>
-                                            <span className="ml-auto font-mono">
-                                                {Math.round(x.size / 1000) +
-                                                    " kb"}
-                                            </span>
-                                            {chunkMap.has(x.id) && (
-                                                <span className="font-mono">
-                                                    ({chunkMap.get(x.id).length}{" "}
-                                                    chunks)
+                                            <div className="ml-auto  flex flex-col leading-3">
+                                                <span className="font-mono text-sm">
+                                                    {Math.round(x.size / 1000) +
+                                                        " kb"}
                                                 </span>
-                                            )}
+
+                                                {chunkMap.has(x.id) && (
+                                                    <span className="font-mono text-xs">
+                                                        {
+                                                            chunkMap.get(x.id)
+                                                                .length
+                                                        }{" "}
+                                                        chunks
+                                                    </span>
+                                                )}
+                                            </div>
                                             <button
                                                 onClick={() => {
                                                     download(x);
@@ -287,6 +326,23 @@ export const Drop = () => {
                                                 >
                                                     <MdDeleteForever />
                                                 </button>
+                                            )}
+                                            {replicationSet.has(x.id) && (
+                                                <div className="relative">
+                                                    <FaSeedling
+                                                        className="text-green-400"
+                                                        size={20}
+                                                    />
+                                                    {getReplicatedChunksCount(
+                                                        x
+                                                    ) > 0 && (
+                                                        <span className="text-xs absolute bg-green-400 rounded-full p-1 leading-[10px] !text-black left-[15px] top-[-10px]">
+                                                            {getReplicatedChunksCount(
+                                                                x
+                                                            )}
+                                                        </span>
+                                                    )}
+                                                </div>
                                             )}
                                         </li>
                                     );

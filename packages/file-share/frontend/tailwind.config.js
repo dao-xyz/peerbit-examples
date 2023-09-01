@@ -11,6 +11,8 @@ export default {
             neutral: colors.neutral,
             white: colors.white,
             black: colors.black,
+            green: colors.green,
+            red: colors.red,
             slate: colors.slate,
         },
     },

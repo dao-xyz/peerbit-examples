@@ -42,6 +42,8 @@ code {
 
     .btn {
         @apply  py-2 px-4 rounded;
+        @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
+
     }
     
     .btn-icon {
@@ -121,4 +123,11 @@ code {
         @apply w-8 h-8
     }
    
+    button[disabled=disabled], button:disabled {
+        box-shadow: none !important;
+        transform: none !important;
+        cursor: default !important;
+        pointer-events:none;
+    }
+
 }

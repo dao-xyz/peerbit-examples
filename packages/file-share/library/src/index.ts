@@ -7,12 +7,12 @@ import {
     Role,
     StringMatchMethod,
     Or,
-    ByteMatchQuery,
 } from "@peerbit/document";
 import { PublicSignKey, sha256Base64Sync, randomBytes } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
+import { TrustedNetwork } from "@peerbit/trusted-network";
 
 export abstract class AbstractFile {
     abstract id: string;
@@ -241,19 +241,35 @@ export class Files extends Program<Args> {
     @field({ type: Uint8Array })
     id: Uint8Array;
 
-    @field({ type: option(PublicSignKey) })
-    rootKey?: PublicSignKey;
+    @field({ type: "string" })
+    name: string;
+
+    @field({ type: option(TrustedNetwork) })
+    trustGraph?: TrustedNetwork;
 
     @field({ type: Documents })
     files: Documents<AbstractFile>;
 
-    constructor(properties: { id?: Uint8Array; rootKey?: PublicSignKey } = {}) {
+    constructor(
+        properties: {
+            id?: Uint8Array;
+            name?: string;
+            rootKey?: PublicSignKey;
+        } = {}
+    ) {
         super();
         this.id = properties.id || randomBytes(32);
-        this.rootKey = properties.rootKey;
+        this.name = properties.name || "";
+        this.trustGraph = properties.rootKey
+            ? new TrustedNetwork({ id: this.id, rootTrust: properties.rootKey })
+            : undefined;
         this.files = new Documents({
             id: sha256Sync(
-                concat([this.id, this.rootKey?.bytes || new Uint8Array(0)])
+                concat([
+                    this.id,
+                    new TextEncoder().encode(this.name),
+                    properties.rootKey?.bytes || new Uint8Array(0),
+                ])
             ),
         });
     }
@@ -367,17 +383,25 @@ export class Files extends Program<Args> {
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
+        await this.trustGraph?.open({
+            role: args?.role,
+        });
+
         await this.files.open({
             type: AbstractFile,
             // TODO add ACL
             role: args?.role,
+            replicas: { min: 3 },
             canPerform: async (operation, context) => {
-                if (!this.rootKey) {
+                if (!this.trustGraph) {
                     return true;
                 }
-                return !!(await context.entry.getSignatures()).find((x) =>
-                    x.publicKey.equals(this.rootKey!)
-                );
+                for (const key of await context.entry.getPublicKeys()) {
+                    if (await this.trustGraph.isTrusted(key)) {
+                        return true;
+                    }
+                }
+                return false;
             },
             index: {
                 fields: (doc) => {
