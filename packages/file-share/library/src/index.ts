@@ -267,37 +267,38 @@ export class LargeFile extends AbstractFile {
                 if (!expectedIds.has(r.id)) {
                     // chunk is not part of this file
                 }
-                fetchQueue.add(async () => {
-                    let lastError: Error | undefined = undefined;
-                    for (let i = 0; i < 3; i++) {
-                        try {
-                            const chunk = await r.getFile(files, {
-                                as: "joined",
-                                timeout: properties?.timeout,
-                            });
-                            if (!chunk) {
-                                throw new Error("Failed to fetch chunk");
-                            }
-                            chunks.set(r.id, chunk);
-                            c++;
-                            properties?.progress?.(c / allChunks.length);
-                            return;
-                        } catch (error: any) {
-                            // try 3 times
+                fetchQueue
+                    .add(async () => {
+                        let lastError: Error | undefined = undefined;
+                        for (let i = 0; i < 3; i++) {
+                            try {
+                                const chunk = await r.getFile(files, {
+                                    as: "joined",
+                                    timeout: properties?.timeout,
+                                });
+                                if (!chunk) {
+                                    throw new Error("Failed to fetch chunk");
+                                }
+                                chunks.set(r.id, chunk);
+                                c++;
+                                properties?.progress?.(c / allChunks.length);
+                                return;
+                            } catch (error: any) {
+                                // try 3 times
 
-                            lastError = error;
+                                lastError = error;
+                            }
                         }
-                    }
-                });
+                        throw lastError;
+                    })
+                    .catch(() => {
+                        fetchQueue.clear(); // Dont do anything more since we failed to fetch one block
+                    });
             }
         }
         await fetchQueue.onIdle();
 
-        if (fetchError) {
-            throw fetchError;
-        }
-
-        if (chunks.size !== expectedIds.size) {
+        if (fetchError || chunks.size !== expectedIds.size) {
             throw new Error(
                 `Failed to resolve file. Recieved ${chunks.size}/${expectedIds.size} chunks`
             );
