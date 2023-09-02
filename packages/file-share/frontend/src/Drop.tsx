@@ -25,6 +25,10 @@ export const Drop = () => {
     const [chunkMap, setChunkMap] = useState<Map<string, AbstractFile[]>>(
         new Map()
     );
+
+    const [progressMap, setProgressMap] = useState<Map<string, number>>(
+        new Map()
+    );
     const [replicationSet, setReplicationSet] = useState<Set<string>>(
         new Set()
     );
@@ -32,8 +36,6 @@ export const Drop = () => {
     const [waitingForHost, setWaitingForHost] = useState<boolean>(false);
     const [role, setRole] = useState<"replicator" | "observer">("observer");
     const [replicatorCount, setReplicatorCount] = useState(0);
-
-    console.log(role);
 
     const updateSeeders = () => {
         setReplicatorCount(
@@ -60,9 +62,7 @@ export const Drop = () => {
                 !f.trustGraph ||
                 (await f.trustGraph.isTrusted(peer.identity.publicKey));
 
-            console.log("IS TRUSTED?", isTrusted);
             filesRef.current = f;
-            console.log("IS TRUSTED?", isTrusted);
 
             if (isTrusted) {
                 // by default open as replicator
@@ -80,18 +80,19 @@ export const Drop = () => {
             }
             f.files.log.events.addEventListener("join", () => {
                 updateSeeders();
+                updateList();
             });
 
+            let updateListTimeout = undefined;
             f.files.events.addEventListener("change", async () => {
-                await updateList();
+                updateListTimeout && clearTimeout(updateListTimeout);
+                updateListTimeout = setTimeout(() => {
+                    updateList();
+                }, 100);
             });
 
             await updateList();
 
-            // TODO remove
-            setTimeout(async () => {
-                await updateList();
-            }, 3000);
             return f;
         });
     }, [peer?.identity?.publicKey.hashcode()]);
@@ -122,12 +123,25 @@ export const Drop = () => {
     };
     const download = async (file: AbstractFile) => {
         console.log("FETCH FILE START");
-        const bytes = await file.getFile(filesRef.current).catch((e) => {
-            console.error(e);
-            throw e;
-        });
+        const bytes = await file
+            .getFile(filesRef.current, {
+                as: "chunks",
+                progress: (progress) => {
+                    setProgressMap(
+                        new Map([...progressMap, [file.id, progress]])
+                    );
+                },
+            })
+            .catch((e) => {
+                console.error(e);
+                throw e;
+            })
+            .finally(() => {
+                progressMap.delete(file.id);
+                setProgressMap(new Map(progressMap));
+            });
         console.log("FETCH FILE DONE");
-        var blob = new Blob([bytes]);
+        var blob = new Blob(bytes);
         console.log("DOWNLOAD FILE");
         var link = document.createElement("a");
         link.href = window.URL.createObjectURL(blob);
@@ -300,12 +314,24 @@ export const Drop = () => {
                                                 )}
                                             </div>
                                             <button
+                                                disabled={progressMap.has(x.id)}
                                                 onClick={() => {
                                                     download(x);
                                                 }}
                                                 className="flex flex-row border border-1 items-center p-2 btn btn-elevated"
                                             >
-                                                <MdDownload />
+                                                {progressMap.has(x.id) ? (
+                                                    <span className="text-xs font-mono">
+                                                        {Math.round(
+                                                            progressMap.get(
+                                                                x.id
+                                                            ) * 100
+                                                        )}
+                                                        %
+                                                    </span>
+                                                ) : (
+                                                    <MdDownload />
+                                                )}
                                             </button>
                                             {isHost && (
                                                 <button

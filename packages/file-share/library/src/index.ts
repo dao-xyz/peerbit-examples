@@ -13,13 +13,24 @@ import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
+import PQueue from "p-queue";
 
 export abstract class AbstractFile {
     abstract id: string;
     abstract name: string;
     abstract size: number;
     abstract parentId?: string;
-    abstract getFile(files: Files): Promise<Uint8Array | undefined>;
+    abstract getFile<
+        OutputType extends "chunks" | "joined" = "joined",
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+    >(
+        files: Files,
+        properties?: {
+            as: OutputType;
+            timeout?: number;
+            progress?: (progress: number) => any;
+        }
+    ): Promise<Output>;
     abstract delete(files: Files): Promise<void>;
 }
 
@@ -55,11 +66,20 @@ export class TinyFile extends AbstractFile {
         this.parentId = properties.parentId;
     }
 
-    async getFile(_files: Files) {
+    async getFile<
+        OutputType extends "chunks" | "joined" = "joined",
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+    >(
+        _files: Files,
+        properties?: { as: OutputType; progress?: (progress: number) => any }
+    ): Promise<Output> {
         if (sha256Base64Sync(this.file) !== this.id) {
             throw new Error("Hash does not match the file content");
         }
-        return Promise.resolve(this.file);
+        properties?.progress?.(1);
+        return Promise.resolve(
+            properties?.as == "chunks" ? [this.file] : this.file
+        ) as Output;
     }
 
     async delete(): Promise<void> {
@@ -114,9 +134,23 @@ export class SmallFile extends AbstractFile {
         return new SmallFile({ name, cid, size: file.byteLength, parentId });
     }
 
-    async getFile(files: Files) {
+    async getFile<
+        OutputType extends "chunks" | "joined" = "joined",
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+    >(
+        files: Files,
+        properties?: {
+            as: OutputType;
+            timeout?: number;
+            progress?: (progress: number) => any;
+        }
+    ): Promise<Output> {
         // Load the file from the block store
-        return await files.node.services.blocks.get(this.id);
+        const block = await files.node.services.blocks.get(this.id, {
+            timeout: properties?.timeout,
+        });
+        properties?.progress?.(1);
+        return (properties?.as == "chunks" ? [block] : block) as Output;
     }
 
     async delete(files: Files): Promise<void> {
@@ -177,7 +211,7 @@ export class LargeFile extends AbstractFile {
         return undefined;
     }
 
-    private async fetchChunks(files: Files) {
+    async fetchChunks(files: Files) {
         const expectedIds = new Set(this.fileIds);
         const allFiles = await files.files.index.search(
             new SearchRequest({
@@ -198,14 +232,34 @@ export class LargeFile extends AbstractFile {
         );
     }
 
-    async getFile(files: Files) {
+    async getFile<
+        OutputType extends "chunks" | "joined" = "joined",
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+    >(
+        files: Files,
+        properties?: {
+            as: OutputType;
+            timeout?: number;
+            progress?: (progress: number) => any;
+        }
+    ): Promise<Output> {
         // Get all sub files (SmallFiles) and concatinate them in the right order (the order of this.fileIds)
 
+        console.log("LISTS CHUNKS!");
         const allChunks = await this.fetchChunks(files);
+        console.log("RECEIVED CHUNKS: " + allChunks.length);
+        console.log("FETCH CHUNKS");
 
-        const chunks: Map<string, Promise<Uint8Array | undefined>> = new Map();
+        const fetchQueue = new PQueue({ concurrency: 10 });
+        let fetchError: Error | undefined = undefined;
+        fetchQueue.on("error", (err) => {
+            fetchError = err;
+        });
+
+        const chunks: Map<string, Uint8Array | undefined> = new Map();
         const expectedIds = new Set(this.fileIds);
         if (allChunks.length > 0) {
+            let c = 0;
             for (const r of allChunks) {
                 if (chunks.has(r.id)) {
                     // chunk already added;
@@ -213,14 +267,42 @@ export class LargeFile extends AbstractFile {
                 if (!expectedIds.has(r.id)) {
                     // chunk is not part of this file
                 }
+                fetchQueue.add(async () => {
+                    let lastError: Error | undefined = undefined;
+                    for (let i = 0; i < 3; i++) {
+                        try {
+                            const chunk = await r.getFile(files, {
+                                as: "joined",
+                                timeout: properties?.timeout,
+                            });
+                            if (!chunk) {
+                                throw new Error("Failed to fetch chunk");
+                            }
+                            chunks.set(r.id, chunk);
+                            c++;
+                            properties?.progress?.(c / allChunks.length);
+                            return;
+                        } catch (error: any) {
+                            // try 3 times
 
-                chunks.set(r.id, r.getFile(files));
+                            lastError = error;
+                        }
+                    }
+                });
             }
+        }
+        await fetchQueue.onIdle();
+
+        if (fetchError) {
+            throw fetchError;
         }
 
         if (chunks.size !== expectedIds.size) {
-            throw new Error("Failed to resolve file");
+            throw new Error(
+                `Failed to resolve file. Recieved ${chunks.size}/${expectedIds.size} chunks`
+            );
         }
+
         const chunkContentResolved: Uint8Array[] = await Promise.all(
             this.fileIds.map(async (x) => {
                 const chunkValue = await chunks.get(x);
@@ -230,7 +312,12 @@ export class LargeFile extends AbstractFile {
                 return chunkValue;
             })
         );
-        return concat(chunkContentResolved);
+        console.log("FETCH DONE");
+        return (
+            properties?.as == "chunks"
+                ? chunkContentResolved
+                : concat(chunkContentResolved)
+        ) as Output;
     }
 }
 
@@ -330,9 +417,13 @@ export class Files extends Program<Args> {
      * @param id
      * @returns
      */
-    async getById(
-        id: string
-    ): Promise<{ id: string; name: string; bytes: Uint8Array } | undefined> {
+    async getById<
+        OutputType extends "chunks" | "joined" = "joined",
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+    >(
+        id: string,
+        properties?: { as: OutputType }
+    ): Promise<{ id: string; name: string; bytes: Output } | undefined> {
         const results = await this.files.index.search(
             new SearchRequest({
                 query: [new StringMatch({ key: "id", value: id })],
@@ -346,9 +437,13 @@ export class Files extends Program<Args> {
         );
 
         for (const result of results) {
-            const file = await result.getFile(this);
+            const file = await result.getFile(this, properties);
             if (file) {
-                return { id: result.id, name: result.name, bytes: file };
+                return {
+                    id: result.id,
+                    name: result.name,
+                    bytes: file as Output,
+                };
             }
         }
     }
@@ -358,9 +453,13 @@ export class Files extends Program<Args> {
      * @param name
      * @returns
      */
-    async getByName(
-        name: string
-    ): Promise<{ id: string; name: string; bytes: Uint8Array } | undefined> {
+    async getByName<
+        OutputType extends "chunks" | "joined" = "joined",
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+    >(
+        name: string,
+        properties?: { as: OutputType }
+    ): Promise<{ id: string; name: string; bytes: Output } | undefined> {
         const results = await this.files.index.search(
             new SearchRequest({
                 query: [new StringMatch({ key: "name", value: name })],
@@ -374,9 +473,13 @@ export class Files extends Program<Args> {
         );
 
         for (const result of results) {
-            const file = await result.getFile(this);
+            const file = await result.getFile(this, properties);
             if (file) {
-                return { id: result.id, name: result.name, bytes: file };
+                return {
+                    id: result.id,
+                    name: result.name,
+                    bytes: file as Output,
+                };
             }
         }
     }

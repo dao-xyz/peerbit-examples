@@ -1,8 +1,8 @@
 import { Peerbit } from "peerbit";
-import { Files } from "..";
+import { Files, LargeFile } from "..";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
-import { Observer } from "@peerbit/document";
+import { Observer, SearchRequest, StringMatch } from "@peerbit/document";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -108,6 +108,48 @@ describe("index", () => {
             expect(
                 await filestoreReader.getByName("random large file")
             ).toBeUndefined();
+        });
+
+        it("rejects after retries", async () => {
+            // Peer 1 is subscribing to a replication topic (to start helping the network)
+            const filestore = await peer.open(new Files());
+
+            const largeFile = crypto.randomBytes(1e7); // 50 mb
+            await filestore.add("10mb file", largeFile);
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { role: new Observer() },
+            });
+            await filestoreReader.waitFor(peer.identity.publicKey);
+
+            const results = await filestoreReader.files.index.search(
+                new SearchRequest({
+                    query: [
+                        new StringMatch({ key: "name", value: "10mb file" }),
+                    ],
+                }),
+                {
+                    local: true,
+                    remote: {
+                        timeout: 10 * 1000,
+                    },
+                }
+            );
+            expect(results).toHaveLength(1);
+            const f0 = results[0] as LargeFile;
+            const allChunks = await f0.fetchChunks(filestoreReader);
+
+            // We do this step so we can terminate the filestore in the process when chunks are fetched
+            f0.fetchChunks = async (_) => {
+                return allChunks;
+            };
+
+            await peer.stop();
+            await expect(() =>
+                f0.getFile(filestoreReader, { timeout: 500, as: "joined" })
+            ).rejects.toThrowError(
+                "Failed to resolve file. Recieved 0/12 chunks"
+            );
         });
     });
 });
