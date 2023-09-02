@@ -12,6 +12,7 @@ import {
     MdUploadFile,
 } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
+import { File } from "./File";
 const isMobile = "ontouchstart" in window;
 
 export const Drop = () => {
@@ -26,14 +27,10 @@ export const Drop = () => {
         new Map()
     );
 
-    const [progressMap, setProgressMap] = useState<Map<string, number>>(
-        new Map()
-    );
     const [replicationSet, setReplicationSet] = useState<Set<string>>(
         new Set()
     );
     const [isHost, setIsHost] = useState<boolean>();
-    const [waitingForHost, setWaitingForHost] = useState<boolean>(false);
     const [role, setRole] = useState<"replicator" | "observer">("observer");
     const [replicatorCount, setReplicatorCount] = useState(0);
 
@@ -42,6 +39,7 @@ export const Drop = () => {
             filesRef.current.files.log.getReplicatorsSorted().length
         );
     };
+
     const updateRole = async (type: "replicator" | "observer") => {
         setRole(type);
         await filesRef.current.files.log.updateRole(
@@ -56,7 +54,7 @@ export const Drop = () => {
 
         peer.open<Files>(decodeURIComponent(params.address), {
             existing: "reuse",
-            args: { role: new Observer() },
+            args: { role: new Replicator() },
         }).then(async (f) => {
             const isTrusted =
                 !f.trustGraph ||
@@ -83,6 +81,11 @@ export const Drop = () => {
                 updateList();
             });
 
+            f.files.log.events.addEventListener("leave", () => {
+                updateSeeders();
+                updateList();
+            });
+
             let updateListTimeout = undefined;
             f.files.events.addEventListener("change", async () => {
                 updateListTimeout && clearTimeout(updateListTimeout);
@@ -90,6 +93,9 @@ export const Drop = () => {
                     updateList();
                 }, 100);
             });
+
+            /*   console.log([...peer.services.pubsub["topics"].keys()]);
+              [...peer.services.pubsub["topics"].keys()].map(x => peer.services.pubsub.requestSubscribers(x)) */
 
             await updateList();
 
@@ -121,24 +127,23 @@ export const Drop = () => {
         setReplicationSet(new Set(filesRef.current.files.index.index.keys()));
         forceUpdate();
     };
-    const download = async (file: AbstractFile) => {
+    const download = async (
+        file: AbstractFile,
+        progress: (progress: number | null) => void
+    ) => {
         console.log("FETCH FILE START");
         const bytes = await file
             .getFile(filesRef.current, {
                 as: "chunks",
-                progress: (progress) => {
-                    setProgressMap(
-                        new Map([...progressMap, [file.id, progress]])
-                    );
-                },
+                timeout: 10 * 1000,
+                progress,
             })
             .catch((e) => {
                 console.error(e);
                 throw e;
             })
             .finally(() => {
-                progressMap.delete(file.id);
-                setProgressMap(new Map(progressMap));
+                progress(null);
             });
         console.log("FETCH FILE DONE");
         var blob = new Blob(bytes);
@@ -177,10 +182,10 @@ export const Drop = () => {
         }
     }
 
-    const getReplicatedChunksCount = (file: AbstractFile) => {
+    const getReplicatedChunks = (file: AbstractFile): AbstractFile[] => {
         return [...(chunkMap.get(file.id)?.values() || [])].filter((y) =>
             replicationSet.has(y.id)
-        )?.length;
+        );
     };
 
     const addFile = async (files: FileList | File[]) => {
@@ -290,86 +295,34 @@ export const Drop = () => {
                                 .filter((x) => !x.parentId)
                                 .map((x, ix) => {
                                     return (
-                                        <li
-                                            className="flex flex-row items-center gap-3 mb-3"
-                                            key={ix}
-                                        >
-                                            <span className="max-w-xs">
-                                                {x.name}
-                                            </span>
-                                            <div className="ml-auto  flex flex-col leading-3">
-                                                <span className="font-mono text-sm">
-                                                    {Math.round(x.size / 1000) +
-                                                        " kb"}
-                                                </span>
-
-                                                {chunkMap.has(x.id) && (
-                                                    <span className="font-mono text-xs">
-                                                        {
-                                                            chunkMap.get(x.id)
-                                                                .length
-                                                        }{" "}
-                                                        chunks
-                                                    </span>
-                                                )}
-                                            </div>
-                                            <button
-                                                disabled={progressMap.has(x.id)}
-                                                onClick={() => {
-                                                    download(x);
+                                        <li key={ix}>
+                                            <File
+                                                chunks={chunkMap.get(x.id)}
+                                                isHost={isHost}
+                                                delete={() => {
+                                                    filesRef.current
+                                                        .removeById(x.id)
+                                                        .then(() => {
+                                                            updateList();
+                                                        })
+                                                        .catch((error) => {
+                                                            alert(
+                                                                "Failed to delete: " +
+                                                                    error.message
+                                                            );
+                                                        });
                                                 }}
-                                                className="flex flex-row border border-1 items-center p-2 btn btn-elevated"
-                                            >
-                                                {progressMap.has(x.id) ? (
-                                                    <span className="text-xs font-mono">
-                                                        {Math.round(
-                                                            progressMap.get(
-                                                                x.id
-                                                            ) * 100
-                                                        )}
-                                                        %
-                                                    </span>
-                                                ) : (
-                                                    <MdDownload />
+                                                download={(progress) =>
+                                                    download(x, progress)
+                                                }
+                                                file={x}
+                                                replicated={replicationSet.has(
+                                                    x.id
                                                 )}
-                                            </button>
-                                            {isHost && (
-                                                <button
-                                                    onClick={() => {
-                                                        filesRef.current
-                                                            .removeById(x.id)
-                                                            .then(() => {
-                                                                updateList();
-                                                            })
-                                                            .catch((error) => {
-                                                                alert(
-                                                                    "Failed to delete: " +
-                                                                        error.message
-                                                                );
-                                                            });
-                                                    }}
-                                                    className="flex flex-row border border-1 items-center p-2 btn btn-elevated"
-                                                >
-                                                    <MdDeleteForever />
-                                                </button>
-                                            )}
-                                            {replicationSet.has(x.id) && (
-                                                <div className="relative">
-                                                    <FaSeedling
-                                                        className="text-green-400"
-                                                        size={20}
-                                                    />
-                                                    {getReplicatedChunksCount(
-                                                        x
-                                                    ) > 0 && (
-                                                        <span className="text-xs absolute bg-green-400 rounded-full p-1 leading-[10px] !text-black left-[15px] top-[-10px]">
-                                                            {getReplicatedChunksCount(
-                                                                x
-                                                            )}
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            )}
+                                                replicatedChunks={getReplicatedChunks(
+                                                    x
+                                                )}
+                                            />
                                         </li>
                                     );
                                 })}
