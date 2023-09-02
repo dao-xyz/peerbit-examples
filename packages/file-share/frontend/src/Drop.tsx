@@ -15,6 +15,13 @@ import { FaSeedling } from "react-icons/fa";
 import { File } from "./File";
 const isMobile = "ontouchstart" in window;
 
+const saveRoleLocalStorage = (files: Files, role: string) => {
+    localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
+};
+const getRoleFromLocalStorage = (files: Files) => {
+    return localStorage.getItem(files.address + "-role"); // Save role in localstorage for next time
+};
+
 export const Drop = () => {
     const navigate = useNavigate();
 
@@ -40,10 +47,13 @@ export const Drop = () => {
         );
     };
 
-    const updateRole = async (type: "replicator" | "observer") => {
-        setRole(type);
+    const updateRole = async (newRole: "replicator" | "observer") => {
+        setRole(newRole);
+
+        saveRoleLocalStorage(filesRef.current, newRole); // Save role in localstorage for next time
+
         await filesRef.current.files.log.updateRole(
-            type === "observer" ? new Observer() : new Replicator()
+            newRole === "observer" ? new Observer() : new Replicator()
         );
         updateSeeders();
     };
@@ -54,7 +64,7 @@ export const Drop = () => {
 
         peer.open<Files>(decodeURIComponent(params.address), {
             existing: "reuse",
-            args: { role: new Replicator() },
+            args: { role: new Observer() },
         }).then(async (f) => {
             const isTrusted =
                 !f.trustGraph ||
@@ -62,7 +72,11 @@ export const Drop = () => {
 
             filesRef.current = f;
 
-            if (isTrusted) {
+            // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
+            if (
+                isTrusted ||
+                getRoleFromLocalStorage(filesRef.current) === "replicator"
+            ) {
                 // by default open as replicator
                 await updateRole("replicator");
             }
@@ -277,6 +291,7 @@ export const Drop = () => {
                                         : "observer"
                                 );
                             }}
+                            disabled={!filesRef.current}
                             pressed={role === "replicator"}
                             className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2"
                             aria-label="Toggle italic"
