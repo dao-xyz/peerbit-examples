@@ -317,7 +317,7 @@ export const Drop = () => {
                                                         .catch((error) => {
                                                             alert(
                                                                 "Failed to delete: " +
-                                                                    error.message
+                                                                error.message
                                                             );
                                                         });
                                                 }}

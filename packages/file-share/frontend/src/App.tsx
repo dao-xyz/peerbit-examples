@@ -13,6 +13,7 @@ export const App = () => {
                 network:
                     import.meta.env.MODE === "development" ? "local" : "remote",
                 host: true,
+                waitForConnnected: true,
             }}
         >
             <div className="h-screen">
