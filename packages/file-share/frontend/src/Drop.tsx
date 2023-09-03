@@ -58,7 +58,7 @@ export const Drop = () => {
 
         peer.open<Files>(decodeURIComponent(params.address), {
             existing: "reuse",
-            args: { role: new Observer() },
+            args: { role: new Observer(), sync: () => true },
         }).then(async (f) => {
             const isTrusted =
                 !f.trustGraph ||
@@ -325,9 +325,10 @@ export const Drop = () => {
                                                     download(x, progress)
                                                 }
                                                 file={x}
-                                                replicated={replicationSet.has(
-                                                    x.id
-                                                )}
+                                                replicated={
+                                                    role === "replicator" &&
+                                                    replicationSet.has(x.id)
+                                                }
                                                 replicatedChunks={getReplicatedChunks(
                                                     x
                                                 )}

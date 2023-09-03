@@ -8,6 +8,7 @@ import {
     StringMatchMethod,
     Or,
 } from "@peerbit/document";
+import { SyncFilter } from "@peerbit/shared-log";
 import { PublicSignKey, sha256Base64Sync, randomBytes } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
@@ -322,7 +323,7 @@ export class LargeFile extends AbstractFile {
     }
 }
 
-type Args = { role: Role };
+type Args = { role: Role; sync?: SyncFilter | undefined };
 
 @variant("files")
 export class Files extends Program<Args> {
@@ -495,6 +496,7 @@ export class Files extends Program<Args> {
             type: AbstractFile,
             // TODO add ACL
             role: args?.role,
+            sync: args?.sync,
             replicas: { min: 3 },
             canPerform: async (operation, context) => {
                 if (!this.trustGraph) {
