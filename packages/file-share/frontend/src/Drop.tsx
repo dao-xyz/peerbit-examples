@@ -5,15 +5,9 @@ import { Files, AbstractFile } from "@peerbit/please-lib";
 import * as Toggle from "@radix-ui/react-toggle";
 
 import { Observer, Replicator } from "@peerbit/document";
-import {
-    MdDownload,
-    MdDeleteForever,
-    MdArrowBack,
-    MdUploadFile,
-} from "react-icons/md";
+import { MdArrowBack, MdUploadFile } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
 import { File } from "./File";
-const isMobile = "ontouchstart" in window;
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
