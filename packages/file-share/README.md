@@ -1,12 +1,19 @@
 # File share app
-<img src="./demo.gif" width="600" />
-
 
 An example how one can use a Document store to store files.
+
+## Library
+In the library folder you can find all code that is handling the file data.
+
+## Frontend 
+<img src="./demo-frontend.gif" width="600" />
+
+In the frontend folder you can find a React application using the library as a dependency.
 
 
 ## CLI
 
+<img src="./demo-cli.gif" width="600" />
 
 There is a CLI application inside [./cli](./cli), that allows you to do the basic functionality.
 
