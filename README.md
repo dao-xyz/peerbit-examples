@@ -26,7 +26,10 @@
 
 
 ### [Sync files](./packages/file-share/)
-[<img src="./packages/file-share/demo.gif" width="600" />](./packages/file-share/)
+#### [React app](./packages/file-share/)
+[<img src="./packages/file-share/demo-frontend.gif" width="600" />](./packages/file-share/)
+#### [CLI](./packages/file-share/)
+[<img src="./packages/file-share/demo-cli.gif" width="600" />](./packages/file-share/)
 
 
 ### [Live video streaming](./packages/live-streaming/)
