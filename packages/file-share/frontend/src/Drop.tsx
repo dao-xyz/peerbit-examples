@@ -233,8 +233,7 @@ export const Drop = () => {
                 navigate("/");
             }}
         >
-            <MdArrowBack size={20} className="mr-2" />{" "}
-            <span>Upload your own files</span>
+            <MdArrowBack size={20} className="mr-2" /> <span>Create space</span>
         </button>
     );
 
