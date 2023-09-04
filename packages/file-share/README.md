@@ -10,6 +10,8 @@ In the library folder you can find all code that is handling the file data.
 
 In the frontend folder you can find a React application using the library as a dependency.
 
+Application is live at [files.dao.xyx](https://files.dao.xyz)
+
 
 ## CLI
 
