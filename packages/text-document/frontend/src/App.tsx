@@ -11,6 +11,7 @@ export const App = () => {
                     import.meta.env.MODE === "development" ? "local" : "remote",
                 host: true,
             }}
+            waitForConnnected={true}
         >
             <Document />
         </PeerProvider>
