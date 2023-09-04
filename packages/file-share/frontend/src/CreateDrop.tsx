@@ -44,7 +44,6 @@ export const CreateDrop = () => {
                                 return f;
                             })
                             .then((db) => {
-                                console.log("NAVIAGE", db.address);
                                 navigate(getDropAreaPath(db));
                             });
                     }}

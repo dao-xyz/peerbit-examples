@@ -146,6 +146,8 @@ export class SmallFile extends AbstractFile {
             progress?: (progress: number) => any;
         }
     ): Promise<Output> {
+        properties?.progress?.(0);
+
         // Load the file from the block store
         const block = await files.node.services.blocks.get(this.id, {
             timeout: properties?.timeout,
@@ -245,6 +247,8 @@ export class LargeFile extends AbstractFile {
         }
     ): Promise<Output> {
         // Get all sub files (SmallFiles) and concatinate them in the right order (the order of this.fileIds)
+
+        properties?.progress?.(0);
 
         console.log("LISTS CHUNKS!");
         const allChunks = await this.fetchChunks(files);

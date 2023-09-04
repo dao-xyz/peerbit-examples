@@ -8,6 +8,7 @@ import { Observer, Replicator } from "@peerbit/document";
 import { MdArrowBack, MdUploadFile } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
 import { File } from "./File";
+import { Spinner } from "./Spinner";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -34,6 +35,8 @@ export const Drop = () => {
     const [isHost, setIsHost] = useState<boolean>();
     const [role, setRole] = useState<"replicator" | "observer">("observer");
     const [replicatorCount, setReplicatorCount] = useState(0);
+    const [loading, setLoading] = useState(true);
+    const [left, setLeft] = useState(false);
 
     const updateSeeders = () => {
         setReplicatorCount(
@@ -55,60 +58,71 @@ export const Drop = () => {
         if (!peer?.identity.publicKey) {
             return;
         }
-
+        setLoading(true);
         peer.open<Files>(decodeURIComponent(params.address), {
             existing: "reuse",
             args: { role: new Observer(), sync: () => true },
-        }).then(async (f) => {
-            const isTrusted =
-                !f.trustGraph ||
-                (await f.trustGraph.isTrusted(peer.identity.publicKey));
+        })
+            .then(async (f) => {
+                const isTrusted =
+                    !f.trustGraph ||
+                    (await f.trustGraph.isTrusted(peer.identity.publicKey));
 
-            filesRef.current = f;
+                filesRef.current = f;
 
-            // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
-            if (
-                isTrusted ||
-                getRoleFromLocalStorage(filesRef.current) === "replicator"
-            ) {
-                // by default open as replicator
-                await updateRole("replicator");
-            }
+                // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
+                if (
+                    isTrusted ||
+                    getRoleFromLocalStorage(filesRef.current) === "replicator"
+                ) {
+                    // by default open as replicator
+                    await updateRole("replicator");
+                }
 
-            setIsHost(isTrusted);
-            if (!isTrusted) {
-                /*   setWaitingForHost(true);
+                setIsHost(isTrusted);
+                if (!isTrusted) {
+                    /*   setWaitingForHost(true);
                   forceUpdate();
                   await f.waitFor(f.rootKey).catch(() => {
                       alert("Host is not online");
                   });
                   setWaitingForHost(false); */
-            }
-            f.files.log.events.addEventListener("join", () => {
-                updateSeeders();
-                updateList();
-            });
-
-            f.files.log.events.addEventListener("leave", () => {
-                updateSeeders();
-                updateList();
-            });
-
-            let updateListTimeout = undefined;
-            f.files.events.addEventListener("change", async () => {
-                updateListTimeout && clearTimeout(updateListTimeout);
-                updateListTimeout = setTimeout(() => {
+                }
+                f.files.log.events.addEventListener("join", () => {
+                    updateSeeders();
                     updateList();
-                }, 100);
-            });
+                });
 
-            /*   console.log([...peer.services.pubsub["topics"].keys()]);
+                f.files.log.events.addEventListener("leave", () => {
+                    updateSeeders();
+                    updateList();
+                });
+
+                let updateListTimeout = undefined;
+                f.files.events.addEventListener("change", async () => {
+                    updateListTimeout && clearTimeout(updateListTimeout);
+                    updateListTimeout = setTimeout(() => {
+                        updateList();
+                    }, 100);
+                });
+
+                /*   console.log([...peer.services.pubsub["topics"].keys()]);
               [...peer.services.pubsub["topics"].keys()].map(x => peer.services.pubsub.requestSubscribers(x)) */
 
-            await updateList();
+                await updateList();
 
-            return f;
-        });
+                return f;
+            })
+            .catch(() => {
+                if (!left) {
+                    alert(
+                        "Failed to load space with address: " + params.address
+                    );
+                }
+            })
+            .finally(() => {
+                setLoading(false);
+            });
     }, [peer?.identity?.publicKey.hashcode()]);
 
     const updateList = async () => {
@@ -210,6 +224,20 @@ export const Drop = () => {
             };
         }
     };
+
+    const goBack = () => (
+        <button
+            className="w-fit btn btn-elevated flex flex-row items-center p-2"
+            onClick={() => {
+                setLeft(true);
+                navigate("/");
+            }}
+        >
+            <MdArrowBack size={20} className="mr-2" />{" "}
+            <span>Upload your own files</span>
+        </button>
+    );
+
     function dragOverHandler(ev) {
         if (!isHost) {
             return;
@@ -220,128 +248,150 @@ export const Drop = () => {
     }
 
     return (
-        <div
-            onDrop={dropHandler}
-            onDragOver={dragOverHandler}
-            className="flex flex-col h-[calc(100% - 40px)] items-center w-screen h-full "
-        >
-            <div className="max-w-3xl w-full flex flex-col p-4  ">
-                <div className="flex flex-row gap-4 items-center">
-                    <div className="flex flex-col ">
-                        <h1 className="text-3xl italic">
-                            {filesRef.current?.name}
-                        </h1>
-                        <span className="font-mono text-xs">
-                            Seeders:{" "}
-                            <span className="!text-green-400">
-                                {replicatorCount}
-                            </span>
-                        </span>
-                        <span className="italice text-xs ">
-                            Copy the URL to share all files
-                        </span>
-                    </div>
+        <>
+            {loading ? (
+                <div className="flex flex-col items-center justify-center content-center h-full gap-4">
+                    <div className="flex flex-row gap-4 items-center justify-center">
+                        <span className="italic">Loading</span> <Spinner />
+                    </div>{" "}
+                    {goBack()}
+                </div>
+            ) : (
+                <div
+                    onDrop={dropHandler}
+                    onDragOver={dragOverHandler}
+                    className="flex flex-col h-[calc(100% - 40px)] items-center w-screen h-full "
+                >
+                    <div className="max-w-3xl w-full flex flex-col p-4  ">
+                        <div className="flex flex-row gap-4 items-center">
+                            <div className="flex flex-col ">
+                                <h1 className="text-3xl italic">
+                                    {filesRef.current?.name}
+                                </h1>
+                                <span className="font-mono text-xs">
+                                    Seeders:{" "}
+                                    <span className="!text-green-400">
+                                        {replicatorCount}
+                                    </span>
+                                </span>
+                                <span className="italice text-xs ">
+                                    Copy the URL to share all files
+                                </span>
+                            </div>
 
-                    <div className="ml-auto flex flex-row items-end gap-2 align-items: center">
-                        {isHost && (
-                            <>
-                                <input
-                                    type="file"
-                                    id="imgupload"
-                                    className="hidden"
-                                    onChange={(e) => {
-                                        addFile(e.target?.files);
+                            <div className="ml-auto flex flex-row items-end gap-2 align-items: center">
+                                {isHost && (
+                                    <>
+                                        <input
+                                            type="file"
+                                            id="imgupload"
+                                            className="hidden"
+                                            onChange={(e) => {
+                                                addFile(e.target?.files);
+                                            }}
+                                        />
+                                        <button
+                                            className="w-fit btn btn-elevated flex flex-row items-center gap-2"
+                                            onClick={() => {
+                                                document
+                                                    .getElementById("imgupload")
+                                                    .click();
+                                            }}
+                                        >
+                                            <span className="hidden sm:block">
+                                                Upload
+                                            </span>{" "}
+                                            <MdUploadFile size={20} />
+                                        </button>
+                                    </>
+                                )}
+                                {!isHost && goBack()}
+                                <Toggle.Root
+                                    onPressedChange={(e) => {
+                                        updateRole(
+                                            role === "observer"
+                                                ? "replicator"
+                                                : "observer"
+                                        );
                                     }}
-                                />
-                                <button
-                                    className="w-fit btn btn-elevated flex flex-row items-center gap-2"
-                                    onClick={() => {
-                                        document
-                                            .getElementById("imgupload")
-                                            .click();
-                                    }}
+                                    disabled={!filesRef.current}
+                                    pressed={role === "replicator"}
+                                    className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2"
+                                    aria-label="Toggle italic"
                                 >
                                     <span className="hidden sm:block">
-                                        Upload
-                                    </span>{" "}
-                                    <MdUploadFile size={20} />
-                                </button>
-                            </>
+                                        Seed
+                                    </span>
+                                    <FaSeedling
+                                        className="text-green-400"
+                                        size={20}
+                                    />
+                                </Toggle.Root>
+                            </div>
+                        </div>
+                        <br></br>
+                        {list?.length > 0 ? (
+                            <div className="flex justify-start flex-col">
+                                <h1 className="text-xl">
+                                    Files ({list.length}):
+                                </h1>
+                                <ul>
+                                    {list
+                                        .filter((x) => !x.parentId)
+                                        .map((x, ix) => {
+                                            return (
+                                                <li key={ix}>
+                                                    <File
+                                                        chunks={chunkMap.get(
+                                                            x.id
+                                                        )}
+                                                        isHost={isHost}
+                                                        delete={() => {
+                                                            filesRef.current
+                                                                .removeById(
+                                                                    x.id
+                                                                )
+                                                                .then(() => {
+                                                                    updateList();
+                                                                })
+                                                                .catch(
+                                                                    (error) => {
+                                                                        alert(
+                                                                            "Failed to delete: " +
+                                                                                error.message
+                                                                        );
+                                                                    }
+                                                                );
+                                                        }}
+                                                        download={(progress) =>
+                                                            download(
+                                                                x,
+                                                                progress
+                                                            )
+                                                        }
+                                                        file={x}
+                                                        replicated={
+                                                            role ===
+                                                                "replicator" &&
+                                                            replicationSet.has(
+                                                                x.id
+                                                            )
+                                                        }
+                                                        replicatedChunks={getReplicatedChunks(
+                                                            x
+                                                        )}
+                                                    />
+                                                </li>
+                                            );
+                                        })}
+                                </ul>
+                            </div>
+                        ) : (
+                            <span className="italic">No files available</span>
                         )}
-                        {!isHost && (
-                            <button
-                                className="w-fit btn btn-elevated flex flex-row items-center p-2"
-                                onClick={() => navigate("/")}
-                            >
-                                <MdArrowBack size={20} className="mr-2" />{" "}
-                                <span>Upload your own files</span>
-                            </button>
-                        )}
-                        <Toggle.Root
-                            onPressedChange={(e) => {
-                                updateRole(
-                                    role === "observer"
-                                        ? "replicator"
-                                        : "observer"
-                                );
-                            }}
-                            disabled={!filesRef.current}
-                            pressed={role === "replicator"}
-                            className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2"
-                            aria-label="Toggle italic"
-                        >
-                            <span className="hidden sm:block">Seed</span>
-                            <FaSeedling className="text-green-400" size={20} />
-                        </Toggle.Root>
                     </div>
                 </div>
-                <br></br>
-                {list?.length > 0 ? (
-                    <div className="flex justify-start flex-col">
-                        <h1 className="text-xl">Files ({list.length}):</h1>
-                        <ul>
-                            {list
-                                .filter((x) => !x.parentId)
-                                .map((x, ix) => {
-                                    return (
-                                        <li key={ix}>
-                                            <File
-                                                chunks={chunkMap.get(x.id)}
-                                                isHost={isHost}
-                                                delete={() => {
-                                                    filesRef.current
-                                                        .removeById(x.id)
-                                                        .then(() => {
-                                                            updateList();
-                                                        })
-                                                        .catch((error) => {
-                                                            alert(
-                                                                "Failed to delete: " +
-                                                                error.message
-                                                            );
-                                                        });
-                                                }}
-                                                download={(progress) =>
-                                                    download(x, progress)
-                                                }
-                                                file={x}
-                                                replicated={
-                                                    role === "replicator" &&
-                                                    replicationSet.has(x.id)
-                                                }
-                                                replicatedChunks={getReplicatedChunks(
-                                                    x
-                                                )}
-                                            />
-                                        </li>
-                                    );
-                                })}
-                        </ul>
-                    </div>
-                ) : (
-                    <span className="italic">No files available</span>
-                )}
-            </div>
-        </div>
+            )}
+        </>
     );
 };
