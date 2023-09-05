@@ -150,14 +150,14 @@ export const PeerProvider = (options: PeerOptions) => {
                                           filter: filters.all,
                                       }),
                                       /*            circuitRelayTransport({ discoverRelays: 1 }),
-         webRTC(), */
+       webRTC(), */
                                   ],
                               }
                             : {
                                   transports: [
                                       webSockets({ filter: filters.wss }),
                                       /*             circuitRelayTransport({ discoverRelays: 1 }),
-          webRTC(), */
+        webRTC(), */
                                   ],
                               }),
 
@@ -166,6 +166,9 @@ export const PeerProvider = (options: PeerOptions) => {
                                 new DirectSub(c, {
                                     canRelayMessage: true,
                                     emitSelf: true,
+                                    connectionManager: {
+                                        autoDial: false,
+                                    },
                                 }),
                         },
                     },
@@ -191,7 +194,13 @@ export const PeerProvider = (options: PeerOptions) => {
                             );
                         } else {
                             // TODO fix types. When proxy client this will not be available
-                            await newPeer["bootstrap"]?.();
+                            if (nodeOptions.bootstrap) {
+                                for (const addr of nodeOptions.bootstrap) {
+                                    await newPeer.dial(addr);
+                                }
+                            } else {
+                                await newPeer["bootstrap"]?.();
+                            }
                         }
                         setConnectionState("connected");
                     } catch (err: any) {
