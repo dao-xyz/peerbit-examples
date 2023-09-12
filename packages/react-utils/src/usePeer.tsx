@@ -139,37 +139,37 @@ export const PeerProvider = (options: PeerOptions) => {
                         streamMuxers: [mplex() /* , mplex() */],
                         ...(nodeOptions.network === "local"
                             ? {
-                                  connectionGater: {
-                                      denyDialMultiaddr: () => {
-                                          // by default we refuse to dial local addresses from the browser since they
-                                          // are usually sent by remote peers broadcasting undialable multiaddrs but
-                                          // here we are explicitly connecting to a local node so do not deny dialing
-                                          // any discovered address
-                                          return false;
-                                      },
-                                  },
-                                  transports: [
-                                      // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                      webSockets({
-                                          filter: filters.all,
-                                      }),
-                                      circuitRelayTransport({
-                                          discoverRelays: 1,
-                                      }),
-                                      webRTC(),
-                                      /*            circuitRelayTransport({ discoverRelays: 1 }),
-   webRTC(), */
-                                  ],
-                              }
+                                connectionGater: {
+                                    denyDialMultiaddr: () => {
+                                        // by default we refuse to dial local addresses from the browser since they
+                                        // are usually sent by remote peers broadcasting undialable multiaddrs but
+                                        // here we are explicitly connecting to a local node so do not deny dialing
+                                        // any discovered address
+                                        return false;
+                                    },
+                                },
+                                transports: [
+                                    // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                    webSockets({
+                                        filter: filters.all,
+                                    }),
+                                    circuitRelayTransport({
+                                        discoverRelays: 1,
+                                    }),
+                                    webRTC(),
+                                    /*            circuitRelayTransport({ discoverRelays: 1 }),
+ webRTC(), */
+                                ],
+                            }
                             : {
-                                  transports: [
-                                      webSockets({ filter: filters.wss }),
-                                      circuitRelayTransport({
-                                          discoverRelays: 1,
-                                      }),
-                                      webRTC(),
-                                  ],
-                              }),
+                                transports: [
+                                    webSockets({ filter: filters.wss }),
+                                    circuitRelayTransport({
+                                        discoverRelays: 1,
+                                    }),
+                                    webRTC(),
+                                ],
+                            }),
 
                         services: {
                             pubsub: (c) =>
@@ -185,8 +185,7 @@ export const PeerProvider = (options: PeerOptions) => {
                     },
                     directory: !(nodeOptions as WithMemory).inMemory
                         ? "./repo"
-                        : undefined,
-                    limitSigning: true,
+                        : undefined
                 });
 
                 setConnectionState("connecting");
@@ -197,11 +196,11 @@ export const PeerProvider = (options: PeerOptions) => {
                         if (nodeOptions.network === "local") {
                             await newPeer.dial(
                                 "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
-                                    (await (
-                                        await fetch(
-                                            "http://localhost:8082/peer/id"
-                                        )
-                                    ).text())
+                                (await (
+                                    await fetch(
+                                        "http://localhost:8082/peer/id"
+                                    )
+                                ).text())
                             );
                         } else {
                             // TODO fix types. When proxy client this will not be available
