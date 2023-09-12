@@ -379,8 +379,7 @@ let videoHeight = () => window.innerHeight;
 let videoWidth = () => window.innerWidth;
 
 export const View = (args: DBArgs | IdentityArgs) => {
-    const [videoStream, setVideoStream] = useState<MediaStreamDBs | null>();
-
+    const videoStream = useRef<MediaStreamDBs>();
     const canvasRef = useRef<HTMLCanvasElement>();
     const lastCanvasRef = useRef<HTMLCanvasElement>();
 
@@ -407,10 +406,11 @@ export const View = (args: DBArgs | IdentityArgs) => {
             return;
         }
         if ((args as DBArgs).db) {
-            setVideoStream((args as DBArgs).db);
+            // setVideoStream((args as DBArgs).db);
         } else {
             const idArgs = args as IdentityArgs;
 
+            console.log(peer.getMultiaddrs().map((x) => x.toString()));
             if (!peer.identity.publicKey.equals(idArgs.node)) {
                 // Open the VideStream database as a viewer
                 peer.open(new MediaStreamDBs(idArgs.node), {
@@ -421,7 +421,159 @@ export const View = (args: DBArgs | IdentityArgs) => {
                     existing: "reuse",
                     // reset: true, // TODO function without reset
                 }).then((vs) => {
-                    setVideoStream(vs);
+                    videoStream.current = vs;
+                    let updateStreamChoice = async () => {
+                        const activeStreams =
+                            await videoStream.current.getLatest({
+                                remote: false,
+                                local: true,
+                            });
+                        const removedStreams =
+                            videoStreamOptions.current.filter(
+                                (x) => !activeStreams.find((y) => y.id === x.id)
+                            );
+
+                        await videoLoadingRef.current;
+                        await audioLoadingRef.current;
+
+                        let currentVideoIsRemoved = !!removedStreams.find(
+                            (x) => x.id == currentVideoRef.current?.source.id
+                        );
+
+                        /*          console.log(
+                                     uniqueResults.map((x) => x.active + "-" + x.id),
+                                     currentVideoIsRemoved,
+                                     videoStreamOptions.current.length
+                                 ); */
+
+                        let videoResults = activeStreams.filter(
+                            (x) => x.source instanceof WebcodecsStreamDB
+                        ) as Track<WebcodecsStreamDB>[];
+
+                        let audioResult = activeStreams.filter(
+                            (x) => x.source instanceof AudioStreamDB
+                        ) as Track<AudioStreamDB>[];
+
+                        /*                 console.log(
+                                            "CHANGE? ",
+                                            videoResults.length,
+                                            videoStreamOptions.current.length === 0,
+                                            currentVideoIsRemoved,
+                                            videoResults.map((x) => x.id + "/" + x.session)
+                                        );
+                         */
+                        const currentOptions = videoStreamOptions.current;
+                        videoStreamOptions.current = videoResults;
+                        if (
+                            videoResults.length > 0 &&
+                            (currentOptions.length === 0 ||
+                                currentVideoIsRemoved)
+                        ) {
+                            let wantedHeight = currentVideoIsRemoved
+                                ? currentVideoRef.current.source
+                                      .decoderDescription.codedHeight
+                                : 0;
+                            videoResults.sort(
+                                (a, b) =>
+                                    Math.abs(
+                                        a.source.decoderDescription
+                                            .codedHeight - wantedHeight
+                                    ) -
+                                    Math.abs(
+                                        b.source.decoderDescription
+                                            .codedHeight - wantedHeight
+                                    )
+                            );
+                            let streamToOpen = videoResults[0];
+                            videoHeight = () =>
+                                /*  Math.min(
+                                         (window.innerWidth /
+                                             streamToOpen.source.decoderDescription
+                                                 .codedWidth) *
+                                         streamToOpen.source.decoderDescription
+                                             .codedHeight,
+                                         window.innerHeight
+                                     ); */
+                                streamToOpen.source.decoderDescription
+                                    .codedHeight;
+                            videoWidth = () =>
+                                /*  Math.min(
+                                         (window.innerHeight /
+                                             streamToOpen.source.decoderDescription
+                                                 .codedHeight) *
+                                         streamToOpen.source.decoderDescription
+                                             .codedWidth,
+                                         window.innerWidth
+                                     ); */
+                                streamToOpen.source.decoderDescription
+                                    .codedWidth;
+
+                            setVideoSize();
+                            await updateVideoStream(streamToOpen);
+                        }
+                        setResolutionOptions(
+                            [
+                                ...videoResults.map(
+                                    (x) =>
+                                        x.source.decoderDescription.codedHeight
+                                ),
+                            ].sort() as Resolution[]
+                        );
+
+                        if (
+                            audioResult.length > 0 &&
+                            (!currentAudioRef.current ||
+                                !!removedStreams.find(
+                                    (x) =>
+                                        x.id ==
+                                        currentAudioRef.current?.source.id
+                                ))
+                        ) {
+                            await updateAudioStream(audioResult[0]);
+                        }
+
+                        videoStream.current
+                            .getReady()
+                            .then((set) =>
+                                setStreamerOnline(
+                                    set.has(
+                                        videoStream.current.sender.hashcode()
+                                    )
+                                )
+                            );
+                    };
+
+                    let updateStreamTimeout:
+                        | ReturnType<typeof setTimeout>
+                        | undefined = undefined;
+
+                    videoStream.current.streams.events.addEventListener(
+                        "change",
+                        async (_e) => {
+                            clearTimeout(updateStreamTimeout);
+                            updateStreamTimeout = setTimeout(() => {
+                                updateStreamChoice();
+                            }, 50);
+                        }
+                    );
+
+                    // Wait for streamer to be online, then query active
+                    if (videoStream.current.closed) {
+                        return;
+                    }
+
+                    videoStream.current
+                        .waitFor(videoStream.current.sender)
+                        .then(() => {
+                            updateStreamChoice();
+                            videoStream.current.getLatest({
+                                remote: { sync: true },
+                            });
+                        })
+                        .catch((e) => {
+                            console.error("Failed to find streamer");
+                            console.error(e);
+                        });
                 });
             }
         }
@@ -549,181 +701,9 @@ export const View = (args: DBArgs | IdentityArgs) => {
             currentAudioRef.current.controls.setLive();
         });
     };
-    const playbackRefCb = useCallback((node) => {
-        canvasRef.current = node as HTMLCanvasElement;
-    }, []);
 
-    useLayoutEffect(() => {
-        if (!canvasRef.current || !videoStream) {
-            return;
-        }
-        if (currentAudioRef.current) {
-            currentAudioRef.current.source?.close();
-        }
-        if (currentVideoRef.current) {
-            currentVideoRef.current.source?.close();
-        }
-
-        let setVideoSize = () =>
-            renderer.resize({ width: videoWidth(), height: videoHeight() });
-
-        let newCanvas = false;
-        newCanvas = canvasRef.current != lastCanvasRef.current;
-        lastCanvasRef.current = canvasRef.current;
-
-        if (canvasRef.current! && newCanvas) {
-            renderer.setup(canvasRef.current!);
-            /* let resizeTimer: any = undefined;
-                window.onload = window.onresize = function () {
-                    clearTimeout(resizeTimer);
-                    resizeTimer = setTimeout(() => {
-                        console.log("set size", videoHeight(), videoWidth());
-                        setVideoSize();
-                    }, 100);
-                }; */
-        }
-
-        if (peer && lastCanvasRef.current && videoStream) {
-            let updateStreamChoice = async () => {
-                const activeStreams = await videoStream.getLatest({
-                    remote: false,
-                    local: true,
-                });
-                const removedStreams = videoStreamOptions.current.filter(
-                    (x) => !activeStreams.find((y) => y.id === x.id)
-                );
-
-                await videoLoadingRef.current;
-                await audioLoadingRef.current;
-
-                let currentVideoIsRemoved = !!removedStreams.find(
-                    (x) => x.id == currentVideoRef.current?.source.id
-                );
-
-                /*          console.log(
-                             uniqueResults.map((x) => x.active + "-" + x.id),
-                             currentVideoIsRemoved,
-                             videoStreamOptions.current.length
-                         ); */
-
-                let videoResults = activeStreams.filter(
-                    (x) => x.source instanceof WebcodecsStreamDB
-                ) as Track<WebcodecsStreamDB>[];
-                let audioResult = activeStreams.filter(
-                    (x) => x.source instanceof AudioStreamDB
-                ) as Track<AudioStreamDB>[];
-
-                /*                 console.log(
-                                    "CHANGE? ",
-                                    videoResults.length,
-                                    videoStreamOptions.current.length === 0,
-                                    currentVideoIsRemoved,
-                                    videoResults.map((x) => x.id + "/" + x.session)
-                                );
-                 */
-                const currentOptions = videoStreamOptions.current;
-                videoStreamOptions.current = videoResults;
-                if (
-                    videoResults.length > 0 &&
-                    (currentOptions.length === 0 || currentVideoIsRemoved)
-                ) {
-                    let wantedHeight = currentVideoIsRemoved
-                        ? currentVideoRef.current.source.decoderDescription
-                              .codedHeight
-                        : 0;
-                    videoResults.sort(
-                        (a, b) =>
-                            Math.abs(
-                                a.source.decoderDescription.codedHeight -
-                                    wantedHeight
-                            ) -
-                            Math.abs(
-                                b.source.decoderDescription.codedHeight -
-                                    wantedHeight
-                            )
-                    );
-                    let streamToOpen = videoResults[0];
-                    videoHeight = () =>
-                        /*  Math.min(
-                                 (window.innerWidth /
-                                     streamToOpen.source.decoderDescription
-                                         .codedWidth) *
-                                 streamToOpen.source.decoderDescription
-                                     .codedHeight,
-                                 window.innerHeight
-                             ); */
-                        streamToOpen.source.decoderDescription.codedHeight;
-                    videoWidth = () =>
-                        /*  Math.min(
-                                 (window.innerHeight /
-                                     streamToOpen.source.decoderDescription
-                                         .codedHeight) *
-                                 streamToOpen.source.decoderDescription
-                                     .codedWidth,
-                                 window.innerWidth
-                             ); */
-                        streamToOpen.source.decoderDescription.codedWidth;
-
-                    setVideoSize();
-                    await updateVideoStream(streamToOpen);
-                }
-                setResolutionOptions(
-                    [
-                        ...videoResults.map(
-                            (x) => x.source.decoderDescription.codedHeight
-                        ),
-                    ].sort() as Resolution[]
-                );
-
-                if (
-                    audioResult.length > 0 &&
-                    (!currentAudioRef.current ||
-                        !!removedStreams.find(
-                            (x) => x.id == currentAudioRef.current?.source.id
-                        ))
-                ) {
-                    await updateAudioStream(audioResult[0]);
-                }
-
-                videoStream
-                    .getReady()
-                    .then((set) =>
-                        setStreamerOnline(
-                            set.has(videoStream.sender.hashcode())
-                        )
-                    );
-            };
-
-            let updateStreamTimeout: ReturnType<typeof setTimeout> | undefined =
-                undefined;
-
-            videoStream.streams.events.addEventListener(
-                "change",
-                async (_e) => {
-                    clearTimeout(updateStreamTimeout);
-                    updateStreamTimeout = setTimeout(() => {
-                        updateStreamChoice();
-                    }, 50);
-                }
-            );
-
-            // Wait for streamer to be online, then query active
-            if (videoStream.closed) {
-                return;
-            }
-
-            videoStream
-                .waitFor(videoStream.sender)
-                .then(() => {
-                    updateStreamChoice();
-                    videoStream.getLatest({ remote: { sync: true } });
-                })
-                .catch((e) => {
-                    console.error("Failed to find streamer");
-                    console.error(e);
-                });
-        }
-    }, [peer, videoStream, canvasRef.current]);
+    let setVideoSize = () =>
+        renderer.resize({ width: videoWidth(), height: videoHeight() });
 
     return (
         <Grid container direction="column">
@@ -737,11 +717,48 @@ export const View = (args: DBArgs | IdentityArgs) => {
                         <canvas
                             id="stream-playback"
                             style={{ width: "100%", height: "auto" }}
-                            ref={playbackRefCb}
+                            ref={(node) => {
+                                if (
+                                    !node ||
+                                    (canvasRef.current &&
+                                        canvasRef.current.isEqualNode(node))
+                                ) {
+                                    return;
+                                }
+                                console.log(
+                                    "NOT EQUAL",
+                                    canvasRef.current,
+                                    node
+                                );
+                                canvasRef.current = node as HTMLCanvasElement;
+                                if (currentAudioRef.current) {
+                                    currentAudioRef.current.source?.close();
+                                }
+                                if (currentVideoRef.current) {
+                                    currentVideoRef.current.source?.close();
+                                }
+
+                                let newCanvas = false;
+                                newCanvas =
+                                    canvasRef.current != lastCanvasRef.current;
+                                lastCanvasRef.current = canvasRef.current;
+
+                                if (canvasRef.current! && newCanvas) {
+                                    renderer.setup(canvasRef.current!);
+                                    /* let resizeTimer: any = undefined;
+                                        window.onload = window.onresize = function () {
+                                            clearTimeout(resizeTimer);
+                                            resizeTimer = setTimeout(() => {
+                                                console.log("set size", videoHeight(), videoWidth());
+                                                setVideoSize();
+                                            }, 100);
+                                        }; */
+                                }
+                            }}
                             width="300px"
                             height="300px"
                         />
-                        {streamerOnline && !!controls && (
+                        {streamerOnline && !!controls.current && (
                             <Controls
                                 progress={0.3}
                                 selectedResolution={selectedResolutions}

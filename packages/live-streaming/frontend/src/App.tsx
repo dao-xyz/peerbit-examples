@@ -10,6 +10,9 @@ import { PeerProvider } from "@peerbit/react";
 import blue from "@mui/material/colors/amber";
 import { inIframe } from "@peerbit/react";
 
+/* import { logger, enable } from "@libp2p/logger";
+enable("libp2p:*"); */
+
 let theme = createTheme({
     palette: {
         mode: "dark",
