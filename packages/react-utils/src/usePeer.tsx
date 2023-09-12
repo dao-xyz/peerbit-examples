@@ -5,6 +5,8 @@ import { webSockets } from "@libp2p/websockets";
 import { DirectSub } from "@peerbit/pubsub";
 
 import { mplex } from "@libp2p/mplex";
+import { yamux } from "@chainsafe/libp2p-yamux";
+
 import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { v4 as uuid } from "uuid";
@@ -15,6 +17,9 @@ import * as filters from "@libp2p/websockets/filters";
 import { useMount } from "./useMount.js";
 import { createClient, createHost } from "@peerbit/proxy-window";
 import { ProgramClient } from "@peerbit/program";
+import { circuitRelayTransport } from "libp2p/circuit-relay";
+import { webRTC } from "@libp2p/webrtc";
+import { identifyService } from "libp2p/identify";
 
 export type ConnectionStatus =
     | "disconnected"
@@ -122,9 +127,7 @@ export const PeerProvider = (options: PeerOptions) => {
                 newPeer = await Peerbit.create({
                     libp2p: {
                         addresses: {
-                            listen: [
-                                /*    '/webrtc' */
-                            ],
+                            listen: ["/webrtc"],
                         },
                         connectionEncryption: [noise()],
                         peerId: await nodeId.toPeerId(), //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
@@ -132,7 +135,8 @@ export const PeerProvider = (options: PeerOptions) => {
                             maxConnections: 100,
                             minConnections: 0,
                         },
-                        streamMuxers: [mplex()],
+
+                        streamMuxers: [mplex() /* , mplex() */],
                         ...(nodeOptions.network === "local"
                             ? {
                                   connectionGater: {
@@ -149,15 +153,21 @@ export const PeerProvider = (options: PeerOptions) => {
                                       webSockets({
                                           filter: filters.all,
                                       }),
+                                      circuitRelayTransport({
+                                          discoverRelays: 1,
+                                      }),
+                                      webRTC(),
                                       /*            circuitRelayTransport({ discoverRelays: 1 }),
-       webRTC(), */
+   webRTC(), */
                                   ],
                               }
                             : {
                                   transports: [
                                       webSockets({ filter: filters.wss }),
-                                      /*             circuitRelayTransport({ discoverRelays: 1 }),
-        webRTC(), */
+                                      circuitRelayTransport({
+                                          discoverRelays: 1,
+                                      }),
+                                      webRTC(),
                                   ],
                               }),
 
@@ -166,10 +176,11 @@ export const PeerProvider = (options: PeerOptions) => {
                                 new DirectSub(c, {
                                     canRelayMessage: true,
                                     emitSelf: true,
-                                    connectionManager: {
-                                        autoDial: false,
-                                    },
+                                    /*  connectionManager: {
+                                         autoDial: false,
+                                     }, */
                                 }),
+                            identify: identifyService(),
                         },
                     },
                     directory: !(nodeOptions as WithMemory).inMemory
@@ -219,7 +230,7 @@ export const PeerProvider = (options: PeerOptions) => {
 
                 // Make sure data flow as expected between tabs and windows locally (offline states)
 
-                if (nodeOptions.waitForConnnected) {
+                if (nodeOptions.waitForConnnected !== false) {
                     await promise;
                 }
             } else {
