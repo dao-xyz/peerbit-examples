@@ -7,6 +7,9 @@ import {
     MdSave,
 } from "react-icons/md";
 import { AppSelect } from "./AppSelect";
+import { RoomContent } from "@dao-xyz/social";
+import { RoomPreview } from "./RoomPreview";
+import { useNavigate } from "react-router-dom";
 
 export const Frame = (properties: {
     pending: boolean;
@@ -19,6 +22,17 @@ export const Frame = (properties: {
     onLoad: (event: React.SyntheticEvent<HTMLIFrameElement, Event>) => void;
     delete(): void;
 }) => {
+    const navigate = useNavigate();
+
+    const open = () => {
+        const url = (properties.element.content as IFrameContent).src;
+        if (new URL(url).host === window.location.host) {
+            // navigate!
+            navigate(new URL(url).hash.substring(2)); // #/path, remove hash symbol
+        } else {
+            properties.setActive(true);
+        }
+    };
     return (
         <div
             onBlur={() => {
@@ -117,9 +131,7 @@ export const Frame = (properties: {
                             )}
                             <button
                                 className="w-6/12 h-full flex justify-center items-center btn"
-                                onClick={() => {
-                                    properties.setActive(true);
-                                }}
+                                onClick={open}
                             >
                                 <span className="mr-2 text-xl">Open</span>{" "}
                                 <MdOpenInBrowser size={30} />
@@ -146,7 +158,9 @@ export const Frame = (properties: {
                         allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
                     ></iframe>
                 ) : (
-                    <>UNSUPPORTED {typeof properties.element.content}</>
+                    <RoomPreview
+                        room={(properties.element.content as RoomContent).room}
+                    ></RoomPreview>
                 )}
             </div>
         </div>

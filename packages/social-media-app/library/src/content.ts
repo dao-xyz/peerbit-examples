@@ -83,8 +83,8 @@ export class Room extends Program {
     @field({ type: Documents<Element> })
     elements: Documents<Element>;
 
-    @field({ type: PublicSignKey })
-    key: PublicSignKey;
+    @field({ type: option(PublicSignKey) })
+    key?: PublicSignKey;
 
     @field({ type: "string" })
     name: string;
@@ -106,7 +106,7 @@ export class Room extends Program {
             concat([
                 new TextEncoder().encode("room"),
                 new TextEncoder().encode(this.name),
-                this.key.bytes,
+                this.key?.bytes || [],
                 properties["parentId"] || properties["seed"],
             ])
         );
@@ -138,9 +138,10 @@ export class Room extends Program {
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
                  */
                 return (
+                    !this.key ||
                     entry.signatures.find(
                         (x) =>
-                            x.publicKey.equals(this.key) ||
+                            x.publicKey.equals(this.key!) ||
                             x.publicKey.equals(this.node.identity.publicKey)
                     ) != null
                 );
@@ -160,14 +161,24 @@ export class Room extends Program {
     async getCreateRoomByPath(path: string[]): Promise<Room[]> {
         const results = await this.findRoomsByPath(path);
         let rooms = results.rooms;
+
         if (path.length !== results.path.length) {
+            if (results.rooms?.length > 1) {
+                throw new Error("More than 1 room to choose from");
+            }
             let room = results.rooms[0] || this;
+
+            if (room.closed) {
+                room = await this.node.open(room, { existing: "reuse" });
+            }
+
             for (let i = results.path.length; i < path.length; i++) {
                 const newRoom = new Room({
                     parentId: this.id,
                     rootTrust: this.node.identity.publicKey,
                     name: path[i],
                 });
+
                 await room.elements.put(
                     new Element<RoomContent>({
                         location: [],
@@ -191,6 +202,7 @@ export class Room extends Program {
             const newRooms: Room[] = [];
             for (let parent of rooms) {
                 if (parent.closed) {
+                    console.log("OPEN PARENT", parent.name);
                     parent = await this.node.open(parent, {
                         existing: "reuse",
                     });
@@ -229,6 +241,8 @@ export class Room extends Program {
                 ],
             })
         );
+        console.log("FIND ROOMS BY NAME", name, results);
+
         return results as Element<RoomContent>[];
     }
 }

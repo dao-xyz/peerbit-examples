@@ -10,7 +10,10 @@ import {
 import { Room } from "@dao-xyz/social";
 import { useState } from "react";
 
-export const RoomPreview = (props: { room: Room; onDelete?: () => void }) => {
+export const RoomPreviewOld = (props: {
+    room: Room;
+    onDelete?: () => void;
+}) => {
     const { peer } = usePeer();
     const [contextMenu, setContextMenu] = useState<{
         mouseX: number;

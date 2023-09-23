@@ -39,20 +39,12 @@ export const Path = () => {
             tagifyRef.current.removeAllTags({ withoutChangeEvent: true });
     };
 
-    const onChange = (e) => {
-        console.log(
-            "CHANGE!",
-            e,
-            tagifyInitializedAtPath.current,
-            location.pathname,
-            tagifyInitializedAtPath.current === location.pathname,
-            tagifyRef.current.value
-        );
+    const onChange = () => {
+        if (!tagifyRef.current) {
+            return;
+        }
 
-        /*    if (tagifyInitializedAtPath.current !== location.pathname) {
-               return
-           } */
-        const path = getRoomPathFromURL(location.pathname);
+        const path = getRoomPathFromURL();
         const newPath = tagifyRef.current.value.map((x) => x.value);
 
         let eq = newPath.length === path.length;
@@ -64,18 +56,25 @@ export const Path = () => {
                 }
             }
         }
-        console.log("NEW PATH?", !eq, path, newPath);
-
         if (!eq) {
+            console.log(
+                "NAVIGATE TO NEW PATH",
+                newPath,
+                getRoomByPath(newPath)
+            );
             navigate(getRoomByPath(newPath), {});
         }
     };
 
     useEffect(() => {
         function handleClickOutside(event) {
+            // If not clicking inside the tag input and not clicking on some of the tags, set focus to false
             if (
                 tagifyRef.current &&
-                !tagifyRef.current.DOM.input.contains(event.target)
+                !tagifyRef.current.DOM.input.contains(event.target) &&
+                !tagifyRef.current
+                    .getTagElms()
+                    .find((x) => x.contains(event.target))
             ) {
                 setFocus(false);
             }
@@ -89,21 +88,15 @@ export const Path = () => {
     }, []);
 
     useEffect(() => {
-        setTags(getRoomPathFromURL(location.pathname));
-    }, [location?.pathname]);
+        console.log("UPDATE TAGS FROM URL .----  ", getRoomPathFromURL());
+        setTags(getRoomPathFromURL());
+    }, [location]);
 
     useEffect(() => {
         if (tagifyRef.current) {
-            console.log(
-                "SET TAGS INITIALLITY",
-                getRoomPathFromURL(location.pathname)
-            );
             tagifyRef.current.removeAllTags({ withoutChangeEvent: true });
-            tagifyRef.current.addTags(
-                getRoomPathFromURL(location.pathname),
-                true
-            );
-            tagifyInitializedAtPath.current = location.pathname;
+            tagifyRef.current.addTags(getRoomPathFromURL(), true);
+            tagifyInitializedAtPath.current = window.location.hash;
             tagifyRef.current.DOM.input.focus();
             forceUpdate();
         }
@@ -166,6 +159,8 @@ export const Path = () => {
                     }}
                     defaultValue=""
                     autoFocus={true}
+                    // this function can never change and can not depend on global states such as location.pathname
+                    // so we just update a state here and useEffect later to do proper change effects
                     onChange={onChange}
                     onInput={(e) => {
                         const currentText: string =
@@ -185,11 +180,13 @@ export const Path = () => {
             ) : (
                 <button
                     className="tagify  btn w-full leading-normal  p-1 pl-4 pr-4 flex flex-row cursor-pointer"
+                    disabled={focus}
                     onClick={() => {
                         setFocus(true);
                     }}
                 >
                     <span>{(tags || []).join("/") || "/"}</span>
+                    {focus && <>FOCUS</>}
                     <MdSearch className="ml-auto" size={20} />
                 </button>
             )}

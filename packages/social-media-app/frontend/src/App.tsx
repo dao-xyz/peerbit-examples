@@ -7,7 +7,8 @@ import { HashRouter } from "react-router-dom";
 import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
 import { AppProvider } from "./useApps";
-
+/* import { logger, enable } from "@libp2p/logger";
+enable("libp2p:*"); */
 /* 
  "&::-webkit-scrollbar, & *::-webkit-scrollbar": {
     backgroundColor: "#2b2b2b",
@@ -82,6 +83,8 @@ const setTheme = () => {
 };
 console.log(keypair.publicKey.toString());
 const HEIGHT = 50;
+import { inIframe } from "@peerbit/react";
+
 export const App = () => {
     setTheme();
     return (
@@ -90,7 +93,14 @@ export const App = () => {
                 import.meta.env.MODE === "development" ? "local" : "remote"
             }
             keypair={keypair}
-            host={true}
+            top={{
+                type: "node",
+                network:
+                    import.meta.env.MODE === "development" ? "local" : "remote",
+                host: true,
+            }}
+            iframe={{ type: "proxy", targetOrigin: "*" }}
+            waitForConnnected={true}
             inMemory={false}
         >
             <NameProvider>
@@ -98,8 +108,7 @@ export const App = () => {
                     <AppProvider>
                         <RoomProvider>
                             <>
-                                <Header></Header>
-
+                                {!inIframe() && <Header></Header>}
                                 <div
                                     /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
                                     /*  */

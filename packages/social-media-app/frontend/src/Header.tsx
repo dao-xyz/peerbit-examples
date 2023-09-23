@@ -4,6 +4,7 @@ import { MdSave, MdEdit } from "react-icons/md";
 import { Path } from "./room/Path";
 import { MdOutlineDarkMode, MdOutlineLightMode } from "react-icons/md";
 import { PiUserCircleThin } from "react-icons/pi";
+import Logo from "/android-chrome-192x192.png";
 
 export const Header = forwardRef((props: any, ref) => {
     const [theme, setTheme] = useState<"dark" | "light">(localStorage.theme);
@@ -48,13 +49,17 @@ export const Header = forwardRef((props: any, ref) => {
     };
 
     return (
-        <div ref={ref as any} className="flex flex-row w-full p-2 items-center">
-            <span className="icon leading-[10px] ml-2 mr-2 text-neutral-500 dark:text-neutral-400 font-[monospace]">
+        <div
+            ref={ref as any}
+            className="flex flex-row w-full p-2  items-center max-h-[50px]"
+        >
+            {/* <span className="icon leading-[10px] ml-2 mr-2 text-neutral-500 dark:text-neutral-400 font-[monospace]">
                 DAO
                 <br />
                 XYZ
-            </span>
-            <div className="ml-2 mr-2 flex-1">
+            </span> */}
+            {/* <img src={Logo} width="20px" /> */}
+            <div className="ml-auto mr-auto max-w-xl flex-1 max-h-[40px] overflow-visible">
                 <Path></Path>
             </div>
             <button

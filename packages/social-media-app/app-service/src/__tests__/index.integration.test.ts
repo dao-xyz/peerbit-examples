@@ -1,12 +1,12 @@
-import { LSession } from "@peerbit/test-utils";
+import { TestSession } from "@peerbit/test-utils";
 import { AppPreview } from "..";
 import { Peerbit } from "peerbit";
 import { delay } from "@peerbit/time";
 describe("index", () => {
-    let session: LSession;
+    let session: TestSession;
 
     beforeEach(async () => {
-        session = await LSession.connected(2);
+        session = await TestSession.connected(2);
     });
     let browser: any;
     afterEach(async () => {

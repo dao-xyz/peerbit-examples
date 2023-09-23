@@ -1,12 +1,12 @@
-import { LSession } from "@peerbit/test-utils";
+import { TestSession } from "@peerbit/test-utils";
 import { BrowsingHistory } from "../user.js";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 
 describe("user", () => {
-    let session: LSession;
+    let session: TestSession;
 
     beforeEach(async () => {
-        session = await LSession.connected(1);
+        session = await TestSession.connected(1);
     });
 
     afterEach(async () => {

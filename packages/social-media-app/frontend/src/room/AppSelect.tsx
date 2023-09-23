@@ -8,7 +8,7 @@ import { AiOutlineQuestionCircle } from "react-icons/ai";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 
 const unknownApp = (url: string) => {
-    return { url } as SimpleWebManifest;
+    return new SimpleWebManifest({ url });
 };
 
 export const AppSelect = (properties: {
@@ -36,6 +36,7 @@ export const AppSelect = (properties: {
                 }
             }
         }
+        console.log("FILTERED OUTU", out);
         filteredAppsRef.current = out;
         forceUpdate();
     };
@@ -180,7 +181,7 @@ export const AppSelect = (properties: {
                                         "bg-primary-600; dark: bg-primary-200"
                                     }`
                                 }
-                                value={selected}
+                                value={unknownApp(query)}
                             >
                                 {query}
                             </Combobox.Option>

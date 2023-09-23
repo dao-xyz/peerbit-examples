@@ -1,14 +1,14 @@
-import { LSession } from "@peerbit/test-utils";
+import { TestSession } from "@peerbit/test-utils";
 import { Room, RoomContent } from "../content.js";
 import { SearchRequest } from "@peerbit/document";
 import { Peerbit } from "peerbit";
 
 describe("content", () => {
     describe("room", () => {
-        let session: LSession;
+        let session: TestSession;
 
         beforeEach(async () => {
-            session = await LSession.connected(2);
+            session = await TestSession.connected(2);
         });
 
         afterEach(async () => {
