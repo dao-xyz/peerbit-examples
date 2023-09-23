@@ -1,17 +1,5 @@
 {
-    "packages": [
-        "packages/react-utils",
-        "packages/many-chat-rooms/*",
-        "packages/file-share/*",
-        "packages/text-document/*",
-        "packages/live-streming/*",
-        "packages/live-streaming-canvas/*",
-        "packages/name-service/*",
-        "packages/social-media-app/*",
-        "packages/one-chat-room/*",
-        "packages/collaborative-learning/*"
-    ],
+    "packages": ["packages/**/*"],
     "version": "independent",
-    "npmClient": "yarn",
-    "useWorkspaces": true
+    "npmClient": "yarn"
 }

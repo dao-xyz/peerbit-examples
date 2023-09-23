@@ -1,6 +1,6 @@
 {
-    "name": "@peerbit/react",
-    "version": "0.0.4",
+    "name": "@dao-xyz/app-sdk",
+    "version": "0.0.1",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
@@ -49,8 +49,7 @@
     "scripts": {
         "clean": "shx rm -rf lib/*",
         "build": "yarn clean && tsc -p tsconfig.json",
-        "test": "jest",
-        "postbuild": "echo '{\"type\":\"module\"} ' | node ../../node_modules/.bin/json > lib/esm/package.json"
+        "test": "jest"
     },
     "eslintConfig": {
         "extends": [
