@@ -140,7 +140,7 @@ export const Room = () => {
                         entries.forEach(({ post, entry }) => {
                             wallTimes.set(
                                 post.id,
-                                entry.metadata.clock.timestamp.wallTime
+                                entry.meta.clock.timestamp.wallTime
                             );
                         });
                     });
@@ -186,12 +186,11 @@ export const Room = () => {
                     keypair: await X25519Keypair.from(
                         await peer.keychain.exportByKey(peer.identity.publicKey)
                     ),
-                    reciever: {
+                    receiver: {
                         payload: receivers.map((r) =>
                             identitiesInChatMap.get(r)
                         ),
-                        metadata: [],
-                        next: [],
+                        meta: [],
                         signatures: [],
                     },
                 },
