@@ -158,7 +158,7 @@ export const PeerProvider = (options: PeerOptions) => {
                                       }),
                                       webRTC(),
                                       /*            circuitRelayTransport({ discoverRelays: 1 }),
- webRTC(), */
+webRTC(), */
                                   ],
                               }
                             : {
