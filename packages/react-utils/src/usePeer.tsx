@@ -20,6 +20,7 @@ import { ProgramClient } from "@peerbit/program";
 import { circuitRelayTransport } from "libp2p/circuit-relay";
 import { webRTC } from "@libp2p/webrtc";
 import { identifyService } from "libp2p/identify";
+import { detectIncognito } from "detectincognitojs";
 
 export type ConnectionStatus =
     | "disconnected"
@@ -39,7 +40,6 @@ if (!window.name) {
 
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
-
 type IFrameOptions = {
     type: "proxy";
     targetOrigin: string;
@@ -183,9 +183,13 @@ webRTC(), */
                             identify: identifyService(),
                         },
                     },
-                    directory: !(nodeOptions as WithMemory).inMemory
-                        ? "./repo"
-                        : undefined,
+                    directory:
+                        !(nodeOptions as WithMemory).inMemory &&
+                        !(
+                            await detectIncognito()
+                        ).isPrivate
+                            ? "./repo"
+                            : undefined,
                 });
 
                 setConnectionState("connecting");

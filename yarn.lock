@@ -5370,6 +5370,11 @@ detect-newline@^3.0.0:
   resolved "https://registry.yarnpkg.com/detect-newline/-/detect-newline-3.1.0.tgz#576f5dfc63ae1a192ff192d8ad3af6308991b651"
   integrity sha512-TLz+x/vEXm/Y7P7wn1EJFNLxYpUD4TgMosxY6fAVJUnJMbupHBOncxyWUG9OpTaH9EBD7uFI5LfEgmMOc54DsA==
 
+detectincognitojs@^1.3.0:
+  version "1.3.0"
+  resolved "https://registry.yarnpkg.com/detectincognitojs/-/detectincognitojs-1.3.0.tgz#6a1338f395c03e06f59e3cf42453e95c96980531"
+  integrity sha512-/uAMG+6Ipa8izluYQ45HqARjeYgtJLLBvpAiX1Zd3zWJ1MhEne6FDSjkkLaC3pdNeHfT3qhpvFRqB6dwLbdnng==
+
 didyoumean@^1.2.2:
   version "1.2.2"
   resolved "https://registry.yarnpkg.com/didyoumean/-/didyoumean-1.2.2.tgz#989346ffe9e839b4555ecf5666edea0d3e8ad037"
