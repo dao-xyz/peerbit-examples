@@ -1,5 +1,9 @@
 import { PeerProvider, usePeer } from "@peerbit/react";
-import { Document } from "./Document";
+import { Routes, Route } from "react-router";
+import { Document } from './Document.js';
+import { NewDocument } from './NewDocument';
+import { HashRouter } from "react-router-dom";
+
 
 export const App = () => {
     return (
@@ -13,7 +17,14 @@ export const App = () => {
             }}
             waitForConnnected={true}
         >
-            <Document />
+            <HashRouter basename="/">
+
+                <Routes>
+                    {/* <Route path={USER_BY_KEY_NAME} element={<Canvas />} /> */}
+                    <Route path="/d/:address" element={<Document />} />
+                    <Route path="/*" element={<NewDocument />} />
+                </Routes>
+            </HashRouter>
         </PeerProvider>
     );
 };

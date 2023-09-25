@@ -18,7 +18,6 @@
         "@dao-xyz/social": "^0.0.2",
         "react-grid-layout-next": "^2.2.0",
         "@peerbit/peer-names": "^0.0.1",
-        "iframe-resizer": "^4.3.4",
         "peerbit": "^2",
         "@peerbit/react": "*",
         "react": "^18.2.0",

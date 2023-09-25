@@ -1,7 +1,6 @@
 import { IFrameContent, Element } from "@dao-xyz/social";
 import {
     MdClear,
-    MdOpenWith,
     MdAddReaction,
     MdOpenInBrowser,
     MdSave,
@@ -10,7 +9,6 @@ import { AppSelect } from "./AppSelect";
 import { useNavigate } from "react-router-dom";
 import { useNames } from "../names/useNames";
 import { useEffect, useState } from "react";
-import iFrameResize from "iframe-resizer";
 import { AppHost } from '@dao-xyz/app-sdk'
 
 export const Frame = (properties: {
@@ -26,9 +24,23 @@ export const Frame = (properties: {
     onLoad?: (event: React.SyntheticEvent<HTMLIFrameElement, Event>) => void;
     delete(): void;
 }) => {
+
     const navigate = useNavigate();
     const { names } = useNames()
     const [author, setAuthor] = useState<string | undefined>(undefined);
+    const [src, setSrc] = useState<string | undefined>(undefined);
+
+    useEffect(() => {
+
+        if (!properties.element.content || properties.element.content.history.closed) {
+            return
+        }
+        const iframeContent = properties.element.content as IFrameContent;
+        iframeContent.getLatest().then((url) => {
+            console.log("SRC!", url)
+            setSrc(url)
+        })
+    }, [properties.element.content?.history.closed || properties.element.content?.history.address])
 
     useEffect(() => {
         if (properties.element.publicKey) {
@@ -44,8 +56,8 @@ export const Frame = (properties: {
 
     }, [properties.element?.publicKey?.hashcode()])
 
-    const open = () => {
-        const url = (properties.element.content as IFrameContent).src;
+    const open = async () => {
+        const url = await (properties.element.content as IFrameContent).getLatest();
         if (new URL(url).host === window.location.host) {
             // navigate!
             navigate(new URL(url).hash.substring(2)); // #/path, remove hash symbol
@@ -183,7 +195,13 @@ export const Frame = (properties: {
                         <iframe
                             onLoad={(event) => {
                                 const host = new AppHost({
-                                    iframe: event.target as any, onNavigate: () => { }, onResize: (e) => {
+                                    iframe: event.target as any, onNavigate: () => {
+                                        // the iframe has navigated to some meaningful path for state
+                                        // update the element for this
+
+
+                                    },
+                                    onResize: (e) => {
                                         console.log("GOT RESIZE MESSAGE", e.data.height, e.data.width)
                                         event.target["style"].height = e.data.height + "px"
                                     }
@@ -216,7 +234,7 @@ export const Frame = (properties: {
                                 height: "100%",
                                 border: 0,
                             }}
-                            src={properties.element.content.src}
+                            src={src}
                             allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
                         ></iframe>
                     ) : (

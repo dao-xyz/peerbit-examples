@@ -16,9 +16,9 @@ const addressOrUndefined = <
     }
 };
 
-export const useProgram = <A, B extends ProgramEvents, P extends Program<A, B>>(
+export const useProgram = <P extends Program<Args, Events>, Args = any, Events extends ProgramEvents = ProgramEvents>(
     addressOrOpen: P | string,
-    options?: OpenOptions<A, P>
+    options?: OpenOptions<Args, P>
 ) => {
     const { peer } = usePeer();
     let [program, setProgram] = useState<P | undefined>();

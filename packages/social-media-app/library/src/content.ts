@@ -2,12 +2,13 @@ import { field, variant, fixedArray, vec, option, getSchema } from "@dao-xyz/bor
 import {
     Documents,
     SearchRequest,
+    Sort,
+    SortDirection,
     StringMatch,
     StringMatchMethod,
 } from "@peerbit/document";
-import { PublicSignKey, randomBytes } from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
-import { sha256Sync } from "@peerbit/crypto";
+import { PublicSignKey, sha256Sync, randomBytes } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
 /* 
@@ -98,7 +99,7 @@ export abstract class View extends Program {
                         publicKey: (await (
                             await this.elements.log.log.get(context.head)
                         )?.getPublicKeys())![0].bytes,
-                        content: obj.content.toIndex(),
+                        content: await obj.content.toIndex(),
                     };
                 },
             },
@@ -180,119 +181,67 @@ export class Replies {
             },
         });
     }
-
-
-    /* async getCreateRoomByPath(path: string[]): Promise<Room[]> {
-        const results = await this.findRoomsByPath(path);
-        let rooms = results.rooms;
-
-        if (path.length !== results.path.length) {
-            if (results.rooms?.length > 1) {
-                throw new Error("More than 1 room to choose from");
-            }
-            let room = results.rooms[0] || this;
-
-            if (room.closed) {
-                room = await this.node.open(room, { existing: "reuse" });
-            }
-
-            for (let i = results.path.length; i < path.length; i++) {
-                const newRoom = new Room({
-                    parentId: this.id,
-                    rootTrust: this.node.identity.publicKey,
-                    name: path[i],
-                });
-
-                await room.elements.put(
-                    new Element<RoomContent>({
-                        publicKey: this.node.identity.publicKey,
-                        content: new RoomContent({ room: newRoom }),
-                    })
-                );
-                room = await this.node.open(newRoom, { existing: "reuse" });
-            }
-            rooms = [room];
-        }
-        return rooms;
-    }
- */
-    /* async findRoomsByPath(
-        path: string[]
-    ): Promise<{ path: string[]; rooms: Room[] }> {
-        let rooms: Room[] = [this];
-        const visitedPath: string[] = [];
-        for (const name of path) {
-            const newRooms: Room[] = [];
-            for (let parent of rooms) {
-                if (parent.closed) {
-                    console.log("OPEN PARENT", parent.name);
-                    parent = await this.node.open(parent, {
-                        existing: "reuse",
-                    });
-                }
-
-                newRooms.push(
-                    ...(await parent.findRoomsByName(name)).map(
-                        (x) => x.content.room
-                    )
-                );
-            }
-            if (newRooms.length > 0) {
-                visitedPath.push(name);
-                rooms = newRooms;
-            } else {
-                break;
-            }
-        }
-        return { path: visitedPath, rooms };
-    }
-
-    async findRoomsByName(name: string): Promise<Element<RoomContent>[]> {
-        const results = await this.elements.index.search(
-            new SearchRequest({
-                query: [
-                    new StringMatch({
-                        key: ["content", "type"],
-                        value: "room",
-                    }),
-                    new StringMatch({
-                        key: ["content", "name"],
-                        value: name,
-                        caseInsensitive: true,
-                        method: StringMatchMethod.exact,
-                    }),
-                ],
-            })
-        );
-        console.log("FIND ROOMS BY NAME", name, results);
-
-        return results as Element<RoomContent>[];
-    } */
 }
 
 export abstract class ElementContent {
     abstract toIndex(): Record<string, any>;
+    abstract open(properties: { publicKey?: PublicSignKey }): Promise<void>
 }
 
+@variant(0)
+export class Navigation {
 
+    @field({ type: fixedArray('u8', 32) })
+    id: Uint8Array
+
+    @field({ type: 'string' })
+    url: string
+
+    constructor(url: string) {
+        this.id = randomBytes(32);
+        this.url = url;
+    }
+}
 
 @variant(0)
 export class IFrameContent extends ElementContent {
-    @field({ type: "string" })
-    src: string; // https://a.cool.thing.com/abc123
+
+    @field({ type: Documents<Navigation> })
+    history: Documents<Navigation>; // https://a.cool.thing.com/abc123
 
 
 
-    constructor(properties: { src: string; }) {
+    constructor() {
         super();
-        this.src = properties.src;
+        this.history = new Documents()
     }
 
-    toIndex(): Record<string, any> {
+    async open(properties: { publicKey: PublicSignKey }) {
+        this.history.open({
+            type: Navigation,
+            canPerform: (operation, ctx) => {
+                return !properties.publicKey || !!ctx.entry.publicKeys.find(x => x.equals(properties.publicKey))
+            },
+            index: {
+                fields: (obj, ctx) => {
+                    return {
+                        url: obj.url,
+                        timestamp: ctx.modified
+                    }
+                }
+            }
+        })
+    }
+
+    async toIndex(): Promise<Record<string, any>> {
         return {
             type: "app",
-            src: this.src,
+            src: this.getLatest(),
         };
+    }
+
+    async getLatest(): Promise<string | undefined> {
+        return (await this.history.index.search(new SearchRequest({ sort: new Sort({ key: ['timestamp'], direction: SortDirection.DESC }) })))[0]?.url
     }
 }
 
@@ -333,6 +282,7 @@ export class Element<T extends ElementContent = any> extends Program {
     }
 
     async open() {
+        await this.content?.open({ publicKey: this.publicKey })
         await this.replies.open({ publicKey: this.publicKey })
     }
 

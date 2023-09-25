@@ -1,10 +1,10 @@
 import { TestSession } from "@peerbit/test-utils";
-import { Element, IFrameContent, Replies } from "../content.js";
+import { Element, IFrameContent, Replies, Navigation } from "../content.js";
 import { SearchRequest } from "@peerbit/document";
 import { Peerbit } from "peerbit";
 import { ChatView } from "../chat.js";
 import { waitForResolved } from '@peerbit/time'
-
+import { delay } from '@peerbit/time'
 describe("content", () => {
     describe("room", () => {
         let session: TestSession;
@@ -17,10 +17,26 @@ describe("content", () => {
             await session.stop();
         });
 
+        it("iframe content", async () => {
+            const root = await session.peers[0].open(
+                new Element({
+                    content: new IFrameContent()
+                })
+            );
+
+            await root.content?.history.put(new Navigation("a"))
+            await root.content?.history.put(new Navigation("b"))
+
+            const rootB = await session.peers[1].open<Element>(root.address);
+            await waitForResolved(async () => expect(await (rootB.content as IFrameContent).getLatest()).toEqual("b"))
+        })
+
+
+
         it("can post path", async () => {
             const root = await session.peers[0].open(
                 new Element({
-                    content: new IFrameContent({ src: "https://xyz" })
+                    content: new IFrameContent()
                 })
             );
 
@@ -28,7 +44,7 @@ describe("content", () => {
             await root.replies.views.put(chatView)
 
             //   const view = await session.peers[0].open(chatView, { existing: 'reuse' })
-            await chatView.elements.put(new Element({ content: new IFrameContent({ src: 'https://xyz' }), views: [chatView.address] }))
+            await chatView.elements.put(new Element({ content: new IFrameContent(), views: [chatView.address] }))
 
 
             const root2 = await session.peers[1].open<Element>(root.address);
@@ -47,19 +63,19 @@ describe("content", () => {
             beforeEach(async () => {
                 p1 = await session.peers[0].open(
                     new Element({
-                        content: new IFrameContent({ src: "1" })
+                        content: new IFrameContent()
                     })
                 );
                 const chatView1 = new ChatView({ parentElement: p1.address });
                 await p1.replies.views.put(chatView1)
 
-                p2 = new Element({ content: new IFrameContent({ src: '2' }), views: [chatView1.address] });
+                p2 = new Element({ content: new IFrameContent(), views: [chatView1.address] });
                 await chatView1.elements.put(p2)
 
                 const chatView2 = new ChatView({ parentElement: p2.address });
                 await p2.replies.views.put(chatView2)
 
-                p3 = new Element({ content: new IFrameContent({ src: '3' }), views: [chatView2.address] });
+                p3 = new Element({ content: new IFrameContent(), views: [chatView2.address] });
                 await chatView2.elements.put(p3);
             })
 

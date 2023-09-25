@@ -1,55 +1,61 @@
-import { PeerProvider, usePeer } from "@peerbit/react";
+import { PeerProvider, usePeer, useProgram } from "@peerbit/react";
 import { useEffect, useReducer, useRef } from "react";
-import { CollaborativeTextDocument } from "./db";
+import { CollaborativeTextDocument } from "./db.js";
 import { Range } from "@peerbit/string";
 import diff from "fast-diff";
 import TextareaAutosize from 'react-textarea-autosize';
 import { AppClient } from '@dao-xyz/app-sdk'
-
-
-// A random ID, but unique for this app
-const ID = new Uint8Array([
-    30, 222, 227, 78, 164, 10, 61, 8, 21, 176, 122, 5, 79, 110, 115, 255, 233,
-    253, 92, 76, 146, 158, 46, 212, 14, 162, 30, 94, 1, 134, 99, 174,
-]);
+import { useParams } from "react-router-dom";
 
 
 
 const client = new AppClient({ onResize: () => { }, targetOrigin: '*' });
 
 export const Document = () => {
-    const doc = useRef<CollaborativeTextDocument>();
-    const testAreaRef = useRef<HTMLTextAreaElement>();
-    const loadingRef = useRef(false);
+    const textRef = useRef<HTMLTextAreaElement>();
+    const params = useParams();
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
+    const { program: db } = useProgram<CollaborativeTextDocument>(params.address, { existing: 'reuse', timeout: 3000 })
 
-    const { peer } = usePeer();
+
     useEffect(() => {
-        console.log(peer);
-        if (loadingRef.current || !peer) {
+        // Tell the parent window that we have opened a text document (only necessary if you want to use @dao-xyz/app-sdk)
+        client.send({ type: 'navigate', to: window.location.href })
+    }, [])
+
+    useEffect(() => {
+        if (!db) {
             return;
         }
-        loadingRef.current = true;
-        peer?.open(new CollaborativeTextDocument({ id: ID }), {
-            existing: "reuse",
-        })
-            .then((d) => {
-                d.string.events.addEventListener("change", async () => {
-                    testAreaRef.current.value = await d.string.getValue();
-                    forceUpdate();
-                });
+        const listener = async () => {
+            textRef.current.value = await db.string.getValue();
+            forceUpdate();
+        };
 
-                doc.current = d;
-                // initial value
-                d.string.getValue().then((v) => {
-                    testAreaRef.current.value = v;
-                    forceUpdate();
-                });
-            })
-            .finally(() => {
-                loadingRef.current = false;
-            });
-    }, [peer?.peerId.toString()]);
+
+        db.string.events.addEventListener("change", listener);
+
+        // initial value
+        textRef.current.value = ""
+        db.string.getValue().then((v) => {
+            if (!v) { // TODO why do we need to do this?
+                db.string.add(
+                    "",
+                    new Range({
+                        offset: 0,
+                        length: 0,
+                    })
+                )
+            }
+            textRef.current.value = v || "";
+            forceUpdate();
+        });
+
+        return () => {
+            db.string.events.removeEventListener("change", listener);
+
+        }
+    }, [db?.address, textRef.current])
 
     /*     useEffect(() => {
             if (!testAreaRef) {
@@ -59,17 +65,16 @@ export const Document = () => {
             autosize(testAreaRef.current, { maximumRows: 5, assumeRendered: true });
     
         }, [testAreaRef]) */
-
+    console.log(db)
     return (
 
         <div data-iframe-height className="fit-content">
             <TextareaAutosize
-
-                ref={testAreaRef}
-                disabled={!doc.current}
+                ref={textRef}
+                disabled={!db}
                 onHeightChange={(e, meta) => {
-                    const height = window.getComputedStyle(testAreaRef.current).height
-                    const width = window.getComputedStyle(testAreaRef.current).width
+                    const height = window.getComputedStyle(textRef.current).height
+                    const width = window.getComputedStyle(textRef.current).width
                     client.send({ type: 'size', height: Number(height.substring(0, height.length - 2)), width: Number(width.substring(0, width.length - 2)) })
                 }}
                 onInput={async (e) => {
@@ -77,7 +82,7 @@ export const Document = () => {
 
                         const textField = e.target as HTMLTextAreaElement;
                         const start = textField.selectionStart;
-                        let oldContent = await doc.current.string.getValue();
+                        let oldContent = await db.string.getValue();
                         let content = textField.value;
                         let diffs = diff(oldContent, content, start);
                         let pos = 0;
@@ -88,7 +93,7 @@ export const Document = () => {
                                 pos += diff[1].length;
                             } else if (diff[0] === -1) {
                                 // DELETE
-                                await doc.current.string.add(
+                                await db.string.add(
                                     "",
                                     new Range({
                                         offset: pos,
@@ -97,7 +102,7 @@ export const Document = () => {
                                 );
                             } else {
                                 // INSERT
-                                await doc.current.string.add(
+                                await db.string.add(
                                     diff[1],
                                     new Range({
                                         offset: pos,
