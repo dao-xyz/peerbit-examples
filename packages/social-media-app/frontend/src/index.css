@@ -74,6 +74,8 @@ code {
        
     .btn {
         @apply  py-2 px-4 rounded;
+        @apply bg-white;
+        @apply dark:bg-black;
     }
     
     .btn-icon {

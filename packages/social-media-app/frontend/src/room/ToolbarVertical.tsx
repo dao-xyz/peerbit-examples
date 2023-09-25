@@ -10,11 +10,11 @@ export const ToolbarVertical = (properties: {
     onSave: () => void;
     unsavedCount: number;
     onNew: () => void;
-    onEditModeChange: (edit: boolean) => void;
+    onEditModeChange?: (edit: boolean) => void;
 }) => {
     return (
         <div className="flex flex-col p-2 gap-2 mt-auto">
-            <Toggle.Root
+            {/*        <Toggle.Root
                 onPressedChange={(e) => {
                     properties.onEditModeChange(e);
                 }}
@@ -22,13 +22,13 @@ export const ToolbarVertical = (properties: {
                 aria-label="Toggle italic"
             >
                 <TbBorderCorners />
-            </Toggle.Root>
+            </Toggle.Root> */}
             <button
                 onClick={() => {
                     console.log("SAVE?");
                     properties.onSave();
                 }}
-                className="ml-auto btn-elevated btn-icon btn-icon-md btn-toggle relative h-max"
+                className="ml-auto btn btn-elevated btn-icon btn-icon-md btn-toggle relative h-max"
                 aria-label="Toggle italic"
             >
                 <MdSave />
@@ -38,23 +38,13 @@ export const ToolbarVertical = (properties: {
                     </div>
                 )}
             </button>
-            <button
-                onClick={() => {
-                    console.log("NEW");
-                    properties.onNew();
-                }}
-                className=" btn-elevated btn-icon btn-icon-md btn-toggle h-max"
-                aria-label="Toggle italic"
-            >
-                <TbHomePlus />
-            </button>
 
             <button
                 onClick={() => {
                     console.log("NEW");
                     properties.onNew();
                 }}
-                className=" btn-elevated btn-icon btn-icon-md btn-toggle h-max"
+                className="btn btn-elevated btn-icon btn-icon-md btn-toggle h-max"
                 aria-label="Toggle italic"
             >
                 <BsSendPlus />

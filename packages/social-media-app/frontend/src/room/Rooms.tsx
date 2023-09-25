@@ -1,49 +1,57 @@
 import { usePeer } from "@peerbit/react";
-import { useRooms } from "../useRooms.js";
+import { useElements } from "../useElements.js";
 import { useEffect, useState } from "react";
-import { Room as RoomView } from "./Room.js";
+import { ViewSpatial } from "./ViewSpatial.js";
 import { Header } from "./Header.js";
 import { CreateRoom } from "./CreateRoom.js";
 import { Spinner } from "../utils/Spinner.js";
 import { inIframe } from "@peerbit/react";
-
+import { SelectView } from "./SelectView.js";
+import { useLocation, useNavigate, useParams } from "react-router-dom";
 export const Rooms = () => {
     const { peer } = usePeer();
-    const { root, location, loading, path } = useRooms();
+    const { current, loading } = useElements();
+
+    const location = useLocation();
+    const params = useParams();
+    const navigate = useNavigate()
+
+    /*     useEffect(() => {
+            if (!peer) {
+                return;
+            }
+          
+        }, [peer?.identity.publicKey.hashcode()]) */
 
     useEffect(() => {
-        if (!peer || !root) {
+        if (!peer || !current) {
             return;
         }
-    }, [peer?.identity.publicKey.hashcode(), root]);
+    }, [peer?.identity.publicKey.hashcode(), current]);
 
-    if (inIframe()) {
-        console.log("???", location, path, root);
-    }
+
     return (
         <>
-            {location.length === 0 && (
+            {!current && (
                 <div className="w-full h-full flex flex-col justify-center">
                     <div className="flex flex-col content-center gap-4 items-center">
                         {loading && (
                             <div className="flex flex-row gap-2">
-                                <>Looking for spaces</>
+                                <>Searching</>
                                 <Spinner />
                             </div>
                         )}
                         {!loading && (
                             <div className="flex flex-row gap-2">
-                                Space not found
+                                Post not found
                             </div>
                         )}
                         <CreateRoom />
                     </div>
                 </div>
             )}
-            {location.length > 0 &&
-                location.map((room, ix) => (
-                    <RoomView key={ix} room={room}></RoomView>
-                ))}
+            <SelectView element={current}></SelectView>
+
         </>
     );
 };

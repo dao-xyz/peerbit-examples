@@ -1,4 +1,4 @@
-import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
+import { field, variant, fixedArray, vec, option, getSchema } from "@dao-xyz/borsh";
 import {
     Documents,
     SearchRequest,
@@ -10,111 +10,52 @@ import { Program } from "@peerbit/program";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
-@variant(0)
-export class Layout {
-    @field({ type: "u32" })
-    x: number;
+/* 
+┌──────────┐             
+│Post      │             
+└┬────────┬┘             
+┌▽──────┐┌▽───┐          
+│Content││Room│          
+└───────┘└┬──┬┘          
+┌─────────▽┐┌▽──────────┐
+│ChatView  ││SpatialView│
+└┬─────────┘└───────────┘
+┌▽──────────────┐        
+│Documents<Post>│        
+└┬──────────────┘        
+┌▽─────────────┐         
+│Post (a reply)│         
+└──────────────┘         
 
-    @field({ type: "u32" })
-    y: number;
+ */
 
-    @field({ type: "u32" })
-    z: number;
 
-    @field({ type: "u32" })
-    w: number;
 
-    @field({ type: "u32" })
-    h: number;
+@variant("view")
+export abstract class View extends Program {
 
-    @field({ type: "string" })
-    breakpoint: string;
-
-    constructor(properties: {
-        breakpoint: string;
-        x: number;
-        y: number;
-        z: number;
-        w: number;
-        h: number;
-    }) {
-        this.breakpoint = properties.breakpoint;
-        this.x = properties.x;
-        this.y = properties.y;
-        this.z = properties.z;
-        this.w = properties.w;
-        this.h = properties.h;
-    }
-}
-
-export abstract class ElementContent {
-    abstract toIndex(): Record<string, any>;
-}
-
-@variant(0)
-export class Element<T extends ElementContent = any> {
-    @field({ type: fixedArray("u8", 32) })
+    @field({ type: fixedArray('u8', 32) })
     id: Uint8Array;
 
-    @field({ type: PublicSignKey })
-    publicKey: PublicSignKey;
+    @field({ type: option('string') })
+    parentElement?: string;
 
-    @field({ type: vec(Layout) })
-    location: Layout[];
-
-    @field({ type: ElementContent })
-    content: T;
-
-    constructor(properties: {
-        id?: Uint8Array;
-        location: Layout[];
-        publicKey: PublicSignKey;
-        content: T;
-    }) {
-        this.location = properties.location;
-        this.publicKey = properties.publicKey;
-        this.content = properties.content;
-        this.id = properties.id || randomBytes(32);
-    }
-}
-
-@variant("room")
-export class Room extends Program {
     @field({ type: Documents<Element> })
     elements: Documents<Element>;
 
-    @field({ type: option(PublicSignKey) })
-    key?: PublicSignKey;
-
-    @field({ type: "string" })
-    name: string;
-
-    @field({ type: option(fixedArray("u8", 32)) })
-    parentId?: Uint8Array;
-
-    constructor(
-        properties: ({ parentId: Uint8Array } | { seed: Uint8Array }) & {
-            rootTrust: PublicSignKey;
-            name?: string;
-        }
-    ) {
-        super();
-        this.key = properties.rootTrust;
-        this.name = properties.name ?? "";
-        this.parentId = properties["parentId"];
-        const elementsId = sha256Sync(
-            concat([
-                new TextEncoder().encode("room"),
-                new TextEncoder().encode(this.name),
-                this.key?.bytes || [],
-                properties["parentId"] || properties["seed"],
-            ])
-        );
-        this.elements = new Documents({ id: elementsId });
+    constructor(properties: { id?: Uint8Array, parentElement?: string }) {
+        super()
+        this.id = properties.id || randomBytes(32)
+        this.elements = new Documents({ id: this.id })
+        this.parentElement = properties.parentElement;
     }
 
-    get id(): Uint8Array {
-        return this.elements.log.log.id;
+
+    async getParentElement(): Promise<Element | undefined> {
+        if (!this.parentElement) {
+            return undefined
+        }
+        return this.node.open<Element>(this.parentElement, { existing: 'reuse' })
     }
 
     async open(): Promise<void> {
@@ -138,19 +79,25 @@ export class Room extends Program {
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
                  */
                 return (
-                    !this.key ||
-                    entry.signatures.find(
-                        (x) =>
-                            x.publicKey.equals(this.key!) ||
-                            x.publicKey.equals(this.node.identity.publicKey)
-                    ) != null
+                    /*   !this.key ||
+                      entry.signatures.find(
+                          (x) =>
+                              x.publicKey.equals(this.key!) ||
+                              x.publicKey.equals(this.node.identity.publicKey)
+                      ) != null */
+                    true
                 );
             },
+            canOpen: () => {
+                return true;
+            },
             index: {
-                fields: (obj) => {
+                fields: async (obj, context) => {
                     return {
                         id: obj.id,
-                        publicKey: obj.publicKey,
+                        publicKey: (await (
+                            await this.elements.log.log.get(context.head)
+                        )?.getPublicKeys())![0].bytes,
                         content: obj.content.toIndex(),
                     };
                 },
@@ -158,7 +105,84 @@ export class Room extends Program {
         });
     }
 
-    async getCreateRoomByPath(path: string[]): Promise<Room[]> {
+
+}
+
+
+
+@variant(0)
+export class Replies {
+
+    @field({ type: Documents<View> })
+    views: Documents<View>;
+
+    constructor(
+        properties: ({ parentId: Uint8Array } | { seed: Uint8Array }) & {
+            name?: string;
+        }
+    ) {
+        const viewsId = sha256Sync(
+            concat([
+                new TextEncoder().encode("room"),
+                properties["parentId"] || properties["seed"],
+            ])
+        );
+        this.views = new Documents({ id: viewsId });
+    }
+
+    get id(): Uint8Array {
+        return this.views.log.log.id;
+    }
+
+
+    async open(properties: { publicKey?: PublicSignKey }): Promise<void> {
+        /*  await this.name.open({
+             canPerform: async (operation, { entry }) => {
+                 // Only allow updates from the creator
+                 return (
+                     entry.signatures.find(
+                         (x) =>
+                             x.publicKey.equals(this.key)
+                     ) != null
+                 );
+             }
+         })
+     */
+        return this.views.open({
+            type: View,
+            canPerform: async (operation, { entry }) => {
+                /**
+                 * Only allow updates if we created it
+                 *  or from myself (this allows us to modifying someone elsecanvas locally)
+                 */
+                return (
+                    !properties.publicKey ||
+                    entry.signatures.find(
+                        (x) =>
+                            x.publicKey.equals(properties.publicKey!)
+                    ) != null,
+                    true
+                );
+            },
+            canOpen: () => {
+                return true;
+            },
+            index: {
+                fields: async (obj, context) => {
+                    return {
+                        id: obj.id,
+                        publicKey: (await (
+                            await this.views.log.log.get(context.head)
+                        )?.getPublicKeys())![0].bytes,
+                        type: getSchema(obj.constructor).variant,
+                    };
+                },
+            },
+        });
+    }
+
+
+    /* async getCreateRoomByPath(path: string[]): Promise<Room[]> {
         const results = await this.findRoomsByPath(path);
         let rooms = results.rooms;
 
@@ -181,7 +205,6 @@ export class Room extends Program {
 
                 await room.elements.put(
                     new Element<RoomContent>({
-                        location: [],
                         publicKey: this.node.identity.publicKey,
                         content: new RoomContent({ room: newRoom }),
                     })
@@ -192,8 +215,8 @@ export class Room extends Program {
         }
         return rooms;
     }
-
-    async findRoomsByPath(
+ */
+    /* async findRoomsByPath(
         path: string[]
     ): Promise<{ path: string[]; rooms: Room[] }> {
         let rooms: Room[] = [this];
@@ -244,21 +267,25 @@ export class Room extends Program {
         console.log("FIND ROOMS BY NAME", name, results);
 
         return results as Element<RoomContent>[];
-    }
+    } */
 }
+
+export abstract class ElementContent {
+    abstract toIndex(): Record<string, any>;
+}
+
+
 
 @variant(0)
 export class IFrameContent extends ElementContent {
     @field({ type: "string" })
     src: string; // https://a.cool.thing.com/abc123
 
-    @field({ type: "bool" })
-    resizer: boolean; // if IFrameResizer is installed on the target site
 
-    constructor(properties: { src: string; resizer: boolean }) {
+
+    constructor(properties: { src: string; }) {
         super();
         this.src = properties.src;
-        this.resizer = properties.resizer;
     }
 
     toIndex(): Record<string, any> {
@@ -269,23 +296,69 @@ export class IFrameContent extends ElementContent {
     }
 }
 
-@variant(1)
-export class RoomContent extends ElementContent {
-    @field({ type: Room })
-    room: Room;
 
-    constructor(properties: { room: Room }) {
-        super();
-        this.room = properties.room;
+
+
+@variant("variant")
+export class Element<T extends ElementContent = any> extends Program {
+
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: option(PublicSignKey) })
+    publicKey?: PublicSignKey // The root trust
+
+    @field({ type: vec('string') })
+    views: string[]
+
+    @field({ type: option(ElementContent) })
+    content?: T;
+
+    @field({ type: Replies })
+    replies: Replies
+
+    constructor(properties: {
+        id?: Uint8Array;
+        publicKey?: PublicSignKey;
+        content?: T;
+        views?: string[]
+        room?: Replies,
+    }) {
+        super()
+        this.views = properties.views || []
+        this.content = properties.content;
+        this.publicKey = properties.publicKey;
+        this.id = properties.id || randomBytes(32);
+        this.replies = properties.room || new Replies({ seed: this.id, parentId: undefined })
     }
 
-    toIndex(): Record<string, any> {
-        return {
-            type: "room",
-            name: this.room.name,
-        };
+    async open() {
+        await this.replies.open({ publicKey: this.publicKey })
     }
+
+    async getViews(): Promise<View[]> {
+        return (await Promise.allSettled(this.views.map(x => this.node.open<View>(x, { existing: 'reuse' })))).map(x => x.status === 'fulfilled' ? x.value : undefined).filter(x => !!x) as View[];
+    }
+
+
+    async getPath(): Promise<Element<any>[]> {
+        // TODO add multiparent support
+        let current: Element = this;
+        let ret: Element<any>[] = []
+        ret.push(current)
+        while (current.views.length > 0) {
+            const parentElements = await Promise.all((await current.getViews()).map(x => x.parentElement ? this.node.open<Element>(x.parentElement, { existing: 'reuse' }) : undefined))
+            const parent = parentElements.filter(x => !!x)[0] as Element
+            current = parent;
+            ret.push(current)
+
+        }
+        return ret.reverse();
+    }
+
+
 }
+
 
 /* 
 type Args = { role?: Role; sync?: SyncFilter };

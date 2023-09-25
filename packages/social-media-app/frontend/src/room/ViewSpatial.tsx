@@ -11,11 +11,12 @@ import {
 import { TEXT_APP } from "../routes.js";
 import { inIframe, usePeer } from "@peerbit/react";
 import {
-    Room as RoomDB,
     Element,
     Layout,
     IFrameContent,
     ElementContent,
+    CanvasView,
+    ElementLayout,
 } from "@dao-xyz/social";
 import iFrameResize from "iframe-resizer";
 import { SearchRequest } from "@peerbit/document";
@@ -43,10 +44,10 @@ const margin: [number, number] = [0, 0];
 const containerPadding: [number, number] = [0, 0];
 const maxRows = Infinity;
 const rectBorderWidth = 10;
-const getLayouts = (rects: Element[]) => {
+const getLayouts = (rects: ElementLayout[]) => {
     let breakpointsToLayouts: Record<string, RGLayout> = {};
     for (const [ix, rect] of rects.entries()) {
-        for (const layout of rect.location) {
+        for (const layout of rect.layout) {
             let arr = breakpointsToLayouts[layout.breakpoint];
             if (!arr) {
                 arr = [];
@@ -60,18 +61,19 @@ const getLayouts = (rects: Element[]) => {
 
 let updateRectsTimeout: ReturnType<typeof setTimeout> = undefined;
 
-export const Room = (properties: { room: RoomDB }) => {
+export const ViewSpatial = (properties: { room: CanvasView }) => {
     const { peer } = usePeer();
     const [rects, setRects] = useState<Element[]>([]);
+    const [elementLayouts, setElementLayouts] = useState<ElementLayout[]>([]);
     const [editMode, setEditMode] = useState(false);
-    const pendingRef = useRef<Element[]>([]);
+    const pendingRef = useRef<{ element: Element, layout: ElementLayout }[]>([]);
     const rectsRef = useRef<Element[]>(rects);
     const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
         new Map()
     );
 
     const [layouts, setLayouts] = useState<Record<string, RGLayout>>({});
-    const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
+    /*   const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined); */
     const { name, setName } = useNames();
     const [focused, setFocused] = useState<number>();
     const [active, setActive] = useState<Set<number>>(new Set());
@@ -105,8 +107,8 @@ export const Room = (properties: { room: RoomDB }) => {
     ) => {
         // await setName(name); // Reinitialize names, so that all keypairs get associated with the name
 
-        let maxY = rectsRef.current
-            .map((x) => x.location)
+        let maxY = elementLayouts
+            .map((x) => x.layout)
             .flat()
             .filter((x) => x.breakpoint === latestBreakpoint.current)
             .reduce(
@@ -115,8 +117,12 @@ export const Room = (properties: { room: RoomDB }) => {
             );
         console.log("CALCUCATE MAX Y", maxY, rectsRef.current.length);
         let element = new Element({
-            publicKey: peer.identity.publicKey,
-            location: [
+            content, //generator({ keypair: peer.identity }),
+        });
+
+        let layout = new ElementLayout({
+            id: element.id,
+            layout: [
                 new Layout({
                     breakpoint: latestBreakpoint.current,
                     x: 0,
@@ -126,8 +132,7 @@ export const Room = (properties: { room: RoomDB }) => {
                     h: 500,
                 }),
             ],
-            content, //generator({ keypair: peer.identity }),
-        });
+        })
 
         if (options.pending) {
             /* if (
@@ -139,7 +144,7 @@ export const Room = (properties: { room: RoomDB }) => {
             if (pendingRef.current.length > 0) {
                 throw new Error("Unpexted dangling rect");
             } */
-            pendingRef.current.push(element);
+            pendingRef.current.push({ element, layout });
             console.log("PUSH PENDING", pendingRef.current.length);
         } else {
             properties.room.elements.put(element);
@@ -152,7 +157,11 @@ export const Room = (properties: { room: RoomDB }) => {
         }
 
         await Promise.all(
-            pendingRef.current.map((x) => properties.room.elements.put(x))
+            pendingRef.current.map((x) => properties.room.elements.put(x.element))
+
+        );
+        await Promise.all(
+            pendingRef.current.map((x) => properties.room.layouts.put(x.layout))
         );
         forceUpdate();
         pendingRef.current = [];
@@ -160,6 +169,7 @@ export const Room = (properties: { room: RoomDB }) => {
     };
 
     const updateRects = async (newRects?: Element[], timeout = 500) => {
+        let newLayouts: ElementLayout[] = []
         if (!newRects) {
             if (!properties.room.elements.index.index) {
                 console.error(properties.room.elements.index.closed);
@@ -181,16 +191,12 @@ export const Room = (properties: { room: RoomDB }) => {
                     )
                 )
             ).filter((x) => !!x);
+            newLayouts = await Promise.all(newRects.map(x => properties.room.layouts.index.get(x.id)))
             if (pendingRef.current) {
-                for (const pending of pendingRef.current) {
-                    if (!newRects.find((x) => equals(x.id, pending.id))) {
-                        console.log(
-                            "COULD NOT FIND ",
-                            pending.id,
-                            "FROM",
-                            newRects
-                        );
-                        newRects.push(pending);
+                for (const [ix, pending] of pendingRef.current.entries()) {
+                    if (!newRects.find((x) => equals(x.id, pending.element.id))) {
+                        newRects.push(pending.element);
+                        newLayouts.push(pending.layout)
                     }
                 }
             }
@@ -204,7 +210,8 @@ export const Room = (properties: { room: RoomDB }) => {
         updateRectsTimeout = setTimeout(() => {
             rectsRef.current = newRects;
             setRects(newRects);
-            setLayouts(getLayouts(newRects));
+            setElementLayouts(newLayouts)
+            setLayouts(getLayouts(newLayouts));
         }, timeout);
     };
 
@@ -216,7 +223,7 @@ export const Room = (properties: { room: RoomDB }) => {
     };
 
     const insertDefault = () => {
-        return addRect(new IFrameContent({ src: TEXT_APP, resizer: false }), {
+        return addRect(new IFrameContent({ src: TEXT_APP }), {
             pending: true,
         }).then(() => {
             updateRects();
@@ -227,20 +234,19 @@ export const Room = (properties: { room: RoomDB }) => {
         const spliced = pendingRef.current.splice(ix, 1);
         if (spliced.length > 0) {
             rectsRef.current.splice(
-                rectsRef.current.findIndex((x) => x === spliced[0]),
+                rectsRef.current.findIndex((x) => x === spliced[0].element),
                 1
             );
         }
     };
 
     const onIframe = useCallback(
-        (node, rect: { content: IFrameContent }, i?: number) => {
+        (node, rect: Element<any>, i?: number) => {
             console.log(
                 "on load frame!",
                 rect.content.src,
-                rect.content.resizer
             );
-            if (rect.content.resizer) {
+            /* if (rect.content.resizer) {
                 const resize = iFrameResize.iframeResize(
                     {
                         heightCalculationMethod: "taggedElement",
@@ -276,7 +282,7 @@ export const Room = (properties: { room: RoomDB }) => {
                                                 rowHeight,
                                             };
 
-                                            const { /*  w, */ h } = calcWH(
+                                            const { h } = calcWH(
                                                 positionParams,
                                                 rzw,
                                                 rzh + rectBorderWidth * 2,
@@ -291,9 +297,7 @@ export const Room = (properties: { room: RoomDB }) => {
                                                 rzh + rectBorderWidth * 2
                                             );
 
-                                            if (/* w !== l.w || */ h !== l.h) {
-                                                // l.w = w;
-
+                                            if ( h !== l.h) {
                                                 l.h = h;
                                                 change = true;
                                             }
@@ -317,7 +321,7 @@ export const Room = (properties: { room: RoomDB }) => {
                 setInterval(() => {
                     resize[0]?.["iFrameResizer"]?.resize();
                 }, 1000); // resize a few times in the beginning, height calculations seems to initialize incorrectly
-            }
+            } */
 
             //submitKeypairChange(node.target, rect.keypair, rect.content.src);
         },
@@ -360,16 +364,13 @@ export const Room = (properties: { room: RoomDB }) => {
 
         const room = properties.room;
         console.log("OPEN!", room.address, room.elements.index.size);
-        const node = room.key;
+        /*   const node = room.key;
+  
+          let isOwner = peer.identity.publicKey.equals(node);
+  
+          setIsOwner(isOwner); */
 
-        let isOwner = peer.identity.publicKey.equals(node);
-
-        setIsOwner(isOwner);
         room.elements.events.addEventListener("change", async (change) => {
-            console.log(
-                "SET RECT AFTER CHANGE!",
-                change.detail.added.map((x) => x.location)
-            );
             updateRects(undefined, 0);
         });
 
@@ -378,11 +379,11 @@ export const Room = (properties: { room: RoomDB }) => {
          } */
 
         updateRects().then(() => {
-            if (isOwner) {
+           /*  if (isOwner) {
                 //addRect();
                 // const { key: keypair2 } = await getFreeKeypair('canvas')
                 // canvas.elements.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) }))
-            } else {
+            } else */ {
                 setTimeout(async () => {
                     console.log(
                         (
@@ -420,13 +421,13 @@ export const Room = (properties: { room: RoomDB }) => {
                     <div
                         ref={gridLayoutRef}
                         className="w-full"
-                        /*  item
-    sx={{
-    overflowY: "scroll",
-    height: `calc(100vh - ${HEIGHT})`,
-    width: "100%", //`calc(100% - 275px)`,
-    }} */
-                        // ${properties.editMode ? 'p-3' : 'p-0'}`
+                    /*  item
+sx={{
+overflowY: "scroll",
+height: `calc(100vh - ${HEIGHT})`,
+width: "100%", //`calc(100% - 275px)`,
+}} */
+                    // ${properties.editMode ? 'p-3' : 'p-0'}`
                     >
                         <ReactGridLayout
                             width={gridLayoutWidth}
@@ -479,7 +480,7 @@ export const Room = (properties: { room: RoomDB }) => {
                                 breakpoint,
                                 layout: layouts,
                             }) => {
-                                let toUpdate = new Map<string, Element>();
+                                let toUpdate = new Map<string, ElementLayout>();
                                 let change = false;
                                 latestBreakpoint.current = breakpoint as
                                     | "xxs"
@@ -510,8 +511,8 @@ export const Room = (properties: { room: RoomDB }) => {
                                             w,
                                             h,
                                             "FROM HEGIHT: " +
-                                                (rz.height +
-                                                    rectBorderWidth * 2)
+                                            (rz.height +
+                                                rectBorderWidth * 2)
                                         );
                                         if (/* w !== l.w || */ h !== l.h) {
                                             // l.w = w;
@@ -525,8 +526,8 @@ export const Room = (properties: { room: RoomDB }) => {
                                 for (const [i, layout] of layouts.entries()) {
                                     const rect =
                                         toUpdate.get(layout.i) ||
-                                        rects[Number(layout.i)];
-                                    let layoutIndex = rect.location.findIndex(
+                                        elementLayouts[Number(layout.i)];
+                                    let layoutIndex = rect.layout.findIndex(
                                         (l) => l.breakpoint === breakpoint
                                     );
                                     let newLayout = new Layout({
@@ -536,19 +537,19 @@ export const Room = (properties: { room: RoomDB }) => {
                                     });
 
                                     if (layoutIndex === -1) {
-                                        rect.location.push(newLayout);
+                                        rect.layout.push(newLayout);
                                     } else {
-                                        rect.location[layoutIndex] = newLayout;
+                                        rect.layout[layoutIndex] = newLayout;
                                     }
                                     toUpdate.set(layout.i, rect);
                                 }
 
                                 Promise.all(
                                     [...toUpdate.values()].map((rect) => {
-                                        if (pendingRef.current.includes(rect)) {
+                                        if (pendingRef.current.find(x => equals(x.element.id, rect.id))) {
                                             return;
                                         }
-                                        return properties.room.elements.put(
+                                        return properties.room.layouts.put(
                                             rect
                                         );
                                     })
@@ -595,8 +596,7 @@ export const Room = (properties: { room: RoomDB }) => {
                                             }}
                                             delete={() => {
                                                 const pendingIndex =
-                                                    pendingRef.current.indexOf(
-                                                        x
+                                                    pendingRef.current.findIndex((pending) => pending.element == x
                                                     );
                                                 if (pendingIndex != -1) {
                                                     removePending(ix);
@@ -625,10 +625,10 @@ export const Room = (properties: { room: RoomDB }) => {
                                                     pendingRef.current.find(
                                                         (pending) =>
                                                             equals(
-                                                                pending.id,
+                                                                pending.element.id,
                                                                 x.id
                                                             )
-                                                    );
+                                                    )?.element;
                                                 let fromPending =
                                                     !!pendingElement;
                                                 let element =
@@ -652,11 +652,12 @@ export const Room = (properties: { room: RoomDB }) => {
                                                 }
                                             }}
                                             onLoad={(event) =>
+
                                                 onIframe(event, x, ix)
                                             }
                                             pending={
                                                 !!pendingRef.current.find((p) =>
-                                                    equals(p.id, x.id)
+                                                    equals(p.element.id, x.id)
                                                 )
                                             }
                                         ></Frame>

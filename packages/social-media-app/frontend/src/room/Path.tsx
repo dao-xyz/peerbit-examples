@@ -4,9 +4,9 @@ import { useLocation, useNavigate } from "react-router-dom";
 import Tags from "@yaireo/tagify/dist/react.tagify";
 import "./path.css";
 import Tagify from "@yaireo/tagify";
-import { getRoomByPath } from "../routes";
-import { getRoomPathFromURL, useRooms } from "../useRooms";
 import { MdSearch } from "react-icons/md";
+import { useElements } from "../useElements";
+
 // Tagify settings object
 const baseTagifySettings = {
     onChangeAfterBlur: false,
@@ -31,6 +31,8 @@ export const Path = () => {
     const tagifyInitializedAtPath = useRef<string | undefined>();
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
+    const { current, path } = useElements();
+
     const tagifyRef = useRef<Tagify>();
 
     // access Tagify internal methods example:
@@ -44,26 +46,26 @@ export const Path = () => {
             return;
         }
 
-        const path = getRoomPathFromURL();
-        const newPath = tagifyRef.current.value.map((x) => x.value);
-
-        let eq = newPath.length === path.length;
-        if (eq) {
-            for (let i = 0; i < newPath.length; i++) {
-                if (newPath[i] !== path[i]) {
-                    eq = false;
-                    break;
-                }
-            }
-        }
-        if (!eq) {
-            console.log(
-                "NAVIGATE TO NEW PATH",
-                newPath,
-                getRoomByPath(newPath)
-            );
-            navigate(getRoomByPath(newPath), {});
-        }
+        /*    const path = getRoomPathFromURL();
+           const newPath = tagifyRef.current.value.map((x) => x.value);
+   
+           let eq = newPath.length === path.length;
+           if (eq) {
+               for (let i = 0; i < newPath.length; i++) {
+                   if (newPath[i] !== path[i]) {
+                       eq = false;
+                       break;
+                   }
+               }
+           }
+           if (!eq) {
+               console.log(
+                   "NAVIGATE TO NEW PATH",
+                   newPath,
+                   getRoomByPath(newPath)
+               );
+               navigate(getRoomByPath(newPath), {});
+           } */
     };
 
     useEffect(() => {
@@ -87,15 +89,17 @@ export const Path = () => {
         };
     }, []);
 
-    useEffect(() => {
-        console.log("UPDATE TAGS FROM URL .----  ", getRoomPathFromURL());
-        setTags(getRoomPathFromURL());
-    }, [location]);
+    /*   useEffect(() => {
+         console.log("UPDATE TAGS FROM URL .----  ", getRoomPathFromURL());
+         setTags(getRoomPathFromURL());
+     }, [location]); */
 
     useEffect(() => {
+        const stringified = path.map(x => x.content?.["src"] || "🌍")
+        setTags(stringified)
         if (tagifyRef.current) {
             tagifyRef.current.removeAllTags({ withoutChangeEvent: true });
-            tagifyRef.current.addTags(getRoomPathFromURL(), true);
+            tagifyRef.current.addTags(stringified, true);
             tagifyInitializedAtPath.current = window.location.hash;
             tagifyRef.current.DOM.input.focus();
             forceUpdate();
@@ -104,7 +108,10 @@ export const Path = () => {
         if (!focus) {
             tagifyInitializedAtPath.current = undefined;
         }
-    }, [tagifyRef.current, focus]);
+    }, [current?.address, tagifyRef.current, focus, location])
+
+
+
     const settings = {
         ...baseTagifySettings,
     };
@@ -133,24 +140,20 @@ export const Path = () => {
                                     prefixCss = "ml-5";
                                 }
 
-                                let tagString = `<tag title="${
-                                    tagData.title || tagData.value
-                                }"
+                                let tagString = `<tag title="${tagData.title || tagData.value
+                                    }"
                       contenteditable='false'
                       spellcheck='false'
                       tabIndex="${_s.a11y.focusableTags ? 0 : -1}"
-                      class="${_s.classNames.tag} ${
-                                    tagData.class || ""
-                                } ${prefixCss} leading-[13px]"
+                      class="${_s.classNames.tag} ${tagData.class || ""
+                                    } ${prefixCss} leading-[13px]"
                       ${this.getAttributes(tagData)}>
             ${prefix}
-              <x title='' class="${
-                  _s.classNames.tagX
-              }" role='button' aria-label='remove tag'></x>
+              <x title='' class="${_s.classNames.tagX
+                                    }" role='button' aria-label='remove tag'></x>
               <div>
-                  <span class="${_s.classNames.tagText}">${
-                                    tagData[_s.tagTextProp] || tagData.value
-                                }</span>
+                  <span class="${_s.classNames.tagText}">${tagData[_s.tagTextProp] || tagData.value
+                                    }</span>
               </div>
           </tag>`;
                                 return tagString;
@@ -165,6 +168,7 @@ export const Path = () => {
                     onInput={(e) => {
                         const currentText: string =
                             tagifyRef.current["state"].inputText.trim();
+
                         if (
                             currentText.length > 1 &&
                             currentText.endsWith("/")

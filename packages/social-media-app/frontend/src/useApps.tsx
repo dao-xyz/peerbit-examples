@@ -177,7 +177,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                     }
                 }
 
-                const resolvedFromUrl = await appServiceRef.current.resolve(
+                const resolvedFromUrl = await appServiceRef.current?.resolve(
                     maybeUrl
                 );
                 if (resolvedFromUrl) {
@@ -213,25 +213,25 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                 // historical searches
                 const fromHistory = historyDB
                     ? await historyDB.visits.index.search(
-                          new SearchRequest({
-                              query: [
-                                  new Or([
-                                      new StringMatch({
-                                          key: ["app", "title"],
-                                          value: urlOrName,
-                                          caseInsensitive: false,
-                                          method: StringMatchMethod.contains,
-                                      }),
-                                      new StringMatch({
-                                          key: ["app", "url"],
-                                          value: urlOrName,
-                                          caseInsensitive: false,
-                                          method: StringMatchMethod.prefix,
-                                      }),
-                                  ]),
-                              ],
-                          })
-                      )
+                        new SearchRequest({
+                            query: [
+                                new Or([
+                                    new StringMatch({
+                                        key: ["app", "title"],
+                                        value: urlOrName,
+                                        caseInsensitive: false,
+                                        method: StringMatchMethod.contains,
+                                    }),
+                                    new StringMatch({
+                                        key: ["app", "url"],
+                                        value: urlOrName,
+                                        caseInsensitive: false,
+                                        method: StringMatchMethod.prefix,
+                                    }),
+                                ]),
+                            ],
+                        })
+                    )
                     : [];
                 if (fromHistory) {
                     for (const app of fromHistory) {
@@ -247,7 +247,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                 if (app) {
                     return app;
                 }
-                app = await appServiceRef.current.resolve(url);
+                app = await appServiceRef.current?.resolve(url);
                 if (app) {
                     setApps([...apps, app]);
                     return app;

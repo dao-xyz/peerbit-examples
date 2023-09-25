@@ -2,7 +2,7 @@ import { releaseKey } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
 import { NameProvider } from "./names/useNames";
 import { getRootKeypair } from "./keys";
-import { RoomProvider } from "./useRooms";
+import { ElementProvider } from "./useElements";
 import { HashRouter } from "react-router-dom";
 import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
@@ -106,19 +106,17 @@ export const App = () => {
             <NameProvider>
                 <HashRouter basename="/">
                     <AppProvider>
-                        <RoomProvider>
-                            <>
-                                {!inIframe() && <Header></Header>}
-                                <div
-                                    /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
-                                    /*  */
-                                    /*   */
-                                    className="content-container"
-                                >
-                                    <BaseRoutes />
-                                </div>
-                            </>
-                        </RoomProvider>
+
+                        <>
+                            <div
+                                /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
+                                /*  */
+                                /*   */
+                                className="content-container"
+                            >
+                                <BaseRoutes />
+                            </div>
+                        </>
                     </AppProvider>
                 </HashRouter>
             </NameProvider>

@@ -13,6 +13,8 @@ export const Header = forwardRef((props: any, ref) => {
     const { name, setName } = useNames();
     const [localName, setLocalName] = useState(name || "");
 
+
+    console.log("NAME?", name)
     useEffect(() => {
         if (name != null) {
             setLocalName(name);
