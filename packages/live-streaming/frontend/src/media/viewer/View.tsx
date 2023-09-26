@@ -16,7 +16,7 @@ import {
 } from "../database.js";
 import { Grid } from "@mui/material";
 import { PublicSignKey } from "@peerbit/crypto";
-import { DocumentsChange, Observer } from "@peerbit/document";
+import { DocumentsChange, Observer, SearchRequest } from "@peerbit/document";
 import "./View.css";
 import CatOffline from "/catbye64.png";
 import { Controls } from "./controller/Control.js";
@@ -428,6 +428,12 @@ export const View = (args: DBArgs | IdentityArgs) => {
                                 remote: false,
                                 local: true,
                             });
+
+                        const all =
+                            await videoStream.current.streams.index.search(
+                                new SearchRequest()
+                            );
+
                         const removedStreams =
                             videoStreamOptions.current.filter(
                                 (x) => !activeStreams.find((y) => y.id === x.id)
@@ -464,6 +470,13 @@ export const View = (args: DBArgs | IdentityArgs) => {
                          */
                         const currentOptions = videoStreamOptions.current;
                         videoStreamOptions.current = videoResults;
+                        console.log(
+                            "NEW STREAM?",
+                            all,
+                            videoResults,
+                            currentOptions.length,
+                            currentVideoIsRemoved
+                        );
                         if (
                             videoResults.length > 0 &&
                             (currentOptions.length === 0 ||
@@ -508,6 +521,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                                 streamToOpen.source.decoderDescription
                                     .codedWidth;
 
+                            console.log("UPDATE VIDEo STREAM", streamToOpen);
                             setVideoSize();
                             await updateVideoStream(streamToOpen);
                         }

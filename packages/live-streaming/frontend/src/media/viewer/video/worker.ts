@@ -9,7 +9,7 @@ class RenderWorker {
         this.#renderer = new WebGLRenderer();
         // Listen for the start request.
         self.addEventListener("message", (message) => {
-            const data = message.data as
+            const data = (message as any).data as
                 | CanvasMessage
                 | FrameMessage
                 | ResizeMessage;

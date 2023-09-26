@@ -127,7 +127,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
         if (!peer || !args.node) {
             return;
         }
-        //  console.log('setup media stream start!')
         peer.open(new MediaStreamDBs(peer.identity.publicKey), {
             existing: "reuse",
         }).then(async (db) => {
@@ -140,6 +139,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
         streamType?: StreamType;
         quality: SourceSetting[];
     }) => {
+        let prevStreamType = streamType.current;
         if (properties.streamType) {
             streamType.current = properties.streamType;
         }
@@ -162,7 +162,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
         }
 
         if (properties.streamType) {
-            bumpSession();
+            if (!prevStreamType) {
+                bumpSession(); // should we do this, what about the DEFAULT_QUALTIY IS ALREADY IN QUALITY?
+            }
             videoRef.current.removeAttribute("src");
             (videoRef.current.srcObject as MediaStream)
                 ?.getTracks()
@@ -272,7 +274,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                                                 sessionTimestampRef.current,
                                                             source: videoStreamDB,
                                                         });
-                                                    //   console.log("ACTIVATE NEW TRACK", videoStreamDB.id, videoStreamDB.address.toString())
                                                     return mediaStreamDBs.current.streams.put(
                                                         streamInfo
                                                     );
