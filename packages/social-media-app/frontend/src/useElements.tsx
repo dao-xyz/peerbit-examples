@@ -129,6 +129,7 @@ export const ElementProvider = ({ children }: { children: JSX.Element }) => {
                     // navigate to the expeected path
                     result.replies.views.put(new ChatView({ id: sha256Sync(ROOT_ID_SEED), parentElement: result.address })).then(() => {
                         navigate("/p/" + result.address)
+                        console.log("NAV!")
 
                     })
 

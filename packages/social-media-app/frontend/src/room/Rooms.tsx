@@ -1,13 +1,11 @@
 import { usePeer } from "@peerbit/react";
 import { useElements } from "../useElements.js";
-import { useEffect, useState } from "react";
-import { ViewSpatial } from "./ViewSpatial.js";
-import { Header } from "./Header.js";
+import { useEffect } from "react";
 import { CreateRoom } from "./CreateRoom.js";
 import { Spinner } from "../utils/Spinner.js";
-import { inIframe } from "@peerbit/react";
 import { SelectView } from "./SelectView.js";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+
 export const Rooms = () => {
     const { peer } = usePeer();
     const { current, loading } = useElements();

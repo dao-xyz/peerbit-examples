@@ -16,6 +16,7 @@ describe("Room", () => {
         await peer2.stop();
     });
     it("earlier", async () => {
+
         const room = await peer.open(
             new Room({ creator: peer.identity.publicKey })
         );

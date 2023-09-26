@@ -2,19 +2,15 @@ import {
     useState,
     useEffect,
     useRef,
-    useCallback,
     useReducer,
-    RefObject,
-    forwardRef,
 } from "react";
 
-import { TEXT_APP } from "../routes.js";
 import { inIframe, usePeer } from "@peerbit/react";
 import {
     Element,
     IFrameContent,
     ElementContent,
-    ChatView,
+    ChatView
 } from "@dao-xyz/social";
 import { SearchRequest } from "@peerbit/document";
 import { equals } from "uint8arrays";
@@ -34,14 +30,13 @@ export const ViewChat = (properties: { room: ChatView }) => {
 
 
 
-
     /*   const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined); */
     const [active, setActive] = useState<Set<number>>(new Set());
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
 
-    const addRect = async (
-        content: ElementContent,
+    const addRect = async <T extends ElementContent>(
+        content: T,
         options: {
             pending: boolean;
         } = { pending: false }
@@ -52,6 +47,8 @@ export const ViewChat = (properties: { room: ChatView }) => {
             publicKey: peer.identity.publicKey,
             content, //generator({ keypair: peer.identity }),
         });
+
+        element = await peer.open(element, { existing: 'reuse' })
 
         if (options.pending) {
             /* if (
@@ -68,6 +65,8 @@ export const ViewChat = (properties: { room: ChatView }) => {
         } else {
             properties.room.elements.put(element);
         }
+        return element
+
     };
 
     const savePending = async () => {
@@ -85,9 +84,10 @@ export const ViewChat = (properties: { room: ChatView }) => {
 
 
     const insertDefault = () => {
-        return addRect(new IFrameContent({ src: TEXT_APP }), {
+        return addRect(new IFrameContent(), {
             pending: true,
-        }).then(() => {
+        }).then((result) => {
+            /*   result.content.history.put(new Navigation(TEXT_APP)) */
             updateRects();
         });
     };
@@ -104,6 +104,7 @@ export const ViewChat = (properties: { room: ChatView }) => {
 
     const updateRects = async () => {
         elementsRef.current = await properties.room.elements.index.search(new SearchRequest({ query: [] }), { local: true, remote: false })
+
         pendingRef.current.forEach((element) => {
             elementsRef.current.push(element)
         })
@@ -221,37 +222,6 @@ export const ViewChat = (properties: { room: ChatView }) => {
                                     }}
                                     element={x}
                                     index={ix}
-                                    replace={async (url) => {
-                                        let pendingElement =
-                                            pendingRef.current.find(
-                                                (pending) =>
-                                                    equals(
-                                                        pending.id,
-                                                        x.id
-                                                    )
-                                            );
-                                        let fromPending =
-                                            !!pendingElement;
-                                        let element =
-                                            pendingElement ||
-                                            (await properties.room.elements.index.get(
-                                                x.id
-                                            ));
-                                        (
-                                            element.content as IFrameContent
-                                        ).src = url;
-                                        console.log(
-                                            "UPDATED ELEMENT",
-                                            element
-                                        );
-                                        if (!fromPending) {
-                                            await properties.room.elements.put(
-                                                element
-                                            );
-                                        } else {
-                                            forceUpdate(); // because pendingrefs is a ref so we need to do change detection manually
-                                        }
-                                    }}
                                     pending={
                                         !!pendingRef.current.find((p) =>
                                             equals(p.id, x.id)

@@ -217,7 +217,7 @@ export class IFrameContent extends ElementContent {
     }
 
     async open(properties: { publicKey: PublicSignKey }) {
-        this.history.open({
+        await this.history.open({
             type: Navigation,
             canPerform: (operation, ctx) => {
                 return !properties.publicKey || !!ctx.entry.publicKeys.find(x => x.equals(properties.publicKey))
@@ -233,10 +233,10 @@ export class IFrameContent extends ElementContent {
         })
     }
 
-    async toIndex(): Promise<Record<string, any>> {
+    toIndex(): Record<string, any> {
         return {
             type: "app",
-            src: this.getLatest(),
+            // TODO and TEST src: this.getLatest(),
         };
     }
 
@@ -294,7 +294,7 @@ export class Element<T extends ElementContent = any> extends Program {
     async getPath(): Promise<Element<any>[]> {
         // TODO add multiparent support
         let current: Element = this;
-        let ret: Element<any>[] = []
+        const ret: Element<any>[] = []
         ret.push(current)
         while (current.views.length > 0) {
             const parentElements = await Promise.all((await current.getViews()).map(x => x.parentElement ? this.node.open<Element>(x.parentElement, { existing: 'reuse' }) : undefined))

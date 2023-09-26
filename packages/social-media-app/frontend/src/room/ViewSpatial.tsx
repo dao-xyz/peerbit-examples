@@ -4,11 +4,9 @@ import {
     useRef,
     useCallback,
     useReducer,
-    RefObject,
-    forwardRef,
+    RefObject
 } from "react";
 
-import { TEXT_APP } from "../routes.js";
 import { inIframe, usePeer } from "@peerbit/react";
 import {
     Element,
@@ -16,9 +14,8 @@ import {
     IFrameContent,
     ElementContent,
     CanvasView,
-    ElementLayout,
+    ElementLayout
 } from "@dao-xyz/social";
-import iFrameResize from "iframe-resizer";
 import { SearchRequest } from "@peerbit/document";
 import { useNames } from "../names/useNames.js";
 import "react-grid-layout-next/css/styles.css";
@@ -223,7 +220,7 @@ export const ViewSpatial = (properties: { room: CanvasView }) => {
     };
 
     const insertDefault = () => {
-        return addRect(new IFrameContent({ src: TEXT_APP }), {
+        return addRect(new IFrameContent(/* { src: TEXT_APP } */), {
             pending: true,
         }).then(() => {
             updateRects();
@@ -620,37 +617,6 @@ width: "100%", //`calc(100% - 275px)`,
                                             editMode={editMode}
                                             element={x}
                                             index={ix}
-                                            replace={async (url) => {
-                                                let pendingElement =
-                                                    pendingRef.current.find(
-                                                        (pending) =>
-                                                            equals(
-                                                                pending.element.id,
-                                                                x.id
-                                                            )
-                                                    )?.element;
-                                                let fromPending =
-                                                    !!pendingElement;
-                                                let element =
-                                                    pendingElement ||
-                                                    (await properties.room.elements.index.get(
-                                                        x.id
-                                                    ));
-                                                (
-                                                    element.content as IFrameContent
-                                                ).src = url;
-                                                console.log(
-                                                    "UPDATED ELEMENT",
-                                                    element
-                                                );
-                                                if (!fromPending) {
-                                                    await properties.room.elements.put(
-                                                        element
-                                                    );
-                                                } else {
-                                                    forceUpdate(); // because pendingrefs is a ref so we need to do change detection manually
-                                                }
-                                            }}
                                             onLoad={(event) =>
 
                                                 onIframe(event, x, ix)

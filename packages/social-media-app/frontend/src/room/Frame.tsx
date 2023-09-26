@@ -1,4 +1,4 @@
-import { IFrameContent, Element } from "@dao-xyz/social";
+import { IFrameContent, Element, Navigation } from "@dao-xyz/social";
 import {
     MdClear,
     MdAddReaction,
@@ -10,6 +10,8 @@ import { useNavigate } from "react-router-dom";
 import { useNames } from "../names/useNames";
 import { useEffect, useState } from "react";
 import { AppHost } from '@dao-xyz/app-sdk'
+import { usePeer } from "@peerbit/react";
+import { TEXT_APP } from "../routes";
 
 export const Frame = (properties: {
     pending: boolean;
@@ -20,7 +22,6 @@ export const Frame = (properties: {
     active: boolean;
     setActive: (value: boolean) => void;
     editMode?: boolean;
-    replace: (url: string) => void;
     onLoad?: (event: React.SyntheticEvent<HTMLIFrameElement, Event>) => void;
     delete(): void;
 }) => {
@@ -29,17 +30,24 @@ export const Frame = (properties: {
     const { names } = useNames()
     const [author, setAuthor] = useState<string | undefined>(undefined);
     const [src, setSrc] = useState<string | undefined>(undefined);
-
+    const { peer } = usePeer()
     useEffect(() => {
-
         if (!properties.element.content || properties.element.content.history.closed) {
             return
         }
+
         const iframeContent = properties.element.content as IFrameContent;
-        iframeContent.getLatest().then((url) => {
-            console.log("SRC!", url)
+        const updateLatestSrc = () => iframeContent.getLatest().then((url) => {
+            if (!url && properties.element.publicKey?.equals(peer.identity.publicKey)) {
+                iframeContent.history.put(new Navigation(TEXT_APP)).then(() => {
+                    updateLatestSrc()
+                })
+            }
             setSrc(url)
         })
+        updateLatestSrc()
+        iframeContent.history.events.addEventListener('change', updateLatestSrc)
+        return iframeContent.history.events.removeEventListener('change', updateLatestSrc)
     }, [properties.element.content?.history.closed || properties.element.content?.history.address])
 
     useEffect(() => {
@@ -148,7 +156,7 @@ export const Frame = (properties: {
                                 <div className="m-1 w-full">
                                     <AppSelect
                                         onSelected={(app) => {
-                                            properties.replace(app.url);
+                                            (properties.element.content as IFrameContent).history.put(app.url);
                                         }}
                                     />
                                 </div>

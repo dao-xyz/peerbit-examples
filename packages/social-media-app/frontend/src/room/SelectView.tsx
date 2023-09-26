@@ -3,10 +3,8 @@ import { ViewChat } from './ViewChat'
 import { ViewSpatial } from './ViewSpatial'
 import { useEffect, useState } from 'react'
 import { HiOutlineChatAlt2 } from 'react-icons/hi'
-
-import { TbBrandWechat } from 'react-icons/tb'
-
 import { SearchRequest } from '@peerbit/document'
+
 export const SelectView = (properties: { element: Element }) => {
 
     const [views, setViews] = useState<View[]>([])
