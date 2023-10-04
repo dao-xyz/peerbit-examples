@@ -15,11 +15,12 @@ import {
     StringMatchMethod,
 } from "@peerbit/document";
 
+export type ManifestWithSource = { source: 'search' | 'history' | 'curated', manifest: SimpleWebManifest }
+
 interface IApps {
-    apps: SimpleWebManifest[];
     history: BrowsingHistory;
-    resolve: (url: string) => Promise<SimpleWebManifest | undefined>;
-    search: (urlOrName: string) => Promise<SimpleWebManifest[]>;
+    /*  resolve: (url: string) => Promise<SimpleWebManifest | undefined>; */
+    search: (urlOrName: string) => Promise<ManifestWithSource[]>;
 }
 
 const STREAMING_APP = ["development", "staging"].includes(import.meta.env.MODE)
@@ -118,7 +119,6 @@ const resolveCuratedUrl = (app: CuratedApp, url: string) => {
 export const AppContext = React.createContext<IApps>({} as any);
 export const useApps = () => useContext(AppContext);
 export const AppProvider = ({ children }: { children: JSX.Element }) => {
-    const [apps, setApps] = useState<SimpleWebManifest[]>([]);
     const [_x, forceUpdate] = useReducer((x) => x + 1, 0);
     const { peer } = usePeer();
     const appServiceRef = useRef<AppPreview>();
@@ -134,34 +134,38 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
         }
 
         const _x = AppPreview; // without this lines AppPreview import might not be included when bundling
-        peer.open<AppPreview>(
-            "zb2rhXREnAbm5Twtm2ahJM7QKT6FoQGNksWv5jp7o5W6BQ7au"
-        ).then((appPreview) => {
-            appServiceRef.current = appPreview;
-            Promise.allSettled(
-                [STREAMING_APP, CHAT_APP, TEXT_APP].map((address) =>
-                    appPreview.resolve(address)
-                )
-            ).then((result) => {
-                setApps(
-                    result
-                        .filter((x) => x.status === "fulfilled" && x.value)
-                        .map(
-                            (x) =>
-                                (x as PromiseFulfilledResult<SimpleWebManifest>)
-                                    .value
-                        )
-                );
-                forceUpdate();
+
+        peer.dial("/dns4/87ecf9778ccaa08bd9f1e8c6104d82c469b35511.peerchecker.com/tcp/4003/wss/p2p/12D3KooWLuLq8k8wskzXn72RY6rx9Yw2VNjP4T29EdMBcYq6Xwgb").then(() => {
+            peer.open<AppPreview>(
+                "zb2rhXREnAbm5Twtm2ahJM7QKT6FoQGNksWv5jp7o5W6BQ7au"
+            ).then((appPreview) => {
+                appServiceRef.current = appPreview;
+                Promise.allSettled(
+                    [STREAMING_APP, CHAT_APP, TEXT_APP].map((address) =>
+                        appPreview.resolve(address)
+                    )
+                ).then((result) => {
+                    /* setApps(
+                        result
+                            .filter((x) => x.status === "fulfilled" && x.value)
+                            .map(
+                                (x) =>
+                                    (x as PromiseFulfilledResult<SimpleWebManifest>)
+                                        .value
+                            )
+                    ); */
+                    forceUpdate();
+                });
             });
-        });
+
+        })
+
     }, [peer?.identity.publicKey.hashcode()]);
     const memo = React.useMemo<IApps>(
         () => ({
-            apps,
             history: historyDB,
-            search: async (urlOrName) => {
-                let result: Map<string, SimpleWebManifest> = new Map();
+            search: async (urlOrName): Promise<ManifestWithSource[]> => {
+                let result: Map<string, ManifestWithSource> = new Map();
 
                 let maybeUrl: string | undefined = undefined;
                 try {
@@ -181,7 +185,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                     maybeUrl
                 );
                 if (resolvedFromUrl) {
-                    result.set(urlOrName, resolvedFromUrl);
+                    result.set(urlOrName, { manifest: resolvedFromUrl, source: 'search' });
                 }
 
                 // Curated apps are url transformations that are wanted
@@ -202,11 +206,14 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                     );
                     result.set(
                         curatedUrl,
-                        getCuratedManifest(
-                            curatedApp,
-                            curatedUrl,
-                            resolvedFromUrl
-                        )
+                        {
+                            source: 'curated',
+                            manifest: getCuratedManifest(
+                                curatedApp,
+                                curatedUrl,
+                                resolvedFromUrl
+                            )
+                        }
                     );
                 }
 
@@ -236,24 +243,24 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                 if (fromHistory) {
                     for (const app of fromHistory) {
                         if (!result.has(app.app.url)) {
-                            result.set(app.app.url, app.app);
+                            result.set(app.app.url, { source: 'history', manifest: app.app });
                         }
                     }
                 }
                 return [...result.values()];
             },
-            resolve: async (url) => {
-                let app = apps.find((x) => x.url === url);
-                if (app) {
-                    return app;
-                }
-                app = await appServiceRef.current?.resolve(url);
-                if (app) {
-                    setApps([...apps, app]);
-                    return app;
-                }
-                return undefined;
-            },
+            /*  resolve: async (url) => {
+                 let app = apps.find((x) => x.url === url);
+                 if (app) {
+                     return app;
+                 }
+                 app = await appServiceRef.current?.resolve(url);
+                 if (app) {
+                     setApps([...apps, app]);
+                     return app;
+                 }
+                 return undefined;
+             }, */
         }),
         [_x, appServiceRef.current?.address, historyDB?.address]
     );

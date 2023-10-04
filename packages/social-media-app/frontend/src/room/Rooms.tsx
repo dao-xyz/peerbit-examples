@@ -3,8 +3,8 @@ import { useElements } from "../useElements.js";
 import { useEffect } from "react";
 import { CreateRoom } from "./CreateRoom.js";
 import { Spinner } from "../utils/Spinner.js";
-import { SelectView } from "./SelectView.js";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
+import { ViewChat } from "./ViewChat.js";
 
 export const Rooms = () => {
     const { peer } = usePeer();
@@ -48,7 +48,8 @@ export const Rooms = () => {
                     </div>
                 </div>
             )}
-            <SelectView element={current}></SelectView>
+            {current && <ViewChat room={current}></ViewChat>}
+            {/*   <SelectView element={current}></SelectView> */}
 
         </>
     );

@@ -1,4 +1,4 @@
-import { CanvasView, ChatView, Element, View } from '@dao-xyz/social'
+import { CanvasView, ChatView, Element } from '@dao-xyz/social'
 import { ViewChat } from './ViewChat'
 import { ViewSpatial } from './ViewSpatial'
 import { useEffect, useState } from 'react'
@@ -7,42 +7,42 @@ import { SearchRequest } from '@peerbit/document'
 
 export const SelectView = (properties: { element: Element }) => {
 
-    const [views, setViews] = useState<View[]>([])
-    const [selected, setSelected] = useState<View | undefined>(undefined)
-    useEffect(() => {
-        if (!properties.element || properties.element.closed) {
-            return;
-        }
-        const update = () => {
-            properties.element.replies.views.index.search(new SearchRequest()).then((views) => {
-                console.log("SET VIEwS", views)
-                setViews(views)
-                if (!selected) {
-                    setSelected(views[0])
-                }
-            })
-        }
-        update()
-        properties.element.replies.views.events.addEventListener('change', update)
-        return () => {
-            properties.element.replies.views.events.removeEventListener('change', update)
-
-        }
-    }, [properties.element?.closed || properties.element?.address])
-
-    const selectView = () => {
-        if (selected instanceof ChatView) {
-            return <ViewChat room={selected} />
-        }
-
-        if (selected instanceof CanvasView) {
-            return <ViewSpatial room={selected} />
-        }
-    }
-
-    const viewSelectButton = (view: View) => {
-        return <button className='btn btn-icon btn-elevated btn-toggle' ><HiOutlineChatAlt2 /></button>
-    }
+    /*  const [views, setViews] = useState<View[]>([])
+   const [selected, setSelected] = useState<View | undefined>(undefined)
+   useEffect(() => {
+         if (!properties.element || properties.element.closed) {
+             return;
+         }
+         const update = () => {
+             properties.element.replies.views.index.search(new SearchRequest()).then((views) => {
+                 console.log("SET VIEwS", views)
+                 setViews(views)
+                 if (!selected) {
+                     setSelected(views[0])
+                 }
+             })
+         }
+         update()
+         properties.element.replies.views.events.addEventListener('change', update)
+         return () => {
+             properties.element.replies.views.events.removeEventListener('change', update)
+ 
+         }
+     }, [properties.element?.closed || properties.element?.address])
+ 
+     const selectView = () => {
+         if (selected instanceof ChatView) {
+             return <ViewChat room={selected} />
+         }
+ 
+         if (selected instanceof CanvasView) {
+             return <ViewSpatial room={selected} />
+         }
+     }
+ 
+     const viewSelectButton = (view: View) => {
+         return <button className='btn btn-icon btn-elevated btn-toggle' ><HiOutlineChatAlt2 /></button>
+     } */
     return <>
         <>
             {/*  <button
@@ -65,7 +65,7 @@ export const SelectView = (properties: { element: Element }) => {
                 })
             }
         </div> */}
-        {selected && selectView()}
+        {/*   {selected && selectView()} */}
     </>
     /* return select() */
 }

@@ -40,20 +40,17 @@ describe("content", () => {
                 })
             );
 
-            const chatView = new ChatView({ parentElement: root.address });
-            await root.replies.views.put(chatView)
 
             //   const view = await session.peers[0].open(chatView, { existing: 'reuse' })
-            await chatView.elements.put(new Element({ content: new IFrameContent(), views: [chatView.address] }))
+            await root.replies.elements.put(new Element({ content: new IFrameContent() }))
 
 
             const root2 = await session.peers[1].open<Element>(root.address);
-            await waitForResolved(() => expect(root2.replies.views.index.size).toEqual(1));
+            await waitForResolved(() => expect(root2.replies.elements.index.size).toEqual(1));
 
-            const view0 = (await root2.replies.views.index.search(new SearchRequest({ query: [] })))[0]
-            expect(view0.closed).toBeFalse(); // since both are 
+            const element = (await root2.replies.elements.index.search(new SearchRequest({ query: [] })))[0]
+            expect(element.closed).toBeFalse(); // since both are 
 
-            await waitForResolved(() => expect(view0.elements.index.size).toEqual(1))
         })
 
         describe('path', () => {
@@ -66,27 +63,20 @@ describe("content", () => {
                         content: new IFrameContent()
                     })
                 );
-                const chatView1 = new ChatView({ parentElement: p1.address });
-                await p1.replies.views.put(chatView1)
+                p2 = new Element({ content: new IFrameContent(), parentElement: p1.address });
+                await p1.replies.elements.put(p2)
 
-                p2 = new Element({ content: new IFrameContent(), views: [chatView1.address] });
-                await chatView1.elements.put(p2)
+                p3 = new Element({ content: new IFrameContent(), parentElement: p2.address });
+                await p2.replies.elements.put(p3)
 
-                const chatView2 = new ChatView({ parentElement: p2.address });
-                await p2.replies.views.put(chatView2)
-
-                p3 = new Element({ content: new IFrameContent(), views: [chatView2.address] });
-                await chatView2.elements.put(p3);
             })
 
             it('fetches parents', async () => {
 
                 const p3b = await session.peers[1].open<Element>(p3.address)
-                const [v2b] = await p3b.getViews();
-                const p2b = await v2b.getParentElement();
+                const p2b = await p3b.getParentElement();
                 expect(p2.address).toEqual(p2b!.address)
-                const [v1b] = await p2b!.getViews();
-                const p1b = await v1b.getParentElement();
+                const p1b = await p2b!.getParentElement();
                 expect(p1.address).toEqual(p1b!.address)
 
             })

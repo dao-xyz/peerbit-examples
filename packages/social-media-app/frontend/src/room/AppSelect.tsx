@@ -1,9 +1,8 @@
-import { IFrameContent, Element } from "@dao-xyz/social";
-import { Fragment, useReducer, useRef, useState } from "react";
+import { Fragment, useEffect, useReducer, useRef, useState } from "react";
 import { Combobox, Transition } from "@headlessui/react";
 
 import { HiSelector } from "react-icons/hi";
-import { useApps } from "../useApps";
+import { ManifestWithSource, useApps } from "../useApps";
 import { AiOutlineQuestionCircle } from "react-icons/ai";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 
@@ -12,22 +11,25 @@ const unknownApp = (url: string) => {
 };
 
 export const AppSelect = (properties: {
+    currentUrl: string,
     onSelected: (app: SimpleWebManifest) => any;
 }) => {
-    const { apps, search: appSearch, history: appHistory } = useApps();
-    const [selected, setSelected] = useState<SimpleWebManifest>(
-        apps[0] || unknownApp("")
+    const { search: appSearch, history: appHistory } = useApps();
+    const [selected, setSelected] = useState<ManifestWithSource>(
+        { manifest: unknownApp(""), source: 'search' }
     );
     const [query, setQuery] = useState("");
     const [comboboxFocused, setComboboxFocused] = useState(false);
     const comboBoxRef = useRef<HTMLElement>();
     const [loadingApp, setLoadingApp] = useState(false);
-    const filteredAppsRef = useRef<SimpleWebManifest[]>([]);
+    const filteredAppsRef = useRef<ManifestWithSource[]>([]);
+    const inputRef = useRef<HTMLInputElement>()
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
-    const filter = async (urlOrName: string, eventTarget: HTMLInputElement) => {
+
+    const filter = async (urlOrName: string, eventTarget?: HTMLInputElement) => {
         const out = await appSearch(urlOrName);
-        if (urlOrName === eventTarget.value) {
+        if (urlOrName === inputRef.current.value) {
             if (out.length > 0) {
                 if (out[0]) {
                     setSelected(out[0]);
@@ -36,7 +38,6 @@ export const AppSelect = (properties: {
                 }
             }
         }
-        console.log("FILTERED OUTU", out);
         filteredAppsRef.current = out;
         forceUpdate();
     };
@@ -46,17 +47,54 @@ export const AppSelect = (properties: {
               return `${active ? "text-white bg-secondary-200" : "text-opacity-50"}  ${selected && "bg-primary-200"}`
           } */
         if (active && selected) {
-            return "bg-primary-400";
-        }
-        if (active) {
-            return "bg-secondary-200";
+            return "bg-primary-400 dark:bg-primary-500";
         }
         if (selected) {
-            return "bg-primary-200";
+            return "bg-primary-300 dark:bg-primary-600";
+        }
+        if (active) {
+            return "bg-neutral-300 dark:bg-neutral-700";
         }
         return "text-opacity-50";
     };
 
+    // For the initial URL set by the element current src
+    useEffect(() => {
+        if (selected.manifest.url && selected.manifest.url !== properties.currentUrl) {
+            filter(selected.manifest.url)
+        }
+    }, [properties.currentUrl])
+
+    const drawOption = (app: ManifestWithSource, ix: number) => <Combobox.Option
+        key={ix}
+        className={({ active, selected }) =>
+            `cursor-default select-none relative py-2 pl-10 pr-4 ${optionStyle(
+                active,
+                selected
+            )}`
+        }
+        value={app}
+    >
+        {({ selected, active }) => (
+            <div className="flex flex-col">
+                <span
+                    className={`truncate ${selected
+                        ? "font-medium"
+                        : "font-normal"
+                        }`}
+                >
+                    {app.manifest.title}
+                </span>
+                {/*  <span className="ml-1 mr-1">-</span> */}
+                <span
+                    className={`truncate font-mono text-xs`}
+                >
+                    {app.manifest.url}
+                </span>
+            </div>
+        )}
+    </Combobox.Option>
+    console.log(selected)
     return (
         <Combobox
             ref={comboBoxRef}
@@ -71,7 +109,6 @@ export const AppSelect = (properties: {
             <div className="w-full relative ">
                 <div className="flex flex-row items-center relative w-full text-left  rounded-lg shadow-md cursor-default focus:outline-none focus-visible:ring-2 focus-visible:ring-opacity-75 focus-visible:ring-white focus-visible:ring-offset-teal-300 focus-visible:ring-offset-2 sm:text-sm overflow-hidden">
                     <div className="absolute top-2 left-2">
-                        {" "}
                         <Transition
                             show={!loadingApp}
                             enter="transform transition duration-[800ms]"
@@ -81,10 +118,10 @@ export const AppSelect = (properties: {
                             leaveFrom="opacity-100 rotate-0 scale-100 "
                             leaveTo="opacity-0 scale-95 "
                         >
-                            {selected?.icon ? (
+                            {selected?.manifest?.icon ? (
                                 <img
                                     className="w-5 h-5"
-                                    src={selected.icon}
+                                    src={selected.manifest.icon}
                                 ></img>
                             ) : (
                                 <AiOutlineQuestionCircle className="w-5 h-5 icon" />
@@ -92,6 +129,8 @@ export const AppSelect = (properties: {
                         </Transition>
                     </div>
                     <Combobox.Input
+                        ref={inputRef}
+                        autoComplete='off'
                         onClick={() => {
                             console.log("CLICKED!");
                             setComboboxFocused(true);
@@ -100,7 +139,7 @@ export const AppSelect = (properties: {
                             console.log("BLUR!");
                             setComboboxFocused(false);
                         }}
-                        className="test-ccc w-full border-none focus:ring-0 py-2 pl-10 pr-10 text-sm leading-5 "
+                        className=" w-full border-none focus:ring-0 py-2 pl-10 pr-10 text-sm leading-5 "
                         displayValue={(person) => {
                             return comboboxFocused
                                 ? person["url"]
@@ -110,7 +149,7 @@ export const AppSelect = (properties: {
                             let eventTargetValue = event.target.value;
                             setQuery(eventTargetValue);
                             setLoadingApp(true);
-                            setSelected(unknownApp(event.target.value));
+                            setSelected({ source: "search", manifest: unknownApp(event.target.value) });
                             filter(eventTargetValue, event.target).finally(
                                 () => {
                                     if (
@@ -134,57 +173,23 @@ export const AppSelect = (properties: {
                     leave="transition ease-in duration-100"
                     leaveFrom="opacity-100"
                     leaveTo="opacity-0"
-                    /*   afterLeave={() => setQuery("")} */
+                /*   afterLeave={() => setQuery("")} */
                 >
-                    <Combobox.Options className="absolute w-full py-1 mt-1 overflow-auto text-base bg-neutral-50 dark:bg-neutral-900 rounded-md shadow-lg max-h-60 ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm">
-                        {filteredAppsRef.current.map((app, ix) => (
-                            <Combobox.Option
-                                key={ix}
-                                className={({ active, selected }) =>
-                                    `cursor-default select-none relative py-2 pl-10 pr-4 ${optionStyle(
-                                        active,
-                                        selected
-                                    )}`
-                                }
-                                value={app}
-                            >
-                                {({ selected, active }) => (
-                                    <div className="flex flex-col">
-                                        <span
-                                            className={`truncate ${
-                                                selected
-                                                    ? "font-medium"
-                                                    : "font-normal"
-                                            }`}
-                                        >
-                                            {app.title}
-                                        </span>
-                                        {/*  <span className="ml-1 mr-1">-</span> */}
-                                        <span
-                                            className={`truncate font-mono text-xs`}
-                                        >
-                                            {app.url}
-                                        </span>
-                                    </div>
-                                )}
-                            </Combobox.Option>
+                    <Combobox.Options className=" bottom-full absolute w-full py-1 mt-1 overflow-auto text-base bg-neutral-50 dark:bg-neutral-900 rounded-md shadow-lg max-h-60 ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm">
+                        <Combobox.Label><div>History</div></Combobox.Label>
+                        {filteredAppsRef.current.filter(x => x.source === 'history').map((app, ix) => (
+                            drawOption(app, ix)
+                        ))}
+                        <Combobox.Label><div>Curated</div></Combobox.Label>
+                        {filteredAppsRef.current.filter(x => x.source === 'curated').map((app, ix) => (
+                            drawOption(app, ix)
+                        ))}
+                        <Combobox.Label><div>Results</div></Combobox.Label>
+                        {filteredAppsRef.current.filter(x => x.source === 'search').map((app, ix) => (
+                            drawOption(app, ix)
                         ))}
                         {query.length > 0 && (
-                            <Combobox.Option
-                                className={({ active, selected }) =>
-                                    `cursor-default select-none relative py-2 pl-10 pr-4 ${
-                                        active
-                                            ? "bg-primary-400; dark: bg-primary-600"
-                                            : "text-gray-900"
-                                    }  ${
-                                        selected &&
-                                        "bg-primary-600; dark: bg-primary-200"
-                                    }`
-                                }
-                                value={unknownApp(query)}
-                            >
-                                {query}
-                            </Combobox.Option>
+                            drawOption({ manifest: unknownApp(query), source: "search" }, 0)
                         )}
                     </Combobox.Options>
                 </Transition>

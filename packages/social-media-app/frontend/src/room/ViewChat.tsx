@@ -9,8 +9,7 @@ import { inIframe, usePeer } from "@peerbit/react";
 import {
     Element,
     IFrameContent,
-    ElementContent,
-    ChatView
+    ElementContent
 } from "@dao-xyz/social";
 import { SearchRequest } from "@peerbit/document";
 import { equals } from "uint8arrays";
@@ -19,20 +18,14 @@ import { Frame } from "./Frame.js";
 import { ToolbarVertical } from "./ToolbarVertical.js";
 
 
-export const ViewChat = (properties: { room: ChatView }) => {
+export const ViewChat = (properties: { room: Element }) => {
 
     const { peer } = usePeer();
     const pendingRef = useRef<Element[]>([]);
     const elementsRef = useRef<Element[]>();
-    const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
-        new Map()
-    );
-
-
-
-    /*   const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined); */
     const [active, setActive] = useState<Set<number>>(new Set());
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
+    const insertedPending = useRef(false)
 
 
     const addRect = async <T extends ElementContent>(
@@ -63,7 +56,7 @@ export const ViewChat = (properties: { room: ChatView }) => {
             pendingRef.current.push(element);
             console.log("PUSH PENDING", pendingRef.current.length);
         } else {
-            properties.room.elements.put(element);
+            properties.room.replies.elements.put(element);
         }
         return element
 
@@ -74,7 +67,7 @@ export const ViewChat = (properties: { room: ChatView }) => {
             throw new Error("Missing pending element");
         }
         await Promise.all(
-            pendingRef.current.map((x) => properties.room.elements.put(x))
+            pendingRef.current.map((x) => properties.room.replies.elements.put(x))
 
         );
         forceUpdate();
@@ -102,10 +95,10 @@ export const ViewChat = (properties: { room: ChatView }) => {
         }
     };
 
-    const updateRects = async () => {
-        elementsRef.current = await properties.room.elements.index.search(new SearchRequest({ query: [] }), { local: true, remote: false })
+    const updateRects = async (mergePending: boolean = false) => {
+        elementsRef.current = await properties.room.replies.elements.index.search(new SearchRequest({ query: [] }), { local: true, remote: false })
 
-        pendingRef.current.forEach((element) => {
+        mergePending && pendingRef.current.forEach((element) => {
             elementsRef.current.push(element)
         })
 
@@ -125,18 +118,21 @@ export const ViewChat = (properties: { room: ChatView }) => {
     }, []);
 
     useEffect(() => {
-        console.log("RESET?");
         if (!peer || !properties.room) {
             return;
         }
 
+        if (!insertedPending.current) { // we cant do pendingref.current === 0 here because insertDefault is async and useEffect will be called twice in dev mode
+            insertedPending.current = true
+            insertDefault()
+        }
         if (properties.room.closed) {
             throw new Error("Expecting room to be open");
         }
 
         const room = properties.room;
 
-        room.elements.events.addEventListener("change", async (change) => {
+        room.replies.elements.events.addEventListener("change", async (change) => {
             updateRects();
         });
 
@@ -148,7 +144,7 @@ export const ViewChat = (properties: { room: ChatView }) => {
                 // canvas.elements.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) }))
             } else */ {
                 setTimeout(async () => {
-                    await room.elements.index.search(
+                    await room.replies.elements.index.search(
                         new SearchRequest({ query: [] }),
                         { remote: { sync: true } }
                     )
@@ -160,9 +156,10 @@ export const ViewChat = (properties: { room: ChatView }) => {
         properties?.room.closed || properties?.room?.address,
     ]);
 
+    console.log(elementsRef.current, pendingRef.current)
     return (
-        <div className="w-[100%] h-full pl-2 pr-2">
-            <div className="overflow-y-scroll h-[100%]">
+        <div className="w-[100%] h-full">
+            <div className="overflow-y-scroll h-[100%]  pl-2 pr-2">
                 <div
                     className={`flex flex-col w-full gap-2`}
 
@@ -173,6 +170,7 @@ export const ViewChat = (properties: { room: ChatView }) => {
                                 <Frame
                                     active={active.has(ix)}
                                     showAuthor={true}
+                                    overlay={true}
                                     setActive={(v) => {
                                         if (v) {
                                             setActive(
@@ -213,7 +211,7 @@ export const ViewChat = (properties: { room: ChatView }) => {
                                                 updateRects();
                                             }
                                         } else {
-                                            properties.room.elements
+                                            properties.room.replies.elements
                                                 .del(x.id)
                                                 .then(() => {
                                                     updateRects();
@@ -235,7 +233,72 @@ export const ViewChat = (properties: { room: ChatView }) => {
             </div>
 
             {!inIframe() && (
-                <div className="absolute right-5 bottom-5">
+                <div className="bg-neutral-300 dark:bg-neutral-700 w-full flex flex-row absolute bottom-0 pt-4">
+                    {pendingRef.current?.map((x, ix) => {
+                        return (
+                            <div key={ix} className="flex-1">
+                                <Frame
+                                    active={active.has(ix)}
+                                    showAuthor={false}
+                                    overlay={false}
+                                    setActive={(v) => {
+                                        if (v) {
+                                            setActive(
+                                                (previousState) =>
+                                                    new Set(
+                                                        previousState.add(
+                                                            ix
+                                                        )
+                                                    )
+                                            );
+                                        } else {
+                                            setActive(
+                                                (prev) =>
+                                                    new Set(
+                                                        [
+                                                            ...prev,
+                                                        ].filter(
+                                                            (x) =>
+                                                                x !== ix
+                                                        )
+                                                    )
+                                            );
+                                        }
+                                    }}
+                                    delete={() => {
+                                        const pendingIndex =
+                                            pendingRef.current.findIndex((pending) => pending == x
+                                            );
+                                        if (pendingIndex != -1) {
+                                            removePending(ix);
+                                            if (
+                                                pendingRef.current
+                                                    .length === 0
+                                            ) {
+                                                // insertDefault()
+                                                updateRects();
+                                            } else {
+                                                updateRects();
+                                            }
+                                        } else {
+                                            properties.room.replies.elements
+                                                .del(x.id)
+                                                .then(() => {
+                                                    updateRects();
+                                                });
+                                        }
+                                    }}
+                                    element={x}
+                                    index={ix}
+                                    pending={
+                                        !!pendingRef.current.find((p) =>
+                                            equals(p.id, x.id)
+                                        )
+                                    }
+                                ></Frame>
+                            </div>
+                        );
+                    })}
                     <ToolbarVertical
                         onSave={() => {
                             savePending();

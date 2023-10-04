@@ -2,7 +2,7 @@ import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
     Documents,
 } from "@peerbit/document";
-import { View } from "./content";
+import { View } from "./view";
 
 @variant(0)
 export class Layout {
@@ -59,60 +59,15 @@ export class ElementLayout {
 
 
 
-@variant("canvas")
+@variant(1)
 export class CanvasView extends View {
 
     @field({ type: Documents })
     layouts: Documents<ElementLayout>;
 
-    constructor(properties: { parentElement: string }) {
-        super(properties)
+    constructor() {
+        super()
         this.layouts = new Documents()
-    }
-
-    async open(): Promise<void> {
-        /*  await this.name.open({
-             canPerform: async (operation, { entry }) => {
-                 // Only allow updates from the creator
-                 return (
-                     entry.signatures.find(
-                         (x) =>
-                             x.publicKey.equals(this.key)
-                     ) != null
-                 );
-             }
-         })
-     */
-        await super.open()
-        return this.layouts.open({
-            type: ElementLayout,
-            canPerform: async (operation, { entry }) => {
-                /**
-                 * Only allow updates if we created it
-                 *  or from myself (this allows us to modifying someone elsecanvas locally)
-                 */
-                /*  return (
-                     !this.key ||
-                     entry.signatures.find(
-                         (x) =>
-                             x.publicKey.equals(this.key!) ||
-                             x.publicKey.equals(this.node.identity.publicKey)
-                     ) != null
-                 ); */
-                return true;
-            },
-            index: {
-                fields: async (obj, context) => {
-                    return {
-                        id: obj.id,
-                        publicKey: (await (
-                            await this.elements.log.log.get(context.head)
-                        )?.getPublicKeys())![0].bytes,
-                        ...obj.layout
-                    };
-                },
-            },
-        });
     }
 
 }

@@ -3087,7 +3087,7 @@
     "@peerbit/libp2p-test-utils" "1.0.8"
     peerbit "2.0.15"
 
-"@peerbit/time@1.0.4":
+"@peerbit/time@1.0.4", "@peerbit/time@^1.0.4":
   version "1.0.4"
   resolved "https://registry.yarnpkg.com/@peerbit/time/-/time-1.0.4.tgz#693b6fdca578aea0f8e6ff26b8a8b9c08ae9ad30"
   integrity sha512-wRO+g8U0Cz29+h4k5v3uKQA/ZVV9YO5FgWqkKTw8D+rUXXVmL7Y9kXoDhhiQRdnQXbuTUj6YDx4AoFlL4kcqwg==
@@ -11712,7 +11712,7 @@ util-deprecate@^1.0.1, util-deprecate@^1.0.2, util-deprecate@~1.0.1:
   resolved "https://registry.yarnpkg.com/util-deprecate/-/util-deprecate-1.0.2.tgz#450d4dc9fa70de732762fbd2d4a28981419a0ccf"
   integrity sha512-EPD5q1uXyFxJpCrLnCc1nHnq3gOa6DZBocAIiI2TaSCA7VCJ1UJDMagCzIkXNsUYfD1daK//LTEQ8xiIbrHtcw==
 
-uuid@^9.0.0:
+uuid@^9.0.0, uuid@^9.0.1:
   version "9.0.1"
   resolved "https://registry.yarnpkg.com/uuid/-/uuid-9.0.1.tgz#e188d4c8853cc722220392c424cd637f32293f30"
   integrity sha512-b+1eJOlsR9K8HJpow9Ok3fiWOWSIcIzXodvv0rQjVoOVNpWMpxf1wZNpt4y9h10odCNrqnYp1OBzRktckBe3sA==

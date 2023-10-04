@@ -20,7 +20,7 @@ export const Document = () => {
 
     useEffect(() => {
         // Tell the parent window that we have opened a text document (only necessary if you want to use @dao-xyz/app-sdk)
-        client.send({ type: 'navigate', to: window.location.href })
+        client.navigate({ to: window.location.href })
     }, [])
 
     useEffect(() => {
@@ -65,7 +65,6 @@ export const Document = () => {
             autosize(testAreaRef.current, { maximumRows: 5, assumeRendered: true });
     
         }, [testAreaRef]) */
-    console.log(db)
     return (
 
         <div data-iframe-height className="fit-content">
@@ -75,7 +74,7 @@ export const Document = () => {
                 onHeightChange={(e, meta) => {
                     const height = window.getComputedStyle(textRef.current).height
                     const width = window.getComputedStyle(textRef.current).width
-                    client.send({ type: 'size', height: Number(height.substring(0, height.length - 2)), width: Number(width.substring(0, width.length - 2)) })
+                    client.resize({ height: Number(height.substring(0, height.length - 2)), width: Number(width.substring(0, width.length - 2)) })
                 }}
                 onInput={async (e) => {
                     try {

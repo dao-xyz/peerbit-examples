@@ -8,7 +8,7 @@ import {
 import { AppSelect } from "./AppSelect";
 import { useNavigate } from "react-router-dom";
 import { useNames } from "../names/useNames";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppHost } from '@dao-xyz/app-sdk'
 import { usePeer } from "@peerbit/react";
 import { TEXT_APP } from "../routes";
@@ -17,6 +17,7 @@ export const Frame = (properties: {
     pending: boolean;
     element: Element;
     preview?: boolean;
+    overlay?: boolean
     index: number;
     showAuthor?: boolean
     active: boolean;
@@ -31,6 +32,19 @@ export const Frame = (properties: {
     const [author, setAuthor] = useState<string | undefined>(undefined);
     const [src, setSrc] = useState<string | undefined>(undefined);
     const { peer } = usePeer()
+    const frame = useRef<HTMLIFrameElement>();
+    const host = useRef<AppHost | undefined>(new AppHost({
+        onNavigate: () => {
+            // the iframe has navigated to some meaningful path for state
+            // update the element for this
+
+
+        },
+        onResize: (e) => {
+            console.log("GOT RESIZE MESSAGE", e.height, e.width)
+            frame.current["style"].height = e.height + "px"
+        }
+    }))
     useEffect(() => {
         if (!properties.element.content || properties.element.content.history.closed) {
             return
@@ -143,8 +157,15 @@ export const Frame = (properties: {
             ) : (
                 <div> </div>
             )} */}
-
-                {!properties.active && !properties.preview && (
+                {!properties.overlay && <div className="w-full">
+                    <AppSelect
+                        currentUrl={src}
+                        onSelected={(app) => {
+                            (properties.element.content as IFrameContent).history.put(new Navigation(app.url));
+                        }}
+                    />
+                </div>}
+                {!properties.active && !properties.preview && properties.overlay && (
                     <div
                         className={`absolute w-full h-full flex opacity-0 group-hover:opacity-100  backdrop-blur-sm group-hover:bg-primary-200/40 group-hover:dark:bg-primary-600/40`}
                     >
@@ -155,8 +176,9 @@ export const Frame = (properties: {
                             >
                                 <div className="m-1 w-full">
                                     <AppSelect
+                                        currentUrl={src}
                                         onSelected={(app) => {
-                                            (properties.element.content as IFrameContent).history.put(app.url);
+                                            (properties.element.content as IFrameContent).history.put(new Navigation(app.url));
                                         }}
                                     />
                                 </div>
@@ -201,48 +223,14 @@ export const Frame = (properties: {
                 <div id={"frame-" + properties.index} className="w-full h-full">
                     {properties.element.content instanceof IFrameContent ? (
                         <iframe
-                            onLoad={(event) => {
-                                const host = new AppHost({
-                                    iframe: event.target as any, onNavigate: () => {
-                                        // the iframe has navigated to some meaningful path for state
-                                        // update the element for this
-
-
-                                    },
-                                    onResize: (e) => {
-                                        console.log("GOT RESIZE MESSAGE", e.data.height, e.data.width)
-                                        event.target["style"].height = e.data.height + "px"
-                                    }
-                                })
-
-                                /*  const resize = iFrameResize.iframeResize(
-                                     {
-                                         heightCalculationMethod: "taggedElement",
-                                         tolerance: 0,
-                                         log: false,
-                                         onResized: (e: { width: number; height: number }) => {
-                                             console.log("RESIZE EVENT", e)
-                                         },
- 
-                                     }
-                                 );
- 
-                                 console.log("TARGET", event.target)
- 
-                                 properties.onLoad?.(event)
- 
-                                 setInterval(() => {
-                                     resize[0]?.["iFrameResizer"]?.resize();
-                                 }, 1000) */
-                            }
-                            }
+                            ref={frame}
                             onBlur={() => { }}
                             style={{
                                 width: "100%",
                                 height: "100%",
                                 border: 0,
                             }}
-                            src={src}
+                            src={src ? host.current.transformClientUrl(src) : undefined}
                             allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
                         ></iframe>
                     ) : (

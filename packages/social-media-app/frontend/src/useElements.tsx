@@ -6,7 +6,7 @@ import React, {
     useState,
     useReducer,
 } from "react";
-import { ChatView, Element } from "@dao-xyz/social";
+import { Element } from "@dao-xyz/social";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { sha256Sync } from '@peerbit/crypto'
 
@@ -127,11 +127,12 @@ export const ElementProvider = ({ children }: { children: JSX.Element }) => {
             .then(async (result) => {
                 if (!params.address) {
                     // navigate to the expeected path
-                    result.replies.views.put(new ChatView({ id: sha256Sync(ROOT_ID_SEED), parentElement: result.address })).then(() => {
-                        navigate("/p/" + result.address)
-                        console.log("NAV!")
+                    /*  result.replies..put(new ChatView({ id: sha256Sync(ROOT_ID_SEED), parentElement: result.address })).then(() => {
+                         console.log("NAV!")
+ 
+                     }) */
+                    navigate("/p/" + result.address)
 
-                    })
 
                 }
                 result.getPath().then((path) => {
