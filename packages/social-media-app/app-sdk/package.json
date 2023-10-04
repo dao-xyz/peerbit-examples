@@ -24,7 +24,6 @@
     "dependencies": {
         "@emotion/react": "^11.10.5",
         "@emotion/styled": "^11.10.5",
-        "@libp2p/webrtc": "^3.1.9",
         "@mui/icons-material": "^5.10.16",
         "@mui/material": "^5.10.13",
         "@peerbit/proxy-window": "^1.0.1",
