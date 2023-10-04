@@ -15,7 +15,7 @@
     },
     "dependencies": {
         "@dao-xyz/app-service": "^0.0.5",
-        "@dao-xyz/social": "^0.0.2",
+        "@dao-xyz/social": "^0.0.3",
         "react-grid-layout-next": "^2.2.0",
         "@peerbit/peer-names": "^0.0.1",
         "iframe-resizer": "^4.3.4",
