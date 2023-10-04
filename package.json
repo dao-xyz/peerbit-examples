@@ -7,17 +7,7 @@
     "type": "module",
     "workspaces": {
         "packages": [
-            "packages/react-utils",
-            "packages/browser-chat/*",
-            "packages/file-share/*",
-            "packages/text-document/*",
-            "packages/live-streaming/*",
-            "packages/live-streaming-canvas/*",
-            "packages/name-service/*",
-            "packages/social-media-app/*",
-            "packages/one-chat-room/*",
-            "packages/many-chat-rooms/*",
-            "packages/collaborative-learning/*"
+            "packages/**/*"
         ],
         "nohoist": [
             "**/@babel/preset-env",
