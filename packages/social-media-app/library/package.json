@@ -1,6 +1,6 @@
 {
     "name": "@dao-xyz/social",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -38,7 +38,7 @@
         "typescript": "^5.1.3"
     },
     "dependencies": {
-        "@dao-xyz/app-service": "^0.0.4",
+        "@dao-xyz/app-service": "^0.0.5",
         "@peerbit/document": "^3",
         "peerbit": "^2",
         "uuid": "^9.0.0"

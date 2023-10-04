@@ -1,6 +1,6 @@
 {
     "name": "@dao-xyz/app-sdk",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
@@ -22,6 +22,7 @@
         "react": "*"
     },
     "dependencies": {
+        "@chainsafe/libp2p-yamux": "^5.0.0",
         "@emotion/react": "^11.10.5",
         "@emotion/styled": "^11.10.5",
         "@mui/icons-material": "^5.10.16",
@@ -34,8 +35,7 @@
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-router-dom": "^6.16.0",
-        "react-use": "^17.4.0",
-        "@chainsafe/libp2p-yamux": "^5.0.0"
+        "react-use": "^17.4.0"
     },
     "devDependencies": {
         "@babel/plugin-proposal-private-property-in-object": "^7.18.6",
