@@ -17,8 +17,7 @@ Connects UI code that interacts with library to create rooms, posts etc
 1. 
 In the root folder of this repo
 ```sh
-yarn install
-yarn lerna bootstrap
+yarn
 ```
 
 2. 
