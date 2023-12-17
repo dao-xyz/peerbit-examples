@@ -14,6 +14,7 @@ import { usePeer } from "@peerbit/react";
 import { Send } from "@mui/icons-material";
 import { Ed25519PublicKey, X25519Keypair } from "@peerbit/crypto";
 import { getRoomNameFromPath } from "./routes";
+import { Peerbit } from "peerbit";
 
 /***
  *  TODO
@@ -104,27 +105,8 @@ export const Room = () => {
         })
             .then(async (r) => {
                 room.current = r;
-                r.messages.events.addEventListener("change", async (e) => {
-                    e.detail.added?.forEach((p) => {
-                        const ix = posts.current.findIndex(
-                            (x) => x.id === p.id
-                        );
-                        if (ix === -1) {
-                            posts.current.push(p);
-                        } else {
-                            posts.current[ix] = p;
-                        }
-                    });
-                    e.detail.removed?.forEach((p) => {
-                        const ix = posts.current.findIndex(
-                            (x) => x.id === p.id
-                        );
-                        if (ix !== -1) {
-                            posts.current.splice(ix, 1);
-                        }
-                    });
 
-                    // Sort by time
+                const sortPosts = async () => {
                     let wallTimes = new Map<string, bigint>();
                     await Promise.all(
                         posts.current.map(async (x) => {
@@ -147,9 +129,39 @@ export const Room = () => {
                     posts.current.sort((a, b) =>
                         Number(wallTimes.get(a.id) - wallTimes.get(b.id))
                     );
+                };
 
+                r.messages.events.addEventListener("change", async (e) => {
+                    e.detail.added?.forEach((p) => {
+                        const ix = posts.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix === -1) {
+                            posts.current.push(p);
+                        } else {
+                            posts.current[ix] = p;
+                        }
+                    });
+                    e.detail.removed?.forEach((p) => {
+                        const ix = posts.current.findIndex(
+                            (x) => x.id === p.id
+                        );
+                        if (ix !== -1) {
+                            posts.current.splice(ix, 1);
+                        }
+                    });
+
+                    // Sort by time
+                    sortPosts();
                     forceUpdate();
                 });
+
+                // Handle missed events by manually retrieving all posts and setting current posts to the ones we find
+                posts.current = await r.messages.index.search(
+                    new SearchRequest()
+                );
+                sortPosts();
+                forceUpdate();
 
                 r.events.addEventListener("join", (e) => {
                     r.getReady().then((set) => setPeerCounter(set.size + 1));
@@ -158,6 +170,8 @@ export const Room = () => {
                 r.events.addEventListener("leave", (e) => {
                     r.getReady().then((set) => setPeerCounter(set.size + 1));
                 });
+
+                r.getReady().then((set) => setPeerCounter(set.size + 1)); // To make sure even if join and leave events have been fired before the handlers have been registered, we do this
             })
             .catch((e) => {
                 console.error("Failed top open room: " + e.message);
