@@ -28,10 +28,8 @@ See [this](../../README.md) for a local node (EASY!)
 
 See [this](https://github.com/dao-xyz/peerbit/tree/master/packages/server-node) for a remote node (host in a data center, or at home with port forwarding) (A little harder)
 
-3. 
-Go to [Peer](./frontend/src/Peer.tsx) and modify the hard code addresses to one of the addresses you obtained in (1)
 
-4. 
+3. 
 In the frontend package
 
 To interact with a local node
