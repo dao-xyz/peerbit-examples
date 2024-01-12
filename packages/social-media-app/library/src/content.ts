@@ -241,8 +241,6 @@ export class Room extends Program {
                 ],
             })
         );
-        console.log("FIND ROOMS BY NAME", name, results);
-
         return results as Element<RoomContent>[];
     }
 }
@@ -288,7 +286,7 @@ export class RoomContent extends ElementContent {
 }
 
 /* 
-type Args = { role?: Role; sync?: SyncFilter };
+type Args = { role?: RoleOptions };
 
 @variant("spaces")
 export class Spaces extends Program<Args> {
@@ -334,7 +332,6 @@ export class Spaces extends Program<Args> {
             },
             canOpen: () => Promise.resolve(false), // don't open things that appear in the db
             role: args?.role,
-            sync: args?.sync,
         });
     }
 }

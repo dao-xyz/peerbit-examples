@@ -98,7 +98,7 @@ const resolveAppFromUrl = async (
     });
 };
 
-const isNode = typeof window === undefined || typeof window === "undefined";
+const isNode = typeof window === "undefined";
 
 type Args = {
     server?: boolean;

@@ -17,9 +17,9 @@ import * as filters from "@libp2p/websockets/filters";
 import { useMount } from "./useMount.js";
 import { createClient, createHost } from "@peerbit/proxy-window";
 import { ProgramClient } from "@peerbit/program";
-import { circuitRelayTransport } from "libp2p/circuit-relay";
+import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { webRTC } from "@libp2p/webrtc";
-import { identifyService } from "libp2p/identify";
+import { identify } from "@libp2p/identify";
 import { detectIncognito } from "detectincognitojs";
 
 export type ConnectionStatus =
@@ -127,9 +127,7 @@ export const PeerProvider = (options: PeerOptions) => {
                 newPeer = await Peerbit.create({
                     libp2p: {
                         addresses: {
-                            listen: [
-                                /* "/webrtc" */
-                            ],
+                            listen: ["/webrtc"],
                         },
                         connectionEncryption: [noise()],
                         peerId: await nodeId.toPeerId(), //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
@@ -138,7 +136,7 @@ export const PeerProvider = (options: PeerOptions) => {
                             minConnections: 0,
                         },
 
-                        streamMuxers: [mplex() /* , mplex() */],
+                        streamMuxers: [mplex(), yamux()],
                         ...(nodeOptions.network === "local"
                             ? {
                                   connectionGater: {
@@ -155,10 +153,10 @@ export const PeerProvider = (options: PeerOptions) => {
                                       webSockets({
                                           filter: filters.all,
                                       }),
-                                      /*        circuitRelayTransport({
-                                               discoverRelays: 1,
-                                           }),
-                                           webRTC(), */
+                                      circuitRelayTransport({
+                                          discoverRelays: 1,
+                                      }),
+                                      webRTC(),
                                       /*            circuitRelayTransport({ discoverRelays: 1 }),
 webRTC(), */
                                   ],
@@ -166,10 +164,10 @@ webRTC(), */
                             : {
                                   transports: [
                                       webSockets({ filter: filters.wss }),
-                                      /*    circuitRelayTransport({
-                                           discoverRelays: 1,
-                                       }),
-                                       webRTC(), */
+                                      circuitRelayTransport({
+                                          discoverRelays: 1,
+                                      }),
+                                      webRTC(),
                                   ],
                               }),
 
@@ -177,12 +175,11 @@ webRTC(), */
                             pubsub: (c) =>
                                 new DirectSub(c, {
                                     canRelayMessage: true,
-                                    emitSelf: true,
                                     /*  connectionManager: {
                                          autoDial: false,
                                      }, */
                                 }),
-                            identify: identifyService(),
+                            identify: identify(),
                         },
                     },
                     directory:
@@ -231,6 +228,7 @@ webRTC(), */
                     }
                 };
 
+                console.log("BOOTSTRAP!");
                 const promise = connectFn();
 
                 // Make sure data flow as expected between tabs and windows locally (offline states)

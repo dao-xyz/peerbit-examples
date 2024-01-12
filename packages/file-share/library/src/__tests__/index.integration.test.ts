@@ -2,7 +2,7 @@ import { Peerbit } from "peerbit";
 import { Files, LargeFile } from "..";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
-import { Observer, SearchRequest, StringMatch } from "@peerbit/document";
+import { SearchRequest, StringMatch } from "@peerbit/document";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -25,9 +25,12 @@ describe("index", () => {
         const smallFile = new Uint8Array([123]);
         await filestore.add("tiny file", smallFile);
         const filestoreReader = await peer2.open<Files>(filestore.address, {
-            args: { role: new Observer() },
+            args: { role: "observer" },
         });
-        await filestoreReader.waitFor(peer.identity.publicKey);
+        await filestoreReader.files.log.waitForReplicator(
+            peer.identity.publicKey
+        );
+
         expect(
             new Uint8Array(
                 (await filestoreReader.getByName("tiny file"))!.bytes
@@ -47,10 +50,12 @@ describe("index", () => {
 
         const filestoreReader = await peer2.open<Files>(filestore.address, {
             args: {
-                role: new Observer(),
+                role: "observer",
             },
         });
-        await filestoreReader.waitFor(peer.identity.publicKey);
+        await filestoreReader.files.log.waitForReplicator(
+            peer.identity.publicKey
+        );
 
         const file = await filestoreReader.getByName("small file");
         expect(equals(new Uint8Array(file!.bytes), smallFile)).toBeTrue();
@@ -75,9 +80,11 @@ describe("index", () => {
             expect(filestore.files.index.size).toEqual(3);
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: { role: new Observer() },
+                args: { role: "observer" },
             });
-            await filestoreReader.waitFor(peer.identity.publicKey);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
 
             const file = await filestoreReader.getByName("large file");
             expect(equals(file!.bytes, largeFile)).toBeTrue();
@@ -95,9 +102,11 @@ describe("index", () => {
             expect(filestore.files.index.size).toEqual(57);
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: { role: new Observer() },
+                args: { role: "observer" },
             });
-            await filestoreReader.waitFor(peer.identity.publicKey);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
 
             const file = (await filestoreReader.getByName(
                 "random large file"
@@ -118,9 +127,11 @@ describe("index", () => {
             await filestore.add("10mb file", largeFile);
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: { role: new Observer() },
+                args: { role: "observer" },
             });
-            await filestoreReader.waitFor(peer.identity.publicKey);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
 
             const results = await filestoreReader.files.index.search(
                 new SearchRequest({

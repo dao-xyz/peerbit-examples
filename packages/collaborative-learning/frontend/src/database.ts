@@ -1,5 +1,5 @@
 import { Program } from "@peerbit/program";
-import { DocumentIndex, Documents } from "@peerbit/document";
+import { Documents } from "@peerbit/document";
 import { field, variant } from "@dao-xyz/borsh";
 
 export class Model {

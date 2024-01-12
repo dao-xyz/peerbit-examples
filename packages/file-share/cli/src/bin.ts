@@ -6,7 +6,7 @@ import fs from "fs";
 import * as yargs from "yargs";
 import { Argv } from "yargs";
 import chalk from "chalk";
-import { waitForAsync } from "@peerbit/time";
+import { waitFor } from "@peerbit/time";
 import path from "path";
 import { multiaddr } from "@multiformats/multiaddr";
 
@@ -38,12 +38,13 @@ const cli = async (args?: string[]) => {
     const peerbit = await Peerbit.create();
     const files = await peerbit.open(new Files({ id: ID }));
 
+    // TODO fix types
     return yargs
         .default(args)
-        .command({
+        .command<any>({
             command: "put <path>",
             describe: "Put file",
-            builder: (yargs: Argv) => {
+            builder: (yargs) => {
                 yargs.positional("path", {
                     type: "string",
                     describe: "Where to save it",
@@ -76,10 +77,10 @@ const cli = async (args?: string[]) => {
                 );
             },
         })
-        .command({
+        .command<any>({
             command: "get <id> [path]",
             describe: "Get file",
-            builder: (yargs: Argv) => {
+            builder: (yargs) => {
                 yargs.positional("id", {
                     type: "string",
                     describe: "The file id. Obtained when putting the file",
@@ -118,9 +119,7 @@ const cli = async (args?: string[]) => {
                 console.log("Fetching file with id: " + args.id);
 
                 // wait for at least 1 replicator
-                await waitForAsync(
-                    async () => (await files.getReady()).size >= 1
-                );
+                await waitFor(async () => (await files.getReady()).size >= 1);
 
                 const file = await files.getById(args.id.trim());
 

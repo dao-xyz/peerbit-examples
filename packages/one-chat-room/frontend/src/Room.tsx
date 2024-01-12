@@ -17,6 +17,7 @@ import { Send } from "@mui/icons-material";
 import { getKeyFromPath } from "./routes";
 import { Ed25519PublicKey, X25519Keypair } from "@peerbit/crypto";
 import PeopleIcon from "@mui/icons-material/People";
+import { useProgram } from "@peerbit/react";
 
 const shortName = (name: string) => {
     return (
@@ -38,17 +39,54 @@ function debounce(func, delay) {
 }
 
 export const Room = () => {
-    const { peer, loading: loadingPeer } = usePeer();
-    const names = useRef<Names>();
-    const room = useRef<RoomDB>();
-    const [peerCounter, setPeerCounter] = useState<number>(1);
-    const [loading, setLoading] = useState(false);
+    // Manage names and identities
     const identitiesInChatMap = useRef<Map<string, Ed25519PublicKey>>();
-    const [text, setText] = useState("");
+
+    // This fields is meant for when one uses encryption (not used as of now)
     const [receivers, setRecievers] = useState<string[]>([]);
+
+    // list of current posts in view
     const postsRef = useRef<Post[]>([]);
+
+    // force updates
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
+
+    // input field
+    const [text, setText] = useState("");
+
+    // url
     const params = useParams();
+
+    // db stuff
+
+    /// client
+    const { peer, loading: loadingPeer } = usePeer();
+
+    /// aliases
+    const names = useProgram(new Names(), {
+        args: {
+            role: {
+                type: "replicator",
+                factor: 1,
+            },
+        },
+        existing: "reuse",
+    });
+
+    /// messages
+    const room = useProgram(
+        params.key && new RoomDB({ creator: getKeyFromPath(params.key) }),
+        {
+            args: {
+                role: {
+                    type: "replicator",
+                    factor: 1,
+                },
+            },
+            existing: "reuse",
+        }
+    );
+
     const messagesEndRef = useRef(null);
 
     const [headerHeight, setHeaderHeight] = useState(0);
@@ -59,123 +97,88 @@ export const Room = () => {
     };
 
     useEffect(() => {
-        if (!room?.current?.id || room?.current?.closed) {
+        console.log(peer?.identity.publicKey.hashcode());
+        if (!room.program?.id || room.program?.closed) {
             return;
         }
-        room?.current.messages.index.search(new SearchRequest({ query: [] }), {
-            remote: { sync: true },
-        });
-    }, [room?.current?.id, room?.current?.closed, peerCounter]);
 
-    useEffect(() => {
-        if (room.current || loading || !params.key || !peer) {
-            //('return', rooms, loadedRoomsLocally)
-            return;
-        }
-        room.current = undefined;
-        setLoading(true);
-        const key = getKeyFromPath(params.key);
-        peer.open(new Names(), {
-            args: { sync: () => true },
-            existing: "reuse",
-        }).then(
-            // only sync more recent messages?
-            async (namesDB) => {
-                names.current = namesDB;
+        const updateNames = async (p: Post) => {
+            const pk = (
+                await room.program.messages.log.log.get(
+                    room.program.messages.index.index.get(p.id).context.head
+                )
+            ).signatures[0].publicKey;
+            names.program?.getName(pk).then((name) => {
+                namesCache.set(pk.hashcode(), name);
+            });
+        };
 
-                const r = new RoomDB({ creator: key });
+        let updateTimeout: ReturnType<typeof setTimeout> | undefined;
 
-                const updateNames = async (p: Post) => {
-                    const pk = (
-                        await r.messages.log.log.get(
-                            r.messages.index.index.get(p.id).context.head
-                        )
-                    ).signatures[0].publicKey;
-                    namesDB.getName(pk).then((name) => {
-                        namesCache.set(pk.hashcode(), name);
-                    });
-                };
-
-                let updateTimeout: ReturnType<typeof setTimeout> | undefined;
-                r.messages.events.addEventListener("change", (e) => {
-                    e.detail.added?.forEach((p) => {
-                        const ix = postsRef.current.findIndex(
-                            (x) => x.id === p.id
-                        );
-                        if (ix === -1) {
-                            postsRef.current.push(p);
-                        } else {
-                            postsRef.current[ix] = p;
-                        }
-                        updateNames(p);
-                    });
-                    e.detail.removed?.forEach((p) => {
-                        const ix = postsRef.current.findIndex(
-                            (x) => x.id === p.id
-                        );
-                        if (ix !== -1) {
-                            postsRef.current.splice(ix, 1);
-                        }
-                    });
-
-                    let wallTimes = new Map<string, bigint>();
-
-                    clearTimeout(updateTimeout);
-                    updateTimeout = setTimeout(async () => {
-                        const entries = await Promise.all(
-                            postsRef.current.map(async (x) => {
-                                return {
-                                    post: x,
-                                    entry: await room.current.messages.log.log.get(
-                                        room.current.messages.index.index.get(
-                                            x.id
-                                        ).context.head
-                                    ),
-                                };
-                            })
-                        );
-                        entries.forEach(({ post, entry }) => {
-                            wallTimes.set(
-                                post.id,
-                                entry.meta.clock.timestamp.wallTime
-                            );
-                        });
-
-                        postsRef.current.sort((a, b) =>
-                            Number(wallTimes.get(a.id) - wallTimes.get(b.id))
-                        );
-                        forceUpdate();
-                    }, 5);
+        const updateWallTimes = () => {
+            let wallTimes = new Map<string, bigint>();
+            clearTimeout(updateTimeout);
+            updateTimeout = setTimeout(async () => {
+                const entries = await Promise.all(
+                    postsRef.current.map(async (x) => {
+                        return {
+                            post: x,
+                            entry: await room.program.messages.log.log.get(
+                                room.program.messages.index.index.get(x.id)
+                                    .context.head
+                            ),
+                        };
+                    })
+                );
+                entries.forEach(({ post, entry }) => {
+                    wallTimes.set(post.id, entry.meta.clock.timestamp.wallTime);
                 });
 
-                r.events.addEventListener("join", (e) => {
-                    r.getReady().then((set) => setPeerCounter(set.size + 1));
-                });
+                postsRef.current.sort((a, b) =>
+                    Number(wallTimes.get(a.id) - wallTimes.get(b.id))
+                );
+                forceUpdate();
+            }, 5);
+        };
 
-                r.events.addEventListener("leave", (e) => {
-                    r.getReady().then((set) => setPeerCounter(set.size + 1));
-                });
-
-                await peer
-                    .open(r, {
-                        args: { sync: () => true },
-                        existing: "reuse",
-                    })
-                    .then(async (r) => {
-                        room.current = r;
-                    })
-                    .catch((e) => {
-                        console.error("Failed top open room: " + e.message);
-                        alert("Failed top open room: " + e.message);
-
-                        throw e;
-                    })
-                    .finally(() => {
-                        setLoading(false);
-                    });
+        const addPostToView = (p: Post) => {
+            const ix = postsRef.current.findIndex((x) => x.id === p.id);
+            if (ix === -1) {
+                postsRef.current.push(p);
+            } else {
+                postsRef.current[ix] = p;
             }
-        );
-    }, [params.name, peer?.identity.publicKey.hashcode()]);
+            updateNames(p);
+        };
+        const removePostFromView = (p: Post) => {
+            const ix = postsRef.current.findIndex((x) => x.id === p.id);
+            if (ix !== -1) {
+                postsRef.current.splice(ix, 1);
+            }
+        };
+        const changeListener = (e) => {
+            e.detail.added?.forEach(addPostToView);
+            e.detail.removed?.forEach(removePostFromView);
+            updateWallTimes();
+        };
+        room.program.messages.events.addEventListener("change", changeListener);
+
+        room.program.messages.index
+            .search(new SearchRequest({ query: [] }), {
+                remote: { sync: true },
+            })
+            .then((results) => {
+                results.forEach(addPostToView);
+                updateWallTimes();
+            });
+
+        return () =>
+            room.program.messages.events.removeEventListener(
+                "change",
+                changeListener
+            );
+    }, [room.program?.address]);
+
     useEffect(() => {
         scrollToBottom();
         // sync latest messages
@@ -185,12 +188,14 @@ export const Room = () => {
         if (!room) {
             return;
         }
-        room.current.messages
+        room.program.messages
             .put(new Post({ message: text, from: peer.identity.publicKey }), {
                 encryption: {
                     // TODO do once for performance
                     keypair: await X25519Keypair.from(
-                        await peer.keychain.exportByKey(peer.identity.publicKey)
+                        await peer.services.keychain.exportByKey(
+                            peer.identity.publicKey
+                        )
                     ),
 
                     // Set reciever of message parts
@@ -211,7 +216,7 @@ export const Room = () => {
                 alert("Failed to create message: " + e.message);
                 throw e;
             });
-    }, [text, room.current?.id, peer, receivers]);
+    }, [text, room.program?.id, peer, receivers]);
 
     const getDisplayName = (p: Post) => {
         const name = namesCache.get(p.from.hashcode());
@@ -222,7 +227,7 @@ export const Room = () => {
     };
     const hasDisplayName = (p: Post) => namesCache.has(p.from.hashcode());
 
-    return loading || loadingPeer ? (
+    return names.loading || room.loading || loadingPeer ? (
         <Box
             sx={{
                 height: "100vh",
@@ -247,7 +252,7 @@ export const Room = () => {
                 <Grid item>
                     <PeopleIcon />
                 </Grid>
-                <Grid item>{peerCounter}</Grid>
+                <Grid item>{room.peerCounter}</Grid>
             </Grid>
             <Grid
                 item
@@ -265,13 +270,13 @@ export const Room = () => {
                         // No scrollbar visible, but we want to "scroll"
                         let scrollingTop = e.deltaY < 0;
                         scrollingTop
-                            ? room.current.loadEarlier()
-                            : room.current.loadLater();
+                            ? room.program.loadEarlier()
+                            : room.program.loadLater();
                     }
                 }, 30)}
                 onScroll={async (e) => {
                     if (e.currentTarget.scrollTop === 0) {
-                        room.current.loadEarlier();
+                        room.program.loadEarlier();
                     } else if (
                         Math.abs(
                             e.currentTarget.scrollHeight -
@@ -279,7 +284,7 @@ export const Room = () => {
                                 e.currentTarget.clientHeight
                         ) < 1
                     ) {
-                        room.current.loadLater();
+                        room.program.loadLater();
                     }
                 }}
             >

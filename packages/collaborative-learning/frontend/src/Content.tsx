@@ -1,4 +1,4 @@
-import { usePeer } from "@peerbit/react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { useState, useEffect, useRef } from "react";
 import { useParams } from "react-router-dom";
 import * as tf from "@tensorflow/tfjs";
@@ -170,28 +170,17 @@ export const Content = () => {
     const [usingCamera, setUsingCamera] = useState(false);
     const p2pStorage = useRef<P2PStorage | tf.io.IOHandler>();
     const [modelDate, setModelDate] = useState<Date>(null);
-    const [subscribers, setSubscribers] = useState(1);
+
+    // The p2p database of model weights
+    const modelDB = useProgram(new ModelDatabase({ id: MODEL_DATABASE_ID }), {
+        existing: "reuse",
+    });
 
     useEffect(() => {
-        if (p2pStorage.current || !peer) {
+        if (!modelDB.program) {
             return;
         }
-        setProcessing(true);
-        peer.open(new ModelDatabase({ id: MODEL_DATABASE_ID }), {
-            existing: "reuse",
-        }).then(async (db) => {
-            db.events.addEventListener("join", (e) => {
-                db.getReady().then((set) => setSubscribers(set.size + 1));
-            });
-
-            db.events.addEventListener("leave", (e) => {
-                db.getReady().then((set) => setSubscribers(set.size + 1));
-            });
-
-            p2pStorage.current = new P2PStorage(db, MODEL_ID);
-
-            setProcessing(false);
-        });
+        p2pStorage.current = new P2PStorage(modelDB.program, MODEL_ID);
     }, [peer?.identity.publicKey.hashcode()]);
 
     const enableCam = () => {
@@ -320,8 +309,8 @@ export const Content = () => {
                 </Grid>
                 <Grid item sx={{ display: "flex", flexDirection: "row" }}>
                     <Typography>Online: &nbsp;</Typography>
-                    <Typography>{subscribers}</Typography>
-                    {subscribers === 1 && (
+                    <Typography>{modelDB.peerCounter}</Typography>
+                    {modelDB.peerCounter === 1 && (
                         <Typography>&nbsp;(just you)</Typography>
                     )}
                 </Grid>
@@ -442,7 +431,9 @@ export const Content = () => {
                         <Button
                             startIcon={<PublicIcon />}
                             color="secondary"
-                            disabled={!p2pStorage.current || subscribers <= 1}
+                            disabled={
+                                !p2pStorage.current || modelDB.peerCounter <= 1
+                            }
                             onClick={() => {
                                 tf.loadLayersModel(p2pStorage.current)
                                     .then((loaded) => {

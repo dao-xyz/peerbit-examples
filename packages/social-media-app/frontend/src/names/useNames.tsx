@@ -51,18 +51,12 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 }),
                 {
                     args: {
-                        sync: () => true,
+                        role: {
+                            type: "replicator",
+                            factor: 1,
+                        },
                     },
                     existing: "reuse",
-
-                    /*  sync: (entry) => { TODO always sync "my" names
-                     for (const s of entry.signatures) {
-                         if (s.publicKey.equals(peer.identity.publicKey) || s.publicKey.equals(peer.identity.publicKey)) {
-                             return true;
-                         }
-                     }
-                     return false;
-                 } */
                 }
             ).then(async (db) => {
                 db.names.events.addEventListener("change", () => {

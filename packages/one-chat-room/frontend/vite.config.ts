@@ -5,6 +5,13 @@ import fs from "fs";
 // https://vitejs.dev/config/
 export default defineConfig({
     plugins: [react()],
+    optimizeDeps: {
+        esbuildOptions: {
+            target: "esnext",
+        },
+
+        exclude: ["@peerbit/any-store"],
+    },
     build: {
         target: "esnext",
     },

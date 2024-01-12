@@ -1,10 +1,9 @@
-import { usePeer } from "@peerbit/react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { useNavigate, useParams } from "react-router-dom";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import * as Toggle from "@radix-ui/react-toggle";
 
-import { Observer, Replicator } from "@peerbit/document";
 import { MdArrowBack, MdUploadFile } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
 import { File } from "./File";
@@ -21,7 +20,6 @@ export const Drop = () => {
     const navigate = useNavigate();
 
     const { peer } = usePeer();
-    const filesRef = useRef<Files>(undefined);
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const params = useParams();
     const [list, setList] = useState<AbstractFile[]>([]);
@@ -35,98 +33,118 @@ export const Drop = () => {
     const [isHost, setIsHost] = useState<boolean>();
     const [role, setRole] = useState<"replicator" | "observer">("observer");
     const [replicatorCount, setReplicatorCount] = useState(0);
-    const [loading, setLoading] = useState(true);
     const [left, setLeft] = useState(false);
 
-    const updateSeeders = () => {
-        setReplicatorCount(
-            filesRef.current.files.log.getReplicatorsSorted().length
-        );
-    };
+    const files = useProgram<Files>(
+        params.address && decodeURIComponent(params.address),
+        {
+            existing: "reuse",
+            args: { role: { type: "replicator", factor: 1 } },
+        }
+    );
 
     const updateRole = async (newRole: "replicator" | "observer") => {
         setRole(newRole);
 
-        saveRoleLocalStorage(filesRef.current, newRole); // Save role in localstorage for next time
+        saveRoleLocalStorage(files.program, newRole); // Save role in localstorage for next time
 
-        await filesRef.current.files.log.updateRole(
-            newRole === "observer" ? new Observer() : new Replicator()
-        );
-        updateSeeders();
+        await files.program.files.log.updateRole(newRole);
     };
+
     useEffect(() => {
-        if (!peer?.identity.publicKey) {
+        if (!files.program?.address) {
             return;
         }
-        setLoading(true);
-        peer.open<Files>(decodeURIComponent(params.address), {
-            existing: "reuse",
-            args: { role: new Observer(), sync: () => true },
-        })
-            .then(async (f) => {
-                const isTrusted =
-                    !f.trustGraph ||
-                    (await f.trustGraph.isTrusted(peer.identity.publicKey));
 
-                filesRef.current = f;
+        const fn = async () => {
+            const isTrusted =
+                !files.program.trustGraph ||
+                (await files.program.trustGraph.isTrusted(
+                    peer.identity.publicKey
+                ));
 
-                // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
-                if (
-                    isTrusted ||
-                    getRoleFromLocalStorage(filesRef.current) === "replicator"
-                ) {
-                    // by default open as replicator
-                    await updateRole("replicator");
-                }
+            files.program = files.program;
 
-                setIsHost(isTrusted);
-                if (!isTrusted) {
-                    /*   setWaitingForHost(true);
-                  forceUpdate();
-                  await f.waitFor(f.rootKey).catch(() => {
-                      alert("Host is not online");
-                  });
-                  setWaitingForHost(false); */
-                }
-                f.files.log.events.addEventListener("join", () => {
-                    updateSeeders();
-                    updateList();
-                });
+            // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
+            if (
+                isTrusted ||
+                getRoleFromLocalStorage(files.program) === "replicator"
+            ) {
+                // by default open as replicator
+                await updateRole("replicator");
+            }
 
-                f.files.log.events.addEventListener("leave", () => {
-                    updateSeeders();
-                    updateList();
-                });
+            setIsHost(isTrusted);
+            if (!isTrusted) {
+                /*   setWaitingForHost(true);
+              forceUpdate();
+              await f.waitFor(f.rootKey).catch(() => {
+                  alert("Host is not online");
+              });
+              setWaitingForHost(false); */
+            }
+            await updateList();
+        };
+        fn();
 
-                let updateListTimeout = undefined;
-                f.files.events.addEventListener("change", async () => {
-                    updateListTimeout && clearTimeout(updateListTimeout);
-                    updateListTimeout = setTimeout(() => {
-                        updateList();
-                    }, 100);
-                });
+        let updateListTimeout = undefined;
 
-                /*   console.log([...peer.services.pubsub["topics"].keys()]);
-              [...peer.services.pubsub["topics"].keys()].map(x => peer.services.pubsub.requestSubscribers(x)) */
+        const networkChangeListener = () => {
+            updateListTimeout && clearTimeout(updateListTimeout);
+            updateListTimeout = setTimeout(() => {
+                updateList();
+            }, 100);
+        };
 
-                await updateList();
+        files.program.files.log.events.addEventListener(
+            "join",
+            networkChangeListener
+        );
+        files.program.files.log.events.addEventListener(
+            "leave",
+            networkChangeListener
+        );
+        files.program.files.events.addEventListener(
+            "change",
+            networkChangeListener
+        );
 
-                return f;
-            })
-            .catch(() => {
-                if (!left) {
-                    alert(
-                        "Failed to load space with address: " + params.address
-                    );
-                }
-            })
-            .finally(() => {
-                setLoading(false);
-            });
-    }, [peer?.identity?.publicKey.hashcode()]);
+        const roleChangeListener = () => {
+            setReplicatorCount(
+                files.program.files.log.getReplicatorsSorted()?.length
+            );
+        };
+
+        files.program.files.log.events.addEventListener(
+            "role",
+            roleChangeListener
+        );
+
+        /*   console.log([...peer.services.pubsub["topics"].keys()]);
+      [...peer.services.pubsub["topics"].keys()].map(x => peer.services.pubsub.requestSubscribers(x)) */
+
+        return () => {
+            files.program.files.log.events.removeEventListener(
+                "join",
+                networkChangeListener
+            );
+            files.program.files.log.events.removeEventListener(
+                "leave",
+                networkChangeListener
+            );
+            files.program.files.events.removeEventListener(
+                "change",
+                networkChangeListener
+            );
+            files.program.files.log.events.removeEventListener(
+                "role",
+                roleChangeListener
+            );
+        };
+    }, [files.program?.address]);
 
     const updateList = async () => {
-        const list = await filesRef.current.list();
+        const list = await files.program.list();
         let chunkMap = new Map();
         setList(
             list
@@ -146,7 +164,7 @@ export const Drop = () => {
         setChunkMap(chunkMap);
 
         // Get replication set
-        setReplicationSet(new Set(filesRef.current.files.index.index.keys()));
+        setReplicationSet(new Set(files.program.files.index.index.keys()));
         forceUpdate();
     };
     const download = async (
@@ -155,7 +173,7 @@ export const Drop = () => {
     ) => {
         console.log("FETCH FILE START");
         const bytes = await file
-            .getFile(filesRef.current, {
+            .getFile(files.program, {
                 as: "chunks",
                 timeout: 10 * 1000,
                 progress,
@@ -210,15 +228,15 @@ export const Drop = () => {
         );
     };
 
-    const addFile = async (files: FileList | File[]) => {
-        for (const file of files) {
+    const addFile = async (filesToAdd: FileList | File[]) => {
+        for (const file of filesToAdd) {
             var reader = new FileReader();
             reader.readAsArrayBuffer(file);
             reader.onload = function () {
                 var arrayBuffer = reader.result;
                 var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
                 console.log(bytes);
-                filesRef.current.add(file.name, bytes).then(() => {
+                files.program.add(file.name, bytes).then(() => {
                     updateList();
                 });
             };
@@ -248,7 +266,7 @@ export const Drop = () => {
 
     return (
         <>
-            {loading ? (
+            {files.loading ? (
                 <div className="flex flex-col items-center justify-center content-center h-full gap-4">
                     <div className="flex flex-row gap-4 items-center justify-center">
                         <span className="italic">Loading</span> <Spinner />
@@ -265,7 +283,7 @@ export const Drop = () => {
                         <div className="flex flex-row gap-4 items-center">
                             <div className="flex flex-col ">
                                 <h1 className="text-3xl italic">
-                                    {filesRef.current?.name}
+                                    {files.program?.name}
                                 </h1>
                                 <span className="font-mono text-xs">
                                     Seeders:{" "}
@@ -313,7 +331,7 @@ export const Drop = () => {
                                                 : "observer"
                                         );
                                     }}
-                                    disabled={!filesRef.current}
+                                    disabled={!files.program}
                                     pressed={role === "replicator"}
                                     className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2"
                                     aria-label="Toggle italic"
@@ -346,7 +364,7 @@ export const Drop = () => {
                                                         )}
                                                         isHost={isHost}
                                                         delete={() => {
-                                                            filesRef.current
+                                                            files.program
                                                                 .removeById(
                                                                     x.id
                                                                 )

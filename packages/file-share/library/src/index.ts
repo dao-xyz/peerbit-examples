@@ -4,11 +4,10 @@ import {
     Documents,
     SearchRequest,
     StringMatch,
-    Role,
     StringMatchMethod,
     Or,
+    RoleOptions,
 } from "@peerbit/document";
-import { SyncFilter } from "@peerbit/shared-log";
 import { PublicSignKey, sha256Base64Sync, randomBytes } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
@@ -157,7 +156,7 @@ export class SmallFile extends AbstractFile {
     }
 
     async delete(files: Files): Promise<void> {
-        return await files.node.services.blocks.rm(this.id);
+        return files.node.services.blocks.rm(this.id);
     }
 }
 
@@ -327,7 +326,7 @@ export class LargeFile extends AbstractFile {
     }
 }
 
-type Args = { role: Role; sync?: SyncFilter | undefined };
+type Args = { role: RoleOptions };
 
 @variant("files")
 export class Files extends Program<Args> {
@@ -500,7 +499,6 @@ export class Files extends Program<Args> {
             type: AbstractFile,
             // TODO add ACL
             role: args?.role,
-            sync: args?.sync,
             replicas: { min: 3 },
             canPerform: async (operation, context) => {
                 if (!this.trustGraph) {

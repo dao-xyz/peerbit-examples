@@ -128,6 +128,12 @@ export const Stream = (args: { node: PublicSignKey }) => {
             return;
         }
         peer.open(new MediaStreamDBs(peer.identity.publicKey), {
+            args: {
+                role: {
+                    type: "replicator",
+                    factor: 1,
+                },
+            },
             existing: "reuse",
         }).then(async (db) => {
             mediaStreamDBs.current = db;
@@ -251,7 +257,14 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                                                 const r = await peer.open(
                                                     newStreamDB,
+
                                                     {
+                                                        args: {
+                                                            role: {
+                                                                type: "replicator",
+                                                                factor: 1,
+                                                            },
+                                                        },
                                                         /*   trim: { type: 'length', to: 10 }, */
                                                     }
                                                 );
@@ -275,7 +288,8 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                                             source: videoStreamDB,
                                                         });
                                                     return mediaStreamDBs.current.streams.put(
-                                                        streamInfo
+                                                        streamInfo,
+                                                        { target: "all" }
                                                     );
                                                 }
                                             })
@@ -300,7 +314,11 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                             chunk: arr,
                                             timestamp: lastVideoFrameTimestamp,
                                         }),
-                                        { meta: { next: [] }, unique: true }
+                                        {
+                                            target: "all",
+                                            meta: { next: [] },
+                                            unique: true,
+                                        }
                                     );
 
                                     //   console.log(mem / ((+new Date) - s0) * 1000)
@@ -409,7 +427,15 @@ export const Stream = (args: { node: PublicSignKey }) => {
             let lastAudioTime = +new Date();
 
             audioStreamDB = await peer.open(
-                new AudioStreamDB(peer.identity.publicKey, 48000)
+                new AudioStreamDB(peer.identity.publicKey, 48000),
+                {
+                    args: {
+                        role: {
+                            type: "replicator",
+                            factor: 1,
+                        },
+                    },
+                }
             );
 
             const dbs = await mediaStreamDBs.current;
@@ -417,7 +443,8 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 new Track({
                     session: sessionTimestampRef.current,
                     source: audioStreamDB,
-                })
+                }),
+                { target: "all" }
             );
             await encoderInit;
             wavEncoder.node.port.onmessage = (ev) => {
@@ -431,6 +458,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 audioStreamDB.chunks.put(
                     new Chunk({ type: "", chunk: audioBuffer, timestamp }),
                     {
+                        target: "all",
                         unique: true,
                     }
                 );

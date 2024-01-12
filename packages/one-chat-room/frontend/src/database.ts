@@ -10,10 +10,10 @@ import {
     Sort,
     Compare,
     Query,
+    RoleOptions,
 } from "@peerbit/document";
 import { v4 as uuid } from "uuid";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
-import { Role, SyncFilter } from "@peerbit/shared-log";
 import { concat } from "uint8arrays";
 
 const FROM = "from";
@@ -39,8 +39,7 @@ export class Post {
 }
 
 type Args = {
-    role?: Role;
-    sync?: SyncFilter;
+    role?: RoleOptions;
 };
 
 @variant("room")
@@ -116,7 +115,6 @@ export class Room extends Program<Args> {
                 },
             },
             role: args?.role,
-            sync: args?.sync,
         });
     }
 

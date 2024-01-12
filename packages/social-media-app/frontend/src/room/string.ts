@@ -1,20 +1,13 @@
 import { field, variant, fixedArray, vec } from "@dao-xyz/borsh";
 import {
-    DeleteOperation,
     Documents,
-    Operation,
-    PutOperation,
-    Role,
     SearchRequest,
     Sort,
     CanPerform,
     SortDirection,
 } from "@peerbit/document";
 import { PublicSignKey, randomBytes } from "@peerbit/crypto";
-import { Ed25519Keypair } from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
-import { SyncFilter } from "@peerbit/shared-log";
-import { CanAppend, Change, Entry, TrimOptions } from "@peerbit/log";
 
 @variant(0)
 class StringElement {

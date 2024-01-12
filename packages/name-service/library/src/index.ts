@@ -1,13 +1,12 @@
-import { field, variant, fixedArray } from "@dao-xyz/borsh";
+import { field, variant } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
 import {
     SearchRequest,
     Documents,
     StringMatch,
-    PutOperation,
+    RoleOptions,
 } from "@peerbit/document";
-import { Role, SyncFilter } from "@peerbit/shared-log";
-import { PublicSignKey, randomBytes } from "@peerbit/crypto";
+import { PublicSignKey } from "@peerbit/crypto";
 
 @variant(0)
 export class Name {
@@ -23,7 +22,7 @@ export class Name {
     }
 }
 
-type Args = { role?: Role; sync?: SyncFilter };
+type Args = { role?: RoleOptions };
 
 // A random ID, but unique for this app
 const ID = new Uint8Array([
@@ -66,7 +65,6 @@ export class Names extends Program<Args> {
                 },
             },
             role: args?.role,
-            sync: args?.sync,
         });
     }
 

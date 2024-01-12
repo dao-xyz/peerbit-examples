@@ -2,16 +2,13 @@ import { field, variant } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
 import {
     Documents,
-    DocumentIndex,
     PutOperation,
     DeleteOperation,
-    Role,
+    RoleOptions,
 } from "@peerbit/document";
 import { v4 as uuid } from "uuid";
-import { Entry } from "@peerbit/log";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { randomBytes } from "@peerbit/crypto";
-import { SyncFilter } from "@peerbit/shared-log";
 import { concat } from "uint8arrays";
 
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
@@ -31,7 +28,7 @@ export class Post {
         this.message = properties.message;
     }
 }
-type Args = { role?: Role; sync?: SyncFilter };
+type Args = { role?: RoleOptions };
 
 @variant("room")
 export class Room extends Program<Args> {
@@ -62,6 +59,8 @@ export class Room extends Program<Args> {
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
+        console.log("ROLE?", args);
+
         await this.messages.open({
             type: Post,
             canPerform: async (operation, context) => {
@@ -95,7 +94,6 @@ export class Room extends Program<Args> {
                 },
             },
             role: args?.role,
-            sync: args?.sync,
         });
     }
 }
@@ -116,6 +114,7 @@ export class Lobby extends Program<Args> {
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
+        console.log("ROLE?", args);
         await this.rooms.open({
             type: Room,
 
@@ -135,10 +134,9 @@ export class Lobby extends Program<Args> {
                 // Even if anyone could do "rooms.put(new Room())", that new entry has to be analyzed. And if it turns out that new entry represents a program
                 // this means it should be handled in a special way (replication etc). This extra functionality needs requires peers to consider this additional security
                 // boundary
-                return Promise.resolve(true);
+                return Promise.resolve(false);
             },
             role: args?.role,
-            sync: args?.sync,
         });
     }
 }

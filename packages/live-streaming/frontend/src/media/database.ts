@@ -16,12 +16,14 @@ import {
     IntegerCompare,
     Compare,
     SearchOptions,
+    RoleOptions,
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import { v4 as uuid } from "uuid";
 import { write, length } from "@protobufjs/utf8";
-import { Role, SyncFilter } from "@peerbit/shared-log";
 import { concat } from "uint8arrays";
+import { Entry } from "@peerbit/log";
+
 const utf8Encode = (value: string) => {
     const l = length(value);
     const arr = new Uint8Array(l);
@@ -83,7 +85,7 @@ export class MediaStreamInfo {
     }
 }
 
-type Args = { role?: Role; sync?: SyncFilter };
+type Args = { role?: RoleOptions; sync?: (entry: Entry<any>) => boolean };
 
 @variant("track-source")
 export abstract class TrackSource extends Program<Args> {

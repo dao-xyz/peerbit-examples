@@ -1,5 +1,5 @@
 import { Peerbit } from "peerbit";
-import { waitFor, waitForAsync } from "@peerbit/time";
+import { waitFor } from "@peerbit/time";
 import { Post, Room, Lobby } from "..";
 import {
     SearchRequest,
@@ -65,7 +65,7 @@ describe("index", () => {
 
         const roomAfrom1 = (await lobbyFrom1.rooms.index.get(roomAFrom2.id))!;
 
-        const helloWorldPostFrom1 = await waitForAsync(
+        const helloWorldPostFrom1 = await waitFor(
             async () =>
                 await roomAfrom1.messages.index.get(helloWorldPostFrom2.id, {
                     local: true,

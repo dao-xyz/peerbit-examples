@@ -1,7 +1,6 @@
 import { Peerbit } from "peerbit";
 import { Post, Room } from "../database";
-import { Observer } from "@peerbit/document";
-
+import { delay } from "@peerbit/time";
 describe("Room", () => {
     let peer: Peerbit, peer2: Peerbit;
 
@@ -28,11 +27,16 @@ describe("Room", () => {
 
         const roomObserve = await peer2.open<Room>(room.address, {
             args: {
-                role: new Observer(),
+                role: "observer",
             },
         });
-        await roomObserve.waitFor(peer.identity.publicKey);
+
+        await roomObserve.messages.log.waitForReplicator(
+            peer.identity.publicKey
+        );
+
         let earlier = await roomObserve.loadEarlier();
+
         expect(earlier).toHaveLength(2);
 
         earlier = await roomObserve.loadEarlier();
@@ -58,10 +62,12 @@ describe("Room", () => {
 
         const roomObserve = await peer2.open<Room>(room.address, {
             args: {
-                role: new Observer(),
+                role: "observer",
             },
         });
-        await roomObserve.waitFor(peer.identity.publicKey);
+        await roomObserve.messages.log.waitForReplicator(
+            peer.identity.publicKey
+        );
         let later = await roomObserve.loadLater();
         expect(later).toHaveLength(2);
 

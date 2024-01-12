@@ -16,14 +16,13 @@ import {
 } from "../database.js";
 import { Grid } from "@mui/material";
 import { PublicSignKey } from "@peerbit/crypto";
-import { DocumentsChange, Observer, SearchRequest } from "@peerbit/document";
+import { DocumentsChange, SearchRequest } from "@peerbit/document";
 import "./View.css";
 import CatOffline from "/catbye64.png";
 import { Controls } from "./controller/Control.js";
 import { ControlFunctions } from "./controller/controls.js";
 import { Resolution } from "../controls/settings.js";
 import { renderer } from "./video/renderer.js";
-import { useUpdateEffect } from "react-use";
 import PQueue from "p-queue";
 
 let inBackground = false;
@@ -415,8 +414,10 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 // Open the VideStream database as a viewer
                 peer.open(new MediaStreamDBs(idArgs.node), {
                     args: {
-                        role: new Observer(),
-                        sync: () => true,
+                        role: {
+                            type: "replicator",
+                            factor: 1,
+                        },
                     },
                     existing: "reuse",
                     // reset: true, // TODO function without reset
@@ -619,7 +620,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
         videoLoadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen.source, {
                 args: {
-                    role: new Observer(),
+                    role: "observer",
                     sync: () => true,
                 },
                 existing: "reuse",
@@ -660,7 +661,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
         audioLoadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen.source, {
                 args: {
-                    role: new Observer(),
+                    role: "observer",
                     sync: () => true,
                 },
                 existing: "reuse",
