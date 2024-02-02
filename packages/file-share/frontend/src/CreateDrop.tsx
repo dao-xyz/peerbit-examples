@@ -3,9 +3,11 @@ import { useNavigate } from "react-router-dom";
 import { useEffect, useReducer, useState } from "react";
 import { Files } from "@peerbit/please-lib";
 import { getDropAreaPath } from "./routes";
+import { Spinner } from "./Spinner";
 
+const persistErrorMessage = `Not allowed to persist data by ${window["chrome"] ? "Chrome" : "the browser"}${window["chrome"] && ". To persist state, try adding the site as a bookmark"}`
 export const CreateDrop = () => {
-    const { peer } = usePeer();
+    const { peer, canPersist, loading } = usePeer();
     const navigate = useNavigate();
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const [name, setName] = useState("");
@@ -17,7 +19,7 @@ export const CreateDrop = () => {
 
     return (
         <div className="w-screen h-screen bg-neutral-200 dark:bg-black flex justify-center items-center transition-all">
-            <div className="flex flex-col gap-3  translate-y-[-50%]">
+            {loading ? <Spinner /> : <div className="flex flex-col gap-3  translate-y-[-50%]">
                 <span>Create space</span>
                 <input
                     className="p-2"
@@ -28,7 +30,7 @@ export const CreateDrop = () => {
                     placeholder="Type a name"
                 ></input>
                 <button
-                    disabled={name.length === 0 || !peer}
+                    disabled={name.length === 0 || loading}
                     className="btn btn-elevated"
                     onClick={() => {
                         peer.open(
@@ -50,7 +52,8 @@ export const CreateDrop = () => {
                 >
                     Create
                 </button>
-            </div>
+                {canPersist === false && <span className="!text-red-600 italic max-w-[300px] text-wrap whitespace-pre">{persistErrorMessage}</span>}
+            </div>}
         </div>
     );
 };

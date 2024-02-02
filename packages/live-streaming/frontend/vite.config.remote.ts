@@ -9,7 +9,6 @@ export default defineConfig({
         esbuildOptions: {
             target: "esnext",
         },
-        exclude: ["@peerbit/any-store"], // https://github.com/vitejs/vite/issues/11672
     },
     build: {
         target: "esnext",
@@ -19,12 +18,12 @@ export default defineConfig({
     },
     server: fs.existsSync("./.cert/key.pem")
         ? {
-              port: 5801,
-              https: {
-                  key: fs.readFileSync("./.cert/key.pem"),
-                  cert: fs.readFileSync("./.cert/cert.pem"),
-              },
-              host: "stream.test.xyz",
-          }
+            port: 5801,
+            https: {
+                key: fs.readFileSync("./.cert/key.pem"),
+                cert: fs.readFileSync("./.cert/cert.pem"),
+            },
+            host: "stream.test.xyz",
+        }
         : undefined,
 });
