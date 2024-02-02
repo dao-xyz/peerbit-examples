@@ -29,7 +29,7 @@ interface IPeerContext {
     promise: Promise<void> | undefined;
     loading: boolean;
     status: ConnectionStatus;
-    canPersist: boolean | undefined;
+    persisted: boolean | undefined;
 }
 
 if (!window.name) {
@@ -72,7 +72,7 @@ export const PeerProvider = (options: PeerOptions) => {
         undefined
     );
 
-    const [canPersist, setCanPersist] = React.useState<boolean | undefined>(
+    const [persisted, setPersisted] = React.useState<boolean | undefined>(
         undefined
     );
 
@@ -86,14 +86,14 @@ export const PeerProvider = (options: PeerOptions) => {
             loading,
             connectionState,
             status: connectionState,
-            canPersist,
+            persisted: persisted,
         }),
         [
             loading,
             !!promise,
             connectionState,
             peer?.identity?.publicKey?.hashcode(),
-            canPersist,
+            persisted,
         ]
     );
 
@@ -134,11 +134,11 @@ export const PeerProvider = (options: PeerOptions) => {
                     !(nodeOptions as WithMemory).inMemory &&
                     !(await detectIncognito()).isPrivate
                 ) {
-                    const canPersist = await navigator.storage.persist();
-                    console.log("CAN PERSIST?", canPersist);
-                    setCanPersist(canPersist);
-                    if (!canPersist) {
-                        setCanPersist(false);
+                    const persisted = await navigator.storage.persist();
+                    console.log("CAN PERSIST?", persisted);
+                    setPersisted(persisted);
+                    if (!persisted) {
+                        setPersisted(false);
                         if (window["chrome"]) {
                             console.error(
                                 "Request persistance but was not given permission by browser. Adding this site to your bookmarks or enabling push notifications might allow your chrome browser to persist data"
@@ -170,35 +170,35 @@ export const PeerProvider = (options: PeerOptions) => {
                         streamMuxers: [yamux()],
                         ...(nodeOptions.network === "local"
                             ? {
-                                  connectionGater: {
-                                      denyDialMultiaddr: () => {
-                                          // by default we refuse to dial local addresses from the browser since they
-                                          // are usually sent by remote peers broadcasting undialable multiaddrs but
-                                          // here we are explicitly connecting to a local node so do not deny dialing
-                                          // any discovered address
-                                          return false;
-                                      },
-                                  },
-                                  transports: [
-                                      // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                      webSockets({
-                                          filter: filters.all,
-                                      }),
-                                      circuitRelayTransport({
-                                          discoverRelays: 1,
-                                      }),
-                                      webRTC(),
-                                  ],
-                              }
+                                connectionGater: {
+                                    denyDialMultiaddr: () => {
+                                        // by default we refuse to dial local addresses from the browser since they
+                                        // are usually sent by remote peers broadcasting undialable multiaddrs but
+                                        // here we are explicitly connecting to a local node so do not deny dialing
+                                        // any discovered address
+                                        return false;
+                                    },
+                                },
+                                transports: [
+                                    // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
+                                    webSockets({
+                                        filter: filters.all,
+                                    }),
+                                    circuitRelayTransport({
+                                        discoverRelays: 1,
+                                    }),
+                                    webRTC(),
+                                ],
+                            }
                             : {
-                                  transports: [
-                                      webSockets({ filter: filters.wss }),
-                                      circuitRelayTransport({
-                                          discoverRelays: 1,
-                                      }),
-                                      webRTC(),
-                                  ],
-                              }),
+                                transports: [
+                                    webSockets({ filter: filters.wss }),
+                                    circuitRelayTransport({
+                                        discoverRelays: 1,
+                                    }),
+                                    webRTC(),
+                                ],
+                            }),
 
                         services: {
                             pubsub: (c) =>
@@ -224,11 +224,11 @@ export const PeerProvider = (options: PeerOptions) => {
                         if (nodeOptions.network === "local") {
                             await newPeer.dial(
                                 "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
-                                    (await (
-                                        await fetch(
-                                            "http://localhost:8082/peer/id"
-                                        )
-                                    ).text())
+                                (await (
+                                    await fetch(
+                                        "http://localhost:8082/peer/id"
+                                    )
+                                ).text())
                             );
                         } else {
                             // TODO fix types. When proxy client this will not be available
