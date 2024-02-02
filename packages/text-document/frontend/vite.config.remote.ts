@@ -18,12 +18,12 @@ export default defineConfig({
     },
     server: fs.existsSync("./.cert/key.pem")
         ? {
-            https: {
-                key: fs.readFileSync("./.cert/key.pem"),
-                cert: fs.readFileSync("./.cert/cert.pem"),
-            },
-            host: "text.test.xyz",
-            port: 5803,
-        }
+              https: {
+                  key: fs.readFileSync("./.cert/key.pem"),
+                  cert: fs.readFileSync("./.cert/cert.pem"),
+              },
+              host: "text.test.xyz",
+              port: 5803,
+          }
         : undefined,
 });
