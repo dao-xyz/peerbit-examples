@@ -35,10 +35,10 @@
     },
     "devDependencies": {
         "@peerbit/test-utils": "^2",
-        "peerbit": "^3",
+        "peerbit": "^4",
         "typescript": "^5.3.3"
     },
     "peerDependencies": {
-        "peerbit": "^3"
+        "peerbit": "^4"
     }
 }

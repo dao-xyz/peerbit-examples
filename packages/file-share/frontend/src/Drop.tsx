@@ -1,13 +1,21 @@
 import { usePeer, useProgram } from "@peerbit/react";
 import { useNavigate, useParams } from "react-router-dom";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useReducer, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import * as Toggle from "@radix-ui/react-toggle";
-
-import { MdArrowBack, MdUploadFile } from "react-icons/md";
+import { MdArrowBack, MdUploadFile, MdClose, MdSettings } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
 import { File } from "./File";
 import { Spinner } from "./Spinner";
+import { RoleOptions, Replicator, Observer, Role } from "@peerbit/shared-log";
+import * as Switch from "@radix-ui/react-switch";
+import * as Slider from "@radix-ui/react-slider";
+
+import * as Popover from "@radix-ui/react-popover";
+import { useStorageUsage } from "./MemoryUsage";
+import { useNetworkUsage } from "./NetworkUsage";
+import { GraphExplorer } from "./Graphs";
+import * as Progress from "@radix-ui/react-progress";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -16,22 +24,47 @@ const getRoleFromLocalStorage = (files: Files) => {
     return localStorage.getItem(files.address + "-role"); // Save role in localstorage for next time
 };
 
+export const useDebouncedEffect = (effect, deps, delay) => {
+    useEffect(() => {
+        const handler = setTimeout(() => effect(), delay);
+
+        return () => clearTimeout(handler);
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [...(deps || []), delay]);
+};
+
+function callEvenInterval(func, delay) {
+    var timer: ReturnType<typeof setTimeout> = undefined;
+    let promise: any = undefined;
+    return function debouncedFn(args?: any) {
+        if (timer || promise) {
+            return;
+        }
+        timer = setTimeout(async () => {
+            promise = func(args);
+            await promise;
+            promise = undefined;
+            timer = undefined;
+        }, delay);
+    };
+}
+
 export const Drop = () => {
     const navigate = useNavigate();
 
     const { peer } = usePeer();
+
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const params = useParams();
     const [list, setList] = useState<AbstractFile[]>([]);
-    const [chunkMap, setChunkMap] = useState<Map<string, AbstractFile[]>>(
-        new Map()
-    );
 
     const [replicationSet, setReplicationSet] = useState<Set<string>>(
         new Set()
     );
     const [isHost, setIsHost] = useState<boolean>();
-    const [role, setRole] = useState<"replicator" | "observer">("observer");
+    const [currentRole, setCurrentRole] = useState<Replicator | Observer>(
+        new Observer()
+    );
     const [replicatorCount, setReplicatorCount] = useState(0);
     const [left, setLeft] = useState(false);
 
@@ -39,80 +72,87 @@ export const Drop = () => {
         params.address && decodeURIComponent(params.address),
         {
             existing: "reuse",
-            args: { role: { type: "replicator", factor: 1 } },
+            args: {
+                role: {
+                    type: "replicator",
+                    limits: { cpu: { max: 0, monitor: undefined as any } },
+                },
+            },
         }
     );
 
-    const updateRole = async (newRole: "replicator" | "observer") => {
-        setRole(newRole);
+    const { memory } = useStorageUsage(files.program?.files.log);
+    const { up, down } = useNetworkUsage();
+    const [limitStorageString, setLimitStorageString] = useState<string>("0");
+    const [limitStorage, setLimitStorage] = useState<boolean>(false);
 
-        saveRoleLocalStorage(files.program, newRole); // Save role in localstorage for next time
+    const [role, setRole] = useState<"replicator" | "observer">("replicator");
+    const [limitCPU, setLimitCPU] = useState<number | undefined>(0);
+    const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
-        await files.program.files.log.updateRole(newRole);
-    };
-
-    useEffect(() => {
-        if (!files.program?.address) {
+    // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
+    const updateRole = async (
+        roleOptions?: Exclude<RoleOptions, "replicator" | "observer">
+    ) => {
+        if (!roleOptions || !files.program) {
             return;
         }
 
-        const fn = async () => {
-            const isTrusted =
-                !files.program.trustGraph ||
-                (await files.program.trustGraph.isTrusted(
-                    peer.identity.publicKey
-                ));
+        // console.log("X", files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]?.max)
+        saveRoleLocalStorage(files.program, JSON.stringify(roleOptions)); // Save role in localstorage for next time
+        files.program.files.log.updateRole(roleOptions);
+    };
 
-            files.program = files.program;
+    useDebouncedEffect(
+        () => {
+            const limitSizeMB = Number(limitStorageString);
+            const sizeBytes = limitSizeMB * 1e6;
 
-            // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
-            if (
-                isTrusted ||
-                getRoleFromLocalStorage(files.program) === "replicator"
-            ) {
-                // by default open as replicator
-                await updateRole("replicator");
-            }
+            updateRole(
+                role === "replicator"
+                    ? {
+                          type: "replicator",
+                          limits: {
+                              cpu:
+                                  limitCPU != null
+                                      ? { max: limitCPU }
+                                      : undefined,
+                              storage: limitStorage ? sizeBytes : undefined,
+                          },
+                      }
+                    : { type: "observer" }
+            );
+        },
+        [limitCPU, limitStorage, role, limitStorageString],
+        30
+    ); // we debounce because of the many changes the CPU slider will do
 
-            setIsHost(isTrusted);
-            if (!isTrusted) {
-                /*   setWaitingForHost(true);
-              forceUpdate();
-              await f.waitFor(f.rootKey).catch(() => {
-                  alert("Host is not online");
-              });
-              setWaitingForHost(false); */
-            }
-            await updateList();
-        };
-        fn();
+    // console.log(files?.program?.files.log?.["cpuUsage"].value())
+    useEffect(() => {
+        if (!files.program?.address || files.program.closed) {
+            return;
+        }
 
-        let updateListTimeout = undefined;
-
-        const networkChangeListener = () => {
-            updateListTimeout && clearTimeout(updateListTimeout);
-            updateListTimeout = setTimeout(() => {
-                updateList();
-            }, 100);
-        };
-
-        files.program.files.log.events.addEventListener(
-            "join",
-            networkChangeListener
-        );
+        const updateListDebounced = callEvenInterval(updateList, 500);
+        const refresh = setInterval(() => {
+            updateListDebounced();
+        }, 5000);
+        files.program.files.log.events.addEventListener("join", updateList);
         files.program.files.log.events.addEventListener(
             "leave",
-            networkChangeListener
+            updateListDebounced
         );
         files.program.files.events.addEventListener(
             "change",
-            networkChangeListener
+            updateListDebounced
         );
 
-        const roleChangeListener = () => {
+        const roleChangeListener = (ev: { detail: { role: Role } }) => {
             setReplicatorCount(
                 files.program.files.log.getReplicatorsSorted()?.length
             );
+
+            setCurrentRole(ev.detail.role);
         };
 
         files.program.files.log.events.addEventListener(
@@ -120,53 +160,109 @@ export const Drop = () => {
             roleChangeListener
         );
 
-        /*   console.log([...peer.services.pubsub["topics"].keys()]);
-      [...peer.services.pubsub["topics"].keys()].map(x => peer.services.pubsub.requestSubscribers(x)) */
+        let onOpen = async () => {
+            const isTrusted =
+                !files.program.trustGraph ||
+                (await files.program.trustGraph.isTrusted(
+                    peer.identity.publicKey
+                ));
+            setIsHost(isTrusted);
+
+            files.program = files.program;
+
+            // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
+            const serializedRoleFromStorage = getRoleFromLocalStorage(
+                files.program
+            );
+            const roleFromLocalstore:
+                | Exclude<RoleOptions, "replicator" | "observer">
+                | undefined = serializedRoleFromStorage
+                ? JSON.parse(serializedRoleFromStorage)
+                : undefined;
+            if (isTrusted && roleFromLocalstore) {
+                // by default open as replicator
+                setLimitCPU(
+                    files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]
+                        ?.max
+                ); // TODO export types
+                const limitStorageLoaded =
+                    files.program.files.log["_roleOptions"]?.["limits"]?.memory;
+                setLimitStorage(limitStorageLoaded != null); // TODO export types
+                setLimitStorageString(
+                    limitStorageLoaded != null
+                        ? String(limitStorageLoaded)
+                        : "0"
+                ); // TODO export types
+                setRole(roleFromLocalstore.type);
+                await updateRole(roleFromLocalstore);
+            } else {
+                if (isTrusted) {
+                    // I am the owner
+                }
+                await updateRole(
+                    role === "replicator"
+                        ? {
+                              type: "replicator",
+                              limits: {
+                                  cpu: { max: 0, monitor: undefined as any },
+                              },
+                          }
+                        : { type: "observer" }
+                );
+            }
+            updateListDebounced();
+        };
+
+        onOpen();
 
         return () => {
+            clearInterval(refresh);
+
             files.program.files.log.events.removeEventListener(
                 "join",
-                networkChangeListener
+                updateList
             );
             files.program.files.log.events.removeEventListener(
                 "leave",
-                networkChangeListener
+                updateListDebounced
             );
             files.program.files.events.removeEventListener(
                 "change",
-                networkChangeListener
+                updateListDebounced
             );
             files.program.files.log.events.removeEventListener(
                 "role",
                 roleChangeListener
             );
+            files.program.events.removeEventListener("open", onOpen);
         };
-    }, [files.program?.address]);
+    }, [files.program?.address, files.program?.closed]);
 
     const updateList = async () => {
-        const list = await files.program.list();
-        let chunkMap = new Map();
-        setList(
-            list
-                .filter((x) => !x.parentId)
-                .sort((a, b) => a.name.localeCompare(b.name))
-        );
-        for (const element of list) {
-            if (element.parentId) {
-                let arr = chunkMap.get(element.parentId);
-                if (!arr) {
-                    arr = [];
-                    chunkMap.set(element.parentId, arr);
-                }
-                arr.push(element);
-            }
+        if (files.program.files.log.closed) {
+            return;
         }
-        setChunkMap(chunkMap);
+        console.log("UPDATE LIST?");
 
-        // Get replication set
-        setReplicationSet(new Set(files.program.files.index.index.keys()));
-        forceUpdate();
+        // TODO don't reload the whole list, just add the new elements..
+        try {
+            const list = await files.program.list();
+            setList(
+                list
+                    .filter((x) => !x.parentId)
+                    .sort((a, b) => a.name.localeCompare(b.name))
+            );
+            // Get replication set
+            setReplicationSet(new Set(files.program.files.index.index.keys()));
+            forceUpdate();
+        } catch (error) {
+            console.warn(
+                "Failed to resolve complete file list: " + error?.message
+            );
+        }
+        console.log("UPDATE DONE");
     };
+
     const download = async (
         file: AbstractFile,
         progress: (progress: number | null) => void
@@ -196,51 +292,78 @@ export const Drop = () => {
     };
 
     function dropHandler(ev) {
-        if (!isHost) {
-            return;
-        }
         console.log("File(s) dropped");
 
         // Prevent default behavior (Prevent file from being opened)
         ev.preventDefault();
 
+        if (!isHost) {
+            alert("Not host!");
+            ev.stopPropagation();
+            return;
+        }
+
+        let promises: Promise<any>[] = [];
+        setUploadProgress(0);
         if (ev.dataTransfer.items) {
             // Use DataTransferItemList interface to access the file(s)
-            console.log(ev.dataTransfer.files);
             [...ev.dataTransfer.items].forEach((item, i) => {
                 // If dropped items aren't files, reject them
                 if (item.kind === "file") {
                     const file: File = item.getAsFile();
-                    addFile([file]);
+                    promises.push(addFile([file], false));
                 }
             });
         } else {
             // Use DataTransfer interface to access the file(s)
             [...ev.dataTransfer.files].forEach((file, i) => {
-                addFile([file]);
+                promises.push(addFile([file], false));
             });
         }
+        Promise.all(promises).finally(() => {
+            setUploadProgress(null);
+        });
     }
 
-    const getReplicatedChunks = (file: AbstractFile): AbstractFile[] => {
-        return [...(chunkMap.get(file.id)?.values() || [])].filter((y) =>
-            replicationSet.has(y.id)
-        );
-    };
+    const addFile = (filesToAdd: FileList | File[], endProgress = true) => {
+        return new Promise<void>((resolve, reject) => {
+            let promises: Promise<any>[] = [];
 
-    const addFile = async (filesToAdd: FileList | File[]) => {
-        for (const file of filesToAdd) {
-            var reader = new FileReader();
-            reader.readAsArrayBuffer(file);
-            reader.onload = function () {
-                var arrayBuffer = reader.result;
-                var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
-                console.log(bytes);
-                files.program.add(file.name, bytes).then(() => {
-                    updateList();
-                });
-            };
-        }
+            // there will just by one file here in practice
+            for (const file of filesToAdd) {
+                var reader = new FileReader();
+                reader.readAsArrayBuffer(file);
+                reader.onload = function () {
+                    var arrayBuffer = reader.result;
+                    var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
+                    promises.push(
+                        files.program.add(
+                            file.name,
+                            bytes,
+                            undefined,
+                            (progress) => {
+                                setUploadProgress(
+                                    Math.min(progress, uploadProgress || 1)
+                                );
+                            }
+                        )
+                    );
+                    if (promises.length === filesToAdd.length) {
+                        Promise.all(promises)
+                            .then(() => {
+                                if (endProgress) {
+                                    setUploadProgress(null);
+                                }
+                                updateList();
+                                resolve();
+                            })
+                            .catch((e) => {
+                                reject(e);
+                            });
+                    }
+                };
+            }
+        });
     };
 
     const goBack = () => (
@@ -256,12 +379,12 @@ export const Drop = () => {
     );
 
     function dragOverHandler(ev) {
+        // Prevent default behavior (Prevent file from being opened)
+        ev.preventDefault();
+
         if (!isHost) {
             return;
         }
-
-        // Prevent default behavior (Prevent file from being opened)
-        ev.preventDefault();
     }
 
     return (
@@ -277,9 +400,9 @@ export const Drop = () => {
                 <div
                     onDrop={dropHandler}
                     onDragOver={dragOverHandler}
-                    className="flex flex-col h-[calc(100% - 40px)] items-center w-screen h-full "
+                    className="flex flex-col h-[calc(100% - 40px)] items-center w-screen h-full  "
                 >
-                    <div className="max-w-3xl w-full flex flex-col p-4  ">
+                    <div className="max-w-3xl w-full flex flex-col p-4 gap-4 ">
                         <div className="flex flex-row gap-4 items-center">
                             <div className="flex flex-col ">
                                 <h1 className="text-3xl italic">
@@ -291,8 +414,14 @@ export const Drop = () => {
                                         {replicatorCount}
                                     </span>
                                 </span>
-                                <span className="italice text-xs ">
+                                <span className="italic text-xs">
                                     Copy the URL to share all files
+                                </span>
+                                <span className="text-xs ">
+                                    Used storage: {memory} kB
+                                </span>
+                                <span className="text-xs ">
+                                    ↑ {up} kb/s ↓ {down} kb/s
                                 </span>
                             </div>
 
@@ -323,84 +452,300 @@ export const Drop = () => {
                                     </>
                                 )}
                                 {!isHost && goBack()}
-                                <Toggle.Root
-                                    onPressedChange={(e) => {
-                                        updateRole(
-                                            role === "observer"
-                                                ? "replicator"
-                                                : "observer"
-                                        );
-                                    }}
-                                    disabled={!files.program}
-                                    pressed={role === "replicator"}
-                                    className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2"
-                                    aria-label="Toggle italic"
-                                >
-                                    <span className="hidden sm:block">
-                                        Seed
-                                    </span>
-                                    <FaSeedling
-                                        className="text-green-400"
-                                        size={20}
-                                    />
-                                </Toggle.Root>
                             </div>
+                            <Toggle.Root
+                                onPressedChange={(e) => {
+                                    setRole(e ? "replicator" : "observer");
+                                }}
+                                disabled={!files.program}
+                                pressed={role === "replicator"}
+                                className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2"
+                                aria-label="Toggle italic"
+                            >
+                                <span className="hidden sm:block">Seed</span>
+                                <FaSeedling
+                                    className="text-green-400"
+                                    size={20}
+                                />
+                            </Toggle.Root>
+
+                            <Popover.Root>
+                                <Popover.Trigger asChild>
+                                    <button className="w-fit btn-icon btn-toggle flex flex-row items-center gap-2">
+                                        <span className="hidden sm:block">
+                                            Settings
+                                        </span>
+                                        <MdSettings size={20} />
+                                    </button>
+                                </Popover.Trigger>
+                                <Popover.Portal>
+                                    <Popover.Content
+                                        className="popover-content"
+                                        sideOffset={5}
+                                    >
+                                        <div className="flex flex-col gap-2">
+                                            <fieldset className="flex flex-row gap-4">
+                                                <label
+                                                    className="Label"
+                                                    htmlFor="seed"
+                                                >
+                                                    Seed
+                                                </label>
+                                                <Switch.Root
+                                                    className="SwitchRoot"
+                                                    id="seed"
+                                                    onCheckedChange={(e) => {
+                                                        setRole(
+                                                            e
+                                                                ? "replicator"
+                                                                : "observer"
+                                                        );
+                                                    }}
+                                                    disabled={!files.program}
+                                                    checked={
+                                                        role === "replicator"
+                                                    }
+                                                >
+                                                    <Switch.Thumb className="SwitchThumb" />
+                                                </Switch.Root>
+                                            </fieldset>
+                                            {currentRole instanceof
+                                                Replicator && (
+                                                <div className="flex flex-col gap-4 mt-4">
+                                                    <span>Limit</span>
+                                                    <fieldset className="flex flex-col gap-2">
+                                                        <div className="flex flex-row gap-4">
+                                                            <label htmlFor="limit-storage">
+                                                                Storage
+                                                            </label>
+                                                            <Switch.Root
+                                                                className="SwitchRoot"
+                                                                id="limit-storage"
+                                                                onCheckedChange={(
+                                                                    e
+                                                                ) => {
+                                                                    setLimitStorage(
+                                                                        e
+                                                                    );
+                                                                }}
+                                                                disabled={
+                                                                    !files.program
+                                                                }
+                                                                checked={
+                                                                    limitStorage
+                                                                }
+                                                            >
+                                                                <Switch.Thumb className="SwitchThumb" />
+                                                            </Switch.Root>
+                                                        </div>
+                                                        <div className="pl-4 flex flex-col gap-2">
+                                                            <span className="text-xs italic">
+                                                                Limit how much
+                                                                data you want to
+                                                                replicate (MB).
+                                                                This is an
+                                                                approximation of
+                                                                real usage
+                                                            </span>
+
+                                                            {limitStorage && (
+                                                                <input
+                                                                    className="p-2"
+                                                                    onChange={(
+                                                                        v
+                                                                    ) => {
+                                                                        setLimitStorageString(
+                                                                            v
+                                                                                .target
+                                                                                .value
+                                                                        );
+                                                                    }}
+                                                                    id="storage"
+                                                                    type="number"
+                                                                    value={
+                                                                        limitStorageString ||
+                                                                        ""
+                                                                    }
+                                                                    placeholder="(Mb)"
+                                                                ></input>
+                                                            )}
+                                                        </div>
+                                                    </fieldset>
+                                                    <fieldset className="flex flex-col gap-2">
+                                                        <div className="flex flex-row gap-4">
+                                                            <label htmlFor="limit-cpu">
+                                                                CPU
+                                                            </label>
+                                                            <Switch.Root
+                                                                className="SwitchRoot"
+                                                                id="limit-cpu"
+                                                                onCheckedChange={(
+                                                                    e
+                                                                ) => {
+                                                                    setLimitCPU(
+                                                                        e
+                                                                            ? limitCPU ??
+                                                                                  0
+                                                                            : undefined
+                                                                    );
+                                                                }}
+                                                                disabled={
+                                                                    !files.program
+                                                                }
+                                                                checked={
+                                                                    limitCPU !=
+                                                                    null
+                                                                }
+                                                            >
+                                                                <Switch.Thumb className="SwitchThumb" />
+                                                            </Switch.Root>
+                                                        </div>
+                                                        <div className="pl-4 flex flex-col gap-2">
+                                                            <span className="text-xs italic">
+                                                                By limiting
+                                                                replication by
+                                                                CPU usage, you
+                                                                allow the
+                                                                replication
+                                                                degree to be
+                                                                reduced when the
+                                                                page gets
+                                                                minimized (and
+                                                                throttled)
+                                                            </span>
+                                                            {limitCPU !=
+                                                                null && (
+                                                                <div className="flex flex-row gap-2">
+                                                                    <span className="text-sm">
+                                                                        Limited
+                                                                    </span>
+                                                                    <Slider.Root
+                                                                        className="slider-root"
+                                                                        defaultValue={[
+                                                                            0,
+                                                                        ]}
+                                                                        value={[
+                                                                            limitCPU,
+                                                                        ]}
+                                                                        max={1}
+                                                                        min={0}
+                                                                        step={
+                                                                            0.01
+                                                                        }
+                                                                        onValueChange={(
+                                                                            v
+                                                                        ) => {
+                                                                            setLimitCPU(
+                                                                                v[0]
+                                                                            );
+                                                                        }}
+                                                                    >
+                                                                        <Slider.Track className="slider-track">
+                                                                            <Slider.Range className="slider-range" />
+                                                                        </Slider.Track>
+                                                                        <Slider.Thumb
+                                                                            className="slider-thumb"
+                                                                            aria-label="Max utilization"
+                                                                        />
+                                                                    </Slider.Root>
+                                                                    <span className="text-sm">
+                                                                        Unlimited
+                                                                    </span>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    </fieldset>
+
+                                                    {/* TODO  <fieldset className="flex flex-col gap-2">
+                                                    <label className="Label" htmlFor="bandwidth">
+                                                        Limit upload
+                                                    </label>
+                                                    <input
+                                                        className="p-2"
+                                                        onChange={(v) => {
+
+
+                                                        }}
+                                                        id="bandwidth"
+                                                        type="number"
+                                                        placeholder="(MB/s)"
+                                                    ></input>
+                                                </fieldset> */}
+                                                </div>
+                                            )}
+                                        </div>
+
+                                        <div className="mt-4">
+                                            <GraphExplorer
+                                                log={files.program?.files.log}
+                                            />
+                                        </div>
+
+                                        <Popover.Close
+                                            className="popover-close"
+                                            aria-label="Close"
+                                        >
+                                            <MdClose />
+                                        </Popover.Close>
+                                        <Popover.Arrow className="popover-arrow" />
+                                    </Popover.Content>
+                                </Popover.Portal>
+                            </Popover.Root>
                         </div>
-                        <br></br>
+                        <br />
+                        {uploadProgress != null && (
+                            <Progress.Root
+                                className="progress-root w-full h-3"
+                                value={uploadProgress}
+                            >
+                                <Progress.Indicator
+                                    className="progress-indicator"
+                                    style={{
+                                        transform: `translateX(-${
+                                            100 - uploadProgress * 100
+                                        }%)`,
+                                    }}
+                                />
+                            </Progress.Root>
+                        )}
                         {list?.length > 0 ? (
                             <div className="flex justify-start flex-col">
                                 <h1 className="text-xl">
                                     Files ({list.length}):
                                 </h1>
                                 <ul>
-                                    {list
-                                        .filter((x) => !x.parentId)
-                                        .map((x, ix) => {
-                                            return (
-                                                <li key={ix}>
-                                                    <File
-                                                        chunks={chunkMap.get(
-                                                            x.id
-                                                        )}
-                                                        isHost={isHost}
-                                                        delete={() => {
-                                                            files.program
-                                                                .removeById(
-                                                                    x.id
-                                                                )
-                                                                .then(() => {
-                                                                    updateList();
-                                                                })
-                                                                .catch(
-                                                                    (error) => {
-                                                                        alert(
-                                                                            "Failed to delete: " +
-                                                                                error.message
-                                                                        );
-                                                                    }
+                                    {list.map((x, ix) => {
+                                        return (
+                                            <li key={ix}>
+                                                <File
+                                                    isHost={isHost}
+                                                    delete={() => {
+                                                        files.program
+                                                            .removeById(x.id)
+                                                            .then(() => {
+                                                                updateList();
+                                                            })
+                                                            .catch((error) => {
+                                                                alert(
+                                                                    "Failed to delete: " +
+                                                                        error.message
                                                                 );
-                                                        }}
-                                                        download={(progress) =>
-                                                            download(
-                                                                x,
-                                                                progress
-                                                            )
-                                                        }
-                                                        file={x}
-                                                        replicated={
-                                                            role ===
-                                                                "replicator" &&
-                                                            replicationSet.has(
-                                                                x.id
-                                                            )
-                                                        }
-                                                        replicatedChunks={getReplicatedChunks(
-                                                            x
-                                                        )}
-                                                    />
-                                                </li>
-                                            );
-                                        })}
+                                                            });
+                                                    }}
+                                                    download={(progress) =>
+                                                        download(x, progress)
+                                                    }
+                                                    files={files.program}
+                                                    file={x}
+                                                    replicated={
+                                                        currentRole instanceof
+                                                            Replicator &&
+                                                        replicationSet.has(x.id)
+                                                    }
+                                                />
+                                            </li>
+                                        );
+                                    })}
                                 </ul>
                             </div>
                         ) : (

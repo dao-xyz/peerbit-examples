@@ -4,6 +4,11 @@
 
 Live demo https://text.dao.xyz
 
+THIS DEMO IS FLAKY.
+
+Just see this as inspiration for doing something better!
+
+
 ## How to run locally 
 
 1). 

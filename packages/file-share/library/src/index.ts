@@ -7,6 +7,7 @@ import {
     StringMatchMethod,
     Or,
     RoleOptions,
+    MissingField,
 } from "@peerbit/document";
 import { PublicSignKey, sha256Base64Sync, randomBytes } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
@@ -34,7 +35,7 @@ export abstract class AbstractFile {
     abstract delete(files: Files): Promise<void>;
 }
 
-const TINY_FILE_SIZE_LIMIT = 1e3;
+const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
 
 @variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
@@ -55,12 +56,13 @@ export class TinyFile extends AbstractFile {
     }
 
     constructor(properties: {
+        id?: string;
         name: string;
         file: Uint8Array;
         parentId?: string;
     }) {
         super();
-        this.id = sha256Base64Sync(properties.file);
+        this.id = properties.id || sha256Base64Sync(properties.file);
         this.name = properties.name;
         this.file = properties.file;
         this.parentId = properties.parentId;
@@ -87,80 +89,7 @@ export class TinyFile extends AbstractFile {
     }
 }
 
-const SMALL_FILE_SIZE_LIMIT = 1e6 * 9;
-
-// TODO Do we really need this if we have TinyFile and LargeFile?
 @variant(1) // for versioning purposes
-export class SmallFile extends AbstractFile {
-    @field({ type: "string" })
-    id: string; // cid
-
-    @field({ type: "string" })
-    name: string;
-
-    @field({ type: "string" })
-    cid: string; // store file separately in a block store, like IPFS
-
-    @field({ type: "u32" })
-    size: number;
-
-    @field({ type: option("string") })
-    parentId?: string;
-
-    constructor(properties: {
-        name: string;
-        cid: string;
-        size: number;
-        parentId?: string;
-    }) {
-        super();
-        this.id = properties.cid;
-        this.name = properties.name;
-        this.cid = properties.cid;
-        this.size = properties.size;
-        this.parentId = properties.parentId;
-    }
-
-    static async create(
-        node: ProgramClient,
-        name: string,
-        file: Uint8Array,
-        parentId?: string
-    ) {
-        if (file.length > SMALL_FILE_SIZE_LIMIT) {
-            throw new Error("To large file for SmallFile");
-        }
-        const cid = await node.services.blocks.put(file);
-        return new SmallFile({ name, cid, size: file.byteLength, parentId });
-    }
-
-    async getFile<
-        OutputType extends "chunks" | "joined" = "joined",
-        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
-    >(
-        files: Files,
-        properties?: {
-            as: OutputType;
-            timeout?: number;
-            progress?: (progress: number) => any;
-        }
-    ): Promise<Output> {
-        properties?.progress?.(0);
-
-        // Load the file from the block store
-        const block = await files.node.services.blocks.get(this.id, {
-            timeout: properties?.timeout,
-        });
-        properties?.progress?.(1);
-        return (properties?.as == "chunks" ? [block] : block) as Output;
-    }
-
-    async delete(files: Files): Promise<void> {
-        return files.node.services.blocks.rm(this.id);
-    }
-}
-
-@variant(2) // for versioning purposes
 export class LargeFile extends AbstractFile {
     @field({ type: "string" })
     id: string; // hash
@@ -187,12 +116,20 @@ export class LargeFile extends AbstractFile {
         this.size = properties.size;
     }
 
-    static async create(name: string, file: Uint8Array, files: Files) {
-        const segmetSize = SMALL_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
+    static async create(
+        name: string,
+        file: Uint8Array,
+        files: Files,
+        progress?: (progress: number) => void
+    ) {
+        const segmetSize = TINY_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
         const fileIds: string[] = [];
         const id = sha256Base64Sync(file);
         const fileSize = file.byteLength;
-        for (let i = 0; i < Math.ceil(file.byteLength / segmetSize); i++) {
+        progress?.(0);
+        const end = Math.ceil(file.byteLength / segmetSize);
+        for (let i = 0; i < end; i++) {
+            progress?.((i + 1) / end);
             fileIds.push(
                 await files.add(
                     name + "/" + i,
@@ -204,8 +141,8 @@ export class LargeFile extends AbstractFile {
                 )
             );
         }
-
-        return new LargeFile({ id, name, fileIds, size: fileSize });
+        progress?.(1);
+        return new LargeFile({ id, name, fileIds: fileIds, size: fileSize });
     }
 
     get parentId() {
@@ -251,7 +188,7 @@ export class LargeFile extends AbstractFile {
 
         console.log("LISTS CHUNKS!");
         const allChunks = await this.fetchChunks(files);
-        console.log("RECEIVED CHUNKS: " + allChunks.length);
+        console.log("RECEIVED CHUNKS: " + allChunks);
         console.log("FETCH CHUNKS");
 
         const fetchQueue = new PQueue({ concurrency: 10 });
@@ -366,22 +303,24 @@ export class Files extends Program<Args> {
         });
     }
 
-    async add(name: string, file: Uint8Array, parentId?: string) {
+    async add(
+        name: string,
+        file: Uint8Array,
+        parentId?: string,
+        progress?: (progress: number) => void
+    ) {
         let toPut: AbstractFile;
+        progress?.(0);
         if (file.byteLength <= TINY_FILE_SIZE_LIMIT) {
             toPut = new TinyFile({ name, file, parentId });
-        } else if (
-            file.byteLength > TINY_FILE_SIZE_LIMIT &&
-            file.byteLength <= SMALL_FILE_SIZE_LIMIT
-        ) {
-            toPut = await SmallFile.create(this.node, name, file, parentId);
         } else {
             if (parentId) {
                 throw new Error("Unexpected that a LargeFile to have a parent");
             }
-            toPut = await LargeFile.create(name, file, this);
+            toPut = await LargeFile.create(name, file, this, progress);
         }
         await this.files.put(toPut);
+        progress?.(1);
         return toPut.id;
     }
 
@@ -411,12 +350,33 @@ export class Files extends Program<Args> {
     }
 
     async list() {
-        const files = await this.files.index.search(new SearchRequest(), {
-            local: true,
-            remote: true,
-        });
+        // only root files (don't fetch fetch chunks here)
+        const files = await this.files.index.search(
+            new SearchRequest({ query: new MissingField({ key: "parentId" }) }),
+            {
+                local: true,
+                remote: {
+                    throwOnMissing: true,
+                    sync: true, // sync here because this, because we might want to access it offline, even though we are not replicators
+                },
+            }
+        );
         return files;
     }
+
+    async listLocalChunks(parent: LargeFile) {
+        const files = await this.files.index.search(
+            new SearchRequest({
+                query: new StringMatch({ key: "parentId", value: parent.id }),
+            }),
+            {
+                local: true,
+                remote: false,
+            }
+        );
+        return files;
+    }
+
     /**
      * Get by name
      * @param id

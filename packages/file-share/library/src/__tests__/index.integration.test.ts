@@ -3,6 +3,7 @@ import { Files, LargeFile } from "..";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
 import { SearchRequest, StringMatch } from "@peerbit/document";
+import { waitForResolved } from "@peerbit/time";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -99,7 +100,7 @@ describe("index", () => {
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +56 SmallFiles
-            expect(filestore.files.index.size).toEqual(57);
+            expect(filestore.files.index.size).toEqual(85);
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
                 args: { role: "observer" },
@@ -117,6 +118,26 @@ describe("index", () => {
             expect(
                 await filestoreReader.getByName("random large file")
             ).toBeUndefined();
+        });
+
+        it("replicates", async () => {
+            const filestore = await peer.open(new Files());
+
+            const filestoreReplicator2 = await peer2.open<Files>(
+                filestore.address
+            );
+
+            let t0 = +new Date();
+            const largeFile = crypto.randomBytes(5 * 1e7); // 50 mb
+            await filestore.add("random large file", largeFile);
+
+            // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
+            // +56 SmallFiles
+            expect(filestore.files.index.size).toEqual(85);
+
+            await waitForResolved(() =>
+                expect(filestoreReplicator2.files.index.size).toEqual(85)
+            );
         });
 
         it("rejects after retries", async () => {

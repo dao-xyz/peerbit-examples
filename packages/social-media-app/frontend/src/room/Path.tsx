@@ -1,4 +1,3 @@
-import { usePeer } from "@peerbit/react";
 import { useEffect, useReducer, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import Tags from "@yaireo/tagify/dist/react.tagify";

@@ -19,7 +19,7 @@ export default function ScrollToTop() {
     return null;
 }
 
-export const STREAM = "s/:address";
+export const SPACE = "s/:address";
 
 export const getDropAreaPath = (files: Files) => "s/" + files.address;
 
@@ -31,7 +31,7 @@ export function BaseRoutes() {
         <>
             <ScrollToTop /> {/* For mobile  */}
             <Routes>
-                <Route path={STREAM} element={<Drop />} />
+                <Route path={SPACE} element={<Drop />} />
                 <Route path={"/#"} element={<CreateDrop />} />
                 <Route path={"/"} element={<CreateDrop />} />
             </Routes>

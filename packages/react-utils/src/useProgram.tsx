@@ -26,7 +26,7 @@ export const useProgram = <
 ) => {
     const { peer } = usePeer();
     let [program, setProgram] = useState<P | undefined>();
-    let [loading, setLoading] = useState(false);
+    let [loading, setLoading] = useState(true);
     const [session, forceUpdate] = useReducer((x) => x + 1, 0);
     let programLoadingRef = useRef<Promise<P>>();
     const [peerCounter, setPeerCounter] = useState<number>(1);

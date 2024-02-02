@@ -1,12 +1,9 @@
 import React, { useContext } from "react";
-import { multiaddr, Multiaddr } from "@multiformats/multiaddr";
+import { Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { DirectSub } from "@peerbit/pubsub";
-
-import { mplex } from "@libp2p/mplex";
 import { yamux } from "@chainsafe/libp2p-yamux";
-
 import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
 import { noise } from "@dao-xyz/libp2p-noise";
 import { v4 as uuid } from "uuid";
@@ -74,7 +71,7 @@ export const PeerProvider = (options: PeerOptions) => {
         undefined
     );
 
-    const [loading, setLoading] = React.useState<boolean>(false);
+    const [loading, setLoading] = React.useState<boolean>(true);
     const [connectionState, setConnectionState] =
         React.useState<ConnectionStatus>("disconnected");
     const memo = React.useMemo<IPeerContext>(
@@ -122,21 +119,22 @@ export const PeerProvider = (options: PeerOptions) => {
                             true // reuse keypairs from same tab, (force release)
                         )
                     ).key;
-
+                const peerId = await nodeId.toPeerId();
                 // We create a new directrory to make tab to tab communication go smoothly
+                console.log("Create client");
                 newPeer = await Peerbit.create({
                     libp2p: {
                         addresses: {
                             listen: ["/webrtc"],
                         },
                         connectionEncryption: [noise()],
-                        peerId: await nodeId.toPeerId(), //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
+                        peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
                         connectionManager: {
                             maxConnections: 100,
-                            minConnections: 0,
+                            minConnections: 1,
                         },
 
-                        streamMuxers: [mplex(), yamux()],
+                        streamMuxers: [yamux()],
                         ...(nodeOptions.network === "local"
                             ? {
                                   connectionGater: {
@@ -157,8 +155,6 @@ export const PeerProvider = (options: PeerOptions) => {
                                           discoverRelays: 1,
                                       }),
                                       webRTC(),
-                                      /*            circuitRelayTransport({ discoverRelays: 1 }),
-webRTC(), */
                                   ],
                               }
                             : {
@@ -175,9 +171,9 @@ webRTC(), */
                             pubsub: (c) =>
                                 new DirectSub(c, {
                                     canRelayMessage: true,
-                                    /*  connectionManager: {
-                                         autoDial: false,
-                                     }, */
+                                    /*      connectionManager: {
+                                            autoDial: false,
+                                        }, */
                                 }),
                             identify: identify(),
                         },
@@ -187,9 +183,11 @@ webRTC(), */
                         !(
                             await detectIncognito()
                         ).isPrivate
-                            ? "./repo"
+                            ? `./repo/${peerId.toString()}/`
                             : undefined,
                 });
+                console.log("Create done");
+                console.log(newPeer?.identity.publicKey.hashcode());
 
                 setConnectionState("connecting");
 
@@ -228,9 +226,11 @@ webRTC(), */
                     }
                 };
 
-                console.log("BOOTSTRAP!");
+                console.log("Bootstrap start...");
                 const promise = connectFn();
-
+                promise.then(() => {
+                    console.log("Bootstrap done");
+                });
                 // Make sure data flow as expected between tabs and windows locally (offline states)
 
                 if (nodeOptions.waitForConnnected !== false) {
@@ -239,6 +239,7 @@ webRTC(), */
             } else {
                 newPeer = await createClient(nodeOptions.targetOrigin);
             }
+
             setPeer(newPeer);
             setLoading(false);
         };

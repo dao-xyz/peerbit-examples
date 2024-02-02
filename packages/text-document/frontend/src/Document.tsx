@@ -1,4 +1,4 @@
-import { PeerProvider, usePeer } from "@peerbit/react";
+import { useProgram } from "@peerbit/react";
 import { useEffect, useReducer, useRef } from "react";
 import { CollaborativeTextDocument } from "./db";
 import { Range } from "@peerbit/string";
@@ -11,48 +11,46 @@ const ID = new Uint8Array([
 ]);
 
 export const Document = () => {
-    const doc = useRef<CollaborativeTextDocument>();
     const testAreaRef = useRef<HTMLTextAreaElement>();
-    const loadingRef = useRef(false);
+    const { program } = useProgram(new CollaborativeTextDocument({ id: ID }), {
+        existing: "reuse",
+    });
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
-    const { peer } = usePeer();
     useEffect(() => {
-        console.log(peer);
-        if (loadingRef.current || !peer) {
+        if (!program?.address) {
             return;
         }
-        loadingRef.current = true;
-        peer?.open(new CollaborativeTextDocument({ id: ID }), {
-            existing: "reuse",
-        })
-            .then((d) => {
-                d.string.events.addEventListener("change", async () => {
-                    testAreaRef.current.value = await d.string.getValue();
-                    forceUpdate();
-                });
+        const listener = async () => {
+            let end = testAreaRef.current.selectionEnd;
+            const text = await program.string.getValue();
+            testAreaRef.current.value = text;
+            testAreaRef.current.selectionEnd = end;
+            console.log("RECEIVED UPDATE", text);
+            forceUpdate();
+        };
+        program.string.events.addEventListener("change", listener);
 
-                doc.current = d;
-                // initial value
-                d.string.getValue().then((v) => {
-                    testAreaRef.current.value = v;
-                    forceUpdate();
-                });
-            })
-            .finally(() => {
-                loadingRef.current = false;
-            });
-    }, [peer?.peerId.toString()]);
+        // initial value
+        program.string.getValue().then((v) => {
+            testAreaRef.current.value = v;
+            forceUpdate();
+        });
+
+        return () => {
+            program.string.events.removeEventListener("change", listener);
+        };
+    }, [program?.address]);
 
     return (
         <textarea
             ref={testAreaRef}
-            disabled={!doc.current}
+            disabled={!program}
             onInput={async (e) => {
                 try {
                     const textField = e.target as HTMLTextAreaElement;
                     const start = textField.selectionStart;
-                    let oldContent = await doc.current.string.getValue();
+                    let oldContent = await program.string.getValue();
                     let content = textField.value;
                     let diffs = diff(oldContent, content, start);
                     let pos = 0;
@@ -63,7 +61,7 @@ export const Document = () => {
                             pos += diff[1].length;
                         } else if (diff[0] === -1) {
                             // DELETE
-                            await doc.current.string.add(
+                            await program.string.add(
                                 "",
                                 new Range({
                                     offset: pos,
@@ -72,7 +70,7 @@ export const Document = () => {
                             );
                         } else {
                             // INSERT
-                            await doc.current.string.add(
+                            await program.string.add(
                                 diff[1],
                                 new Range({
                                     offset: pos,

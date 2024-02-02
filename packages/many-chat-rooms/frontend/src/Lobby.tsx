@@ -11,7 +11,7 @@ const lobbyConfig = new LobbyDB({
     id: new Uint8Array(32), // 0,0,....0 choose this dynamically instead? Now it is static, => same lobby for all
 });
 export const Lobby = () => {
-    const { loading: loadingPeer, peer } = usePeer();
+    const { loading: loadingPeer } = usePeer();
     const navigate = useNavigate();
     const lobby = useProgram(lobbyConfig, {
         args: {
@@ -25,7 +25,6 @@ export const Lobby = () => {
     const rooms = useRef<Room[]>([]);
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
-    console.log(lobby.program?.rooms?.log["_roleOptions"]);
     useEffect(() => {
         if (lobby.program && !lobby.program.closed) {
             const addToLobby = (toAdd: Room[], reset?: Boolean) => {
@@ -45,14 +44,8 @@ export const Lobby = () => {
                 }
             };
 
-            console.log("HERE!", lobby.program.rooms.log.log.length);
-            setTimeout(() => {
-                console.log("HERE!", lobby.program.rooms.log.log.length);
-            }, 3000);
-
             const changeListener = async (e) => {
                 // additions
-                console.log("CHANGE");
                 e.detail.added && addToLobby(e.detail.added);
 
                 // removals

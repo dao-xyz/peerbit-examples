@@ -13,8 +13,8 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "peerbit": "^3",
-        "@peerbit/document": "^4",
+        "peerbit": "^4",
+        "@peerbit/document": "^6",
         "@peerbit/example-many-chat-rooms": "^0.0.2",
         "@peerbit/react": "*",
         "react": "^18.2.0",
@@ -31,7 +31,7 @@
         "@types/react-dom": "^18.2.18",
         "@vitejs/plugin-react": "^4",
         "typescript": "^5.3.3",
-        "vite": "^5.0.10"
+        "vite": "^5.0.12"
     },
     "browserslist": {
         "production": [
