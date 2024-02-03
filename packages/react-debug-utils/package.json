@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/react-debug",
-    "version": "0.0.5",
+    "version": "0.0.6",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
@@ -22,10 +22,10 @@
         "react": "*"
     },
     "dependencies": {
+        "@peerbit/document": "^6",
         "@types/react": "^18.2.46",
         "@types/react-dom": "^18.2.18",
         "peerbit": "^4",
-        "@peerbit/document": "^6",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-router-dom": "^6.16.0",
