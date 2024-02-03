@@ -5,11 +5,13 @@ import { Files } from "@peerbit/please-lib";
 import { getDropAreaPath } from "./routes";
 import { Spinner } from "./Spinner";
 
-const persistErrorMessage = `Not allowed to persist data by ${window["chrome"] ? "Chrome" : "the browser"
-    }${window["chrome"]
+const persistErrorMessage = `Not allowed to persist data by ${
+    window["chrome"] ? "Chrome" : "the browser"
+}${
+    window["chrome"]
         ? ". To persist state, try adding the site as a bookmark"
         : ""
-    }`;
+}`;
 export const CreateDrop = () => {
     const { peer, persisted, loading } = usePeer();
     const navigate = useNavigate();

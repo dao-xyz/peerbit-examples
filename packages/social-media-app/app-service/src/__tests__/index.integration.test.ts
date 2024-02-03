@@ -1,7 +1,6 @@
 import { TestSession } from "@peerbit/test-utils";
 import { AppPreview } from "..";
-import { Peerbit } from "peerbit";
-import { delay } from "@peerbit/time";
+import { v4 as uuid } from "uuid";
 describe("index", () => {
     let session: TestSession;
 
@@ -23,6 +22,7 @@ describe("index", () => {
             },
         });
         const client = await session.peers[1].open<AppPreview>(db.address);
+        await client.waitFor(db.node.identity.publicKey);
         const resposne = await client.resolve("https://twitch.tv/ppy");
         expect(resposne?.title).toEqual("Twitch");
 
@@ -42,7 +42,8 @@ describe("index", () => {
         });
         let t0 = +new Date();
         const client = await session.peers[1].open<AppPreview>(db.address);
-        await client.resolve("https://thissitedoesnotexist1239043534.com");
+        await client.waitFor(db.node.identity.publicKey);
+        await client.resolve(`https://thissitedoesnotexist${uuid()}.com`);
         expect(+new Date() - t0).toBeLessThan(5000);
     });
 });

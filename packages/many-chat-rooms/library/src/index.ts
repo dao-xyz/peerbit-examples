@@ -59,8 +59,6 @@ export class Room extends Program<Args> {
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
-        console.log("ROLE?", args);
-
         await this.messages.open({
             type: Post,
             canPerform: async (operation, context) => {

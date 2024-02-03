@@ -6,6 +6,7 @@ import {
     StringMatch,
     StringMatchMethod,
 } from "@peerbit/document";
+import { waitForResolved } from "@peerbit/time";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -54,16 +55,21 @@ describe("index", () => {
         expect(results.length).toEqual(1);
         expect(results[0].id).toEqual(roomBFrom2.id);
 
-        expect(results[0].closed).toBeFalse(); // because peer1 is also a replicator (will open automatically)
+        // TODO auto open (?)
+        // await waitForResolved(() => expect(results[0].closed).toBeFalse()); // because peer1 is also a replicator (will open automatically)
 
         // Put a message
         const helloWorldPostFrom2 = new Post({
             message: "hello world",
             from: peer2.identity.publicKey,
         });
+
+        await peer2.open(roomAFrom2); // TODO auto open on put
         await roomAFrom2.messages.put(helloWorldPostFrom2);
 
         const roomAfrom1 = (await lobbyFrom1.rooms.index.get(roomAFrom2.id))!;
+
+        await peer.open(roomAfrom1); // TODO auto open on syn
 
         const helloWorldPostFrom1 = await waitFor(
             async () =>

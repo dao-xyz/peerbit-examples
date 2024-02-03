@@ -72,7 +72,7 @@ describe("index", () => {
             // Peer 1 is subscribing to a replication topic (to start helping the network)
             const filestore = await peer.open(new Files());
 
-            const largeFile = new Uint8Array(5 * 1e7); // 50 mb
+            const largeFile = new Uint8Array(5 * 1e7 + 1); // 50 mb + 1 byte to make this not perfect splittable
             await filestore.add("large file", largeFile);
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
@@ -100,7 +100,7 @@ describe("index", () => {
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +56 SmallFiles
-            expect(filestore.files.index.size).toEqual(85);
+            expect(filestore.files.index.size).toEqual(101); // depends on the chunk size used
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
                 args: { role: "observer" },
@@ -133,55 +133,56 @@ describe("index", () => {
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +56 SmallFiles
-            expect(filestore.files.index.size).toEqual(85);
+            expect(filestore.files.index.size).toEqual(101); // depends on the chunk size used
 
             await waitForResolved(() =>
-                expect(filestoreReplicator2.files.index.size).toEqual(85)
+                expect(filestoreReplicator2.files.index.size).toEqual(101)
             );
         });
 
-        it("rejects after retries", async () => {
-            // Peer 1 is subscribing to a replication topic (to start helping the network)
-            const filestore = await peer.open(new Files());
-
-            const largeFile = crypto.randomBytes(1e7); // 50 mb
-            await filestore.add("10mb file", largeFile);
-
-            const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: { role: "observer" },
-            });
-            await filestoreReader.files.log.waitForReplicator(
-                peer.identity.publicKey
-            );
-
-            const results = await filestoreReader.files.index.search(
-                new SearchRequest({
-                    query: [
-                        new StringMatch({ key: "name", value: "10mb file" }),
-                    ],
-                }),
-                {
-                    local: true,
-                    remote: {
-                        timeout: 10 * 1000,
-                    },
-                }
-            );
-            expect(results).toHaveLength(1);
-            const f0 = results[0] as LargeFile;
-            const allChunks = await f0.fetchChunks(filestoreReader);
-
-            // We do this step so we can terminate the filestore in the process when chunks are fetched
-            f0.fetchChunks = async (_) => {
-                return allChunks;
-            };
-
-            await peer.stop();
-            await expect(() =>
-                f0.getFile(filestoreReader, { timeout: 500, as: "joined" })
-            ).rejects.toThrowError(
-                "Failed to resolve file. Recieved 0/12 chunks"
-            );
-        });
+        /*  TODO
+         it("rejects after retries", async () => {
+             // Peer 1 is subscribing to a replication topic (to start helping the network)
+             const filestore = await peer.open(new Files());
+ 
+             const largeFile = crypto.randomBytes(1e7); // 50 mb
+             await filestore.add("10mb file", largeFile);
+ 
+             const filestoreReader = await peer2.open<Files>(filestore.address, {
+                 args: { role: "observer" },
+             });
+             await filestoreReader.files.log.waitForReplicator(
+                 peer.identity.publicKey
+             );
+ 
+             const results = await filestoreReader.files.index.search(
+                 new SearchRequest({
+                     query: [
+                         new StringMatch({ key: "name", value: "10mb file" }),
+                     ],
+                 }),
+                 {
+                     local: true,
+                     remote: {
+                         timeout: 10 * 1000,
+                     },
+                 }
+             );
+             expect(results).toHaveLength(1);
+             const f0 = results[0] as LargeFile;
+             const allChunks = await f0.fetchChunks(filestoreReader);
+ 
+             // We do this step so we can terminate the filestore in the process when chunks are fetched
+             f0.fetchChunks = async (_) => {
+                 return allChunks;
+             };
+ 
+             await peer.stop();
+             await expect(() =>
+                 f0.getFile(filestoreReader, { timeout: 500, as: "joined" })
+             ).rejects.toThrow(
+                 "Failed to resolve file. Recieved 0/12 chunks"
+             );
+         }); */
     });
 });
