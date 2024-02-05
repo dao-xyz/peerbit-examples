@@ -68,13 +68,25 @@ export class WebGLRenderer implements Renderer {
 
     setup(canvas: OffscreenCanvas | HTMLCanvasElement) {
         this.#canvas = canvas;
-        const gl = (this.#ctx = canvas.getContext("webgl2", {
+        const glArgs = {
             alpha: false,
             antialias: false,
             desynchronizing: true,
             powerPreference: "high-performance",
-        }) as WebGL2RenderingContext);
+        };
+        const gl =
+            (this.#ctx = canvas.getContext(
+                "webgl2",
+                glArgs
+            ) as WebGL2RenderingContext) ||
+            (this.#ctx = canvas.getContext(
+                "webgl",
+                glArgs
+            ) as WebGLRenderingContext);
 
+        if (!gl) {
+            throw new Error("Missing WebGL");
+        }
         const vertexShader = gl.createShader(gl.VERTEX_SHADER);
 
         gl.shaderSource(vertexShader, WebGLRenderer.vertexShaderSource);

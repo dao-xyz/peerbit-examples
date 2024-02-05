@@ -1,3 +1,43 @@
+/**
+    This file contains all the definitions for the databases related to media streaming and playback
+ 
+    MediaStreamDB controls all the media sources in Tracks.
+    Each Track is defined by its start and end time.
+    Each Track contains a database of chunks which is the media
+    Tracks can be of different types, like Video, Audio in different encodings
+
+    E.g. A multiresolution stream with audia is done by having multiple tracks active at once. One track for each resolution,
+    and one track for the audio.
+    If a viewer only want to listen to the audio or specific resolution, they don't have to bother about the other tracks 
+    since the viewer can choose to only "open" the tracks it is interested in
+                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         
+    +-----------------------------------------------------------------------------------------------------------------+            
+    |                                                                                                                 |            
+    |    MediaStreamDB                                                                                                |            
+    |    Host/Sender                                                                                                  |            
+    |                                                                                                                 |            
+    |                                        +------------------------+                                               |            
+    |                                        |      Track<Video>      |                                               |            
+    |                                        +------------------------+                                               |            
+    |           +------------------------++-------------------------------------------------------------------+       |            
+    |           |      Track<Video>      ||                           Track<Video>                            |       |            
+    |           +------------------------++-------------------------------------------------------------------+       |            
+    |           +------------------------+                                                                            |            
+    |           |      Track<Audio>      |                                                                            |            
+    |           +------------------------+                                                                            |            
+    |                          +------------------------+                                                             |            
+    |                          |      Track<Audio>      |                                                             |            
+    |                          +------------------------+                                                             |            
+    |                                                                                                                 |            
+    |                                                                                                                 |            
+    |     ---------------------------------------------------------------------------------------------------->       |            
+    |                                                    Time                                                         |            
+    |                                                                                                                 |            
+    |                                                                                                                 |            
+    +-----------------------------------------------------------------------------------------------------------------+            
+                                                                                                                        
+ */
+
 import { field, variant, option, serialize, fixedArray } from "@dao-xyz/borsh";
 import {
     sha256Base64Sync,
@@ -7,22 +47,22 @@ import {
     fromBase64,
 } from "@peerbit/crypto";
 import {
-    DocumentIndex,
     Documents,
     SearchRequest,
-    BoolQuery,
     Sort,
     SortDirection,
     IntegerCompare,
     Compare,
-    SearchOptions,
+    MissingField,
     RoleOptions,
+    SearchOptions,
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import { v4 as uuid } from "uuid";
 import { write, length } from "@protobufjs/utf8";
 import { concat } from "uint8arrays";
 import { Entry } from "@peerbit/log";
+import { randomBytes } from "@peerbit/crypto";
 
 const utf8Encode = (value: string) => {
     const l = length(value);
@@ -88,59 +128,28 @@ export class MediaStreamInfo {
 type Args = { role?: RoleOptions; sync?: (entry: Entry<any>) => boolean };
 
 @variant("track-source")
-export abstract class TrackSource extends Program<Args> {
-    @field({ type: "string" })
-    private _id: string;
-
-    @field({ type: PublicSignKey })
-    private _sender: PublicSignKey;
-
-    @field({ type: "u64" })
-    private _timestamp: bigint;
-
+export abstract class TrackSource {
     @field({ type: Documents })
     private _chunks: Documents<Chunk>;
 
-    constructor(properties: { sender: PublicSignKey; id: string }) {
-        super();
-        this._id = properties.id;
-        this._sender = properties.sender;
-        this._timestamp = BigInt(+new Date());
+    constructor() {
         this._chunks = new Documents({
-            id: sha256Sync(
-                concat([
-                    new TextEncoder().encode("chunks"),
-                    new TextEncoder().encode(this._id),
-                    sha256Sync(this.sender.bytes),
-                ])
-            ),
+            id: randomBytes(32),
         });
-    }
-
-    get id() {
-        return this._id;
-    }
-
-    get sender(): PublicSignKey {
-        return this._sender;
-    }
-
-    get timestamp() {
-        return this._timestamp;
     }
 
     get chunks() {
         return this._chunks;
     }
 
-    async open(args?: Args): Promise<void> {
+    async open(args: { sender: PublicSignKey } & Partial<Args>): Promise<void> {
         await this.chunks.open({
             type: Chunk,
             canPerform: async (_operation, context) => {
                 const keys = await context.entry.getPublicKeys();
                 // Only append if chunks are signed by sender/streamer
                 for (const key of keys) {
-                    if (key.equals(this.sender)) {
+                    if (key.equals(args.sender)) {
                         return true;
                     }
                 }
@@ -159,6 +168,10 @@ export abstract class TrackSource extends Program<Args> {
             sync: args?.sync,
         });
     }
+
+    close() {
+        return this.chunks.close();
+    }
 }
 
 @variant("audio-stream-db")
@@ -166,9 +179,9 @@ export class AudioStreamDB extends TrackSource {
     @field({ type: "u32" })
     sampleRate: number;
 
-    constructor(sender: PublicSignKey, sampleRate: number) {
-        super({ sender, id: sender.hashcode() + "/audio" });
-        this.sampleRate = sampleRate;
+    constructor(properties: { sampleRate: number }) {
+        super();
+        this.sampleRate = properties.sampleRate;
     }
 }
 
@@ -198,19 +211,10 @@ export class WebcodecsStreamDB extends TrackSource {
     @field({ type: "string" })
     decoderConfigJSON: string;
 
-    constructor(props: {
-        sender: PublicSignKey;
-        decoderDescription: VideoDecoderConfig;
-    }) {
+    constructor(props: { decoderDescription: VideoDecoderConfig }) {
         const decoderDescription = serializeConfig(props.decoderDescription);
 
-        super({
-            id:
-                props.sender.hashcode() +
-                "/webcodecs/" +
-                sha256Base64Sync(utf8Encode(decoderDescription)),
-            sender: props.sender,
-        }); // Streams addresses will depend on its config
+        super(); // Streams addresses will depend on its config
         this.decoderConfigJSON = decoderDescription;
     }
 
@@ -228,47 +232,71 @@ export class WebcodecsStreamDB extends TrackSource {
     }
 }
 
-@variant(0)
-export class Track<T extends TrackSource> {
-    @field({ type: "string" })
-    id: string;
+@variant("track")
+export class Track<T extends TrackSource> extends Program<Args> {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: TrackSource })
+    source: T; /// audio, video, whatever
 
     @field({ type: "u64" })
     session: bigint;
 
-    @field({ type: TrackSource })
-    source: T;
+    @field({ type: "u32" })
+    startTime: number;
 
-    constructor(properties: { session: bigint; source: T }) {
-        this.session = properties.session;
-        this.id = properties.source.id;
-        this.source = properties.source;
-    }
-}
-
-@variant("media-streams")
-export class MediaStreamDBs extends Program<Args> {
-    @field({ type: Uint8Array })
-    id: Uint8Array;
+    @field({ type: option("u32") })
+    endTime?: number; // when the track ended
 
     @field({ type: PublicSignKey })
     sender: PublicSignKey;
 
+    constructor(properties: {
+        sender: PublicSignKey;
+        session: bigint;
+        start: number;
+        source: T;
+    }) {
+        super();
+        this.id = randomBytes(32);
+        this.session = properties.session;
+        this.startTime = properties.start;
+        this.source = properties.source;
+        this.sender = properties.sender;
+    }
+
+    setEnd() {
+        this.endTime = +new Date() - Number(this.session);
+    }
+    open(args?: Args): Promise<void> {
+        return this.source.open({ ...args, sender: this.sender });
+    }
+}
+
+@variant("media-streams")
+export class MediaStreamDB extends Program<Args> {
+    @field({ type: Uint8Array })
+    id: Uint8Array;
+
+    @field({ type: PublicSignKey })
+    owner: PublicSignKey;
+
     @field({ type: Documents })
     streams: Documents<Track<AudioStreamDB | WebcodecsStreamDB>>;
 
-    constructor(sender: PublicSignKey) {
+    constructor(owner: PublicSignKey) {
         // force the id of the program to be the same for all stream
         // so that we can repopen the same stream without knowing the db address
         super();
-        this.id = sender.bytes;
-        this.sender = sender;
+        this.id = owner.bytes;
+        this.owner = owner;
         this.streams = new Documents({
             id: sha256Sync(
                 concat([
                     new TextEncoder().encode("media-streams"),
                     this.id,
-                    sha256Sync(this.sender.bytes),
+                    sha256Sync(this.owner.bytes),
                 ])
             ),
         });
@@ -281,7 +309,7 @@ export class MediaStreamDBs extends Program<Args> {
                 const keys = await entry.getPublicKeys();
                 // Only append if chunks are signed by sender/streamer
                 for (const key of keys) {
-                    if (key.equals(this.sender)) {
+                    if (key.equals(this.owner)) {
                         return true;
                     }
                 }
@@ -307,21 +335,30 @@ export class MediaStreamDBs extends Program<Args> {
         if (latest.length === 0) {
             return [];
         }
+        console.log("LATEST", latest[0].session);
         const tracks = await this.streams.index.search(
             new SearchRequest({
                 query: [
+                    // Only get by the latest session
                     new IntegerCompare({
                         compare: Compare.GreaterOrEqual,
                         key: "session",
                         value: latest[0].session,
                     }),
+
+                    // make track has not ended
+                    new MissingField({
+                        key: "endTime",
+                    }),
                 ],
-                sort: [
-                    new Sort({ key: "session", direction: SortDirection.DESC }),
-                ],
+                /*    sort: [
+                       // sort first by session 
+                       new Sort({ key: "session", direction: SortDirection.DESC }),
+                   ], */
             }),
             { ...options }
         );
+
         return tracks;
     }
 }

@@ -1,3 +1,7 @@
+/**
+ * Wave encoder that can run inside in a worklet
+ */
+
 const SAMPLE_RATE = 48000;
 
 const url_worklet = URL.createObjectURL(
@@ -224,8 +228,6 @@ export class WAVEncoder {
             await this.audioContext.audioWorklet.addModule(url_worklet);
         }
 
-        await this.audioContext.resume();
-
         if (sameVideo) {
             return;
         }
@@ -235,21 +237,25 @@ export class WAVEncoder {
             this.audioContext,
             "convert-bits-processor"
         );
+        this.node.port.start();
     }
 
-    play() {
+    async play() {
         if (!this.source) {
             return;
         }
         this.source.connect(this.node);
         this.node.connect(this.audioContext.destination);
+        this.node.port.start();
+        await this.audioContext.resume();
     }
-    pause() {
+    async pause() {
         if (!this.source) {
             return;
         }
         this.source.disconnect();
         this.node.disconnect();
+        await this.audioContext.suspend();
     }
 }
 
