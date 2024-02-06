@@ -135,7 +135,6 @@ export const PeerProvider = (options: PeerOptions) => {
                     !(await detectIncognito()).isPrivate
                 ) {
                     const persisted = await navigator.storage.persist();
-                    console.log("CAN PERSIST?", persisted);
                     setPersisted(persisted);
                     if (!persisted) {
                         setPersisted(false);
