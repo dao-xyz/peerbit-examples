@@ -369,9 +369,15 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 videoElementRef.srcObject =
                     await navigator.mediaDevices.getUserMedia({
                         video: {
-                            height: { ideal: 1440 },
+                            height: { ideal: 720 },
                         },
-                        audio: !!firstQuality.audio,
+                        audio: !!firstQuality.audio
+                            ? {
+                                  autoGainControl: false,
+                                  echoCancellation: false,
+                                  noiseSuppression: false,
+                              }
+                            : false,
                     });
 
                 break;
@@ -383,7 +389,11 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             height: { ideal: 1440 },
                             //height: { ideal: 1440 }
                         }, // { height: s.video.height, width: s.video.width },
-                        audio: true,
+                        audio: {
+                            autoGainControl: false,
+                            echoCancellation: false,
+                            noiseSuppression: false,
+                        },
                     });
 
                 break;
