@@ -4,10 +4,11 @@ import react from "@vitejs/plugin-react";
 export default defineConfig({
     plugins: [react()],
     optimizeDeps: {
-        esbuildOptions: {
-            target: "esnext",
-        },
-        exclude: ["@peerbit/any-store"],
+        /*  esbuildOptions: {
+             target: "esnext",
+         },
+         exclude: ["@peerbit/any-store"], */
+        disabled: true,
     },
     build: {
         target: "esnext",
