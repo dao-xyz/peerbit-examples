@@ -9,6 +9,7 @@ export default defineConfig({
         esbuildOptions: {
             target: "esnext",
         },
+        exclude: ["@peerbit/any-store"],
     },
     build: {
         target: "esnext",
