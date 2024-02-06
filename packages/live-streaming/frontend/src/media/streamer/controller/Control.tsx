@@ -514,7 +514,13 @@ export const Controls = (props: {
                 <Grid item justifyContent="center">
                     <IconButton
                         onClick={() => {
-                            props.viewRef?.requestFullscreen();
+                            if (props.viewRef) {
+                                if (props.viewRef.requestFullscreen)
+                                    props.viewRef.requestFullscreen();
+                                if (props.viewRef["webkitRequestFullscreen"]) {
+                                    props.viewRef["webkitRequestFullscreen"]();
+                                }
+                            }
                         }}
                         sx={{ borderRadius: 0 }}
                     >
