@@ -511,22 +511,29 @@ export const Controls = (props: {
                         <FitScreen />
                     </IconButton>
                 </Grid> */}
-                <Grid item justifyContent="center">
-                    <IconButton
-                        onClick={() => {
-                            if (props.viewRef) {
-                                if (props.viewRef.requestFullscreen)
-                                    props.viewRef.requestFullscreen();
-                                if (props.viewRef["webkitRequestFullscreen"]) {
-                                    props.viewRef["webkitRequestFullscreen"]();
+                {(props.videoRef?.requestFullscreen ||
+                    props.videoRef?.["webkitExitFullscreen"]) && (
+                    <Grid item justifyContent="center">
+                        <IconButton
+                            onClick={() => {
+                                if (props.videoRef) {
+                                    if (props.videoRef.requestFullscreen) {
+                                        props.videoRef.requestFullscreen();
+                                    } else if (
+                                        props.videoRef["webkitExitFullscreen"]
+                                    ) {
+                                        props.videoRef[
+                                            "webkitExitFullscreen"
+                                        ]();
+                                    }
                                 }
-                            }
-                        }}
-                        sx={{ borderRadius: 0 }}
-                    >
-                        <Fullscreen />
-                    </IconButton>
-                </Grid>
+                            }}
+                            sx={{ borderRadius: 0 }}
+                        >
+                            <Fullscreen />
+                        </IconButton>
+                    </Grid>
+                )}
             </Grid>
         </Grid>
     );

@@ -54,7 +54,7 @@ export const Controls = (
         selectedResolution?: Resolution[];
         onStreamTypeChange?: (settings: StreamType) => void;
         onQualityChange: (settings: SourceSetting[]) => void;
-        viewRef: HTMLElement;
+        viewRef: HTMLCanvasElement;
     } & ControlInterface
 ) => {
     const [showControls, setShowControls] = useState(false);
@@ -616,22 +616,27 @@ export const Controls = (
                         <FitScreen />
                     </IconButton>
                 </Grid> */}
-                <Grid item justifyContent="center">
-                    <IconButton
-                        onClick={() => {
-                            if (props.viewRef) {
-                                if (props.viewRef.requestFullscreen)
-                                    props.viewRef.requestFullscreen();
-                                if (props.viewRef["webkitRequestFullscreen"]) {
-                                    props.viewRef["webkitRequestFullscreen"]();
+                {(props.viewRef?.requestFullscreen ||
+                    props.viewRef?.["webkitExitFullscreen"]) && (
+                    <Grid item justifyContent="center">
+                        <IconButton
+                            onClick={() => {
+                                if (props.viewRef) {
+                                    if (props.viewRef.requestFullscreen) {
+                                        props.viewRef.requestFullscreen();
+                                    } else if (
+                                        props.viewRef["webkitExitFullscreen"]
+                                    ) {
+                                        props.viewRef["webkitExitFullscreen"]();
+                                    }
                                 }
-                            }
-                        }}
-                        sx={{ borderRadius: 0 }}
-                    >
-                        <Fullscreen />
-                    </IconButton>
-                </Grid>
+                            }}
+                            sx={{ borderRadius: 0 }}
+                        >
+                            <Fullscreen />
+                        </IconButton>
+                    </Grid>
+                )}
             </Grid>
         </Grid>
     );
