@@ -63,8 +63,9 @@ interface VideoStream {
 let lastVideoFrameTimestamp: bigint | undefined = undefined;
 const openVideoStreamQueue = new PQueue({ concurrency: 1 });
 
-let x = false;
 const DEFAULT_QUALITY = resolutionToSourceSetting(360);
+
+const isTouchScreen = window.matchMedia("(pointer: coarse)").matches;
 
 const clampedFrameRate = (fps: number) => Math.max(Math.min(fps, 60), 1);
 export const Stream = (args: { node: PublicSignKey }) => {
@@ -101,6 +102,8 @@ export const Stream = (args: { node: PublicSignKey }) => {
     }, []);
 
     let videoRef = useRef<HTMLVideoElementWithCaptureStream>();
+
+    const [clickedOnce, setClickedOnce] = useState(false);
 
     useEffect(() => {
         if (!tickWorkerRef.current) {
@@ -210,6 +213,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         videoStreamDB.setEnd();
 
                         // update the track with the end timer
+
                         await mediaStreamDBs.streams.put(videoStreamDB, {
                             target: "all",
                         });
@@ -239,53 +243,78 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             chunk.copyTo(arr);
 
                             if (metadata.decoderConfig) {
-                                const videoTrack = new Track<WebcodecsStreamDB>(
-                                    {
-                                        sender: peer.identity.publicKey,
-                                        session: sessionTimestampRef.current,
-                                        source: new WebcodecsStreamDB({
-                                            decoderDescription:
-                                                metadata.decoderConfig,
-                                            /*   timestamp: videoStreamDB?.timestamp, ??? */
-                                        }),
-                                        start:
-                                            +new Date() -
-                                            Number(sessionTimestampRef.current),
-                                    }
-                                );
-                                if (
-                                    !videoStreamDB ||
-                                    !equals(videoTrack.id, videoStreamDB.id)
-                                ) {
-                                    skip = true;
-                                    // console.log('got frame', chunk.type, arr.length, !!metadata.decoderConfig)
-                                    // deactivate previous
-                                    await openVideoStreamQueue
-                                        .add(async () => {
-                                            //  console.log('open video stream db!', videoStreamDB?.timestamp)
-
-                                            const r = await peer.open(
-                                                videoTrack,
-                                                {
-                                                    args: {
-                                                        role: {
-                                                            type: "replicator",
-                                                            factor: 1,
-                                                        },
-                                                    },
-                                                    /*   trim: { type: 'length', to: 10 }, */
-                                                }
-                                            );
-                                            while (videoStreamDB) {
-                                                await close(false);
-                                            }
-                                            mediaStreamDBs.streams.put(r);
-                                            videoStreamDB = r;
-                                            return r;
-                                        })
-                                        .finally(() => {
-                                            skip = false;
+                                if (!videoStreamDB) {
+                                    const videoTrack =
+                                        new Track<WebcodecsStreamDB>({
+                                            sender: peer.identity.publicKey,
+                                            session:
+                                                sessionTimestampRef.current,
+                                            source: new WebcodecsStreamDB({
+                                                decoderDescription:
+                                                    metadata.decoderConfig,
+                                                /*   timestamp: videoStreamDB?.timestamp, ??? */
+                                            }),
+                                            start:
+                                                +new Date() -
+                                                Number(
+                                                    sessionTimestampRef.current
+                                                ),
                                         });
+
+                                    let change = false;
+                                    if (videoStreamDB) {
+                                        if (
+                                            videoTrack.session >
+                                            videoStreamDB.session
+                                        ) {
+                                            // ok!
+                                            change = true;
+                                        } else if (
+                                            videoTrack.source
+                                                .decoderConfigJSON !==
+                                            videoStreamDB.source
+                                                .decoderConfigJSON
+                                        ) {
+                                            // ok!
+                                            change = true;
+                                        } else {
+                                            // no change, ignore
+                                        }
+                                    } else {
+                                        change = true;
+                                    }
+
+                                    if (change) {
+                                        skip = true;
+                                        // console.log('got frame', chunk.type, arr.length, !!metadata.decoderConfig)
+                                        // deactivate previous
+                                        await openVideoStreamQueue
+                                            .add(async () => {
+                                                //  console.log('open video stream db!', videoStreamDB?.timestamp)
+
+                                                const r = await peer.open(
+                                                    videoTrack,
+                                                    {
+                                                        args: {
+                                                            role: {
+                                                                type: "replicator",
+                                                                factor: 1,
+                                                            },
+                                                        },
+                                                        /*   trim: { type: 'length', to: 10 }, */
+                                                    }
+                                                );
+                                                while (videoStreamDB) {
+                                                    await close(false);
+                                                }
+                                                mediaStreamDBs.streams.put(r);
+                                                videoStreamDB = r;
+                                                return r;
+                                            })
+                                            .finally(() => {
+                                                skip = false;
+                                            });
+                                    }
                                 }
                             }
                             if (videoStreamDB) {
@@ -644,9 +673,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 <div className="container">
                     <div className="video-wrapper">
                         <video
-                            crossOrigin="anonymous" /* Allow createMediaElementSource */
+                            crossOrigin="anonymous"
                             data-iframe-height
                             ref={videoRef}
+                            playsInline
                             height="auto"
                             width="100%"
                             onPlay={(e) =>
@@ -669,6 +699,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                     : videoRef.current.pause()
                             }
                             muted={streamType.current.type === "noise"}
+                            controls={false}
                         ></video>
                         <Controls
                             selectedResolution={
@@ -688,6 +719,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             }}
                             videoRef={videoRef.current}
                             viewRef={videoRef.current}
+                            alwaysShow={isTouchScreen}
                         />
                     </div>
                 </div>

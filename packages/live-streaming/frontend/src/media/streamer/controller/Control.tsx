@@ -41,8 +41,9 @@ export const Controls = (props: {
     onQualityChange: (settings: SourceSetting[]) => void;
     videoRef: HTMLVideoElement;
     viewRef: HTMLCanvasElement | HTMLVideoElement;
+    alwaysShow: boolean | undefined;
 }) => {
-    const [showControls, setShowControls] = useState(false);
+    const [showControls, setShowControls] = useState(props.alwaysShow || false);
 
     const [speed, setSpeed] = useState(1);
     const [muted, setMuted] = useState(
@@ -77,12 +78,12 @@ export const Controls = (props: {
         });
     };
     useEffect(() => {
-        if (!props.viewRef) {
+        if (!props.viewRef || props.alwaysShow) {
             return;
         }
 
         addShowControlsListener(props.viewRef);
-    }, [props.viewRef]);
+    }, [props.viewRef, props.alwaysShow]);
 
     const [videoSettingsAnchor, setVideoSettingsAnchor] =
         useState<null | HTMLElement>(null);

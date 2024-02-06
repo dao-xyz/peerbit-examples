@@ -36,7 +36,7 @@
 
     backdrop-filter: blur(1px);
     -webkit-backdrop-filter: blur(1px);
-    mask: linear-gradient(transparent, black 90%);
+    /* mask: linear-gradient(transparent, black 90%); */
     transition: 1s;
 
 
