@@ -366,7 +366,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 break;
 
             case "camera":
-                videoElementRef.setAttribute("REQUESTING_DISPLAY_MEDIA", "Y");
                 videoElementRef.srcObject =
                     await navigator.mediaDevices.getUserMedia({
                         video: {
@@ -375,12 +374,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         audio: !!firstQuality.audio,
                     });
 
-                videoElementRef.removeAttribute("REQUESTING_DISPLAY_MEDIA");
-
                 break;
 
             case "screen":
-                videoElementRef.setAttribute("REQUESTING_DISPLAY_MEDIA", "Y");
                 videoElementRef.srcObject =
                     await navigator.mediaDevices.getDisplayMedia({
                         video: {
@@ -389,7 +385,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         }, // { height: s.video.height, width: s.video.width },
                         audio: true,
                     });
-                videoElementRef.removeAttribute("REQUESTING_DISPLAY_MEDIA");
 
                 break;
         }
@@ -489,7 +484,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
             close: () => {
                 videoRef.removeEventListener("play", onPlay);
                 videoRef.removeEventListener("pause", onPause);
-                return audioControlsPromise.then((p) => p.close());
+                return audioControlsPromise?.then((p) => p.close());
             },
         };
     };
