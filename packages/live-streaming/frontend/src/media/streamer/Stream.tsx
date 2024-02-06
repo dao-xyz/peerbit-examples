@@ -618,9 +618,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             videoRef.videoHeight;
                         // console.log('set bitrate', videoEncoder.setting.video.bitrate)
                         encoder.configure({
-                            codec: isSafari
+                            codec: "vp09.00.10.08" /* isSafari
                                 ? "avc1.428020"
-                                : "av01.0.04M.10" /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
+                                : "av01.0.04M.10" */ /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
                             height: videoEncoder.setting.video.height,
                             width: videoRef.videoWidth * scaler,
                             bitrate: videoEncoder.setting.video.bitrate,
