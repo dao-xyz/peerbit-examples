@@ -22,8 +22,8 @@ interface NoiseType {
 
 export type StreamType = MediaType | CameraStream | ScreenShare | NoiseType;
 
-export type Resolution = 360 | 480 | 720 | 1080;
-export const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080];
+export type Resolution = 360 | 480 | 720 | 1080 | 1440 | 2160;
+export const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080, 1440, 2160];
 export const resolutionToSourceSetting = (resolution: Resolution) => {
     if (resolution === 360) {
         return {
@@ -69,6 +69,29 @@ export const resolutionToSourceSetting = (resolution: Resolution) => {
             video: {
                 bitrate: 4.5 * 1e6,
                 height: 1080,
+            },
+        };
+    }
+
+    if (resolution === 1440) {
+        return {
+            audio: {
+                bitrate: 1e5,
+            },
+            video: {
+                bitrate: 5.5 * 1e6,
+                height: 1440,
+            },
+        };
+    }
+    if (resolution === 2160) {
+        return {
+            audio: {
+                bitrate: 1e5,
+            },
+            video: {
+                bitrate: 6.5 * 1e6,
+                height: 1440,
             },
         };
     }

@@ -1,4 +1,3 @@
-let last = 0;
 let timeout: ReturnType<typeof setTimeout> | undefined = undefined;
 
 /**
@@ -19,21 +18,18 @@ self.addEventListener(
         switch (message.type) {
             case "stop": {
                 clearTimeout(timeout);
+                timeout = undefined;
                 break;
             }
             case "next": {
+                if (timeout) {
+                    return;
+                }
                 const expectedFrameDuration = 1000 / message.tps;
-                const now = +new Date();
-                const currentDuration = now - last;
-                last = now;
-                const durationLeft = Math.max(
-                    expectedFrameDuration - currentDuration,
-                    0
-                );
-                clearTimeout(timeout);
                 timeout = setTimeout(() => {
                     self.postMessage("tick");
-                }, durationLeft);
+                    timeout = undefined;
+                }, expectedFrameDuration);
                 break;
             }
         }

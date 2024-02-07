@@ -335,7 +335,6 @@ export class MediaStreamDB extends Program<Args> {
         if (latest.length === 0) {
             return [];
         }
-        console.log("LATEST", latest[0].session);
         const tracks = await this.streams.index.search(
             new SearchRequest({
                 query: [

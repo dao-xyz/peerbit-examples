@@ -67,7 +67,7 @@ const DEFAULT_QUALITY = resolutionToSourceSetting(360);
 
 const isTouchScreen = window.matchMedia("(pointer: coarse)").matches;
 
-const clampedFrameRate = (fps: number) => Math.max(Math.min(fps, 60), 1);
+const clampedFrameRate = (fps: number) => Math.max(Math.min(fps, 60), 10);
 export const Stream = (args: { node: PublicSignKey }) => {
     const streamType = useRef<StreamType>({ type: "noise" });
     const [quality, setQuality] = useState<SourceSetting[]>([DEFAULT_QUALITY]);
@@ -107,25 +107,40 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
     useEffect(() => {
         if (!tickWorkerRef.current) {
+            let f = 0;
             tickWorkerRef.current = new TickWorker();
+            const tickListener = () => {
+                scheduleFrameFn.current();
+                f = +new Date();
+            };
+
             let listener = () => {
                 if (document.hidden) {
                     tickWorkerRef.current.postMessage({
                         type: "next",
                         tps: clampedFrameRate(lastFrameRate.current),
                     } as NextTick);
+                    tickWorkerRef.current.addEventListener(
+                        "message",
+                        tickListener
+                    );
                 } else {
                     tickWorkerRef.current.postMessage({ type: "stop" } as Stop);
+                    tickWorkerRef.current.removeEventListener(
+                        "message",
+                        tickListener
+                    );
                 }
             };
 
             document.addEventListener("visibilitychange", listener);
-            const tickListener = () => {
-                scheduleFrameFn.current();
-            };
-            tickWorkerRef.current.addEventListener("message", tickListener);
 
             return () => {
+                tickWorkerRef.current.removeEventListener(
+                    "message",
+                    tickListener
+                );
+
                 document.removeEventListener("visibilitychange", listener);
                 tickWorkerRef.current.terminate();
                 tickWorkerRef.current = undefined;
@@ -203,7 +218,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 let videoStreamDB: Track<WebcodecsStreamDB> | undefined =
                     undefined;
                 let encoder: VideoEncoder | undefined = undefined;
+                let abortController = new AbortController();
+
                 let close = async (closeEncoder: boolean = true) => {
+                    abortController.abort();
                     if (closeEncoder && encoder && encoder.state !== "closed") {
                         encoder.close();
                     }
@@ -243,81 +261,88 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             chunk.copyTo(arr);
 
                             if (metadata.decoderConfig) {
-                                if (!videoStreamDB) {
-                                    const videoTrack =
-                                        new Track<WebcodecsStreamDB>({
-                                            sender: peer.identity.publicKey,
-                                            session:
-                                                sessionTimestampRef.current,
-                                            source: new WebcodecsStreamDB({
-                                                decoderDescription:
-                                                    metadata.decoderConfig,
-                                                /*   timestamp: videoStreamDB?.timestamp, ??? */
-                                            }),
-                                            start:
-                                                +new Date() -
-                                                Number(
-                                                    sessionTimestampRef.current
-                                                ),
-                                        });
+                                const videoTrack = new Track<WebcodecsStreamDB>(
+                                    {
+                                        sender: peer.identity.publicKey,
+                                        session: sessionTimestampRef.current,
+                                        source: new WebcodecsStreamDB({
+                                            decoderDescription:
+                                                metadata.decoderConfig,
+                                            /*   timestamp: videoStreamDB?.timestamp, ??? */
+                                        }),
+                                        start:
+                                            +new Date() -
+                                            Number(sessionTimestampRef.current),
+                                    }
+                                );
 
-                                    let change = false;
-                                    if (videoStreamDB) {
-                                        if (
-                                            videoTrack.session >
-                                            videoStreamDB.session
-                                        ) {
-                                            // ok!
-                                            change = true;
-                                        } else if (
-                                            videoTrack.source
-                                                .decoderConfigJSON !==
+                                let change = false;
+                                if (videoStreamDB) {
+                                    if (
+                                        videoTrack.session >
+                                        videoStreamDB.session
+                                    ) {
+                                        // ok!
+                                        change = true;
+                                    } else if (
+                                        videoTrack.source.decoderConfigJSON !==
+                                        videoStreamDB.source.decoderConfigJSON
+                                    ) {
+                                        // ok!
+                                        change = true;
+                                    } else {
+                                        // no change, ignore
+
+                                        console.log(
+                                            "NO CHANGE",
                                             videoStreamDB.source
                                                 .decoderConfigJSON
-                                        ) {
-                                            // ok!
-                                            change = true;
-                                        } else {
-                                            // no change, ignore
-                                        }
-                                    } else {
-                                        change = true;
+                                        );
                                     }
+                                } else {
+                                    change = true;
+                                }
 
-                                    if (change) {
-                                        skip = true;
-                                        // console.log('got frame', chunk.type, arr.length, !!metadata.decoderConfig)
-                                        // deactivate previous
-                                        await openVideoStreamQueue
-                                            .add(async () => {
-                                                //  console.log('open video stream db!', videoStreamDB?.timestamp)
+                                if (change) {
+                                    skip = true;
+                                    // console.log('got frame', chunk.type, arr.length, !!metadata.decoderConfig)
+                                    // deactivate previous
+                                    await openVideoStreamQueue
+                                        .add(async () => {
+                                            //  console.log('open video stream db!', videoStreamDB?.timestamp)
 
-                                                const r = await peer.open(
-                                                    videoTrack,
-                                                    {
-                                                        args: {
-                                                            role: {
-                                                                type: "replicator",
-                                                                factor: 1,
-                                                            },
+                                            const r = await peer.open(
+                                                videoTrack,
+                                                {
+                                                    args: {
+                                                        role: {
+                                                            type: "replicator",
+                                                            factor: 1,
                                                         },
-                                                        /*   trim: { type: 'length', to: 10 }, */
-                                                    }
-                                                );
-                                                while (videoStreamDB) {
-                                                    await close(false);
+                                                    },
+                                                    /*   trim: { type: 'length', to: 10 }, */
                                                 }
-                                                mediaStreamDBs.streams.put(r);
-                                                videoStreamDB = r;
-                                                return r;
-                                            })
-                                            .finally(() => {
-                                                skip = false;
-                                            });
-                                    }
+                                            );
+                                            while (videoStreamDB) {
+                                                await close(false);
+                                            }
+                                            mediaStreamDBs.streams.put(r);
+                                            abortController =
+                                                new AbortController();
+                                            videoStreamDB = r;
+                                            return r;
+                                        })
+                                        .finally(() => {
+                                            skip = false;
+                                        });
                                 }
                             }
-                            if (videoStreamDB) {
+                            if (
+                                await waitFor(() => videoStreamDB, {
+                                    signal: abortController.signal,
+                                })
+                            ) {
+                                // TODO waitFor ?
                                 if (s0 === undefined) {
                                     s0 = +new Date();
                                 }
@@ -490,7 +515,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     "message",
                     wavListener
                 );
-                await audioTrack.source.close();
+                await audioTrack.close();
                 audioTrack.setEnd();
                 mediaStreamDBs.streams.put(audioTrack, { target: "all" });
             };
@@ -549,9 +574,16 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
         let framesSinceLastBackground = 0;
 
+        /*  let t0 = 0; */
+
         const requestFrame = () => {
+            /*    let t1 = +new Date;
+               console.log(t1 - t0, tickWorkerRef.current);
+               t0 = t1; */
             if (!inBackground && "requestVideoFrameCallback" in videoRef) {
                 videoRef.requestVideoFrameCallback(frameFn);
+
+                /*   setTimeout(() => { frameFn() }, 1e3 / 24) */
             } else {
                 tickWorkerRef.current.postMessage({
                     type: "next",
@@ -581,6 +613,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
             /// console.log(counter / ((+new Date() - t0) / 1000));
             const frame = new VideoFrame(videoRef);
+
             for (const videoEncoder of videoEncoders.current) {
                 const encoder = videoEncoder.encoder();
 
@@ -630,20 +663,25 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     }
 
                     if (encoder.state === "configured") {
-                        if (encoder.encodeQueueSize > 2) {
+                        if (encoder.encodeQueueSize > 15) {
                             // Too many frames in flight, encoder is overwhelmed
                             // let's drop this frame.
+                            encoder.flush();
+                            console.log("DROP FRAME");
                         } else {
                             frameCounter++;
-                            const insert_keyframe =
+                            const insertKeyframe =
                                 Math.round(
                                     frameCounter / videoEncoders.current.length
                                 ) %
                                     60 ===
                                 0;
 
+                            //let t1 = +new Date;
+                            //        console.log("PUT CHUNK", encoder.encodeQueueSize, (t1 - t0));
+                            // t0 = t1;
                             encoder.encode(frame, {
-                                keyFrame: insert_keyframe,
+                                keyFrame: insertKeyframe,
                             });
                         }
                     }
@@ -684,12 +722,8 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                     e.currentTarget as HTMLVideoElementWithCaptureStream
                                 )
                             }
-                            onPause={() => {
-                                wavEncoder.pause();
-                            }}
                             onEnded={() => {
                                 onEnd();
-                                wavEncoder.pause();
                             }}
                             autoPlay
                             loop

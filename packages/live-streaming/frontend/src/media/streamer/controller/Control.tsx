@@ -133,7 +133,7 @@ export const Controls = (props: {
         }
 
         const currentJSON = JSON.stringify(type);
-        if (currentJSON !== JSON.stringify(prevSettings)) {
+        if (/* currentJSON !== JSON.stringify(prevSettings) */ true) {
             setPrevSettings(JSON.parse(currentJSON));
             props.onStreamTypeChange(type);
         }

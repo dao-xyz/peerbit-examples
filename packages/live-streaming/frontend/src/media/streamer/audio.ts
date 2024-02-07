@@ -3,7 +3,6 @@
  */
 
 const SAMPLE_RATE = 48000;
-
 const url_worklet = URL.createObjectURL(
     new Blob(
         [
@@ -14,6 +13,13 @@ const url_worklet = URL.createObjectURL(
                 class ConvertBitsProcessor extends AudioWorkletProcessor {
                     audioBuffer: Float32Array[][] = [];
                     bufferLen = 0;
+
+                    // This variable describe how much audio data we need to buffer before
+                    // we sent it back into an array
+                    // making this tooo small can have performanc overheads
+                    // making this too big i will make will increase latency for listeners
+                    MIN_CHUNK_SIZE = 5000; // TODO  make this as option
+
                     static get parameterDescriptors() {
                         return [];
                     }
@@ -117,7 +123,7 @@ const url_worklet = URL.createObjectURL(
                             inputs.map((x) => new Float32Array(x))
                         ); // Copy is necessary (why (?)) the output becomes malformed without it
                         this.bufferLen += 128 * inputs.length;
-                        if (this.bufferLen > 5000) {
+                        if (this.bufferLen > this.MIN_CHUNK_SIZE) {
                             // merge data within channels
                             const merged: Float32Array[] = [];
                             const channels = this.audioBuffer[0].length;
@@ -241,6 +247,8 @@ export class WAVEncoder {
     }
 
     async play() {
+        console.log("PLAY?", this.source);
+
         if (!this.source) {
             return;
         }

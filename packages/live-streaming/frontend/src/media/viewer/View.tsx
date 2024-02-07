@@ -10,7 +10,7 @@ import {
 } from "../database.js";
 import { Grid } from "@mui/material";
 import { PublicSignKey } from "@peerbit/crypto";
-import { DocumentsChange, SearchRequest } from "@peerbit/document";
+import { DocumentsChange } from "@peerbit/document";
 import "./View.css";
 import CatOffline from "/catbye64.png";
 import { Controls } from "./controller/Control.js";
@@ -19,6 +19,8 @@ import { Resolution } from "../controls/settings.js";
 import { renderer } from "./video/renderer.js";
 import PQueue from "p-queue";
 import { equals } from "uint8arrays";
+import { getKeepAspectRatioBoundedSize } from "../MaintainAspectRatio.js";
+import ClickOnceForAudio from "./ClickOnceForAudio.js";
 
 let inBackground = false;
 document.addEventListener("visibilitychange", () => {
@@ -142,11 +144,10 @@ const addVideoStreamListener = async (
         }
     };
 
-    let cleanup: (() => void) | undefined = undefined;
+    let cleanup: (() => void) | undefined = () =>
+        streamDB.chunks.events.removeEventListener("change", listener);
     let setLive = () => {
-        cleanup = () => {
-            streamDB.chunks.events.removeEventListener("change", listener);
-        };
+        streamDB.chunks.events.removeEventListener("change", listener);
         streamDB.chunks.events.addEventListener("change", listener);
     };
     return {
@@ -176,6 +177,9 @@ const addVideoStreamListener = async (
     };
 };
 
+const updateAudioStreamQueue = new PQueue({ concurrency: 1 });
+const updateVIdeotreamQueue = new PQueue({ concurrency: 1 });
+
 const addAudioStreamListener = async (
     streamDB: AudioStreamDB,
     play: boolean,
@@ -195,13 +199,16 @@ const addAudioStreamListener = async (
             play = false;
         }
     };
-    const stop = () => {
+    const stop = async () => {
+        console.log("STOP");
         if (audioContext) {
             audioContext.removeEventListener(
                 "statechange",
                 audioContextListener
             );
-            audioContext.close();
+            audioContext.destination.disconnect();
+            await audioContext.close();
+            gainNode.disconnect();
         }
         audioContext = undefined;
         setVolume = undefined;
@@ -211,9 +218,10 @@ const addAudioStreamListener = async (
         if (gainNode) gainNode.gain.value = volume;
     };
 
-    const setupAudioContext = () => {
-        stop();
+    const setupAudioContext = async () => {
+        await stop();
         time = 0;
+        console.log("SETUP AUDIO CONTEXT");
         audioContext = new AudioContext({ sampleRate: streamDB.sampleRate });
         audioContext.addEventListener("statechange", audioContextListener);
         gainNode = audioContext.createGain();
@@ -226,7 +234,7 @@ const addAudioStreamListener = async (
     let time = 0;
     let expectedLatency = 0.1;
 
-    const renderFrame = async () => {
+    const renderFrame = async (x?: number) => {
         if (!time) {
             // we've not yet started the queue - just queue this up,
             // leaving a "latency gap" so we're not desperately trying
@@ -242,19 +250,34 @@ const addAudioStreamListener = async (
         if (audioContext.state !== "running") {
             return;
         }
+
         if (!underflow) {
+            /*  if (audioContext !== context) {
+                 console.log("DIFF", audioContext, context)
+                 return;
+             } */
             const frame = pendingFrames.shift();
             const audioSource = audioContext.createBufferSource();
             audioSource.buffer = frame.buffer;
             audioSource.connect(gainNode);
-            audioSource.start(time);
-            let currentLag =
-                (currentVideoTime
-                    ? Math.min(time, currentVideoTime() / 1e6)
-                    : time) - audioContext.currentTime;
+            let currentLag = time - audioContext.currentTime;
+            /*   (currentVideoTime
+                  ? Math.min(time, currentVideoTime() / 1e6)
+                  : time) - audioContext.currentTime; */
+            const offset = Math.max(audioContext.currentTime - time, 0);
+            if (offset > 0) {
+                // we are not catching up, i.e. the player is going faster than we get new chunks
+                console.log(offset, currentLag);
+            }
+            audioSource.start(time, offset);
+
+            //  console.log("START AT  TIME", time, x)
             let lagRatio = currentLag / expectedLatency;
-            let damp = 0.95;
-            const playbackRate = 1 * damp + Math.max(0, lagRatio) * (1 - damp);
+            let damp = 0.99;
+            // console.log(currentLag, expectedLatency)
+            const playbackRate = 1; // damp + Math.max(0, lagRatio) * (1 - damp);
+
+            // console.log(frame.timestamp > l, time, frame.timestamp, audioContext.currentTime, currentLag, time, audioContext.currentTime, audioSource.buffer.duration, currentVideoTime?.(), audioContext.currentTime)
 
             //  let detune = -12 * Math.log2(1 / playbackRate) * 100;
             // audioSource.detune.value = -detune
@@ -264,10 +287,12 @@ const addAudioStreamListener = async (
 
             // console.log('AUDIO INFO', audioSource.buffer.duration / playbackRate + time, currentVideoTime?.(), frame.timestamp)
             time += audioSource.buffer.duration / playbackRate;
+        } else {
+            console.log("UNDERFLOW");
         }
 
         // Immediately schedule rendering of the next frame
-        setTimeout(renderFrame, 1); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
+        setTimeout(() => renderFrame(time), 0); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
         //requestAnimationFrame(renderFrame);
     };
 
@@ -282,6 +307,12 @@ const addAudioStreamListener = async (
                 if (decodeAudioDataQueue.size > 10) {
                     decodeAudioDataQueue.clear(); // We can't keep up, clear the queue
                 }
+                console.log(
+                    "DECODE CHUNK",
+                    streamDB.chunks.index.size,
+                    added.timestamp
+                );
+
                 decodeAudioDataQueue.add(() => {
                     let zeroOffsetBuffer = new Uint8Array(added.chunk.length);
                     zeroOffsetBuffer.set(added.chunk, 0);
@@ -302,7 +333,7 @@ const addAudioStreamListener = async (
                                         ?.resume()
                                         .then((r) => {
                                             resuming = false;
-                                            renderFrame();
+                                            renderFrame(-1);
                                         })
                                         .catch((e) => {});
                                 }
@@ -310,7 +341,7 @@ const addAudioStreamListener = async (
                                 pendingFrames.push(frame);
                                 if (underflow) {
                                     underflow = false;
-                                    renderFrame();
+                                    renderFrame(time);
                                 }
                             }
                         },
@@ -322,20 +353,20 @@ const addAudioStreamListener = async (
             }
         }
     };
-    let cleanup: (() => void) | undefined = undefined;
-    let setLive = () => {
+    let cleanup: (() => void) | undefined = () =>
+        streamDB.chunks.events.removeEventListener("change", listener);
+    let setLive = async () => {
         if (!audioContext) {
-            setupAudioContext();
+            await setupAudioContext();
         }
-
-        cleanup = () => {
-            streamDB.chunks.events.removeEventListener("change", listener);
-        };
+        console.log("XXXXX ADD LISTENER");
+        streamDB.chunks.events.removeEventListener("change", listener);
         streamDB.chunks.events.addEventListener("change", listener);
     };
     return {
-        close: () => {
+        close: async () => {
             cleanup?.();
+            await stop();
         },
         setProgress: (progress: number) => {
             cleanup?.();
@@ -345,10 +376,10 @@ const addAudioStreamListener = async (
         setVolume,
         mute,
         unmute,
-        play: () => {
+        play: async () => {
             play = true;
             setupAudioContext();
-            setLive();
+            await setLive();
             renderFrame();
         },
         pause: () => {
@@ -364,7 +395,7 @@ type IdentityArgs = { node: PublicSignKey };
 type StreamControlFunction = ControlFunctions & {
     close: () => void;
 };
-type Streams<T extends TrackSource> = {
+type StreamWithControls<T extends TrackSource> = {
     source: Track<T>;
     controls: StreamControlFunction;
 };
@@ -384,16 +415,28 @@ export const View = (args: DBArgs | IdentityArgs) => {
     const [selectedResolutions, setSelectedResolutions] = useState<
         Resolution[]
     >([]);
-    const videoLoadingRef = useRef<Promise<Streams<WebcodecsStreamDB>>>();
-    const currentVideoRef = useRef<Streams<WebcodecsStreamDB>>(null);
-    const audioLoadingRef = useRef<Promise<Streams<AudioStreamDB>>>();
-    const currentAudioRef = useRef<Streams<AudioStreamDB>>(null);
+    const videoLoadingRef =
+        useRef<Promise<StreamWithControls<WebcodecsStreamDB>>>();
+    const currentVideoRef = useRef<StreamWithControls<WebcodecsStreamDB>>(null);
+    const audioLoadingRef =
+        useRef<Promise<StreamWithControls<AudioStreamDB>>>();
+    const currentAudioRef = useRef<StreamWithControls<AudioStreamDB>>(null);
 
     const containerRef = useRef<HTMLDivElement>(null);
     const [streamerOnline, setStreamerOnline] = useState(false);
     const { peer } = usePeer();
     const controls = useRef<StreamControlFunction[]>([]);
     const [isPlaying, setIsPlaying] = useState(true);
+    /* 
+        const [styleHeight, setStyleHeight] = useState<'100dvh' | 'fit-content'>("fit-content");
+        const [styleWidth, setStyleWidth] = useState<'100dvw' | 'fit-content'>("100dvw");
+     */
+
+    const { height: styleHeight, width: styleWidth } =
+        getKeepAspectRatioBoundedSize({
+            height: videoHeight(),
+            width: videoWidth(),
+        });
 
     useEffect(() => {
         if (!peer) {
@@ -505,14 +548,11 @@ export const View = (args: DBArgs | IdentityArgs) => {
             local: true,
         });
 
-        const all = await videoStream.current.streams.index.search(
-            new SearchRequest()
-        );
-
         // remove closed streams
-        const removedStreams = videoStreamOptions.current.filter(
-            (x) => !activeStreams.find((y) => equals(y.id, x.id))
-        );
+        const removedStreams = [
+            currentAudioRef.current?.source,
+            ...videoStreamOptions.current,
+        ].filter((x) => x && !activeStreams.find((y) => equals(y.id, x.id)));
 
         await videoLoadingRef.current;
         await audioLoadingRef.current;
@@ -535,25 +575,18 @@ export const View = (args: DBArgs | IdentityArgs) => {
             (x) => x.source instanceof AudioStreamDB
         ) as Track<AudioStreamDB>[];
 
-        /*                 console.log(
-                            "CHANGE? ",
-                            videoResults.length,
-                            videoStreamOptions.current.length === 0,
-                            currentVideoIsRemoved,
-                            videoResults.map((x) => x.id + "/" + x.session)
-                        );
-         */
         const currentOptions = videoStreamOptions.current.filter(
             (x) => !x.closed
         );
         videoStreamOptions.current = videoResults;
         console.log(
             "NEW STREAM?",
-            all,
             videoResults,
             currentOptions.length,
+            videoStreamOptions.current.length,
             currentVideoIsRemoved
         );
+
         if (
             videoResults.length > 0 &&
             (currentOptions.length === 0 || currentVideoIsRemoved)
@@ -574,28 +607,10 @@ export const View = (args: DBArgs | IdentityArgs) => {
             let streamToOpen = videoResults[0];
 
             const ratio = Math.ceil(window.devicePixelRatio); // for dense displays, like mobile we need to scale canvas to not make it look blurry
-
             videoHeight = () =>
-                /*  Math.min(
-                         (window.innerWidth /
-                             streamToOpen.source.decoderDescription
-                                 .codedWidth) *
-                         streamToOpen.source.decoderDescription
-                             .codedHeight,
-                         window.innerHeight
-                     ); */
                 streamToOpen.source.decoderDescription.codedHeight * ratio;
             videoWidth = () =>
-                /*  Math.min(
-                         (window.innerHeight /
-                             streamToOpen.source.decoderDescription
-                                 .codedHeight) *
-                         streamToOpen.source.decoderDescription
-                             .codedWidth,
-                         window.innerWidth
-                     ); */
                 streamToOpen.source.decoderDescription.codedWidth * ratio;
-
             setVideoSize();
             await updateVideoStream(streamToOpen);
         }
@@ -627,59 +642,80 @@ export const View = (args: DBArgs | IdentityArgs) => {
     const updateVideoStream = async (
         streamToOpen: Track<WebcodecsStreamDB>
     ) => {
-        await videoLoadingRef.current;
-        if (currentVideoRef.current) {
-            await currentVideoRef.current.controls.close();
-            await currentVideoRef.current?.source.drop();
-            controls.current = controls.current.filter(
-                (x) => x === currentVideoRef.current.controls
-            );
-        }
-        videoLoadingRef.current = new Promise((resolve, reject) => {
-            peer.open(streamToOpen, {
-                args: {
-                    role: "observer",
-                    sync: () => true,
-                },
-                existing: "reuse",
-                /* reset: true, */ // TODO function without reset
-            })
-                .then(async (s) => {
-                    setSelectedResolutions([
-                        s.source.decoderDescription.codedHeight as Resolution,
-                    ]);
-                    return {
-                        video: s,
-                        controls: await addVideoStreamListener(
-                            s.source,
-                            isPlaying
-                        ),
-                    };
-                })
-                .then(({ video, controls: videoFns }) => {
-                    controls.current.push(videoFns);
-                    resolve({ source: video, controls: videoFns });
-                })
-                .catch(reject);
-        });
+        updateVIdeotreamQueue.clear();
+        return updateVIdeotreamQueue.add(() =>
+            updateMediaStream(videoLoadingRef, currentVideoRef, streamToOpen)
+        );
 
-        return videoLoadingRef.current.then((streams) => {
-            currentVideoRef.current = streams;
-            currentVideoRef.current.controls.setLive();
-        });
+        /*  console.log("A UPDATE VIDEO STREAM", videoLoadingRef.current, currentVideoRef.current)
+         await videoLoadingRef.current;
+         console.log("B UPDATE VIDEO STREAM", videoLoadingRef.current, currentVideoRef.current)
+ 
+         if (currentVideoRef.current) {
+             await currentVideoRef.current.controls.close();
+             await currentVideoRef.current?.source.drop();
+             controls.current = controls.current.filter(
+                 (x) => x === currentVideoRef.current.controls
+             );
+         }
+         videoLoadingRef.current = new Promise((resolve, reject) => {
+             peer.open(streamToOpen, {
+                 args: {
+                     role: "observer",
+                     sync: () => true,
+                 },
+                 existing: "reuse",
+             })
+                 .then(async (s) => {
+                     setSelectedResolutions([
+                         s.source.decoderDescription.codedHeight as Resolution,
+                     ]);
+                     return {
+                         video: s,
+                         controls: await addVideoStreamListener(
+                             s.source,
+                             isPlaying
+                         ),
+                     };
+                 })
+                 .then(({ video, controls: videoFns }) => {
+                     controls.current.push(videoFns);
+                     const ret = { source: video, controls: videoFns }
+                     currentVideoRef.current = ret;
+                     ret.controls.setLive();
+                     resolve(ret);
+                 })
+                 .catch(reject);
+         }); */
     };
 
     const updateAudioStream = async (streamToOpen: Track<AudioStreamDB>) => {
-        await audioLoadingRef.current;
-        if (currentAudioRef.current) {
-            currentAudioRef.current.controls.close();
-            await currentAudioRef.current.source?.drop();
+        updateAudioStreamQueue.clear();
+        return updateAudioStreamQueue.add(() =>
+            updateMediaStream(audioLoadingRef, currentAudioRef, streamToOpen)
+        );
+    };
+
+    const updateMediaStream = async (
+        loadingRef: React.MutableRefObject<Promise<StreamWithControls<any>>>,
+        resultRef: React.MutableRefObject<StreamWithControls<any>>,
+        streamToOpen: Track<any>
+    ) => {
+        streamToOpen.source instanceof AudioStreamDB &&
+            console.log("A CLOSE PREV?", loadingRef.current);
+        const prev = await loadingRef.current;
+
+        if (prev) {
+            await prev.controls.close();
+            await prev.source?.drop();
         }
+        streamToOpen.source instanceof AudioStreamDB &&
+            console.log("B CLOSE PREV?", loadingRef.current);
 
         // get stream with closest bitrate
         let currentVideoTime: (() => number) | undefined = undefined;
 
-        audioLoadingRef.current = new Promise((resolve, reject) => {
+        loadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen, {
                 args: {
                     role: "observer",
@@ -688,54 +724,28 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 existing: "reuse",
             })
                 .then(async (s) => {
-                    await addAudioStreamListener(
+                    streamToOpen.source instanceof AudioStreamDB &&
+                        console.log("ADD AUDIO LISTENER");
+                    const controllerResolver =
+                        s.source instanceof AudioStreamDB
+                            ? addAudioStreamListener
+                            : addVideoStreamListener;
+                    await controllerResolver(
                         s.source,
                         isPlaying,
                         currentVideoTime
-                    ).then((audioFns) => {
-                        /*   let mergedControls = {
-                              setSpeed: (value) => {
-                                  audioFns.setSpeed(value)
-                                  videoFns.setSpeed(value)
-                              },
-                              setLive: () => {
-                                  audioFns.setLive()
-                                  videoFns.setLive()
-                              },
-                              setProgress: (value) => {
-                                  audioFns.setProgress(value);
-                                  videoFns.setProgress(value)
-                              },
-                              pause: () => {
-                                  audioFns.pause()
-                                  videoFns.pause()
-                                  setIsPlaying(false);
-                              },
-                              play: () => {
-                                  audioFns.play()
-                                  videoFns.play()
-                                  setIsPlaying(true);
-                              },
-                              close: () => {
-                                  audioFns.close()
-                                  videoFns.close()
-                              },
-                              setVolume: audioFns.setVolume,
-                              mute: audioFns.mute,
-                              unmute: audioFns.unmute,
-                            
-                          }; */
-                        controls.current.push(audioFns);
-                        resolve({ source: s, controls: audioFns });
+                    ).then((fns) => {
+                        controls.current.push(fns);
+                        const ret = { source: s, controls: fns };
+                        resultRef.current = ret;
+                        ret.controls.setLive();
+                        resolve(ret);
                     });
                 })
                 .catch(reject);
         });
 
-        return audioLoadingRef.current.then((streams) => {
-            currentAudioRef.current = streams;
-            currentAudioRef.current.controls.setLive();
-        });
+        return loadingRef.current;
     };
 
     let setVideoSize = () =>
@@ -750,50 +760,60 @@ export const View = (args: DBArgs | IdentityArgs) => {
                     ref={containerRef}
                 >
                     <div className="video-wrapper">
-                        <canvas
-                            id="stream-playback"
-                            style={{ width: "100%", height: "auto" }}
-                            ref={(node) => {
-                                if (
-                                    !node ||
-                                    (canvasRef.current &&
-                                        canvasRef.current.isEqualNode(node))
-                                ) {
-                                    return;
-                                }
-                                console.log(
-                                    "NOT EQUAL",
-                                    canvasRef.current,
-                                    node
-                                );
-                                canvasRef.current = node as HTMLCanvasElement;
-                                if (currentAudioRef.current) {
-                                    currentAudioRef.current.source?.close();
-                                }
-                                if (currentVideoRef.current) {
-                                    currentVideoRef.current.source?.close();
-                                }
+                        <ClickOnceForAudio
+                            play={() => console.log("PLAY AUDIO")}
+                        >
+                            <canvas
+                                id="stream-playback"
+                                style={{
+                                    width: styleWidth,
+                                    height: styleHeight,
+                                }}
+                                /*    style={{ width: "100%", height: "auto" }} */
+                                ref={(node) => {
+                                    if (
+                                        !node ||
+                                        (canvasRef.current &&
+                                            canvasRef.current.isEqualNode(node))
+                                    ) {
+                                        return;
+                                    }
+                                    console.log(
+                                        "NOT EQUAL",
+                                        canvasRef.current,
+                                        node
+                                    );
+                                    canvasRef.current =
+                                        node as HTMLCanvasElement;
+                                    if (currentAudioRef.current) {
+                                        currentAudioRef.current.source?.close();
+                                    }
+                                    if (currentVideoRef.current) {
+                                        currentVideoRef.current.source?.close();
+                                    }
 
-                                let newCanvas = false;
-                                newCanvas =
-                                    canvasRef.current != lastCanvasRef.current;
-                                lastCanvasRef.current = canvasRef.current;
+                                    let newCanvas = false;
+                                    newCanvas =
+                                        canvasRef.current !=
+                                        lastCanvasRef.current;
+                                    lastCanvasRef.current = canvasRef.current;
 
-                                if (canvasRef.current! && newCanvas) {
-                                    renderer.setup(canvasRef.current!);
-                                    /* let resizeTimer: any = undefined;
-                                        window.onload = window.onresize = function () {
-                                            clearTimeout(resizeTimer);
-                                            resizeTimer = setTimeout(() => {
-                                                console.log("set size", videoHeight(), videoWidth());
-                                                setVideoSize();
-                                            }, 100);
-                                        }; */
-                                }
-                            }}
-                            width="300px"
-                            height="300px"
-                        />
+                                    if (canvasRef.current! && newCanvas) {
+                                        renderer.setup(canvasRef.current!);
+                                        /* let resizeTimer: any = undefined;
+                                            window.onload = window.onresize = function () {
+                                                clearTimeout(resizeTimer);
+                                                resizeTimer = setTimeout(() => {
+                                                    console.log("set size", videoHeight(), videoWidth());
+                                                    setVideoSize();
+                                                }, 100);
+                                            }; */
+                                    }
+                                }}
+                                width="300px"
+                                height="300px"
+                            />
+                        </ClickOnceForAudio>
                         {streamerOnline && !!controls.current && (
                             <Controls
                                 progress={0.3}

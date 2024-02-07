@@ -1,23 +1,14 @@
-import { inIframe, usePeer } from "@peerbit/react";
-import {
-    useRef,
-    useState,
-    useEffect,
-    useCallback,
-    MutableRefObject,
-} from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
 import {
     Box,
     Button,
     Grid,
     IconButton,
-    InputLabel,
     ListItemIcon,
     ListItemText,
     Menu,
     MenuItem,
     MenuList,
-    OutlinedInput,
     Select,
     Slider,
     Typography,
