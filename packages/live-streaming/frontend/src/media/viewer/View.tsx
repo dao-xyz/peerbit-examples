@@ -269,7 +269,7 @@ const addAudioStreamListener = async (
                 // we are not catching up, i.e. the player is going faster than we get new chunks
                 console.log(offset, currentLag);
             }
-            audioSource.start(time, offset);
+            audioSource.start(time);
 
             //  console.log("START AT  TIME", time, x)
             let lagRatio = currentLag / expectedLatency;
@@ -359,7 +359,6 @@ const addAudioStreamListener = async (
         if (!audioContext) {
             await setupAudioContext();
         }
-        console.log("XXXXX ADD LISTENER");
         streamDB.chunks.events.removeEventListener("change", listener);
         streamDB.chunks.events.addEventListener("change", listener);
     };
