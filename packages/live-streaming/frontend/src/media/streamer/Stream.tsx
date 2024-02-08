@@ -9,7 +9,7 @@ import {
 } from "../database";
 import { Buffer } from "buffer";
 import { waitFor } from "@peerbit/time";
-import { Grid } from "@mui/material";
+import { Alert, AlertTitle, Grid, Snackbar } from "@mui/material";
 import { PublicSignKey } from "@peerbit/crypto";
 import {
     SourceSetting,
@@ -103,8 +103,17 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
     let videoRef = useRef<HTMLVideoElementWithCaptureStream>();
 
-    const [clickedOnce, setClickedOnce] = useState(false);
+    const [errorMessage, setErrorMessage] = useState<string | undefined>(
+        undefined
+    );
 
+    useEffect(() => {
+        const clickListener = () => {
+            setErrorMessage(undefined);
+        };
+        window.addEventListener("click", clickListener);
+        return () => window.removeEventListener("click", clickListener);
+    });
     useEffect(() => {
         if (!tickWorkerRef.current) {
             let f = 0;
@@ -252,6 +261,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     encoder = new VideoEncoder({
                         error: (e) => {
                             console.error(e);
+                            const msg =
+                                "Failed to encode video.\n" + e.toString();
+                            setErrorMessage(msg);
                         },
                         output: async (chunk, metadata) => {
                             if (skip) {
@@ -651,7 +663,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             videoRef.videoHeight;
                         // console.log('set bitrate', videoEncoder.setting.video.bitrate)
                         encoder.configure({
-                            codec: "vp09.00.10.08" /* isSafari
+                            codec: "vp09.00.51.08.01.01.01.01.00" /*  "vp09.00.10.08" */ /* isSafari
                                 ? "avc1.428020"
                                 : "av01.0.04M.10" */ /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
                             height: videoEncoder.setting.video.height,
@@ -758,7 +770,20 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     </div>
                 </div>
             </Grid>
-
+            {errorMessage && (
+                <Snackbar
+                    open={true}
+                    anchorOrigin={{
+                        vertical: "top",
+                        horizontal: "center",
+                    }}
+                >
+                    <Alert severity="error">
+                        <AlertTitle>Error</AlertTitle>
+                        {errorMessage}
+                    </Alert>
+                </Snackbar>
+            )}
             {/*  {true && <View db={mediaStreamDBs.current} node={args.node} ></View>} */}
         </Grid>
     );
