@@ -71,9 +71,15 @@ const addVideoStreamListener = async (
             renderer.draw(frame);
         }
 
-        const timeUntilNextFrame = calculateTimeUntilNextFrame(currentTime);
-        clearTimeout(nextFrameTimeout);
-        nextFrameTimeout = setTimeout(renderFrame, timeUntilNextFrame); // TODO this can be a cause of LAG sometimes before/after blur events
+        // TODO better
+        /*    
+            const timeUntilNextFrame = calculateTimeUntilNextFrame(currentTime);  
+            clearTimeout(nextFrameTimeout);
+        */
+        nextFrameTimeout = setTimeout(
+            renderFrame,
+            0 /* pendingFrames.length > 0 ? 1 : frame.duration */
+        ); // TODO this can be a cause of LAG sometimes before/after blur events
     };
 
     let decoder: VideoDecoder;
@@ -186,7 +192,6 @@ const addAudioStreamListener = async (
     currentVideoTime?: () => number
 ) => {
     let pendingFrames: { buffer: AudioBuffer; timestamp: bigint }[] = [];
-    let underflow = true;
     let audioContext: AudioContext | undefined = undefined;
     let setVolume: ((value: number) => void) | undefined = undefined;
     let gainNode: GainNode | undefined = undefined;
@@ -220,7 +225,7 @@ const addAudioStreamListener = async (
 
     const setupAudioContext = async () => {
         await stop();
-        time = 0;
+        bufferedAudioTime = 0;
         console.log("SETUP AUDIO CONTEXT");
         audioContext = new AudioContext({ sampleRate: streamDB.sampleRate });
         audioContext.addEventListener("statechange", audioContextListener);
@@ -231,68 +236,76 @@ const addAudioStreamListener = async (
     const mute = () => {}; // we don't do anything with the source, we let the controller set volume to 0
     const unmute = () => {}; // we don't do anything with the source, we let the controller set volume back to previous volume before mute
 
-    let time = 0;
-    let expectedLatency = 0.1;
+    let bufferedAudioTime = undefined;
+    const MIN_EXPECTED_LATENCY = 0.01; // seconds
+    let currentExpectedLatency = 3;
+    let succesfullFrameCount = 0;
+    const isUnderflow = () => 0; /* pendingFrames.length < 30 */
+
+    const updateExpectedLatency = (latency: number) => {
+        console.log("UPDATE EXPECTED LATENCY", latency);
+        currentExpectedLatency = latency;
+        bufferedAudioTime = Math.max(
+            currentExpectedLatency + audioContext.currentTime,
+            0
+        );
+    };
 
     const renderFrame = async (x?: number) => {
-        if (!time) {
+        if (!bufferedAudioTime) {
             // we've not yet started the queue - just queue this up,
             // leaving a "latency gap" so we're not desperately trying
             // to keep up.  Note if the network is slow, this is going
             // to fail.  Latency gap here is 100 ms.
-            time = Math.max(audioContext.currentTime - expectedLatency, 0);
+            updateExpectedLatency(MIN_EXPECTED_LATENCY);
         }
 
-        underflow = pendingFrames.length == 0;
-
         if (!play) return;
-        if (underflow) return;
+        if (pendingFrames.length === 0) return;
         if (audioContext.state !== "running") {
             return;
         }
 
-        if (!underflow) {
-            /*  if (audioContext !== context) {
-                 console.log("DIFF", audioContext, context)
-                 return;
-             } */
-            const frame = pendingFrames.shift();
-            const audioSource = audioContext.createBufferSource();
-            audioSource.buffer = frame.buffer;
-            audioSource.connect(gainNode);
-            let currentLag = time - audioContext.currentTime;
-            /*   (currentVideoTime
-                  ? Math.min(time, currentVideoTime() / 1e6)
-                  : time) - audioContext.currentTime; */
-            const offset = Math.max(audioContext.currentTime - time, 0);
-            if (offset > 0) {
-                // we are not catching up, i.e. the player is going faster than we get new chunks
-                console.log(offset, currentLag);
+        /**
+         *  Take one element from the queue
+         */
+        const frame = pendingFrames.shift();
+        const audioSource = audioContext.createBufferSource();
+        audioSource.buffer = frame.buffer;
+        audioSource.connect(gainNode);
+
+        const isBehindSeconds = Math.max(
+            audioContext.currentTime - bufferedAudioTime,
+            0
+        );
+
+        let skipframe = false;
+        if (isBehindSeconds > 0) {
+            // we are not catching up, i.e. the player is going faster than we get new chunks
+            if (isBehindSeconds > audioSource.buffer.duration) {
+                skipframe = true;
             }
-            audioSource.start(time);
+            succesfullFrameCount = 0;
+            // here we want to do something about the expectedLatency, because if we also end up here
+            // it means we are trying to watch in "too" much realtime
+            updateExpectedLatency(currentExpectedLatency * 2);
+        } else if (currentExpectedLatency > MIN_EXPECTED_LATENCY) {
+            succesfullFrameCount++;
 
-            //  console.log("START AT  TIME", time, x)
-            let lagRatio = currentLag / expectedLatency;
-            let damp = 0.99;
-            // console.log(currentLag, expectedLatency)
-            const playbackRate = 1; // damp + Math.max(0, lagRatio) * (1 - damp);
-
-            // console.log(frame.timestamp > l, time, frame.timestamp, audioContext.currentTime, currentLag, time, audioContext.currentTime, audioSource.buffer.duration, currentVideoTime?.(), audioContext.currentTime)
-
-            //  let detune = -12 * Math.log2(1 / playbackRate) * 100;
-            // audioSource.detune.value = -detune
-
-            // audioSource.detune.linearRampToValueAtTime(-detune, time)
-            audioSource.playbackRate.value = playbackRate;
-
-            // console.log('AUDIO INFO', audioSource.buffer.duration / playbackRate + time, currentVideoTime?.(), frame.timestamp)
-            time += audioSource.buffer.duration / playbackRate;
-        } else {
-            console.log("UNDERFLOW");
+            // we have been succesfully been able
+            if (succesfullFrameCount > 1000) {
+                const newLatency = currentExpectedLatency / 2;
+                if (newLatency >= MIN_EXPECTED_LATENCY) {
+                    updateExpectedLatency(newLatency);
+                }
+                succesfullFrameCount = 0;
+            }
         }
 
-        // Immediately schedule rendering of the next frame
-        setTimeout(() => renderFrame(time), 0); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
+        !skipframe && audioSource.start(bufferedAudioTime, isBehindSeconds);
+        bufferedAudioTime += audioSource.buffer.duration;
+
+        setTimeout(() => renderFrame(bufferedAudioTime), bufferedAudioTime); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
         //requestAnimationFrame(renderFrame);
     };
 
@@ -307,12 +320,12 @@ const addAudioStreamListener = async (
                 if (decodeAudioDataQueue.size > 10) {
                     decodeAudioDataQueue.clear(); // We can't keep up, clear the queue
                 }
-                console.log(
-                    "DECODE CHUNK",
-                    streamDB.chunks.index.size,
-                    added.timestamp
-                );
-
+                /*  console.log(
+                     "DECODE CHUNK",
+                     streamDB.chunks.index.size,
+                     added.timestamp
+                 );
+  */
                 decodeAudioDataQueue.add(() => {
                     let zeroOffsetBuffer = new Uint8Array(added.chunk.length);
                     zeroOffsetBuffer.set(added.chunk, 0);
@@ -338,10 +351,10 @@ const addAudioStreamListener = async (
                                         .catch((e) => {});
                                 }
                             } else {
+                                /*   const wasEmpty = pendingFrames.length; */
                                 pendingFrames.push(frame);
-                                if (underflow) {
-                                    underflow = false;
-                                    renderFrame(time);
+                                if (!isUnderflow()) {
+                                    renderFrame(bufferedAudioTime);
                                 }
                             }
                         },
@@ -353,8 +366,10 @@ const addAudioStreamListener = async (
             }
         }
     };
-    let cleanup: (() => void) | undefined = () =>
+    let cleanup: (() => void) | undefined = () => {
+        decodeAudioDataQueue.clear();
         streamDB.chunks.events.removeEventListener("change", listener);
+    };
     let setLive = async () => {
         if (!audioContext) {
             await setupAudioContext();
@@ -414,6 +429,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
     const [selectedResolutions, setSelectedResolutions] = useState<
         Resolution[]
     >([]);
+
     const videoLoadingRef =
         useRef<Promise<StreamWithControls<WebcodecsStreamDB>>>();
     const currentVideoRef = useRef<StreamWithControls<WebcodecsStreamDB>>(null);
@@ -508,38 +524,6 @@ export const View = (args: DBArgs | IdentityArgs) => {
         (args as DBArgs).db?.id.toString(),
         (args as IdentityArgs).node?.hashcode(),
     ]);
-    /* 
-        useEffect(() => {
-            if (!currentVideoRef.current) {
-                return;
-            }
-            console.log("ADD EVENT LISTENER", currentVideoRef.current.source.id)
-            const onStreamerDroppedTrack = (ev: CustomEvent<PublicSignKey>) => {
-                if (ev.detail.equals(currentVideoRef.current.source.sender)) {
-                    // Host stopped supporting a specific video stream.
-                    // Choose a diferent quality if possible
-                    if (currentVideoRef.current.source.closed === false) {
-                        // close and drop data
-                        currentVideoRef.current.controls.close();
-                        currentVideoRef.current.source?.drop();
-                        currentVideoRef.current.source.events.removeEventListener('leave', onStreamerDroppedTrack);
-    
-                        // See if other qualities still exist
-                        const l1 = videoStreamOptions.current.length;
-                        videoStreamOptions.current = videoStreamOptions.current.filter(x => x.source != currentVideoRef.current.source);
-                        console.log("DROPPED, UPDATE STREAM CHOICE", videoStreamOptions.current.length, l1);
-    
-                        updateStreamChoice()
-                    }
-    
-    
-                }
-            }
-            currentVideoRef.current.source.events.addEventListener('leave', onStreamerDroppedTrack);
-            return () => currentVideoRef.current.source.events.removeEventListener('leave', onStreamerDroppedTrack);
-    
-        }, [currentVideoRef.current?.source.address])
-     */
 
     const updateStreamChoice = async () => {
         const activeStreams = await videoStream.current.getLatest({
@@ -559,12 +543,6 @@ export const View = (args: DBArgs | IdentityArgs) => {
         let currentVideoIsRemoved = !!removedStreams.find((x) =>
             equals(x.id, currentVideoRef.current?.source.id)
         );
-
-        /*          console.log(
-                     uniqueResults.map((x) => x.active + "-" + x.id),
-                     currentVideoIsRemoved,
-                     videoStreamOptions.current.length
-                 ); */
 
         let videoResults = activeStreams.filter(
             (x) => x.source instanceof WebcodecsStreamDB
@@ -645,47 +623,6 @@ export const View = (args: DBArgs | IdentityArgs) => {
         return updateVIdeotreamQueue.add(() =>
             updateMediaStream(videoLoadingRef, currentVideoRef, streamToOpen)
         );
-
-        /*  console.log("A UPDATE VIDEO STREAM", videoLoadingRef.current, currentVideoRef.current)
-         await videoLoadingRef.current;
-         console.log("B UPDATE VIDEO STREAM", videoLoadingRef.current, currentVideoRef.current)
- 
-         if (currentVideoRef.current) {
-             await currentVideoRef.current.controls.close();
-             await currentVideoRef.current?.source.drop();
-             controls.current = controls.current.filter(
-                 (x) => x === currentVideoRef.current.controls
-             );
-         }
-         videoLoadingRef.current = new Promise((resolve, reject) => {
-             peer.open(streamToOpen, {
-                 args: {
-                     role: "observer",
-                     sync: () => true,
-                 },
-                 existing: "reuse",
-             })
-                 .then(async (s) => {
-                     setSelectedResolutions([
-                         s.source.decoderDescription.codedHeight as Resolution,
-                     ]);
-                     return {
-                         video: s,
-                         controls: await addVideoStreamListener(
-                             s.source,
-                             isPlaying
-                         ),
-                     };
-                 })
-                 .then(({ video, controls: videoFns }) => {
-                     controls.current.push(videoFns);
-                     const ret = { source: video, controls: videoFns }
-                     currentVideoRef.current = ret;
-                     ret.controls.setLive();
-                     resolve(ret);
-                 })
-                 .catch(reject);
-         }); */
     };
 
     const updateAudioStream = async (streamToOpen: Track<AudioStreamDB>) => {
