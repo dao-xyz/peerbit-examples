@@ -369,6 +369,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                         type: chunk.type,
                                         chunk: arr,
                                         timestamp: lastVideoFrameTimestamp,
+                                        /*  duration: chunk.duration, */
                                     }),
                                     {
                                         target: "all",
@@ -505,6 +506,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
             await encoderInit;
 
             const wavListener = (ev) => {
+                if (!ev.data) {
+                    throw new Error("Unexpected: Missing audio data");
+                }
                 const { audioBuffer } = ev.data as { audioBuffer: Uint8Array };
                 let currentTime = +new Date();
                 let timestamp =
@@ -675,11 +679,12 @@ export const Stream = (args: { node: PublicSignKey }) => {
                     }
 
                     if (encoder.state === "configured") {
-                        if (encoder.encodeQueueSize > 15) {
+                        if (encoder.encodeQueueSize > 30) {
                             // Too many frames in flight, encoder is overwhelmed
                             // let's drop this frame.
                             encoder.flush();
-                            console.log("DROP FRAME");
+
+                            // TODO in non streaming mode, slow down the playback
                         } else {
                             frameCounter++;
                             const insertKeyframe =
