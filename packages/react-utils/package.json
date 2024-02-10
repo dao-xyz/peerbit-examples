@@ -22,6 +22,7 @@
         "react": "*"
     },
     "dependencies": {
+        "@peerbit/document": "^6",
         "@chainsafe/libp2p-yamux": "^6",
         "@libp2p/webrtc": "^4",
         "@peerbit/proxy-window": "^3",
