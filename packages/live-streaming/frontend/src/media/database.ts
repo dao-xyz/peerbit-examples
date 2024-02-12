@@ -272,6 +272,53 @@ export class Track<T extends TrackSource> extends Program<Args> {
     open(args?: Args): Promise<void> {
         return this.source.open({ ...args, sender: this.sender });
     }
+
+    /**
+     *
+     * @param progress [0,1] (the progress bar)
+     */
+    async iterate(progress: number) {
+        // Find max media time
+        console.log("FETCH MAX TIME");
+        const maxMediaTime = (
+            await this.source.chunks.index.search(
+                new SearchRequest({
+                    sort: [
+                        new Sort({
+                            direction: SortDirection.DESC,
+                            key: "timestamp",
+                        }),
+                    ],
+                }),
+                { local: true, remote: true, size: 1 }
+            )
+        )[0].timestamp;
+
+        // convert progress bar value into a media time
+        const progressBarMediaTime = progress * Number(maxMediaTime);
+
+        console.log("MAX TIME", progress, progressBarMediaTime);
+
+        // create an iterator that starts from the progress bar and goes forward
+        return this.source.chunks.index.iterate(
+            new SearchRequest({
+                query: [
+                    new IntegerCompare({
+                        key: "timestamp",
+                        compare: Compare.GreaterOrEqual,
+                        value: BigInt(Math.round(progressBarMediaTime)),
+                    }),
+                ],
+                sort: [
+                    new Sort({
+                        direction: SortDirection.ASC,
+                        key: "timestamp",
+                    }),
+                ],
+            }),
+            { remote: true, local: false }
+        );
+    }
 }
 
 @variant("media-streams")
