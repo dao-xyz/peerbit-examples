@@ -11,6 +11,7 @@ import {
     MenuList,
     Select,
     Slider,
+    useTheme,
     Typography,
 } from "@mui/material";
 import Divider from "@mui/material/Divider";
@@ -48,20 +49,19 @@ export const Controls = (
         viewRef: HTMLCanvasElement;
     } & ControlInterface
 ) => {
-    const [showControls, setShowControls] = useState(false);
-
+    const [showControls, setShowControls] = useState(true);
     const [speed, setSpeed] = useState(1);
     const [muted, setMuted] = useState(false);
     const [prevMuteVolume, setPrevMuteVolume] = useState(1);
     const [volume, setVolume] = useState(0.66);
     const [isPlaying, setIsPlaying] = useState(props.isPlaying ?? false);
     const addShowControlsListener = (ref: HTMLElement) => {
-        ref.addEventListener("mouseenter", () => {
-            setShowControls(true);
-        });
-        ref.addEventListener("mouseleave", () => {
-            setShowControls(false);
-        });
+        /*  ref.addEventListener("mouseenter", () => {
+             setShowControls(true);
+         });
+         ref.addEventListener("mouseleave", () => {
+             setShowControls(false);
+         }); */
     };
     const controlRef = useCallback((node) => {
         if (node) addShowControlsListener(node);
@@ -216,23 +216,31 @@ export const Controls = (
             className="controls"
             sx={{ opacity: showControls ? 1 : 0 }}
         >
-            {/*   TODO   <Grid
+            <Grid
                 item
                 display="flex"
                 justifyContent="center"
-                sx={{ width: "100%", height: "15px", marginTop: "-14px" }}
+                sx={{ width: "100%", height: "15px", marginTop: "-17px" }}
             >
                 <Slider
-                    sx={{ borderRadius: "0px" }}
+                    sx={{
+                        borderRadius: "0px",
+                        overflow: "hidden",
+                        padding: "15px 0px !important",
+                    }} // Need important because IOS
                     size="small"
                     min={0}
-                    max={100}
-                    value={(props.progress || 0) * 100}
-                    onChange={(e) =>
-                        props.setProgress(Number(e.target["value"]))
-                    }
+                    max={1}
+                    step={0.001}
+                    value={props.progress === "live" ? 1 : props.progress || 0}
+                    onChange={(e) => {
+                        const p = Number(e.target["value"]);
+                        console.log("CHANGE", p, props.progress);
+
+                        props.setProgress(p);
+                    }}
                 />
-            </Grid> */}
+            </Grid>
             <Grid
                 container
                 item
@@ -248,8 +256,28 @@ export const Controls = (
 
                 <>
                     <Grid item>
-                        <Button color="inherit" onClick={props.setLive}>
-                            Live
+                        <Button
+                            color={"inherit"}
+                            onClick={() => props.setProgress("live")}
+                        >
+                            {props.progress === "live" ? (
+                                <Typography
+                                    sx={(e) => {
+                                        return {
+                                            textShadow:
+                                                "0px 0px 3px " +
+                                                e.palette.primary.main,
+                                        };
+                                    }}
+                                    color={(theme) =>
+                                        theme.palette.primary.main
+                                    }
+                                >
+                                    Live
+                                </Typography>
+                            ) : (
+                                <Typography>Live</Typography>
+                            )}
                         </Button>
                     </Grid>
                     <Grid item justifyContent="center">

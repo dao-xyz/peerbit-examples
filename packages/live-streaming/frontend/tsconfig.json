@@ -16,7 +16,8 @@
         "experimentalDecorators": true,
         "noEmit": true,
         "jsx": "react-jsx",
-        "types": [
+        "typeRoots": [
+            "../../../node_modules/@types",
             "@types/dom-webcodecs",
             "@types/audioworklet",
             "@types/dom-mediacapture-transform",

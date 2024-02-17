@@ -23,7 +23,12 @@ export const getKeepAspectRatioBoundedSize = ({
             //   console.log(width / containerSize.width, height / containerSize.height)
             const isLimitedByHeight =
                 width / containerSize.width < height / containerSize.height;
-            console.log("??", isLimitedByHeight, width);
+            console.log(
+                "??",
+                isLimitedByHeight,
+                width / containerSize.width,
+                height / containerSize.height
+            );
 
             if (isLimitedByHeight) {
                 setStyleHeight("100dvh");
@@ -33,6 +38,7 @@ export const getKeepAspectRatioBoundedSize = ({
                 setStyleWidth("100dvw");
             }
         };
+        listener();
         window.addEventListener("resize", listener);
         return () => window.removeEventListener("resize", listener);
     });

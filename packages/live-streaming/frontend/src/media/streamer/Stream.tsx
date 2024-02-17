@@ -24,8 +24,7 @@ import PQueue from "p-queue";
 import { WAVEncoder } from "./audio.js";
 import TickWorker from "./tickWorker.js?worker";
 import { NextTick, Stop } from "./tickWorker.js";
-import { isSafari } from "../utils";
-import { equals } from "uint8arrays";
+
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
     mozCaptureStream?(fps?: number): MediaStream;
@@ -60,7 +59,7 @@ interface VideoStream {
     open: () => Promise<void>;
 }
 
-let lastVideoFrameTimestamp: bigint | undefined = undefined;
+let lastVideoChunkTimestamp: number | undefined = undefined;
 const openVideoStreamQueue = new PQueue({ concurrency: 1 });
 
 const DEFAULT_QUALITY = resolutionToSourceSetting(360);
@@ -68,7 +67,7 @@ const DEFAULT_QUALITY = resolutionToSourceSetting(360);
 const isTouchScreen = window.matchMedia("(pointer: coarse)").matches;
 
 const clampedFrameRate = (fps: number) => Math.max(Math.min(fps, 60), 10);
-export const Stream = (args: { node: PublicSignKey }) => {
+export const Stream = (args: { stream: MediaStreamDB }) => {
     const streamType = useRef<StreamType>({ type: "noise" });
     const [quality, setQuality] = useState<SourceSetting[]>([DEFAULT_QUALITY]);
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
@@ -76,18 +75,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
     );
     const videoLoadedOnce = useRef(false);
     const { peer } = usePeer();
-    const { program: mediaStreamDBs } = useProgram<MediaStreamDB>(
-        new MediaStreamDB(peer.identity.publicKey),
-        {
-            args: {
-                role: {
-                    type: "replicator",
-                    factor: 1,
-                },
-            },
-            existing: "reuse",
-        }
-    );
+    const { stream: mediaStreamDBs } = args;
     const videoEncoders = useRef<VideoStream[]>([]);
     const audioCapture = useRef<{ close: () => void | Promise<void> }>(
         undefined
@@ -95,7 +83,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
     const tickWorkerRef = useRef<Worker>();
     const lastFrameRate = useRef(30);
     const scheduleFrameFn = useRef<() => void>();
+    const sourceId = useRef(0);
     const startId = useRef(0);
+
     const sessionTimestampRef = useRef(BigInt(+new Date()));
     const bumpSession = useCallback(() => {
         sessionTimestampRef.current = BigInt(+new Date());
@@ -106,6 +96,9 @@ export const Stream = (args: { node: PublicSignKey }) => {
     const [errorMessage, setErrorMessage] = useState<string | undefined>(
         undefined
     );
+    const [loop, setLoop] = useState(true);
+
+    const loopCounter = useRef(0);
 
     useEffect(() => {
         const clickListener = () => {
@@ -114,6 +107,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
         window.addEventListener("click", clickListener);
         return () => window.removeEventListener("click", clickListener);
     });
+
     useEffect(() => {
         if (!tickWorkerRef.current) {
             let f = 0;
@@ -156,6 +150,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
             };
         }
     }, []);
+
     useEffect(() => {
         if (videoLoadedOnce.current || !mediaStreamDBs) {
             return;
@@ -237,11 +232,13 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                     if (videoStreamDB) {
                         videoStreamDB.source.close();
-                        videoStreamDB.setEnd();
+                        videoStreamDB.setEnd(
+                            Number(sessionTimestampRef.current)
+                        );
 
                         // update the track with the end timer
 
-                        await mediaStreamDBs.streams.put(videoStreamDB, {
+                        await mediaStreamDBs.tracks.put(videoStreamDB, {
                             target: "all",
                         });
                         videoStreamDB = undefined;
@@ -276,7 +273,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 const videoTrack = new Track<WebcodecsStreamDB>(
                                     {
                                         sender: peer.identity.publicKey,
-                                        session: sessionTimestampRef.current,
                                         source: new WebcodecsStreamDB({
                                             decoderDescription:
                                                 metadata.decoderConfig,
@@ -290,13 +286,13 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                                 let change = false;
                                 if (videoStreamDB) {
-                                    if (
+                                    /*  if (
                                         videoTrack.session >
                                         videoStreamDB.session
                                     ) {
                                         // ok!
                                         change = true;
-                                    } else if (
+                                    } else  */ if (
                                         videoTrack.source.decoderConfigJSON !==
                                         videoStreamDB.source.decoderConfigJSON
                                     ) {
@@ -338,7 +334,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                             while (videoStreamDB) {
                                                 await close(false);
                                             }
-                                            mediaStreamDBs.streams.put(r);
+                                            mediaStreamDBs.tracks.put(r);
                                             abortController =
                                                 new AbortController();
                                             videoStreamDB = r;
@@ -360,15 +356,18 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 }
 
                                 mem += arr.byteLength;
-                                lastVideoFrameTimestamp = BigInt(
-                                    chunk.timestamp
-                                );
+                                lastVideoChunkTimestamp = chunk.timestamp;
 
+                                /*   console.log(
+                                      "PUT CHUnK at TIMEstAMP",
+                                      lastVideoChunkTimestamp,
+                                      videoStreamDB.source.chunks.index.size
+                                  ); */
                                 await videoStreamDB.source.chunks.put(
                                     new Chunk({
                                         type: chunk.type,
                                         chunk: arr,
-                                        timestamp: lastVideoFrameTimestamp,
+                                        time: lastVideoChunkTimestamp,
                                         /*  duration: chunk.duration, */
                                     }),
                                     {
@@ -421,6 +420,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
         await audioCapture.current?.close();
 
         videoElementRef.pause();
+
+        loopCounter.current = 0;
+        sourceId.current += 1;
+
         switch (streamType.current.type) {
             case "noise":
                 videoElementRef.muted = true;
@@ -465,6 +468,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
 
                 break;
         }
+
         audioCapture.current = await streamAudio(videoElementRef);
     };
 
@@ -480,14 +484,16 @@ export const Stream = (args: { node: PublicSignKey }) => {
             }
         });
 
+        let lastInidSourceId: number | undefined = undefined;
+
         const init = async () => {
-            let lastAudioTimestamp: bigint = 0n;
+            console.log("REINIT");
+            let lastAudioTimestamp: number = 0;
             let lastAudioTime = +new Date();
 
             const audioTrack = await peer.open(
                 new Track({
                     sender: peer.identity.publicKey,
-                    session: sessionTimestampRef.current,
                     source: new AudioStreamDB({ sampleRate: 48000 }),
                     start: +new Date() - Number(sessionTimestampRef.current),
                 }),
@@ -501,7 +507,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 }
             );
 
-            await mediaStreamDBs.streams.put(audioTrack, { target: "all" });
+            await mediaStreamDBs.tracks.put(audioTrack, { target: "all" });
 
             await encoderInit;
 
@@ -512,12 +518,15 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 const { audioBuffer } = ev.data as { audioBuffer: Uint8Array };
                 let currentTime = +new Date();
                 let timestamp =
-                    lastVideoFrameTimestamp ||
-                    BigInt((currentTime - lastAudioTime) * 1000) +
-                        lastAudioTimestamp;
+                    lastVideoChunkTimestamp ||
+                    (currentTime - lastAudioTime) * 1000 + lastAudioTimestamp;
                 lastAudioTime = currentTime;
                 audioTrack.source.chunks.put(
-                    new Chunk({ type: "", chunk: audioBuffer, timestamp }),
+                    new Chunk({
+                        type: "key",
+                        chunk: audioBuffer,
+                        time: timestamp,
+                    }),
                     {
                         target: "all",
                         unique: true,
@@ -525,30 +534,38 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 );
                 lastAudioTimestamp = timestamp;
             };
+
             wavEncoder.node.port.addEventListener("message", wavListener);
+
             const close = async () => {
                 wavEncoder.node.port.removeEventListener(
                     "message",
                     wavListener
                 );
                 await audioTrack.close();
-                audioTrack.setEnd();
-                mediaStreamDBs.streams.put(audioTrack, { target: "all" });
+                audioTrack.setEnd(Number(sessionTimestampRef.current));
+                mediaStreamDBs.tracks.put(audioTrack, { target: "all" });
             };
             return { close };
         };
 
         let audioControlsPromise: Promise<{ close: () => void }> | undefined =
             undefined;
-        if (!videoRef.paused) {
-            audioControlsPromise = init();
-        }
+
         const onPlay = async () => {
-            if (audioControlsPromise) {
-                await (await audioControlsPromise)?.close();
+            if (lastInidSourceId === sourceId.current) {
+                // don't re init on same source
+                return;
             }
+            lastInidSourceId = sourceId.current;
+            await (await audioControlsPromise)?.close();
+
             audioControlsPromise = init();
         };
+
+        if (!videoRef.paused) {
+            onPlay();
+        }
 
         const onPause = async () => {
             if (audioControlsPromise) {
@@ -568,8 +585,15 @@ export const Stream = (args: { node: PublicSignKey }) => {
             },
         };
     };
+
     const onStart = async (videoRef: HTMLVideoElementWithCaptureStream) => {
-        let tempStartId = (startId.current = startId.current + 1);
+        if (sourceId.current === startId.current) {
+            return;
+        }
+
+        startId.current = sourceId.current;
+        const sourceIdOnStart = startId.current;
+
         if (videoRef && streamType) {
             // TODO why do we need this here?
             if (
@@ -585,21 +609,12 @@ export const Stream = (args: { node: PublicSignKey }) => {
         }
 
         let frameCounter = 0;
-        let counter = 0;
         let lastFrame: number | undefined = undefined;
-
         let framesSinceLastBackground = 0;
 
-        /*  let t0 = 0; */
-
         const requestFrame = () => {
-            /*    let t1 = +new Date;
-               console.log(t1 - t0, tickWorkerRef.current);
-               t0 = t1; */
             if (!inBackground && "requestVideoFrameCallback" in videoRef) {
                 videoRef.requestVideoFrameCallback(frameFn);
-
-                /*   setTimeout(() => { frameFn() }, 1e3 / 24) */
             } else {
                 tickWorkerRef.current.postMessage({
                     type: "next",
@@ -609,8 +624,8 @@ export const Stream = (args: { node: PublicSignKey }) => {
         };
 
         const frameFn = async () => {
-            if (startId.current !== tempStartId) {
-                return;
+            if (sourceIdOnStart !== sourceId.current) {
+                return; // new source, expect a reboot of the frame loop cycle
             }
 
             if (!inBackground) {
@@ -625,11 +640,16 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 framesSinceLastBackground = 0;
             }
 
-            counter += 1;
-
             /// console.log(counter / ((+new Date() - t0) / 1000));
-            const frame = new VideoFrame(videoRef);
 
+            const frame = new VideoFrame(videoRef, {
+                timestamp:
+                    loopCounter.current > 0
+                        ? (loopCounter.current * videoRef.duration +
+                              videoRef.currentTime) *
+                          1e6
+                        : undefined,
+            });
             for (const videoEncoder of videoEncoders.current) {
                 const encoder = videoEncoder.encoder();
 
@@ -712,7 +732,12 @@ export const Stream = (args: { node: PublicSignKey }) => {
         requestFrame();
     };
     const onEnd = () => {
-        return videoEncoders.current.map((x) => x.close());
+        if (loop) {
+            loopCounter.current++;
+            videoRef.current.play();
+        } else {
+            return videoEncoders.current.map((x) => x.close());
+        }
     };
 
     return (
@@ -730,7 +755,10 @@ export const Stream = (args: { node: PublicSignKey }) => {
                         <video
                             crossOrigin="anonymous"
                             data-iframe-height
-                            ref={videoRef}
+                            ref={(ref) => {
+                                videoRef.current =
+                                    ref as HTMLVideoElementWithCaptureStream;
+                            }}
                             playsInline
                             height="auto"
                             width="100%"
@@ -743,7 +771,6 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                 onEnd();
                             }}
                             autoPlay
-                            loop
                             onClick={() =>
                                 videoRef.current.paused
                                     ? videoRef.current.play()
@@ -752,26 +779,30 @@ export const Stream = (args: { node: PublicSignKey }) => {
                             muted={streamType.current.type === "noise"}
                             controls={false}
                         ></video>
-                        <Controls
-                            selectedResolution={
-                                quality.map(
-                                    (x) => x.video.height
-                                ) as Resolution[]
-                            }
-                            resolutionOptions={resolutionOptions}
-                            onStreamTypeChange={(settings) => {
-                                updateStream({
-                                    streamType: settings,
-                                    quality: quality,
-                                });
-                            }}
-                            onQualityChange={(settings) => {
-                                updateStream({ quality: settings });
-                            }}
-                            videoRef={videoRef.current}
-                            viewRef={videoRef.current}
-                            alwaysShow={isTouchScreen}
-                        />
+                        <div style={{ marginTop: "-42px", width: "100%" }}>
+                            <Controls
+                                selectedResolution={
+                                    quality.map(
+                                        (x) => x.video.height
+                                    ) as Resolution[]
+                                }
+                                resolutionOptions={resolutionOptions}
+                                onStreamTypeChange={(settings) => {
+                                    updateStream({
+                                        streamType: settings,
+                                        quality: quality,
+                                    });
+                                }}
+                                onQualityChange={(settings) => {
+                                    updateStream({ quality: settings });
+                                }}
+                                videoRef={videoRef.current}
+                                viewRef={videoRef.current}
+                                alwaysShow={isTouchScreen}
+                            />
+                        </div>
+                        {/*   <Tracks db={mediaStreamDBs} />
+                         */}
                     </div>
                 </div>
             </Grid>
