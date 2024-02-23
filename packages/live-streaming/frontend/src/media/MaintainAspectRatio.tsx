@@ -23,12 +23,6 @@ export const getKeepAspectRatioBoundedSize = ({
             //   console.log(width / containerSize.width, height / containerSize.height)
             const isLimitedByHeight =
                 width / containerSize.width < height / containerSize.height;
-            console.log(
-                "??",
-                isLimitedByHeight,
-                width / containerSize.width,
-                height / containerSize.height
-            );
 
             if (isLimitedByHeight) {
                 setStyleHeight("100dvh");

@@ -61,11 +61,9 @@ import {
     And,
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
-import { v4 as uuid } from "uuid";
 import { concat } from "uint8arrays";
 import { Entry } from "@peerbit/log";
 import { randomBytes } from "@peerbit/crypto";
-import { hrtime } from "@peerbit/time";
 import { delay, AbortError } from "@peerbit/time";
 import PQueue from "p-queue";
 import { equals } from "uint8arrays";
@@ -80,14 +78,11 @@ const utf8Encode = (value: string) => {
  */
 @variant(0)
 export class Chunk {
-    @field({ type: "string" })
-    id: string;
-
     @field({ type: "u8" })
     private _type: 0 | 1 | 2;
 
-    @field({ type: "u32" })
-    time: number;
+    @field({ type: "u64" })
+    private _time: bigint;
 
     @field({ type: Uint8Array })
     chunk: Uint8Array;
@@ -97,16 +92,24 @@ export class Chunk {
         chunk: Uint8Array;
         time: number;
     }) {
-        this.id = uuid();
         this._type = 0;
         if (props.type == "key") {
             this._type = 1;
         } else {
-            this._type = 2;
+            this._type = 2; // "delta"
         }
         this.chunk = props.chunk;
-        this.time = props.time;
+        this._time = BigInt(props.time);
     }
+
+    get id(): string {
+        return String(this.time);
+    }
+
+    get time() {
+        return Number(this._time);
+    }
+
     get type(): "key" | "delta" | undefined {
         if (this._type === 0) {
             return undefined;
@@ -183,6 +186,7 @@ export abstract class TrackSource {
                         return true;
                     }
                 }
+                console.log("CAN NOT PUT CHUNK");
                 return false;
             },
             index: {
@@ -202,6 +206,8 @@ export abstract class TrackSource {
     close() {
         return this.chunks.close();
     }
+
+    abstract get mediaType(): "audio" | "video";
 }
 
 @variant("audio-stream-db")
@@ -209,9 +215,17 @@ export class AudioStreamDB extends TrackSource {
     @field({ type: "u32" })
     sampleRate: number;
 
-    constructor(properties: { sampleRate: number }) {
+    @field({ type: "u8" })
+    channels: number;
+
+    constructor(properties: { sampleRate: number; channels?: number }) {
         super();
         this.sampleRate = properties.sampleRate;
+        this.channels = properties.channels || 2;
+    }
+
+    get mediaType() {
+        return "audio" as const;
     }
 }
 
@@ -260,6 +274,10 @@ export class WebcodecsStreamDB extends TrackSource {
             ))
         );
     }
+
+    get mediaType() {
+        return "video" as const;
+    }
 }
 
 @variant("track")
@@ -270,11 +288,11 @@ export class Track<T extends TrackSource> extends Program<Args> {
     @field({ type: TrackSource })
     source: T; /// audio, video, whatever
 
-    @field({ type: "u32" })
-    startTime: number;
+    @field({ type: "u64" })
+    private _startTime: bigint;
 
-    @field({ type: option("u32") })
-    endTime?: number; // when the track ended
+    @field({ type: option("u64") })
+    private _endTime?: bigint; // when the track ended
 
     @field({ type: PublicSignKey })
     sender: PublicSignKey;
@@ -282,26 +300,75 @@ export class Track<T extends TrackSource> extends Program<Args> {
     @field({ type: "bool" })
     private effects: false; // TODO effects, like transformation, scaling, filter, etc
 
+    private _now?: () => bigint | number;
+    private _globalTime?: bigint | number;
+
     constructor(properties: {
         sender: PublicSignKey;
-        start: number;
-        end?: number;
+        now?: () => bigint | number;
+        globalTime?: bigint | number;
+        start?: number | bigint;
+        end?: number | bigint;
         source: T;
     }) {
         super();
         this.id = randomBytes(32);
-        this.startTime = properties.start;
-        this.endTime = properties.end;
+        this._now = properties.now;
+        this._globalTime = properties.globalTime;
+        this._startTime =
+            properties.start != null
+                ? typeof properties.start === "number"
+                    ? BigInt(properties.start)
+                    : properties.start
+                : this.timeSinceStart();
+        this._endTime =
+            typeof properties.end === "number"
+                ? BigInt(properties.end)
+                : properties.end;
         this.source = properties.source;
         this.sender = properties.sender;
         this.effects = false;
     }
 
-    setEnd(startTime: number) {
-        this.endTime = +new Date() - startTime;
+    private timeSinceStart() {
+        if (this._now == null) {
+            throw new Error("Can not set end time without start time");
+        }
+        if (this._globalTime == null) {
+            throw new Error("Can not set end time without global time");
+        }
+        return BigInt(this._now()) - BigInt(this._globalTime);
     }
+
+    setEnd(time?: bigint | number) {
+        this._endTime = time != null ? BigInt(time) : this.timeSinceStart();
+    }
+
     open(args?: Args): Promise<void> {
         return this.source.open({ ...args, sender: this.sender });
+    }
+
+    get endTime(): number | undefined {
+        return this._endTime == null ? undefined : Number(this._endTime);
+    }
+
+    get endTimeBigInt() {
+        return this._endTime;
+    }
+
+    get duration() {
+        if (this._endTime == null) {
+            return "live";
+        }
+        return Number(this._endTime - this._startTime);
+    }
+
+    get startTime() {
+        return Number(this._startTime);
+    }
+
+    get startTimeBigInt() {
+        return this._startTime;
     }
 
     /**
@@ -359,14 +426,22 @@ export class Track<T extends TrackSource> extends Program<Args> {
 export type TracksIterator = {
     time: () => number | "live";
     options: Track<WebcodecsStreamDB | AudioStreamDB>[];
+    current: TrackWithBuffer<WebcodecsStreamDB | AudioStreamDB>[];
     selectOption: (
         track: Track<WebcodecsStreamDB | AudioStreamDB>
     ) => Promise<void>;
-    done: () => boolean;
     close: () => Promise<void>;
     play: () => void;
     pause: () => void;
     paused: boolean;
+};
+
+type TrackWithBuffer<T extends TrackSource> = {
+    track: Track<T>;
+    iterator?: ResultsIterator<Chunk>;
+    last?: number;
+    close?: () => void;
+    open?: () => void;
 };
 
 export type TrackChangeProcessor<T extends TrackSource = TrackSource> =
@@ -483,43 +558,6 @@ export class MediaStreamDB extends Program<Args> {
         return tracks;
     }
 
-    /* async getDuringOrLater(
-        time: number,
-        options?: SearchOptions<Track<AudioStreamDB | WebcodecsStreamDB>>
-    ): Promise<Track<AudioStreamDB | WebcodecsStreamDB>[]> {
-        const tracks = await this.tracks.index.search(
-            new SearchRequest({
-                query: [
-                    new Or([
-                        new And([
-                            new IntegerCompare({
-                                key: "startTime",
-                                compare: Compare.GreaterOrEqual,
-                                value: time,
-                            }),
-                            new Or([
-                                new MissingField({
-                                    key: "endTime",
-                                }),
-                                new IntegerCompare({
-                                    key: "endTime",
-                                    compare: Compare.Less,
-                                    value: time,
-                                }),
-                            ])
-                        ])
-                    ])
-                ],
-                sort: [
-                    new Sort({ key: "startTime", direction: SortDirection.DESC }),
-                ],
-            }),
-            { ...options }
-        );
-
-        return tracks;
-    } */
-
     /**
      *
      * @param progress [0,1] (the progress bar)
@@ -534,11 +572,15 @@ export class MediaStreamDB extends Program<Args> {
                 track: Track<WebcodecsStreamDB | AudioStreamDB>;
                 chunk: Chunk;
             }) => void;
-            onOptionsChange?: (
+            onTrackOptionsChange?: (
                 options: Track<WebcodecsStreamDB | AudioStreamDB>[]
+            ) => void;
+            onTracksChange?: (
+                tracks: Track<WebcodecsStreamDB | AudioStreamDB>[]
             ) => void;
         }
     ): Promise<TracksIterator> {
+        console.log("START ITERATOR!");
         if (!this.owner.equals(this.node.identity.publicKey)) {
             await this.tracks.log.waitForReplicator(this.owner);
         }
@@ -550,14 +592,17 @@ export class MediaStreamDB extends Program<Args> {
         let play: () => void;
         let pause: () => void;
         let mediaTime: () => number | "live";
-        let playedMediaTime = 0;
         let paused = false;
         let session = 0;
         let playing = false;
-        const nowMicroSeconds = () => Number(hrtime.bigint() / 1000n);
+        const nowMicroSeconds = () => performance.now() * 1e3;
         let startPlayAt: number | undefined = undefined;
+        const currentTracks: TrackWithBuffer<any>[] = [];
+        const currentTrackOptions: Track<any>[] = [];
+        let closed = false;
 
-        const endedTracks = new Set();
+        const latestPendingFrame: Map<"audio" | "video", number> = new Map();
+        const latestPlayedFrame: Map<"audio" | "video", number> = new Map();
 
         const startTimer: () => void = () => {
             if (startPlayAt != null) {
@@ -630,17 +675,6 @@ export class MediaStreamDB extends Program<Args> {
         }
 
         console.log("START MEDIA TIME", startProgressBarMediaTime);
-        const done = false;
-        type TrackWithBuffer = {
-            track: Track<any>;
-            iterator?: ResultsIterator<Chunk>;
-            last?: number;
-            close?: () => void;
-            open?: () => void;
-        };
-
-        let currentTracks: TrackWithBuffer[] = [];
-        let currentTrackOptions: Track<any>[] = [];
 
         const selectOption = async (track: Track<any>) => {
             if (await removeTrack(track)) {
@@ -651,44 +685,55 @@ export class MediaStreamDB extends Program<Args> {
         };
 
         const removeTrack = async (track: Track<any>, ended?: boolean) => {
-            console.log("REMOVE TRACK", track.startTime);
-            const index = currentTracks.findIndex(
-                (x) => x.track.address === track.address
+            const index = currentTracks.findIndex((x) =>
+                equals(x.track.id, track.id)
             );
             if (index >= 0) {
-                if (ended) {
-                    const trackOptionIndex = currentTrackOptions.findIndex(
-                        (x) => equals(x.id, track.id)
-                    );
-                    if (trackOptionIndex >= 0) {
-                        currentTrackOptions.splice(trackOptionIndex, 1);
-                    }
-                    endedTracks.add(track.address);
-                }
-
                 const element = currentTracks.splice(index, 1)[0];
-                opts?.onOptionsChange?.(currentTracks.map((x) => x.track));
-                console.log("CLOSE TRACK A", element.track.address);
+                opts?.onTracksChange?.(currentTracks.map((x) => x.track));
                 await element.track.close();
-                return true;
+                console.log(
+                    "REMOVE TRACK",
+                    track.startTime,
+                    track.endTime,
+                    ended,
+                    index,
+                    currentTracks.length,
+                    currentTrackOptions.length
+                );
             }
+
+            if (ended) {
+                const trackOptionIndex = currentTrackOptions.findIndex((x) =>
+                    equals(x.id, track.id)
+                );
+                if (trackOptionIndex >= 0) {
+                    currentTrackOptions.splice(trackOptionIndex, 1);
+                    opts?.onTrackOptionsChange?.(currentTrackOptions);
+                    console.log(
+                        "REMOVE TRACK OPTION",
+                        track.startTime,
+                        track.endTime,
+                        ended
+                    );
+                }
+            }
+
             return false;
         };
 
-        let pendingFrames: {
+        const pendingFrames: {
             track: Track<WebcodecsStreamDB | AudioStreamDB>;
             chunk: Chunk;
         }[] = [];
+
         const renderLoop = (currentSession: number) => {
-            if (session !== currentSession) {
-                return;
-            }
-            const currentTime = mediaTime() as number;
-            const keepFrames: {
-                track: Track<WebcodecsStreamDB | AudioStreamDB>;
-                chunk: Chunk;
-            }[] = [];
+            let spliceSize = 0;
             for (const frame of pendingFrames) {
+                if (paused) {
+                    break;
+                }
+
                 if (startProgressBarMediaTime === "live") {
                     opts?.onProgress?.({
                         chunk: frame.chunk,
@@ -696,24 +741,18 @@ export class MediaStreamDB extends Program<Args> {
                     });
                 } else {
                     const startAt = frame.track.startTime + frame.chunk.time;
-
+                    const currentTime = mediaTime();
                     const isLaterThanStartProgress =
                         startAt >= startProgressBarMediaTime;
-                    const isLaterThanProgress = startAt <= currentTime;
-                    //       console.log(startAt, currentTime, isLaterThanProgress, isLaterThanStartProgress)
+                    const isLaterThanProgress =
+                        startAt <= (currentTime as number);
 
                     if (isLaterThanStartProgress) {
                         if (isLaterThanProgress || startPlayAt == null) {
-                            /*  console.log("PLAY FRAME", {
-                                 mediaTime: mediaTime(),
-                                 startPlayAt,
-                                 startAt,
-                                 playedMediaTime,
-                                 track: frame.track.startTime,
-                             }); */
-                            playedMediaTime = Math.max(
-                                startAt,
-                                playedMediaTime
+                            updateLatestFrame(
+                                latestPlayedFrame,
+                                frame.track,
+                                frame.chunk.time
                             );
                             startTimer();
                             opts?.onProgress?.({
@@ -721,23 +760,88 @@ export class MediaStreamDB extends Program<Args> {
                                 track: frame.track,
                             });
                         } else {
-                            keepFrames.push(frame);
+                            break;
                         }
                     } else {
                         console.log("DISCARD!", startAt);
                     }
                 }
+                spliceSize++;
             }
-            pendingFrames = keepFrames;
-            requestAnimationFrame(() => renderLoop(currentSession));
+
+            if (spliceSize > 0) {
+                pendingFrames.splice(0, spliceSize);
+            }
+
+            !paused && requestAnimationFrame(() => renderLoop(currentSession));
+        };
+
+        const addTrackAsOption = (track: Track<any>) => {
+            const exists = currentTrackOptions.find((x) =>
+                equals(x.id, track!.id)
+            );
+            if (!exists) {
+                console.log(
+                    "ADD TRACK OPTION",
+                    track.startTime,
+                    currentTrackOptions.length
+                );
+                currentTrackOptions.push(track);
+
+                opts?.onTrackOptionsChange?.(currentTrackOptions);
+            }
+        };
+
+        const updateLatestFrame = (
+            map: Map<"audio" | "video", number>,
+            track: Track<WebcodecsStreamDB | AudioStreamDB>,
+            timeMicroseconds: number
+        ) => {
+            const latest = map.get(track.source.mediaType);
+            const mediaTime = timeMicroseconds + track.startTime;
+            if (latest == null || latest < mediaTime) {
+                map.set(track.source.mediaType, mediaTime);
+                return true;
+            }
+            return false;
         };
 
         const maybeChangeTrack = async (change: {
             force?: boolean;
             add?: Track<any>;
             remove?: Track<any>;
+            isOption?: boolean;
         }) => {
+            console.log(
+                "MAYBE ADD TRACK",
+                change.add && toBase64(change.add.id),
+                !!currentTracks.find((x) => equals(x.track.id, change.add!.id))
+            );
+
             return openTrackQueue.add(async () => {
+                // remove existing track if we got a new track with same id that has a endtime set before the currentTime
+                if (change.add && change.add.endTime != null) {
+                    const mediaTimeForType = mediaTime();
+                    const existing = currentTrackOptions.find((x) =>
+                        equals(x.id, change.add!.id)
+                    );
+                    if (existing) {
+                        // update end time of existing track
+                        existing.setEnd(change.add.endTimeBigInt);
+
+                        // remove track if it has ended
+                        if (
+                            mediaTimeForType === "live" ||
+                            change.add.endTime < mediaTimeForType
+                        ) {
+                            await removeTrack(existing, true);
+                            return;
+                        }
+                    }
+                }
+
+                !change.isOption && change.add && addTrackAsOption(change.add);
+
                 const filteredChange = changeProcessor({
                     force: change.force,
                     current: currentTracks.map((x) => x.track),
@@ -754,76 +858,96 @@ export class MediaStreamDB extends Program<Args> {
             });
         };
         const addTrack = async (track: Track<any>) => {
+            const runningTrack = !!currentTracks.find((x) =>
+                equals(x.track.id, track.id)
+            );
+            if (runningTrack) {
+                return;
+            }
+
+            if (track.endTime != null) {
+                const lastPendingFrameTime = latestPendingFrame.get(
+                    track.source.mediaType
+                );
+                if (
+                    lastPendingFrameTime != null &&
+                    lastPendingFrameTime > track.endTime
+                ) {
+                    return;
+                }
+            }
+
+            console.log(
+                "ADD TRACK",
+                closed,
+                track.startTime,
+                latestPlayedFrame.get(track.source.mediaType),
+                currentTracks.length
+            );
+
             let close: () => void;
             let open: () => void;
 
-            console.log("OPEN TRACK!", toBase64(track.id));
             track = await this.node.open(track, {
                 args: { role: "observer", sync: () => true },
                 existing: "reuse",
             });
+
             await track.source.chunks.log.waitForReplicator(this.owner);
 
             console.log(
                 "INIT TRAACK AT",
+                track.startTime,
                 startProgressBarMediaTime,
-                playedMediaTime
+                latestPlayedFrame.get(track.source.mediaType),
+                track.source.mediaType
             );
 
             if (startProgressBarMediaTime === "live") {
-                let lastTime = -1;
                 const listener = (change) => {
                     for (const chunk of change.detail.added) {
-                        if (chunk.time > lastTime) {
-                            pendingFrames.push({ track, chunk });
-                            lastTime = chunk.time;
+                        const isLatest = updateLatestFrame(
+                            latestPendingFrame,
+                            track,
+                            chunk.time
+                        );
+                        //  console.log("GOT CHUNK", chunk.time, track.startTime, track.startTime + chunk.time, track.source.mediaType, isLatest, latestPendingFrame.get(track.source.mediaType), track.source.mediaType);
+                        if (!isLatest) {
+                            continue;
                         }
+                        pendingFrames.push({ track, chunk });
                     }
                 };
-                open = () => {
-                    track.source.chunks.events.addEventListener(
-                        "change",
-                        listener
-                    );
-                };
+
                 close = () => {
                     track.source.chunks.events.removeEventListener(
                         "change",
                         listener
                     );
                 };
+                open = () => {
+                    close();
+                    track.source.chunks.events.addEventListener(
+                        "change",
+                        listener
+                    );
+                };
+
+                open();
             } else {
-                let last: number | undefined = undefined;
                 let iterator: ResultsIterator<Chunk> | undefined = undefined;
 
                 console.log(
                     "START BUFFER LOOP TRACK",
                     track.startTime,
                     mediaTime(),
-                    playedMediaTime,
                     startProgressBarMediaTime
                 );
+
                 const bufferLoop = async (currentSession: number) => {
-                    const bufferTime = 3e6; // 3 seconds in microseconds
+                    const bufferTime = 3e3; // 3 seconds in microseconds
 
                     if (!iterator) {
-                        /*   console.log("START ITERATOR", { track: track.startTime, offset: (playedMediaTime > 0 ? playedMediaTime : (startProgressBarMediaTime as number)) - track.startTime, playedMediaTime });
-                          iterator = await track.iterate(Math.max((playedMediaTime > 0 ? playedMediaTime : (startProgressBarMediaTime as number)) - track.startTime, 0) as number) */
-
-                        console.log("START ITERATOR", {
-                            track: track.startTime,
-                            offset1: Math.max(
-                                (startProgressBarMediaTime as number) -
-                                    track.startTime,
-                                0
-                            ) as number,
-                            offset2:
-                                (playedMediaTime > 0
-                                    ? playedMediaTime
-                                    : (startProgressBarMediaTime as number)) -
-                                track.startTime,
-                            playedMediaTime,
-                        });
                         iterator = await track.iterate(
                             Math.max(
                                 (startProgressBarMediaTime as number) -
@@ -833,48 +957,65 @@ export class MediaStreamDB extends Program<Args> {
                         );
                     }
 
+                    /* THIS WRONG */
                     const loopCondition = () =>
-                        (last == null ||
-                            last <
-                                playedMediaTime -
-                                    track.startTime +
-                                    bufferTime) &&
-                        !iterator?.done();
-
+                        (latestPlayedFrame.get(track.source.mediaType) || 0) -
+                            (latestPendingFrame.get(track.source.mediaType) ||
+                                0) <
+                            bufferTime &&
+                        !iterator?.done() &&
+                        !closed;
                     const q = loopCondition();
-                    if (!q && track.startTime === 0) {
-                        const a =
-                            (mediaTime() as number) -
-                            track.startTime +
-                            bufferTime;
-                    }
+
                     while (loopCondition()) {
                         // buffer bufferTime worth of video
-                        const newChunks = await iterator?.next(60);
-
                         if (session !== currentSession) {
                             return;
                         }
 
-                        if (!newChunks || newChunks.length === 0) {
-                            console.log("NO MORE ELEMENTS!");
-                            return removeTrack(track, true);
-                        }
+                        const newChunks = await iterator?.next(60);
+
+                        console.log("FETCH CHUNKS", newChunks?.length);
                         /* console.log(
                             "NEW CHUNKS?",
                             { startTime: track.startTime },
                             newChunks.map((x) => track.startTime + x.time)
                         );
  */
-                        last = newChunks[newChunks.length - 1].time;
 
                         if (newChunks.length > 0) {
-                            newChunks.forEach((chunk) => {
+                            for (const chunk of newChunks) {
+                                const isLatest = updateLatestFrame(
+                                    latestPendingFrame,
+                                    track,
+                                    chunk.time
+                                );
+                                //  console.log("GOT CHUNK", isLatest, track.startTime, chunk.time)
+                                if (!isLatest) {
+                                    continue;
+                                }
                                 pendingFrames.push({ chunk, track });
-                            });
+                            }
                         }
-                        if (iterator?.done()) {
-                            console.log("ITERATOR DONE!");
+
+                        if (
+                            !newChunks ||
+                            newChunks.length === 0 ||
+                            iterator?.done()
+                        ) {
+                            // prevent tracks to be reused by setting latest media time to the end time of the track
+                            updateLatestFrame(
+                                latestPendingFrame,
+                                track,
+                                track.duration === "live" ? 0 : track.duration
+                            );
+                            updateLatestFrame(
+                                latestPlayedFrame,
+                                track,
+                                track.duration === "live" ? 0 : track.duration
+                            );
+                            startTimer();
+                            console.log("RETURN EMPTY!");
                             return removeTrack(track, true);
                         }
                     }
@@ -882,15 +1023,9 @@ export class MediaStreamDB extends Program<Args> {
                     if (session !== currentSession) {
                         return;
                     }
-                    if (track.startTime === 0) {
-                        console.log(
-                            "BUFFER MORE NEXT",
-                            bufferTime,
-                            last,
-                            mediaTime()
-                        );
-                    }
-                    delay(bufferTime / 1e3, { signal: pauseController.signal })
+
+                    console.log("REDO LOOP!");
+                    delay(bufferTime, { signal: pauseController.signal })
                         .then(() => bufferLoop(currentSession))
                         .catch((e) => {
                             if (e instanceof AbortError) {
@@ -899,17 +1034,18 @@ export class MediaStreamDB extends Program<Args> {
                             throw e;
                         });
                 };
-                bufferLoop(session);
+
                 open = () => {
                     bufferLoop(session);
                 };
                 close = () => {
                     iterator?.close();
                 };
+
+                open();
             }
 
-            console.log("PUSH TRACK");
-            const trackWithBuffer: TrackWithBuffer = {
+            const trackWithBuffer: TrackWithBuffer<any> = {
                 track,
                 open,
                 close: () => {
@@ -919,30 +1055,53 @@ export class MediaStreamDB extends Program<Args> {
             };
 
             currentTracks.push(trackWithBuffer);
-            opts?.onOptionsChange?.(currentTracks.map((x) => x.track));
+            console.log(
+                "ADDED TO CURRENT",
+                trackWithBuffer.track.startTime,
+                mediaTime(),
+                currentTracks.length
+            );
+            opts?.onTracksChange?.(currentTracks.map((x) => x.track));
         };
 
-        const scheduleTrackLoop = (fromSession: number) => {
+        const scheduleTrackLoop = async (fromSession: number) => {
             if (fromSession !== session) {
                 return;
             }
 
-            const currentTime = mediaTime();
-            const keepTracks: Track<WebcodecsStreamDB | AudioStreamDB>[] = [];
+            const tracksToRemove: [
+                Track<WebcodecsStreamDB | AudioStreamDB>,
+                boolean
+            ][] = [];
             for (const track of currentTrackOptions) {
+                if (currentTracks.find((x) => equals(x.track.id, track.id))) {
+                    continue;
+                }
+
+                const currentTime = mediaTime();
                 if (currentTime === "live") {
-                    maybeChangeTrack({ add: track });
+                    await maybeChangeTrack({ add: track, isOption: true });
                 } else if (track.startTime <= currentTime) {
                     if (track.endTime == null || track.endTime > currentTime) {
-                        maybeChangeTrack({ add: track });
+                        console.log(
+                            "SCHEDULE TRACK",
+                            track.startTime,
+                            track.endTime,
+                            currentTime
+                        );
+                        await maybeChangeTrack({ add: track, isOption: true });
+                    } else {
+                        tracksToRemove.push([
+                            track,
+                            track.endTime < currentTime,
+                        ]);
                     }
-
-                    // else ignore track!
-                } else {
-                    keepTracks.push(track);
                 }
             }
-            currentTrackOptions = keepTracks;
+
+            for (const [track, ended] of tracksToRemove) {
+                await removeTrack(track, ended);
+            }
 
             requestAnimationFrame(() => scheduleTrackLoop(fromSession));
         };
@@ -950,25 +1109,29 @@ export class MediaStreamDB extends Program<Args> {
         let pauseController = new AbortController();
         if (startProgressBarMediaTime === "live") {
             const listener = async (change) => {
-                if (change.detail.added)
+                if (change.detail.added) {
                     for (const added of change.detail.added) {
-                        await addTrack(added); // TODO only add trackes we want to listen on
+                        await maybeChangeTrack({ add: added }); // TODO only add trackes we want to listen on
                     }
-                if (change.detail.removed)
+                }
+                if (change.detail.removed) {
                     for (const remove of change.detail.removed) {
-                        await removeTrack(remove);
+                        await maybeChangeTrack({ remove: remove });
                     }
+                }
             };
-            await this.getLatest().then(async (tracks) => {
-                //  const openTracks = await Promise.all(tracks.map(async (x) => { const openTrack = await this.node.open(x); openTrack.source.chunks.log.waitForReplicator(this.owner); return openTrack }))
-                return listener({ detail: { added: tracks } });
-            });
+
             close = () =>
                 this.tracks.events.removeEventListener("change", listener);
             pause = close;
-            play = () => {
+            play = async () => {
                 this.tracks.events.removeEventListener("change", listener);
                 this.tracks.events.addEventListener("change", listener);
+
+                await this.getLatest().then(async (tracks) => {
+                    //  const openTracks = await Promise.all(tracks.map(async (x) => { const openTrack = await this.node.open(x); openTrack.source.chunks.log.waitForReplicator(this.owner); return openTrack }))
+                    return listener({ detail: { added: tracks } });
+                });
             };
             mediaTime = () => "live";
         } else {
@@ -1005,15 +1168,17 @@ export class MediaStreamDB extends Program<Args> {
                               }),
                           ],
                       }),
-                { remote: true, local: false }
+                { remote: true, local: true }
             );
+
+            console.log("SETUP TRACKS ITERATOR", startProgressBarMediaTime);
 
             const bufferLoop = async (currentSession: number) => {
                 // buffer tracks that are to start, or should start with at least bufferTime
-                const bufferAhead = 1e3;
+                const bufferAhead = 1e6; // microseconds
                 const bufferTo =
                     (startProgressBarMediaTime as number) + bufferAhead;
-                let nextCheckTime = bufferAhead;
+                let nextCheckTime = bufferAhead / 1e3; // microseconds to milliseconds
                 while (true as any) {
                     if (session !== currentSession) {
                         return;
@@ -1024,7 +1189,8 @@ export class MediaStreamDB extends Program<Args> {
                     }
 
                     for (const track of current) {
-                        currentTrackOptions.push(track);
+                        console.log("ADD OPTION", track.startTime);
+                        addTrackAsOption(track);
                     }
 
                     const last = current[current.length - 1];
@@ -1033,6 +1199,7 @@ export class MediaStreamDB extends Program<Args> {
                         break;
                     }
                 }
+                console.log("BUFFER TRACKS NEXT CHECK TIME", nextCheckTime);
 
                 delay(nextCheckTime, { signal: pauseController.signal })
                     .then(() => bufferLoop(currentSession))
@@ -1100,29 +1267,36 @@ export class MediaStreamDB extends Program<Args> {
             for (const track of currentTracks) {
                 track.close?.();
             }
-            currentTracks = [];
+            currentTracks.splice(0, currentTracks.length);
         };
 
         const closeCtrl = async () => {
-            await pauseCtrl();
+            console.log("CLOSE ITERATOR!");
             session++;
+            pauseController.abort("Closed");
+
+            openTrackQueue.pause();
             await Promise.all([
                 close(),
                 ...currentTracks.map((x) => x.iterator?.close()),
             ]);
-            currentTracks = [];
-            opts?.onOptionsChange?.([]);
+            openTrackQueue.clear();
+            await openTrackQueue.onEmpty();
+
+            closed = true;
+            currentTracks.splice(0, currentTracks.length);
+            opts?.onTrackOptionsChange?.([]);
         };
         playCtrl();
 
         return {
-            time: mediaTime,
-            options: currentTracks.map((x) => x.track),
+            time: () => mediaTime(), // startProgressBarMediaTime === 'live' ? 'live' : latestPlayedFrameTime(),
+            options: currentTrackOptions,
+            current: currentTracks,
             play: playCtrl,
             pause: pauseCtrl,
             paused,
             selectOption,
-            done: () => done,
             close: closeCtrl,
         };
     }

@@ -8,29 +8,27 @@ import { MediaStreamDB } from "./media/database";
 
 export const StreamOrView = () => {
     const { peer } = usePeer();
+
     const params = useParams();
+
     const [isStreamer, setIsStreamer] = useState<boolean | undefined>(
         undefined
     );
+
     const mediaStream = useProgram<MediaStreamDB>(params.address, {
         args: { role: { type: "replicator", factor: 1 } },
         existing: "reuse",
     });
+
     // TODO
     useEffect(() => {
         if (!peer || !mediaStream?.program) {
             return;
         }
-
-        console.log(
-            "???",
-            peer.identity.publicKey.equals(mediaStream.program.owner)
-        );
         setIsStreamer(
             peer.identity.publicKey.equals(mediaStream.program.owner)
         );
     }, [mediaStream?.program?.address]);
-    console.log(mediaStream?.program?.address);
     return (
         <>
             {isStreamer !== undefined && (

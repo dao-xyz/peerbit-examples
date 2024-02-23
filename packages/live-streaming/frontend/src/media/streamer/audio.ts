@@ -217,137 +217,71 @@ const url_worklet = URL.createObjectURL(
     )
 );
 
+import PDefer, { DeferredPromise } from "p-defer";
 export class WAVEncoder {
     audioContext: AudioContext;
     node: AudioWorkletNode;
     source: MediaElementAudioSourceNode;
     _prevVideo: HTMLVideoElement;
+    initializing: DeferredPromise<void>;
     async init(video: HTMLVideoElement) {
         if (!video) {
             return;
         }
+
+        if (video.muted) {
+            return; // TODO this line seems necessary, else once we change the video source to a source with audio, there will just be a black screen
+        }
+
         const sameVideo = this._prevVideo && video.isSameNode(this._prevVideo);
         this._prevVideo = video;
-
-        if (!this.audioContext) {
-            this.audioContext = new AudioContext({ sampleRate: SAMPLE_RATE });
-            await this.audioContext.audioWorklet.addModule(url_worklet);
-        }
 
         if (sameVideo) {
             return;
         }
-
-        this.source = this.audioContext.createMediaElementSource(video);
-        this.node = new AudioWorkletNode(
-            this.audioContext,
-            "convert-bits-processor"
-        );
-        this.node.port.start();
+        this.initializing = PDefer<void>();
+        try {
+            if (!this.source) {
+                console.log("INIT AUDIO CONTEXT?");
+                this.audioContext = new AudioContext({
+                    sampleRate: SAMPLE_RATE,
+                });
+                await this.audioContext.audioWorklet.addModule(url_worklet);
+                this.source = this.audioContext.createMediaElementSource(video);
+                this.node = new AudioWorkletNode(
+                    this.audioContext,
+                    "convert-bits-processor"
+                );
+                this.source.connect(this.node);
+                this.node.connect(this.audioContext.destination);
+            }
+            this.node.port.start();
+            this.initializing.resolve();
+        } catch (e) {
+            this.initializing.reject(e);
+        }
     }
-
+    async destroy() {
+        if (this.source) {
+            this.source.disconnect();
+            this.node.disconnect();
+            this.audioContext.close();
+            this.source = null;
+            this.node = null;
+            this.audioContext = null;
+        }
+    }
     async play() {
-        console.log("PLAY?", this.source);
-
+        await this.initializing.promise;
         if (!this.source) {
             return;
         }
-        this.source.connect(this.node);
-        this.node.connect(this.audioContext.destination);
-        this.node.port.start();
         await this.audioContext.resume();
     }
     async pause() {
         if (!this.source) {
             return;
         }
-        this.source.disconnect();
-        this.node.disconnect();
         await this.audioContext.suspend();
     }
 }
-
-/*   interleave2(buffers: Float32Array[]) {
- 
-            const numberOfChannels = 2;
-            const sampleRate = 48000;
-            const bytesPerSample = Int16Array.BYTES_PER_ELEMENT
- 
-            var bufferLength = buffers[0].length;
-            var reducedData = new Uint8Array(bufferLength * numberOfChannels * bytesPerSample);
- 
-            // Interleave
-            for (var i = 0; i < bufferLength; i++) {
-                for (var channel = 0; channel < numberOfChannels; channel++) {
- 
-                    var outputIndex = (i * numberOfChannels + channel) * bytesPerSample;
- 
-                    // clip the signal if it exceeds [-1, 1]
-                    var sample = Math.max(-1, Math.min(1, buffers[channel][i]));
- 
-                    // bit reduce and convert to integer
-                    switch (bytesPerSample) {
-                        case 4: // 32 bits signed
-                            sample = sample * 2147483647.5 - 0.5;
-                            reducedData[outputIndex] = sample;
-                            reducedData[outputIndex + 1] = sample >> 8;
-                            reducedData[outputIndex + 2] = sample >> 16;
-                            reducedData[outputIndex + 3] = sample >> 24;
-                            break;
- 
-                        case 3: // 24 bits signed
-                            sample = sample * 8388607.5 - 0.5;
-                            reducedData[outputIndex] = sample;
-                            reducedData[outputIndex + 1] = sample >> 8;
-                            reducedData[outputIndex + 2] = sample >> 16;
-                            break;
- 
-                        case 2: // 16 bits signed
-                            sample = sample * 32767.5 - 0.5;
-                            reducedData[outputIndex] = sample;
-                            reducedData[outputIndex + 1] = sample >> 8;
-                            break;
- 
-                        case 1: // 8 bits unsigned
-                            reducedData[outputIndex] = (sample + 1) * 127.5;
-                            break;
- 
-                        default:
-                            throw new Error("Only 8, 16, 24 and 32 bits per sample are supported");
-                    }
-                }
-            }
- 
-            return reducedData
- 
-        } */
-
-/* fto16bit(recordedBuffers: Uint8Array[]) {
-    var bufferLength = recordedBuffers[0].length;
-    var dataLength = recordedBuffers.length * bufferLength;
-    var headerLength = 44;
-    var wav = new Uint8Array(headerLength + dataLength);
-    var view = new DataView(wav.buffer);
-    const numberOfChannels = 2;
-    const sampleRate = 48000;
-    const bytesPerSample = Int16Array.BYTES_PER_ELEMENT
-
-    view.setUint32(0, 1380533830, false); // RIFF identifier 'RIFF'
-    view.setUint32(4, 36 + dataLength, true); // file length minus RIFF identifier length and file description length
-    view.setUint32(8, 1463899717, false); // RIFF type 'WAVE'
-    view.setUint32(12, 1718449184, false); // format chunk identifier 'fmt '
-    view.setUint32(16, 16, true); // format chunk length
-    view.setUint16(20, 1, true); // sample format (raw)
-    view.setUint16(22, numberOfChannels, true); // channel count
-    view.setUint32(24, sampleRate, true); // sample rate
-    view.setUint32(28, sampleRate * bytesPerSample * numberOfChannels, true); // byte rate (sample rate * block align)
-    view.setUint16(32, bytesPerSample * numberOfChannels, true); // block align (channel count * bytes per sample)
-    view.setUint16(34, 16, true); // bits per sample
-    view.setUint32(36, 1684108385, false); // data chunk identifier 'data'
-    view.setUint32(40, dataLength, true); // data chunk length
-
-    for (var i = 0; i < recordedBuffers.length; i++) {
-        wav.set(recordedBuffers[i], i * bufferLength + headerLength);
-    }
-    return wav;
-} */

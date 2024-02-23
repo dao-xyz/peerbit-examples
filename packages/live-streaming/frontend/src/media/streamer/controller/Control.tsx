@@ -42,13 +42,20 @@ export const Controls = (props: {
     videoRef: HTMLVideoElement;
     viewRef: HTMLCanvasElement | HTMLVideoElement;
     alwaysShow: boolean | undefined;
+    muted?: boolean;
 }) => {
     const [showControls, setShowControls] = useState(props.alwaysShow || false);
 
     const [speed, setSpeed] = useState(1);
     const [muted, setMuted] = useState(
-        /* !(props as { videoRef: HTMLVideoElement }).videoRef?.muted ?? */ false
+        /* !(props as { videoRef: HTMLVideoElement }).videoRef?.muted ?? */ props.muted ??
+            false
     );
+
+    useEffect(() => {
+        props.muted != null && setMuted(props.muted);
+    }, [props.muted]);
+
     const [prevMuteVolume, setPrevMuteVolume] = useState(
         /* (props as { videoRef: HTMLVideoElement }).videoRef?.volume ?? */ 1
     );
