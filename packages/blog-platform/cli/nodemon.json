@@ -1,0 +1,7 @@
+{
+    "watch": ["src"],
+    "ext": "ts",
+    "ignore": ["src/__tests__/**"],
+    "exec": "ts-node --esm ./src/bin.ts",
+    "stdin": false
+}

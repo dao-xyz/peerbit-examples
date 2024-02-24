@@ -1,19 +1,19 @@
 {
-    "name": "@dao-xyz/social",
-    "version": "0.0.4",
+    "name": "@peerbit/blog",
+    "version": "0.0.1",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
     "type": "module",
     "private": false,
-    "publishConfig": {
-        "access": "public"
-    },
     "sideEffects": false,
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
     "exports": {
         "import": "./lib/esm/index.js"
+    },
+    "bin": {
+        "blog": "./lib/esm/bin.js"
     },
     "files": [
         "lib",
@@ -22,6 +22,9 @@
         "!lib/**/__tests__",
         "LICENSE"
     ],
+    "publishConfig": {
+        "access": "public"
+    },
     "engines": {
         "node": ">=16.15.1"
     },
@@ -30,16 +33,17 @@
         "build": "yarn clean && tsc -p tsconfig.json",
         "test": "node ../../../node_modules/.bin/jest test  -c  ../../../jest.config.ts --runInBand --forceExit",
         "test:unit": "node ../../../node_modules/.bin/jest test  -c  ../../../jest.config.unit.ts --runInBand --forceExit",
-        "test:integration": "node ../../../node_modules/.bin/jest test -c  ../../../jest.config.integration.ts --runInBand --forceExit"
+        "test:integration": "node ../../../node_modules/.bin/jest test -c  ../../../jest.config.integration.ts --runInBand --forceExit",
+        "watch": "nodemon"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^2",
-        "typescript": "^5.3.3"
+        "typescript": "^5.3.3",
+        "@types/inquirer": "^9"
     },
     "dependencies": {
-        "@dao-xyz/app-service": "^0.0.6",
-        "@peerbit/document": "^6",
-        "peerbit": "^4",
-        "uuid": "^9.0.0"
+        "@peerbit/blog-sdk": "^0.0.1",
+        "@inquirer/editor": "^2",
+        "@inquirer/select": "^2",
+        "@inquirer/input": "^2"
     }
 }
