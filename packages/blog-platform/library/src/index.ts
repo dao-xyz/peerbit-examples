@@ -13,9 +13,8 @@ import {
     TransactionContext,
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
-import { Ed25519PublicKey, PublicSignKey, sha256Sync } from "@peerbit/crypto";
+import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { v4 as uuid } from "uuid";
-import { peerIdFromString } from "@libp2p/peer-id";
 import { concat } from "uint8arrays";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 
@@ -181,7 +180,7 @@ export class BlogPosts extends Program<Args> {
                     key: "content",
                     value: content,
                     method: StringMatchMethod.contains,
-                    caseInsensitive: false,
+                    caseInsensitive: true,
                 }),
             ],
         });
@@ -231,7 +230,7 @@ export class BlogPosts extends Program<Args> {
                         key: "name",
                         value: alias,
                         method: StringMatchMethod.prefix,
-                        caseInsensitive: false,
+                        caseInsensitive: true,
                     }),
                 ],
             })

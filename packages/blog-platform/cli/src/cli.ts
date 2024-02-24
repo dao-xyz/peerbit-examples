@@ -6,8 +6,29 @@ import input from "@inquirer/input";
 
 import { Ed25519PublicKey } from "@peerbit/crypto";
 
-export const start = async () => {
-    const client = await Peerbit.create();
+import path from "path";
+import os from "os";
+import fs from "fs";
+
+export const start = async (directory?: string | null) => {
+    // if directoy is not provided open in a default directory
+    if (directory === undefined) {
+        // if directory is null we dont want to use persistance
+        const homeDir = os.homedir();
+
+        // check if the blog-platform directory exists
+        directory = path.join(homeDir, "peerbit-blog-platform");
+        if (!fs.existsSync(directory)) {
+            fs.mkdirSync(directory, { recursive: true });
+        }
+    }
+
+    console.log(
+        "Starting blog platform CLI" +
+            (directory ? ` in directory ${directory}` : "")
+    );
+
+    const client = await Peerbit.create({ directory: directory ?? undefined });
     const blogPosts = await client.open(new BlogPosts());
 
     let myAlias = await blogPosts.getAlias(client.identity.publicKey);
