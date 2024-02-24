@@ -22,6 +22,7 @@
         "react": "*"
     },
     "dependencies": {
+        "@peerbit/document": "^6",
         "@chainsafe/libp2p-yamux": "^6",
         "@libp2p/webrtc": "^4",
         "@peerbit/proxy-window": "^3",
@@ -46,8 +47,7 @@
     "scripts": {
         "clean": "shx rm -rf lib/*",
         "build": "yarn clean && tsc -p tsconfig.json",
-        "test": "jest",
-        "postbuild": "echo '{\"type\":\"module\"} ' | node ../../node_modules/.bin/json > lib/esm/package.json"
+        "test": "jest"
     },
     "eslintConfig": {
         "extends": [

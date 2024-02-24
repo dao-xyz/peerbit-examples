@@ -1,6 +1,6 @@
 {
-    "short_name": "Text",
-    "name": "Text",
+    "short_name": "file share",
+    "name": "File share",
     "icons": [],
     "start_url": ".",
     "display": "standalone",
