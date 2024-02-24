@@ -15,7 +15,7 @@
     "dependencies": {
         "peerbit": "^4",
         "@peerbit/document": "^6",
-        "@peerbit/example-many-chat-rooms": "^0.0.3",
+        "@peerbit/example-many-chat-rooms": "^0",
         "@peerbit/react": "*",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
