@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/react",
-    "version": "0.0.6",
+    "version": "0.0.7",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
@@ -22,9 +22,9 @@
         "react": "*"
     },
     "dependencies": {
-        "@peerbit/document": "^6",
         "@chainsafe/libp2p-yamux": "^6",
         "@libp2p/webrtc": "^4",
+        "@peerbit/document": "^6",
         "@peerbit/proxy-window": "^3",
         "@types/react": "^18.2.46",
         "@types/react-dom": "^18.2.18",
