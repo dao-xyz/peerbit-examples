@@ -29,6 +29,7 @@ export const start = async (directory?: string | null) => {
     );
 
     const client = await Peerbit.create({ directory: directory ?? undefined });
+    await client.bootstrap();
     const blogPosts = await client.open(new BlogPosts());
 
     let myAlias = await blogPosts.getAlias(client.identity.publicKey);
