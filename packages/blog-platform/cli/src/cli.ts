@@ -10,6 +10,13 @@ import fs from "fs";
 import events from "events";
 events.setMaxListeners(100);
 
+const dotsIfLongerThan = (string: string, length: number) => {
+    if (string.length > length) {
+        return string.slice(0, length) + "...";
+    }
+    return string;
+};
+
 export const start = async (directory?: string | null) => {
     // if directoy is not provided open in a default directory
     if (directory === undefined) {
@@ -142,9 +149,12 @@ export const start = async (directory?: string | null) => {
                                 name:
                                     alias.name +
                                     " " +
-                                    (
-                                        await alias.publicKey.toPeerId()
-                                    ).toString(),
+                                    dotsIfLongerThan(
+                                        (
+                                            await alias.publicKey.toPeerId()
+                                        ).toString(),
+                                        16
+                                    ),
                                 value: alias,
                             };
                         })
@@ -171,7 +181,13 @@ export const start = async (directory?: string | null) => {
                     const posts = await blogPosts.getPostsByAuthor(
                         authorAlias.publicKey
                     );
-                    await readPosts(posts, chooseAuthor);
+                    await readPosts(
+                        posts,
+                        chooseAuthor,
+                        authorAlias.name +
+                            "\n" +
+                            (await authorAlias.publicKey.toPeerId()).toString()
+                    );
                 };
                 await chooseAuthor();
             } else if (answers === "Search for posts") {
@@ -207,14 +223,16 @@ export const start = async (directory?: string | null) => {
                             const authorKey = await blogPosts.getPostAuthor(
                                 post.id
                             );
+                            const authorName =
+                                (await blogPosts.getAlias(authorKey)) ||
+                                (await authorKey.toPeerId()).toString();
+
+                            // if author name is longer than 16 characters, show only the first 12 characters and add "..."
                             return {
                                 name:
                                     post.title +
                                     " by " +
-                                    ((await blogPosts.getAlias(authorKey)) ||
-                                        (
-                                            await authorKey.toPeerId()
-                                        ).toString()),
+                                    dotsIfLongerThan(authorName, 16),
                                 value: post,
                             };
                         })
@@ -272,7 +290,11 @@ export const start = async (directory?: string | null) => {
         });
     };
 
-    const readPosts = async (posts: Post[], back = startCLI) => {
+    const readPosts = async (
+        posts: Post[],
+        back = startCLI,
+        prefix?: string
+    ) => {
         const postChoicesFn = async () => {
             const postChoices: { name: string; value: "back" | Post }[] =
                 posts.map((post) => {
@@ -284,9 +306,10 @@ export const start = async (directory?: string | null) => {
             postChoices.push({ name: "Back", value: "back" });
             const result = await select({
                 message:
-                    posts.length > 0
-                        ? "Select a post to read"
-                        : "No posts found",
+                    (prefix ? "\n\n" + prefix + "\n\n" : "") +
+                    (posts.length > 0
+                        ? "Which post would you like to read?"
+                        : "No posts found"),
                 choices: postChoices,
                 loop: false,
             });
