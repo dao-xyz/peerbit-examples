@@ -60,6 +60,8 @@ Now, you have launched a server on your AWS account in the default region. This 
 
 ## Express Server API Wrapper
 
+This package is not necessary to interact with the platform. It is just a demostration how you can wrap it with an Express server.
+
 This package contains an Express server that wraps the blog client.
 
 See [./server](./server) for more information.
