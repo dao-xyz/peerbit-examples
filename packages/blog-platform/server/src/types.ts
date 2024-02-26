@@ -12,9 +12,9 @@ export class PostJSON {
     static async from(platform: BlogPosts, post: Post): Promise<PostJSON> {
         return {
             id: post.id,
-            author: (await platform.getPostAuthor(post.id))
-                .toPeerId()
-                .toString(), // convert to IPFS id for readability
+            author: (
+                await (await platform.getPostAuthor(post.id)).toPeerId()
+            ).toString(), // convert to IPFS id for readability
             title: post.title,
             content: post.content,
         };

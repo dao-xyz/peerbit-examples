@@ -6,6 +6,7 @@ import { PostJSON } from "./types.js";
 
 export const start = async (port = 7654) => {
     const client = await Peerbit.create();
+    await client.bootstrap();
     const posts = await client.open(new BlogPosts());
     const app = express();
     app.use(bodyParser.json());
