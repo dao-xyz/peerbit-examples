@@ -7,4 +7,4 @@ const directoryIndex = process.argv.indexOf("--directory");
 const directory =
     directoryIndex !== -1 ? process.argv[directoryIndex + 1] : undefined;
 
-start(null);
+start(directory);
