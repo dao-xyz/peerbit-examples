@@ -26,24 +26,38 @@ blog
 ```
 
 
-### Run CLI locally
-To run it locally:
+### Run CLI from local build
+To run from local build do:
 
-First go to the root folder of the exampels repo and build it
+First go [./cli](./cli)
 
 ```
+yarn
 yarn build
+node  ./cli/lib/esm/bin.js
 ```
 
-Then go back to the [./cli](./cli) folder and now you can do: 
 
-```node  ./cli/lib/esm/bin.js``` instead of ```blog``` to invoke the cli. 
+## Deploying the blog-platform to a server for persistance
+To keep state available for peers when few peers are online, you might want to host a dedicated server for this. With the Peerbit cli it looks something like this 
 
+```sh
+npm install -g @peerbit/server
+peerbit remote spawn aws --count 1 --size medium --name "blog-platform" 
+```
+wait for server to become ready, then do:
 
+```sh
+peerbit remote connect blog-platform-1
+install @peerbit/blog-sdk
+program open --variant blog-posts
+```
 
-## Server
+Now you have launched a server on your AWS account in the default region. This node will keep whatever posts other have created, and will be available when new peers want to read posts, but no other are online, except this server.
 
-This package contains an express server that wraps the blog client
+## Express server API wrapper
 
-You can interact with the server using API tools, like Insomnia to read blog posts
+This package contains an express server that wraps the blog client.
+
+see [./server](./server) for more info
 

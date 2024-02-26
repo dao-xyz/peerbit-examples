@@ -3,10 +3,12 @@
 A Express server API wrapper around some of the blog platform API
 
 
-## Start by invokgin
+## Start by invoking
 
-```yarn```
-```yarn start```
+```sh
+yarn
+yarn start
+```
 
 ## Interact with the server
 

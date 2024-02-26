@@ -3,12 +3,12 @@ import { Peerbit } from "peerbit";
 import editor from "@inquirer/editor";
 import select from "@inquirer/select";
 import input from "@inquirer/input";
-
-import { Ed25519PublicKey } from "@peerbit/crypto";
-
+import { PublicSignKey } from "@peerbit/crypto";
 import path from "path";
 import os from "os";
 import fs from "fs";
+import events from "events";
+events.setMaxListeners(100);
 
 export const start = async (directory?: string | null) => {
     // if directoy is not provided open in a default directory
@@ -101,59 +101,79 @@ export const start = async (directory?: string | null) => {
                     content,
                 });
 
-                // put post to the network
-                await blogPosts.posts.put(postObject);
+                // final check if the user wants to save the changes
 
-                console.log("Post created successfully: ", postObject.id);
+                await printPost(
+                    postObject,
+                    client.identity.publicKey,
+                    new Date()
+                );
+                const action = await select({
+                    message: "Save changes?",
+                    choices: ["Save", "Back"].map((x) => {
+                        return { name: x, value: x };
+                    }),
+                });
+
+                if (action === "Save") {
+                    // put post to the network
+                    await blogPosts.posts.put(postObject);
+
+                    console.log("Post created successfully: ", postObject.id);
+                }
 
                 // go back
                 startCLI();
             } else if (answers === "Posts by author") {
                 const author = await input({
-                    message: "Enter the author's alias",
+                    message: "Enter the author's alias (keep empty to see all)",
                 });
 
-                const aliases = await blogPosts.getAliases(author);
+                const chooseAuthor = async () => {
+                    const aliases = await blogPosts.getAliases(author);
 
-                // select a public key from the list to read posts from
-                const authorChoices: { name: string; value: "back" | Alias }[] =
-                    await Promise.all(
+                    // select a public key from the list to read posts from
+                    const authorChoices: {
+                        name: string;
+                        value: "back" | Alias;
+                    }[] = await Promise.all(
                         aliases.map(async (alias) => {
                             return {
                                 name:
                                     alias.name +
                                     " " +
                                     (
-                                        await (
-                                            alias.publicKey as Ed25519PublicKey
-                                        ).toPeerId()
+                                        await alias.publicKey.toPeerId()
                                     ).toString(),
                                 value: alias,
                             };
                         })
                     );
 
-                authorChoices.push({ name: "Back", value: "back" });
+                    authorChoices.push({ name: "Back", value: "back" });
 
-                const result = await select({
-                    message:
-                        aliases.length > 0
-                            ? "Select an author to read posts from"
-                            : "No authors found",
-                    choices: authorChoices,
-                });
+                    const result = await select({
+                        message:
+                            aliases.length > 0
+                                ? "Select an author to read posts from"
+                                : "No authors found",
+                        choices: authorChoices,
+                        loop: false,
+                    });
 
-                if (result === "back") {
-                    startCLI();
-                    return;
-                }
+                    if (result === "back") {
+                        startCLI();
+                        return;
+                    }
 
-                const authorAlias: Alias = result;
+                    const authorAlias: Alias = result;
 
-                const posts = await blogPosts.getPostsByAuthor(
-                    authorAlias.publicKey
-                );
-                await readPosts(posts, startCLI);
+                    const posts = await blogPosts.getPostsByAuthor(
+                        authorAlias.publicKey
+                    );
+                    await readPosts(posts, chooseAuthor);
+                };
+                await chooseAuthor();
             } else if (answers === "Search for posts") {
                 // prompt the user for a search query
                 const search = await input({
@@ -181,12 +201,24 @@ export const start = async (directory?: string | null) => {
                     const postChoices: {
                         name: string;
                         value: "back" | "load" | Post;
-                    }[] = currentPosts.map((post) => {
-                        return {
-                            name: post.title,
-                            value: post,
-                        };
-                    });
+                    }[] = await Promise.all(
+                        currentPosts.map(async (post) => {
+                            // show the title of the post and the author alias or PeerId if missing
+                            const authorKey = await blogPosts.getPostAuthor(
+                                post.id
+                            );
+                            return {
+                                name:
+                                    post.title +
+                                    " by " +
+                                    ((await blogPosts.getAlias(authorKey)) ||
+                                        (
+                                            await authorKey.toPeerId()
+                                        ).toString()),
+                                value: post,
+                            };
+                        })
+                    );
 
                     if (postChoices.length > 0 && iterator.done() == false) {
                         postChoices.push({ name: "Load more", value: "load" });
@@ -199,6 +231,7 @@ export const start = async (directory?: string | null) => {
                                 ? "No more posts"
                                 : "Select a post to read",
                         choices: postChoices,
+                        loop: false,
                     });
 
                     if (result === "back") {
@@ -255,6 +288,7 @@ export const start = async (directory?: string | null) => {
                         ? "Select a post to read"
                         : "No posts found",
                 choices: postChoices,
+                loop: false,
             });
             if (result === "back") {
                 return back();
@@ -265,20 +299,24 @@ export const start = async (directory?: string | null) => {
         };
         return postChoicesFn();
     };
-
-    const readPost = async (post: Post, back = startCLI) => {
+    const printPost = async (
+        post: Post,
+        authorKey?: PublicSignKey,
+        date?: Date
+    ) => {
         // show post title in a bold and colored font
         console.log("");
         console.log("\x1b[1m\x1b[36m%s\x1b[0m", post.title);
 
         // show author and date in italic font
-        const author = await blogPosts.getPostAuthor(post.id);
+        const author = authorKey || (await blogPosts.getPostAuthor(post.id));
         console.log(
             "\x1b[3m%s\x1b[0m",
             `By ${(
-                (await blogPosts.getAlias(author)) ||
-                (await (author as Ed25519PublicKey).toPeerId())
-            ).toString()} on ${await blogPosts.getPostDate(post.id)}`
+                (await blogPosts.getAlias(author)) || (await author.toPeerId())
+            ).toString()} on ${(
+                date || (await blogPosts.getPostDate(post.id))
+            ).toDateString()}`
         );
 
         console.log("");
@@ -287,7 +325,11 @@ export const start = async (directory?: string | null) => {
         console.log(post.content);
 
         console.log("");
+    };
+
+    const readPost = async (post: Post, back = startCLI) => {
         // when the user presses enter, go back to the menu
+        await printPost(post);
         await input({
             message: "Press any key to go back",
         });
@@ -295,12 +337,6 @@ export const start = async (directory?: string | null) => {
     };
 
     const manageMyPosts = async (results: Post[], back = startCLI) => {
-        if (results.length === 0) {
-            console.log("No posts found");
-            startCLI();
-            return;
-        }
-
         const postChoices: { name: string; value: "back" | Post }[] =
             results.map((post) => {
                 return {
@@ -311,8 +347,12 @@ export const start = async (directory?: string | null) => {
         postChoices.push({ name: "Back", value: "back" });
 
         const result = await select({
-            message: "Select a post to read or edit",
+            message:
+                results.length > 0
+                    ? "Select a post to read or edit"
+                    : "No posts found",
             choices: postChoices,
+            loop: false,
         });
 
         if (result === "back") {
@@ -348,10 +388,24 @@ export const start = async (directory?: string | null) => {
                     content,
                 });
 
-                // put post to the network
-                await blogPosts.posts.put(postObject);
+                // final check if the user wants to save the changes
+                await printPost(
+                    postObject,
+                    client.identity.publicKey,
+                    new Date()
+                );
+                const action = await select({
+                    message: "Save changes?",
+                    choices: ["Save", "Back"].map((x) => {
+                        return { name: x, value: x };
+                    }),
+                });
 
-                console.log("Post updated successfully: ", postObject.id);
+                if (action === "Save") {
+                    // put post to the network
+                    await blogPosts.posts.put(postObject);
+                    console.log("Post updated successfully: ", postObject.id);
+                }
 
                 // go back
                 return back();

@@ -5,6 +5,7 @@ import {
     Documents,
     PutOperation,
     ResultsIterator,
+    RoleOptions,
     SearchRequest,
     Sort,
     SortDirection,
@@ -29,10 +30,14 @@ export class Post {
     @field({ type: "string" })
     content: string;
 
+    @field({ type: "u8" })
+    private replyTo: 0; // TODO feature not implemented yet
+
     constructor(properties: { id?: string; content: string; title: string }) {
         this.id = properties.id || uuid();
         this.title = properties.title;
         this.content = properties.content;
+        this.replyTo = 0;
     }
 }
 
@@ -57,7 +62,7 @@ export class Alias {
 }
 
 type Args = {
-    // TODO: define args
+    role?: RoleOptions;
 };
 
 // define a fixed blog platform id with length 32
@@ -85,9 +90,9 @@ export class BlogPosts extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.alias.open({
             type: Alias,
-            role: {
+            role: args?.role || {
                 type: "replicator",
-                factor: 1,
+                factor: 1, // TODO set replication factor better
             },
             canPerform: async (operation, context) => {
                 if (
@@ -128,7 +133,7 @@ export class BlogPosts extends Program<Args> {
 
         return this.posts.open({
             type: Post,
-            role: {
+            role: args?.role || {
                 type: "replicator",
                 factor: 1,
             },
@@ -193,7 +198,7 @@ export class BlogPosts extends Program<Args> {
                 (await this.posts.index.getDetailed(id))![0].results[0].context
                     .created!
             ) / 1e6
-        ).toDateString();
+        );
     }
 
     async getPostAuthor(id: string) {
