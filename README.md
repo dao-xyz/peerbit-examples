@@ -21,6 +21,10 @@
 ### [Lobby + chat rooms](./packages/many-chat-rooms/)
 [<img src="./packages/many-chat-rooms/demo.gif" width="600" />](./packages/many-chat-rooms/)
 
+### [Blog platform](./packages/blog-platform/)
+[<img src="./packages/blog-platform/demo-cli.gif" width="600" />](./packages/blog-platform/)
+
+
 ### [Collaborative text document](./packages/text-document/)
 [<img src="./packages/text-document/demo.gif" width="600" />](./packages/text-document/)
 
