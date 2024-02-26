@@ -22,6 +22,13 @@ Launch it:
 ```sh
 blog
 ```
+Data will persist in /HOME_DIR/peerbit-blog-platform
+
+To set a custom working directory 
+
+```sh
+blog --directory DIRECTORY
+```
 
 ### Run CLI from Local Build
 
