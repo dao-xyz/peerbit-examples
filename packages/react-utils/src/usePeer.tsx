@@ -18,8 +18,6 @@ import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { webRTC } from "@libp2p/webrtc";
 import { identify } from "@libp2p/identify";
 import { detectIncognito } from "detectincognitojs";
-import events from "events";
-events.setMaxListeners(Infinity);
 
 export type ConnectionStatus =
     | "disconnected"
