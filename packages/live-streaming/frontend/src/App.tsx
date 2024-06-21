@@ -45,9 +45,6 @@ export const App = () => {
         <PeerProvider
             inMemory={true /* inIframe() */} // TODO mobile in memory? Weak devices in memory? https://github.com/dao-xyz/peerbit/issues/18
             waitForConnnected={true}
-            bootstrap={[
-                "/dns4/36b631592994756b7365801a28b9ecafca843171.peerchecker.com/tcp/4003/wss/p2p/12D3KooWHEXi7VtdBFANXXVvWXVDSQaWTHZUjZq2MsVUxQ1ZF4SX",
-            ]}
             network={
                 import.meta.env.MODE === "development" ? "local" : "remote"
             }
