@@ -1,10 +1,23 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
+import peerbit from "@peerbit/vite";
 import fs from "fs";
+
+const wasmContentTypePlugin = {
+    name: "wasm-content-type-plugin",
+    configureServer(server) {
+        server.middlewares.use((req, res, next) => {
+            if (req.url.endsWith(".wasm")) {
+                res.setHeader("Content-Type", "application/wasm");
+            }
+            next();
+        });
+    },
+};
 
 // https://vitejs.dev/config/
 export default defineConfig({
-    plugins: [react()],
+    plugins: [react(), wasmContentTypePlugin, peerbit()],
     optimizeDeps: {
         esbuildOptions: {
             target: "esnext",

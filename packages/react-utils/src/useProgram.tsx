@@ -38,6 +38,7 @@ export const useProgram = <
         }
         setLoading(true);
         let changeListener: () => void;
+
         closingRef.current.then(() => {
             programLoadingRef.current = peer
                 ?.open(addressOrOpen, { ...options, existing: "reuse" })
@@ -67,18 +68,26 @@ export const useProgram = <
             let startRef = programLoadingRef.current;
 
             // TODO don't close on reopen the same db?
-            closingRef.current =
-                programLoadingRef.current?.then((p) =>
-                    p.close().then(() => {
-                        p.events.removeEventListener("join", changeListener);
-                        p.events.removeEventListener("leave", changeListener);
+            if (programLoadingRef.current) {
+                closingRef.current =
+                    programLoadingRef.current.then((p) =>
+                        p.close().then(() => {
+                            p.events.removeEventListener(
+                                "join",
+                                changeListener
+                            );
+                            p.events.removeEventListener(
+                                "leave",
+                                changeListener
+                            );
 
-                        if (programLoadingRef.current === startRef) {
-                            setProgram(undefined);
-                            programLoadingRef.current = undefined;
-                        }
-                    })
-                ) || Promise.resolve();
+                            if (programLoadingRef.current === startRef) {
+                                setProgram(undefined);
+                                programLoadingRef.current = undefined;
+                            }
+                        })
+                    ) || Promise.resolve();
+            }
         };
     }, [
         peer?.identity.publicKey.hashcode(),

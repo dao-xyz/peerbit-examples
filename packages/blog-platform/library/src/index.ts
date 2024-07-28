@@ -1,23 +1,20 @@
 import { field, variant } from "@dao-xyz/borsh";
 import {
     ByteMatchQuery,
-    DeleteOperation,
+    CanPerformOperations,
     Documents,
-    PutOperation,
-    ResultsIterator,
-    RoleOptions,
     SearchRequest,
     Sort,
     SortDirection,
     StringMatch,
     StringMatchMethod,
-    TransactionContext,
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { v4 as uuid } from "uuid";
 import { concat } from "uint8arrays";
 import { serialize, deserialize } from "@dao-xyz/borsh";
+import { ReplicationOptions } from "@peerbit/shared-log";
 
 @variant(0)
 export class Post {
@@ -38,6 +35,40 @@ export class Post {
         this.title = properties.title;
         this.content = properties.content;
         this.replyTo = 0;
+    }
+}
+
+class PostIndexable {
+    @field({ type: "string" })
+    id: string;
+
+    @field({ type: "string" })
+    title: string;
+
+    @field({ type: "string" })
+    content: string;
+
+    @field({ type: "u64" })
+    created: bigint;
+
+    @field({ type: "u64" })
+    modified: bigint;
+
+    @field({ type: Uint8Array })
+    author: Uint8Array;
+
+    constructor(
+        post: Post,
+        created: bigint,
+        modified: bigint,
+        author: PublicSignKey
+    ) {
+        this.id = post.id;
+        this.title = post.title;
+        this.content = post.content;
+        this.created = created;
+        this.modified = modified;
+        this.author = author.bytes;
     }
 }
 
@@ -62,7 +93,7 @@ export class Alias {
 }
 
 type Args = {
-    role?: RoleOptions;
+    replicate?: ReplicationOptions;
 };
 
 // define a fixed blog platform id with length 32
@@ -71,7 +102,7 @@ const GLOBAL_BLOG_PLATFORM_ID = new Uint8Array(new Array(32).fill(1));
 @variant("blog-posts")
 export class BlogPosts extends Program<Args> {
     @field({ type: Documents })
-    posts: Documents<Post>;
+    posts: Documents<Post, PostIndexable>;
 
     @field({ type: Documents })
     alias: Documents<Alias>;
@@ -79,7 +110,7 @@ export class BlogPosts extends Program<Args> {
     // overriding this id will make address to change. Using afixed id will make all "client.open(new BlogPosts())" to open the same database
     constructor(id: Uint8Array = GLOBAL_BLOG_PLATFORM_ID) {
         super();
-        this.posts = new Documents<Post>({
+        this.posts = new Documents<Post, PostIndexable>({
             id: sha256Sync(concat([id, new Uint8Array([1])])),
         });
         this.alias = new Documents<Alias>({
@@ -90,25 +121,19 @@ export class BlogPosts extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.alias.open({
             type: Alias,
-            role: args?.role || {
-                type: "replicator",
+            replicate: args?.replicate || {
                 factor: 1, // TODO set replication factor better
             },
-            canPerform: async (operation, context) => {
-                if (
-                    !(await allowCommitsFromSameSigners(this.alias)(
-                        operation,
-                        context
-                    ))
-                ) {
+            canPerform: async (props) => {
+                if (!(await allowCommitsFromSameSigners(this.alias)(props))) {
                     return false;
                 }
 
-                if (operation instanceof PutOperation) {
+                if (props.type === "put") {
                     // check that this id is the public key of the signer
-                    const alias = operation.value;
+                    const alias = props.value;
                     if (
-                        !context.entry.signatures.find((x) =>
+                        !props.entry.signatures.find((x) =>
                             x.publicKey.equals(alias!.publicKey)
                         )
                     ) {
@@ -133,8 +158,7 @@ export class BlogPosts extends Program<Args> {
 
         return this.posts.open({
             type: Post,
-            role: args?.role || {
-                type: "replicator",
+            replicate: args?.replicate || {
                 factor: 1,
             },
             canPerform: allowCommitsFromSameSigners(this.posts),
@@ -142,15 +166,16 @@ export class BlogPosts extends Program<Args> {
                 canRead: async (identity) => {
                     return true; // Anyone can query
                 },
-                fields: async (post, ctx) => {
-                    return {
-                        title: post.title,
-                        content: post.content,
-                        modified: ctx.modified,
-                        created: ctx.modified,
-                        author: (await this.posts.log.log.get(ctx.head))
-                            ?.signatures[0].publicKey.bytes,
-                    };
+                type: PostIndexable,
+                transform: async (post, ctx) => {
+                    return new PostIndexable(
+                        post,
+                        ctx.created,
+                        ctx.modified,
+                        (await this.posts.log.log.get(
+                            ctx.head
+                        ))!.signatures[0].publicKey
+                    );
                 },
             },
         });
@@ -163,12 +188,12 @@ export class BlogPosts extends Program<Args> {
                 sort: [
                     new Sort({ key: "created", direction: SortDirection.DESC }),
                 ],
-            }),
-            { size }
+                fetch: size,
+            })
         );
     }
 
-    async getLatestPostsIterator(): Promise<ResultsIterator<Post>> {
+    async getLatestPostsIterator() {
         return this.posts.index.iterate(
             new SearchRequest({
                 sort: [
@@ -188,8 +213,9 @@ export class BlogPosts extends Program<Args> {
                     caseInsensitive: true,
                 }),
             ],
+            fetch: size,
         });
-        return this.posts.index.search(query, { size });
+        return this.posts.index.search(query);
     }
 
     async getPostDate(id: string) {
@@ -257,14 +283,10 @@ export class BlogPosts extends Program<Args> {
 }
 
 const allowCommitsFromSameSigners =
-    (document: Documents<any>) =>
-    async (
-        _operation: PutOperation<any> | DeleteOperation,
-        context: TransactionContext<any>
-    ) => {
+    (document: Documents<any>) => async (props: CanPerformOperations<any>) => {
         // allow all operations if the are signed by the same authors
         // i.e. for all the related commits ('next') the signatures should be the same
-        const previousCommits = context.entry.next;
+        const previousCommits = props.entry.next;
         for (const commit of previousCommits) {
             const prevSignatures = (await document.log.log.get(commit))
                 ?.signatures;
@@ -272,7 +294,7 @@ const allowCommitsFromSameSigners =
                 return false;
             }
 
-            const currentSignatures = context.entry.signatures;
+            const currentSignatures = props.entry.signatures;
 
             // check that the new commit is signed by the same authors
             if (prevSignatures.length !== currentSignatures.length) {

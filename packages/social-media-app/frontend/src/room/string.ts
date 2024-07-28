@@ -22,6 +22,21 @@ class StringElement {
     }
 }
 
+class StringElementIndexable {
+    @field({ type: Uint8Array })
+    id: Uint8Array;
+    @field({ type: "string" })
+    string: string;
+    @field({ type: "u64" })
+    timestamp: bigint;
+
+    constructor(element: StringElement, timestamp: bigint) {
+        this.id = element.id;
+        this.string = element.string;
+        this.timestamp = timestamp;
+    }
+}
+
 type Args = { canPerform: CanPerform<StringElement> };
 
 /**
@@ -30,7 +45,7 @@ type Args = { canPerform: CanPerform<StringElement> };
 @variant("editable_string")
 export class EditableString extends Program<Args> {
     @field({ type: Documents<Element> })
-    versions: Documents<StringElement>;
+    versions: Documents<StringElement, StringElementIndexable>;
 
     constructor() {
         super();
@@ -41,12 +56,9 @@ export class EditableString extends Program<Args> {
             type: StringElement,
             canPerform: args.canPerform,
             index: {
-                fields: (obj, context) => {
-                    return {
-                        id: obj.id,
-                        timestamp: context.modified,
-                        string: obj.string,
-                    };
+                type: StringElementIndexable,
+                transform: (obj, context) => {
+                    return new StringElementIndexable(obj, context.modified);
                 },
             },
         });

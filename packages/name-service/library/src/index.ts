@@ -1,11 +1,7 @@
-import { field, variant } from "@dao-xyz/borsh";
+import { field, variant, vec } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
-import {
-    SearchRequest,
-    Documents,
-    StringMatch,
-    RoleOptions,
-} from "@peerbit/document";
+import { SearchRequest, Documents, StringMatch } from "@peerbit/document";
+import { ReplicationOptions } from "@peerbit/shared-log";
 import { PublicSignKey } from "@peerbit/crypto";
 
 @variant(0)
@@ -22,7 +18,24 @@ export class Name {
     }
 }
 
-type Args = { role?: RoleOptions };
+class IndexedName {
+    @field({ type: Uint8Array })
+    id: Uint8Array;
+
+    @field({ type: "string" })
+    name: string;
+
+    @field({ type: vec("string") })
+    keys: string[];
+
+    constructor(name: Name, keys: string[]) {
+        this.id = name.id;
+        this.name = name.name;
+        this.keys = keys;
+    }
+}
+
+type Args = { replicate?: ReplicationOptions };
 
 // A random ID, but unique for this app
 const ID = new Uint8Array([
@@ -48,23 +61,23 @@ export class Names extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.names.open({
             type: Name,
-            canPerform: (operation, context) => {
+            canPerform: (operation) => {
                 return Promise.resolve(true); // Anyone can create rooms
             },
             index: {
-                fields: async (doc, context) => {
-                    return {
-                        id: doc.id,
-                        name: doc.name,
-                        keys: (await this.names.log.log.get(
+                type: IndexedName,
+                transform: async (doc, context) => {
+                    return new IndexedName(
+                        doc,
+                        (await this.names.log.log.get(
                             context.head
                         ))!.signatures.map((signature) =>
                             signature.publicKey.hashcode()
-                        ),
-                    };
+                        )
+                    );
                 },
             },
-            role: args?.role,
+            replicate: args?.replicate,
         });
     }
 

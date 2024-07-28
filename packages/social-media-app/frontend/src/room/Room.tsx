@@ -169,17 +169,7 @@ export const Room = (properties: { room: RoomDB }) => {
                 return;
             }
             newRects = (
-                await Promise.all(
-                    [...properties.room.elements.index.index?.values()].map(
-                        async (x) => {
-                            let doc =
-                                await properties.room.elements.index.getDocument(
-                                    x
-                                );
-                            return doc;
-                        }
-                    )
-                )
+                await properties.room.elements.index.search(new SearchRequest())
             ).filter((x) => !!x);
             if (pendingRef.current) {
                 for (const pending of pendingRef.current) {
@@ -359,7 +349,6 @@ export const Room = (properties: { room: RoomDB }) => {
         }
 
         const room = properties.room;
-        console.log("OPEN!", room.address, room.elements.index.size);
         const node = room.key;
 
         let isOwner = peer.identity.publicKey.equals(node);
@@ -421,11 +410,11 @@ export const Room = (properties: { room: RoomDB }) => {
                         ref={gridLayoutRef}
                         className="w-full"
                         /*  item
-    sx={{
-    overflowY: "scroll",
-    height: `calc(100vh - ${HEIGHT})`,
-    width: "100%", //`calc(100% - 275px)`,
-    }} */
+sx={{
+overflowY: "scroll",
+height: `calc(100vh - ${HEIGHT})`,
+width: "100%", //`calc(100% - 275px)`,
+}} */
                         // ${properties.editMode ? 'p-3' : 'p-0'}`
                     >
                         <ReactGridLayout

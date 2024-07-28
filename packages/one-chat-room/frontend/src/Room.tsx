@@ -65,8 +65,7 @@ export const Room = () => {
     /// aliases
     const names = useProgram(new Names(), {
         args: {
-            role: {
-                type: "replicator",
+            replicate: {
                 factor: 1,
             },
         },
@@ -78,8 +77,7 @@ export const Room = () => {
         params.key && new RoomDB({ creator: getKeyFromPath(params.key) }),
         {
             args: {
-                role: {
-                    type: "replicator",
+                replicate: {
                     factor: 1,
                 },
             },
@@ -105,7 +103,9 @@ export const Room = () => {
         const updateNames = async (p: Post) => {
             const pk = (
                 await room.program.messages.log.log.get(
-                    room.program.messages.index.index.get(p.id).context.head
+                    (
+                        await room.program.messages.index.getDetailed(p.id)
+                    )[0]?.results[0].context.head
                 )
             ).signatures[0].publicKey;
             names.program?.getName(pk).then((name) => {
@@ -124,8 +124,11 @@ export const Room = () => {
                         return {
                             post: x,
                             entry: await room.program.messages.log.log.get(
-                                room.program.messages.index.index.get(x.id)
-                                    .context.head
+                                (
+                                    await room.program.messages.index.getDetailed(
+                                        x.id
+                                    )
+                                )[0]?.results[0].context.head
                             ),
                         };
                     })
@@ -134,9 +137,12 @@ export const Room = () => {
                     wallTimes.set(post.id, entry.meta.clock.timestamp.wallTime);
                 });
 
-                postsRef.current.sort((a, b) =>
-                    Number(wallTimes.get(a.id) - wallTimes.get(b.id))
-                );
+                postsRef.current.sort((a, b) => {
+                    return Number(
+                        (wallTimes.get(a.id) || 0n) -
+                            (wallTimes.get(b.id) || 0n)
+                    );
+                });
                 forceUpdate();
             }, 5);
         };
@@ -213,6 +219,9 @@ export const Room = () => {
             })
             .catch((e) => {
                 console.error("Failed to create message: " + e.message);
+                if (!e.message) {
+                    console.error(e);
+                }
                 alert("Failed to create message: " + e.message);
                 throw e;
             });

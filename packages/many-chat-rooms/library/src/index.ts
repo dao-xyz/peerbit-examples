@@ -1,15 +1,11 @@
 import { field, variant } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
-import {
-    Documents,
-    PutOperation,
-    DeleteOperation,
-    RoleOptions,
-} from "@peerbit/document";
+import { Documents, PutOperation, DeleteOperation } from "@peerbit/document";
 import { v4 as uuid } from "uuid";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { randomBytes } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
+import { ReplicationOptions } from "@peerbit/shared-log";
 
 @variant(0) // for versioning purposes, we can do @variant(1) when we create a new post type version
 export class Post {
@@ -28,7 +24,7 @@ export class Post {
         this.message = properties.message;
     }
 }
-type Args = { role?: RoleOptions };
+type Args = { replicate?: ReplicationOptions };
 
 @variant("room")
 export class Room extends Program<Args> {
@@ -61,22 +57,24 @@ export class Room extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.messages.open({
             type: Post,
-            canPerform: async (operation, context) => {
-                if (operation instanceof PutOperation) {
-                    const post = operation.value;
+            canPerform: async (props) => {
+                if (props.type === "put") {
+                    const post = props.value;
                     if (
-                        !context.entry.signatures.find((x) =>
+                        !props.entry.signatures.find((x) =>
                             x.publicKey.equals(post!.from)
                         )
                     ) {
                         return false;
                     }
                     return true;
-                } else if (operation instanceof DeleteOperation) {
-                    const get = await this.messages.index.get(operation.key);
+                } else if (props.type === "delete") {
+                    const get = await this.messages.index.get(
+                        props.operation.key
+                    );
                     if (
                         !get ||
-                        !context.entry.signatures.find((x) =>
+                        !props.entry.signatures.find((x) =>
                             x.publicKey.equals(get.from)
                         )
                     ) {
@@ -91,8 +89,17 @@ export class Room extends Program<Args> {
                     return true; // Anyone can query
                 },
             },
-            role: args?.role,
+            replicate: args?.replicate,
         });
+    }
+}
+
+class RoomIndexable {
+    @field({ type: "string" })
+    name: string;
+
+    constructor(properties: { name: string }) {
+        this.name = properties.name;
     }
 }
 
@@ -102,12 +109,12 @@ export class Lobby extends Program<Args> {
     id: Uint8Array;
 
     @field({ type: Documents })
-    rooms: Documents<Room>;
+    rooms: Documents<Room, RoomIndexable>;
 
     constructor(properties: { id?: Uint8Array }) {
         super();
         this.id = properties.id || randomBytes(32);
-        this.rooms = new Documents<Room>({ id: this.id });
+        this.rooms = new Documents<Room, RoomIndexable>({ id: this.id });
     }
 
     // Setup lifecycle, will be invoked on 'open'
@@ -121,8 +128,8 @@ export class Lobby extends Program<Args> {
             },
 
             index: {
-                key: "name",
-
+                idProperty: "name",
+                type: RoomIndexable,
                 canRead: (post, publicKey) => {
                     return Promise.resolve(true); // Anyone can search for rooms
                 },
@@ -134,7 +141,7 @@ export class Lobby extends Program<Args> {
                 // boundary
                 return Promise.resolve(false);
             },
-            role: args?.role,
+            replicate: args?.replicate,
         });
     }
 }

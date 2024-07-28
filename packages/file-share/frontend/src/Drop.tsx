@@ -7,15 +7,15 @@ import { MdArrowBack, MdUploadFile, MdClose, MdSettings } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
 import { File } from "./File";
 import { Spinner } from "./Spinner";
-import { RoleOptions, Replicator, Observer, Role } from "@peerbit/shared-log";
 import * as Switch from "@radix-ui/react-switch";
 import * as Slider from "@radix-ui/react-slider";
-
+import { SearchRequest } from "@peerbit/document";
 import * as Popover from "@radix-ui/react-popover";
 import { useStorageUsage } from "./MemoryUsage";
 import { useNetworkUsage } from "./NetworkUsage";
 import { GraphExplorer } from "./Graphs";
 import * as Progress from "@radix-ui/react-progress";
+import { ReplicationOptions } from "@peerbit/shared-log";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -62,9 +62,7 @@ export const Drop = () => {
         new Set()
     );
     const [isHost, setIsHost] = useState<boolean>();
-    const [currentRole, setCurrentRole] = useState<Replicator | Observer>(
-        new Observer()
-    );
+    const [currentRole, setCurrentRole] = useState<ReplicationOptions>(false);
     const [replicatorCount, setReplicatorCount] = useState(0);
     const [left, setLeft] = useState(false);
 
@@ -73,8 +71,7 @@ export const Drop = () => {
         {
             existing: "reuse",
             args: {
-                role: {
-                    type: "replicator",
+                replicate: {
                     limits: { cpu: { max: 0, monitor: undefined as any } },
                 },
             },
@@ -91,16 +88,17 @@ export const Drop = () => {
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
     // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
-    const updateRole = async (
-        roleOptions?: Exclude<RoleOptions, "replicator" | "observer">
-    ) => {
-        if (!roleOptions || !files.program) {
+    const updateRole = async (roleOptions?: ReplicationOptions) => {
+        if (roleOptions == null || !files.program) {
             return;
         }
 
         // console.log("X", files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]?.max)
         saveRoleLocalStorage(files.program, JSON.stringify(roleOptions)); // Save role in localstorage for next time
-        files.program.files.log.updateRole(roleOptions);
+        await files.program.files.log.replicate(false);
+        if (roleOptions !== false) {
+            files.program.files.log.replicate(roleOptions);
+        }
     };
 
     useDebouncedEffect(
@@ -111,7 +109,6 @@ export const Drop = () => {
             updateRole(
                 role === "replicator"
                     ? {
-                          type: "replicator",
                           limits: {
                               cpu:
                                   limitCPU != null
@@ -120,7 +117,7 @@ export const Drop = () => {
                               storage: limitStorage ? sizeBytes : undefined,
                           },
                       }
-                    : { type: "observer" }
+                    : false
             );
         },
         [limitCPU, limitStorage, role, limitStorageString],
@@ -147,17 +144,17 @@ export const Drop = () => {
             updateListDebounced
         );
 
-        const roleChangeListener = (ev: { detail: { role: Role } }) => {
+        const replicatorsChangeListener = async (ev) => {
             setReplicatorCount(
-                files.program.files.log.getReplicatorsSorted()?.length
+                (await files.program.files.log.getReplicators()).size
             );
 
-            setCurrentRole(ev.detail.role);
+            //  setCurrentRole(ev.detail.replicate); TODO this should be somewhere else
         };
 
         files.program.files.log.events.addEventListener(
-            "role",
-            roleChangeListener
+            "replication:change",
+            replicatorsChangeListener
         );
 
         let onOpen = async () => {
@@ -174,11 +171,10 @@ export const Drop = () => {
             const serializedRoleFromStorage = getRoleFromLocalStorage(
                 files.program
             );
-            const roleFromLocalstore:
-                | Exclude<RoleOptions, "replicator" | "observer">
-                | undefined = serializedRoleFromStorage
-                ? JSON.parse(serializedRoleFromStorage)
-                : undefined;
+            const roleFromLocalstore: ReplicationOptions | undefined =
+                serializedRoleFromStorage
+                    ? JSON.parse(serializedRoleFromStorage)
+                    : undefined;
             if (isTrusted && roleFromLocalstore) {
                 // by default open as replicator
                 setLimitCPU(
@@ -193,7 +189,7 @@ export const Drop = () => {
                         ? String(limitStorageLoaded)
                         : "0"
                 ); // TODO export types
-                setRole(roleFromLocalstore.type);
+                setRole(roleFromLocalstore ? "replicator" : "observer");
                 await updateRole(roleFromLocalstore);
             } else {
                 if (isTrusted) {
@@ -202,12 +198,11 @@ export const Drop = () => {
                 await updateRole(
                     role === "replicator"
                         ? {
-                              type: "replicator",
                               limits: {
                                   cpu: { max: 0, monitor: undefined as any },
                               },
                           }
-                        : { type: "observer" }
+                        : false
                 );
             }
             updateListDebounced();
@@ -232,7 +227,7 @@ export const Drop = () => {
             );
             files.program.files.log.events.removeEventListener(
                 "role",
-                roleChangeListener
+                replicatorsChangeListener
             );
             files.program.events.removeEventListener("open", onOpen);
         };
@@ -253,7 +248,16 @@ export const Drop = () => {
                     .sort((a, b) => a.name.localeCompare(b.name))
             );
             // Get replication set
-            setReplicationSet(new Set(files.program.files.index.index.keys()));
+            // TODO performance: this is not efficient
+            setReplicationSet(
+                new Set(
+                    (
+                        await files.program.files.index.search(
+                            new SearchRequest({})
+                        )
+                    ).map((x) => x.id)
+                )
+            );
             forceUpdate();
         } catch (error) {
             console.warn(
@@ -509,8 +513,7 @@ export const Drop = () => {
                                                     <Switch.Thumb className="SwitchThumb" />
                                                 </Switch.Root>
                                             </fieldset>
-                                            {currentRole instanceof
-                                                Replicator && (
+                                            {role === "replicator" && (
                                                 <div className="flex flex-col gap-4 mt-4">
                                                     <span>Limit</span>
                                                     <fieldset className="flex flex-col gap-2">
@@ -738,8 +741,7 @@ export const Drop = () => {
                                                     files={files.program}
                                                     file={x}
                                                     replicated={
-                                                        currentRole instanceof
-                                                            Replicator &&
+                                                        role === "replicator" &&
                                                         replicationSet.has(x.id)
                                                     }
                                                 />

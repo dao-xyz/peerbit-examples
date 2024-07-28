@@ -21,7 +21,7 @@ describe("user", () => {
             await history.insert(
                 new SimpleWebManifest({ url: "https://example.com" })
             );
-            expect(history.visits.index.size).toEqual(1);
+            expect(await history.visits.index.getSize()).toEqual(1);
 
             // close and reload
             await history.close();
@@ -30,7 +30,7 @@ describe("user", () => {
                 rootTrust: session.peers[0].identity.publicKey,
             });
             await session.peers[0].open(historyAgain);
-            expect(historyAgain.visits.index.size).toEqual(1);
+            expect(await historyAgain.visits.index.getSize()).toEqual(1);
         });
     });
 });

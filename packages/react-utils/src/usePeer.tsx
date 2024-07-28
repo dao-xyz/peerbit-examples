@@ -157,7 +157,9 @@ export const PeerProvider = (options: PeerOptions) => {
                 newPeer = await Peerbit.create({
                     libp2p: {
                         addresses: {
-                            listen: ["/webrtc"],
+                            listen: [
+                                /* "/webrtc" */
+                            ], // TMP disable because flaky behaviour with libp2p 1.8.1
                         },
                         connectionEncryption: [noise()],
                         peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
@@ -186,7 +188,7 @@ export const PeerProvider = (options: PeerOptions) => {
                                       circuitRelayTransport({
                                           discoverRelays: 1,
                                       }),
-                                      webRTC(),
+                                      /*    webRTC(), */ // TMP disable because flaky behaviour with libp2p 1.8.1
                                   ],
                               }
                             : {
@@ -195,7 +197,7 @@ export const PeerProvider = (options: PeerOptions) => {
                                       circuitRelayTransport({
                                           discoverRelays: 1,
                                       }),
-                                      webRTC(),
+                                      /*   webRTC(), */ // TMP disable because flaky behaviour with libp2p 1.8.1
                                   ],
                               }),
 

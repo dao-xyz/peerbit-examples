@@ -9,13 +9,13 @@ import {
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
 
-    beforeAll(async () => {
+    beforeEach(async () => {
         peer = await Peerbit.create();
         peer2 = await Peerbit.create();
         await peer.dial(peer2);
     });
 
-    afterAll(async () => {
+    afterEach(async () => {
         await peer.stop();
         await peer2.stop();
     });
@@ -38,7 +38,7 @@ describe("index", () => {
             expect(myPosts).toHaveLength(1);
 
             const viewer = await peer2.open<BlogPosts>(platform.address, {
-                args: { role: "observer" },
+                args: { replicate: false },
             });
 
             // wait for viewer knows that peer is replicating the posts

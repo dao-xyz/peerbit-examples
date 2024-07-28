@@ -1,11 +1,12 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import Tags from "@yaireo/tagify/dist/react.tagify";
+import * as Tags from "@yaireo/tagify/dist/react.tagify";
 import "./path.css";
 import Tagify from "@yaireo/tagify";
 import { getRoomByPath } from "../routes";
-import { getRoomPathFromURL, useRooms } from "../useRooms";
+import { getRoomPathFromURL } from "../useRooms";
 import { MdSearch } from "react-icons/md";
+
 // Tagify settings object
 const baseTagifySettings = {
     onChangeAfterBlur: false,

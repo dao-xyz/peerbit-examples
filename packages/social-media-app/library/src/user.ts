@@ -55,12 +55,12 @@ export class BrowsingHistory extends Program {
     async open(): Promise<void> {
         return this.visits.open({
             type: Visit,
-            canPerform: async (operation, { entry }) => {
+            canPerform: async (props) => {
                 /**
                  * Only allow self
                  */
                 return (
-                    entry.signatures.find(
+                    props.entry.signatures.find(
                         (x) =>
                             x.publicKey.equals(this.key) &&
                             x.publicKey.equals(this.node.identity.publicKey)

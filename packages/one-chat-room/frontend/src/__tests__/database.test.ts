@@ -27,7 +27,7 @@ describe("Room", () => {
 
         const roomObserve = await peer2.open<Room>(room.address, {
             args: {
-                role: "observer",
+                replicate: false,
             },
         });
 
@@ -62,7 +62,7 @@ describe("Room", () => {
 
         const roomObserve = await peer2.open<Room>(room.address, {
             args: {
-                role: "observer",
+                replicate: false,
             },
         });
         await roomObserve.messages.log.waitForReplicator(

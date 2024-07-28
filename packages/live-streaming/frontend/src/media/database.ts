@@ -53,8 +53,7 @@ import {
     SortDirection,
     IntegerCompare,
     Compare,
-    MissingField,
-    RoleOptions,
+    IsNull,
     SearchOptions,
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
@@ -63,6 +62,7 @@ import { write, length } from "@protobufjs/utf8";
 import { concat } from "uint8arrays";
 import { Entry } from "@peerbit/log";
 import { randomBytes } from "@peerbit/crypto";
+import { ReplicationOptions } from "@peerbit/shared-log";
 
 const utf8Encode = (value: string) => {
     const l = length(value);
@@ -90,6 +90,23 @@ export class Chunk {
         this.type = props.type;
         this.chunk = props.chunk;
         this.timestamp = props.timestamp;
+    }
+}
+
+class ChunkIndexable {
+    @field({ type: "string" })
+    id: string;
+
+    @field({ type: "string" })
+    type: string;
+
+    @field({ type: "u64" })
+    timestamp: bigint;
+
+    constructor(chunk: Chunk) {
+        this.id = chunk.id;
+        this.type = chunk.type;
+        this.timestamp = chunk.timestamp;
     }
 }
 
@@ -125,12 +142,15 @@ export class MediaStreamInfo {
     }
 }
 
-type Args = { role?: RoleOptions; sync?: (entry: Entry<any>) => boolean };
+type Args = {
+    replicate?: ReplicationOptions;
+    sync?: (entry: Entry<any>) => boolean;
+};
 
 @variant("track-source")
 export abstract class TrackSource {
     @field({ type: Documents })
-    private _chunks: Documents<Chunk>;
+    private _chunks: Documents<Chunk, ChunkIndexable>;
 
     constructor() {
         this._chunks = new Documents({
@@ -145,8 +165,8 @@ export abstract class TrackSource {
     async open(args: { sender: PublicSignKey } & Partial<Args>): Promise<void> {
         await this.chunks.open({
             type: Chunk,
-            canPerform: async (_operation, context) => {
-                const keys = await context.entry.getPublicKeys();
+            canPerform: async (props) => {
+                const keys = await props.entry.getPublicKeys();
                 // Only append if chunks are signed by sender/streamer
                 for (const key of keys) {
                     if (key.equals(args.sender)) {
@@ -156,15 +176,17 @@ export abstract class TrackSource {
                 return false;
             },
             index: {
-                fields: (obj) => {
-                    return {
+                type: ChunkIndexable,
+                transform: (obj) => {
+                    return new ChunkIndexable({
                         id: obj.id,
                         timestamp: obj.timestamp,
                         type: obj.type,
-                    };
+                        chunk: obj.chunk,
+                    });
                 },
             },
-            role: args?.role,
+            replicate: args?.replicate,
             sync: args?.sync,
         });
     }
@@ -305,8 +327,8 @@ export class MediaStreamDB extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.streams.open({
             type: Track,
-            canPerform: async (opeation, { entry }) => {
-                const keys = await entry.getPublicKeys();
+            canPerform: async (props) => {
+                const keys = await props.entry.getPublicKeys();
                 // Only append if chunks are signed by sender/streamer
                 for (const key of keys) {
                     if (key.equals(this.owner)) {
@@ -316,7 +338,7 @@ export class MediaStreamDB extends Program<Args> {
                 return false;
             },
             canOpen: (_) => Promise.resolve(false), // dont open subdbs by opening this db
-            role: args?.role,
+            replicate: args?.replicate,
             sync: args?.sync,
         });
     }
@@ -329,8 +351,9 @@ export class MediaStreamDB extends Program<Args> {
                 sort: [
                     new Sort({ key: "session", direction: SortDirection.DESC }),
                 ],
+                fetch: 1,
             }),
-            { ...options, size: 1 }
+            { ...options }
         );
         if (latest.length === 0) {
             return [];
@@ -346,7 +369,7 @@ export class MediaStreamDB extends Program<Args> {
                     }),
 
                     // make track has not ended
-                    new MissingField({
+                    new IsNull({
                         key: "endTime",
                     }),
                 ],

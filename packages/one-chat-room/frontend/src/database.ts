@@ -10,11 +10,11 @@ import {
     Sort,
     Compare,
     Query,
-    RoleOptions,
 } from "@peerbit/document";
 import { v4 as uuid } from "uuid";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
+import { ReplicationOptions } from "@peerbit/shared-log";
 
 const FROM = "from";
 const MESSAGE = "message";
@@ -38,8 +38,29 @@ export class Post {
     }
 }
 
+class IndexablePost {
+    @field({ type: "string" })
+    id: string;
+
+    @field({ type: Uint8Array })
+    [FROM]: Uint8Array;
+
+    @field({ type: "string" })
+    [MESSAGE]: string;
+
+    @field({ type: "u64" })
+    [TIMESTAMP]: bigint;
+
+    constructor(post: Post, timestamp: bigint) {
+        this.id = post.id;
+        this[FROM] = post.from.bytes;
+        this[MESSAGE] = post.message;
+        this[TIMESTAMP] = timestamp;
+    }
+}
+
 type Args = {
-    role?: RoleOptions;
+    replicate?: ReplicationOptions;
 };
 
 @variant("room")
@@ -48,17 +69,17 @@ export class Room extends Program<Args> {
     creator: PublicSignKey;
 
     @field({ type: Documents })
-    messages: Documents<Post>;
+    messages: Documents<Post, IndexablePost>;
 
     constructor(properties: {
         creator: PublicSignKey;
-        messages?: Documents<Post>;
+        messages?: Documents<Post, IndexablePost>;
     }) {
         super();
         this.creator = properties.creator;
         this.messages =
             properties.messages ||
-            new Documents<Post>({
+            new Documents<Post, IndexablePost>({
                 id: sha256Sync(
                     concat([
                         new TextEncoder().encode("room"),
@@ -76,22 +97,24 @@ export class Room extends Program<Args> {
     async open(args?: Args): Promise<void> {
         await this.messages.open({
             type: Post,
-            canPerform: async (operation, { entry }) => {
-                if (operation instanceof PutOperation) {
-                    const post = operation.value;
+            canPerform: async (props) => {
+                if (props.type === "put") {
+                    const post = props.value;
                     if (
-                        !entry.signatures.find((x) =>
+                        !props.entry.signatures.find((x) =>
                             x.publicKey.equals(post!.from)
                         )
                     ) {
                         return false;
                     }
                     return true;
-                } else if (operation instanceof DeleteOperation) {
-                    const get = await this.messages.index.get(operation.key);
+                } else if (props.type === "delete") {
+                    const get = await this.messages.index.get(
+                        props.operation.key
+                    );
                     if (
                         !get ||
-                        !entry.signatures.find((x) =>
+                        !props.entry.signatures.find((x) =>
                             x.publicKey.equals(get.from)
                         )
                     ) {
@@ -103,18 +126,16 @@ export class Room extends Program<Args> {
             },
 
             index: {
-                fields: (obj, context) => {
-                    return {
-                        [FROM]: obj[FROM].bytes,
-                        [MESSAGE]: obj[MESSAGE],
-                        [TIMESTAMP]: context.created,
-                    };
+                type: IndexablePost,
+                idProperty: "id",
+                transform: (obj, context) => {
+                    return new IndexablePost(obj, context.created);
                 },
                 canRead: async (document, publicKey) => {
                     return true; // Anyone can query
                 },
             },
-            role: args?.role,
+            replicate: args?.replicate,
         });
     }
 
@@ -155,7 +176,7 @@ export class Room extends Program<Args> {
             if (created != null) {
                 query.push(
                     new IntegerCompare({
-                        key: "timestmap",
+                        key: "timestamp",
                         compare: Compare.Less,
                         value: created,
                     })

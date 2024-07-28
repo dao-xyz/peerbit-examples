@@ -2,7 +2,6 @@ import { Peerbit } from "peerbit";
 import { Files, LargeFile } from "..";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
-import { SearchRequest, StringMatch } from "@peerbit/document";
 import { waitForResolved } from "@peerbit/time";
 
 describe("index", () => {
@@ -26,7 +25,7 @@ describe("index", () => {
         const smallFile = new Uint8Array([123]);
         await filestore.add("tiny file", smallFile);
         const filestoreReader = await peer2.open<Files>(filestore.address, {
-            args: { role: "observer" },
+            args: { replicate: false },
         });
         await filestoreReader.files.log.waitForReplicator(
             peer.identity.publicKey
@@ -51,7 +50,7 @@ describe("index", () => {
 
         const filestoreReader = await peer2.open<Files>(filestore.address, {
             args: {
-                role: "observer",
+                replicate: false,
             },
         });
         await filestoreReader.files.log.waitForReplicator(
@@ -78,10 +77,10 @@ describe("index", () => {
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +2 SmallFiles, because all chunks expect the last one will be exactly the same
             //(the last chunk will be different because it is smaller, but will also just contain 0)
-            expect(filestore.files.index.size).toEqual(3);
+            expect(await filestore.files.index.getSize()).toEqual(3);
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: { role: "observer" },
+                args: { replicate: false },
             });
             await filestoreReader.files.log.waitForReplicator(
                 peer.identity.publicKey
@@ -100,10 +99,10 @@ describe("index", () => {
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +56 SmallFiles
-            expect(filestore.files.index.size).toEqual(101); // depends on the chunk size used
+            expect(await filestore.files.index.getSize()).toEqual(101); // depends on the chunk size used
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: { role: "observer" },
+                args: { replicate: false },
             });
             await filestoreReader.files.log.waitForReplicator(
                 peer.identity.publicKey
@@ -133,10 +132,12 @@ describe("index", () => {
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +56 SmallFiles
-            expect(filestore.files.index.size).toEqual(101); // depends on the chunk size used
+            expect(await filestore.files.index.getSize()).toEqual(101); // depends on the chunk size used
 
-            await waitForResolved(() =>
-                expect(filestoreReplicator2.files.index.size).toEqual(101)
+            await waitForResolved(async () =>
+                expect(
+                    await filestoreReplicator2.files.index.getSize()
+                ).toEqual(101)
             );
         });
 
@@ -149,7 +150,7 @@ describe("index", () => {
              await filestore.add("10mb file", largeFile);
  
              const filestoreReader = await peer2.open<Files>(filestore.address, {
-                 args: { role: "observer" },
+                 args: { replicate: false },
              });
              await filestoreReader.files.log.waitForReplicator(
                  peer.identity.publicKey

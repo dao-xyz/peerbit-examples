@@ -38,7 +38,9 @@ describe("index", () => {
         await lobbyFrom2.rooms.put(roomBFrom2);
 
         // peer 1 will eventually also replicate the room, since both have opened the Lobby as replicators
-        await waitFor(() => lobbyFrom1.rooms.index.size === 2);
+        await waitFor(
+            async () => (await lobbyFrom1.rooms.index.getSize()) === 2
+        );
         const results: Room[] = await lobbyFrom1.rooms.index.search(
             new SearchRequest({
                 query: [

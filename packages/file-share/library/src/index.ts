@@ -6,8 +6,7 @@ import {
     StringMatch,
     StringMatchMethod,
     Or,
-    RoleOptions,
-    MissingField,
+    IsNull,
 } from "@peerbit/document";
 import { PublicSignKey, sha256Base64Sync, randomBytes } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
@@ -15,6 +14,7 @@ import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import PQueue from "p-queue";
+import { ReplicationOptions } from "@peerbit/shared-log";
 
 export abstract class AbstractFile {
     abstract id: string;
@@ -33,6 +33,27 @@ export abstract class AbstractFile {
         }
     ): Promise<Output>;
     abstract delete(files: Files): Promise<void>;
+}
+
+class IndexableFile {
+    @field({ type: "string" })
+    id: string;
+
+    @field({ type: "string" })
+    name: string;
+
+    @field({ type: "u32" })
+    size: number;
+
+    @field({ type: option("string") })
+    parentId?: string;
+
+    constructor(file: AbstractFile) {
+        this.id = file.id;
+        this.name = file.name;
+        this.size = file.size;
+        this.parentId = file.parentId;
+    }
 }
 
 const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
@@ -161,6 +182,7 @@ export class LargeFile extends AbstractFile {
                         )
                     ),
                 ],
+                fetch: 0xffffffff,
             })
         );
         return allFiles;
@@ -263,7 +285,7 @@ export class LargeFile extends AbstractFile {
     }
 }
 
-type Args = { role: RoleOptions };
+type Args = { replicate: ReplicationOptions };
 
 @variant("files")
 export class Files extends Program<Args> {
@@ -277,7 +299,7 @@ export class Files extends Program<Args> {
     trustGraph?: TrustedNetwork;
 
     @field({ type: Documents })
-    files: Documents<AbstractFile>;
+    files: Documents<AbstractFile, IndexableFile>;
 
     constructor(
         properties: {
@@ -341,6 +363,7 @@ export class Files extends Program<Args> {
                     caseInsensitive: false,
                     method: StringMatchMethod.exact,
                 }),
+                fetch: 0xffffffff,
             })
         );
         for (const file of files) {
@@ -352,7 +375,10 @@ export class Files extends Program<Args> {
     async list() {
         // only root files (don't fetch fetch chunks here)
         const files = await this.files.index.search(
-            new SearchRequest({ query: new MissingField({ key: "parentId" }) }),
+            new SearchRequest({
+                query: new IsNull({ key: "parentId" }),
+                fetch: 0xffffffff,
+            }),
             {
                 local: true,
                 remote: {
@@ -368,6 +394,7 @@ export class Files extends Program<Args> {
         const files = await this.files.index.search(
             new SearchRequest({
                 query: new StringMatch({ key: "parentId", value: parent.id }),
+                fetch: 0xffffffff,
             }),
             {
                 local: true,
@@ -392,6 +419,7 @@ export class Files extends Program<Args> {
         const results = await this.files.index.search(
             new SearchRequest({
                 query: [new StringMatch({ key: "id", value: id })],
+                fetch: 0xffffffff,
             }),
             {
                 local: true,
@@ -428,6 +456,7 @@ export class Files extends Program<Args> {
         const results = await this.files.index.search(
             new SearchRequest({
                 query: [new StringMatch({ key: "name", value: name })],
+                fetch: 0xffffffff,
             }),
             {
                 local: true,
@@ -452,19 +481,19 @@ export class Files extends Program<Args> {
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
         await this.trustGraph?.open({
-            role: args?.role,
+            replicate: args?.replicate,
         });
 
         await this.files.open({
             type: AbstractFile,
             // TODO add ACL
-            role: args?.role,
+            replicate: args?.replicate,
             replicas: { min: 3 },
-            canPerform: async (operation, context) => {
+            canPerform: async (operation) => {
                 if (!this.trustGraph) {
                     return true;
                 }
-                for (const key of await context.entry.getPublicKeys()) {
+                for (const key of await operation.entry.getPublicKeys()) {
                     if (await this.trustGraph.isTrusted(key)) {
                         return true;
                     }
@@ -472,14 +501,7 @@ export class Files extends Program<Args> {
                 return false;
             },
             index: {
-                fields: (doc) => {
-                    return {
-                        id: doc.id,
-                        name: doc.name,
-                        size: doc.size,
-                        parentId: doc.parentId,
-                    };
-                },
+                type: IndexableFile,
             },
         });
     }

@@ -9,7 +9,9 @@ import {
     Legend,
 } from "chart.js";
 import tailwindConfig from "./../tailwind.config.js";
-import { SharedLog, Replicator } from "@peerbit/shared-log";
+import { SharedLog } from "@peerbit/shared-log";
+import { SearchRequest } from "@peerbit/document";
+import { iterate } from "@peerbit/indexer-interface";
 
 ChartJS.register(
     BarController,
@@ -118,37 +120,32 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any> }) => {
             return;
         }
 
-        const roleChangeListener = (ev) => {
+        const roleChangeListener = async (ev) => {
             let dataSets: { data: number[][] }[] = [{ data: [] }, { data: [] }];
             let labels: string[] = [];
             let myIndex = -1;
-            for (const [i, rect] of properties.log
-                .getReplicatorsSorted()
-                .toArray()
-                .entries()) {
-                let replicator: Replicator = rect.role;
+            for (const [i, rect] of (
+                await iterate(
+                    properties.log.replicationIndex,
+                    new SearchRequest()
+                ).all()
+            ).entries()) {
                 if (
-                    rect.publicKey.equals(
-                        properties.log.node.identity.publicKey
-                    )
+                    rect.value.hash ===
+                    properties.log.node.identity.publicKey.hashcode()
                 ) {
                     labels.push("you");
                     myIndex = i;
                 } else {
-                    labels.push(rect.publicKey.hashcode().slice(0, 5) + "...");
+                    labels.push(rect.value.hash.slice(0, 5) + "...");
                 }
 
-                if (replicator.factor === 1) {
+                if (rect.value.widthNormalized === 1) {
                     dataSets[0].data[i] = [0, 1];
                     dataSets[1].data[i] = [0, 0];
                 } else {
-                    let start1 = replicator.offset;
-                    let end = start1 + replicator.factor;
-                    let end1 = Math.min(1, end);
-                    let end2 = end > 1 ? end - 1 : 0;
-                    let start2 = 0;
-                    dataSets[0].data[i] = [start1, end1];
-                    dataSets[1].data[i] = [start2, end2];
+                    dataSets[0].data[i] = [rect.value.start1, rect.value.end1];
+                    dataSets[1].data[i] = [rect.value.start2, rect.value.end2];
                 }
             }
             if (chartRef.current) {
@@ -171,7 +168,10 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any> }) => {
             }
         };
         roleChangeListener(undefined as any);
-        properties.log.events.addEventListener("role", roleChangeListener);
+        properties.log.events.addEventListener(
+            "replication:change",
+            roleChangeListener
+        );
         return () =>
             properties.log.events.removeEventListener(
                 "role",

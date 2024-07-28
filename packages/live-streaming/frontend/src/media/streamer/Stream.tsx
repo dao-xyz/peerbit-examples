@@ -80,8 +80,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
         new MediaStreamDB(peer.identity.publicKey),
         {
             args: {
-                role: {
-                    type: "replicator",
+                replicate: {
                     factor: 1,
                 },
             },
@@ -327,8 +326,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                                                 videoTrack,
                                                 {
                                                     args: {
-                                                        role: {
-                                                            type: "replicator",
+                                                        replicate: {
                                                             factor: 1,
                                                         },
                                                     },
@@ -493,8 +491,7 @@ export const Stream = (args: { node: PublicSignKey }) => {
                 }),
                 {
                     args: {
-                        role: {
-                            type: "replicator",
+                        replicate: {
                             factor: 1,
                         },
                     },

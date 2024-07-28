@@ -26,7 +26,6 @@ export const Document = () => {
             const text = await program.string.getValue();
             testAreaRef.current.value = text;
             testAreaRef.current.selectionEnd = end;
-            console.log("RECEIVED UPDATE", text);
             forceUpdate();
         };
         program.string.events.addEventListener("change", listener);

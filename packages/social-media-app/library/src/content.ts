@@ -9,6 +9,7 @@ import { PublicSignKey, randomBytes } from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
+import { ReplicationOptions } from "@peerbit/shared-log";
 
 @variant(0)
 export class Layout {
@@ -78,10 +79,31 @@ export class Element<T extends ElementContent = any> {
     }
 }
 
+class IndexableElement {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: Uint8Array })
+    publicKey: Uint8Array;
+
+    @field({ type: "string" })
+    content: string;
+
+    constructor(properties: {
+        id: Uint8Array;
+        publicKey: Uint8Array;
+        content: string;
+    }) {
+        this.id = properties.id;
+        this.publicKey = properties.publicKey;
+        this.content = properties.content;
+    }
+}
+
 @variant("room")
 export class Room extends Program {
-    @field({ type: Documents<Element> })
-    elements: Documents<Element>;
+    @field({ type: Documents })
+    elements: Documents<Element, IndexableElement>;
 
     @field({ type: option(PublicSignKey) })
     key?: PublicSignKey;
@@ -132,14 +154,14 @@ export class Room extends Program {
      */
         return this.elements.open({
             type: Element,
-            canPerform: async (operation, { entry }) => {
+            canPerform: async (operation) => {
                 /**
                  * Only allow updates if we created it
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
                  */
                 return (
                     !this.key ||
-                    entry.signatures.find(
+                    operation.entry.signatures.find(
                         (x) =>
                             x.publicKey.equals(this.key!) ||
                             x.publicKey.equals(this.node.identity.publicKey)
@@ -147,12 +169,13 @@ export class Room extends Program {
                 );
             },
             index: {
-                fields: (obj) => {
-                    return {
+                type: IndexableElement,
+                transform: async (obj) => {
+                    return new IndexableElement({
                         id: obj.id,
-                        publicKey: obj.publicKey,
+                        publicKey: obj.publicKey.bytes,
                         content: obj.content.toIndex(),
-                    };
+                    });
                 },
             },
         });
@@ -286,7 +309,7 @@ export class RoomContent extends ElementContent {
 }
 
 /* 
-type Args = { role?: RoleOptions };
+type Args = { replicate?: ReplicationOptions };
 
 @variant("spaces")
 export class Spaces extends Program<Args> {

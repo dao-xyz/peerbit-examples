@@ -14,7 +14,7 @@
     },
     "dependencies": {
         "peerbit": "^4",
-        "@peerbit/document": "^6",
+        "@peerbit/document": "^7",
         "@peerbit/react": "*",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
@@ -34,7 +34,8 @@
         "@types/react-dom": "^18.2.18",
         "@vitejs/plugin-react": "^4",
         "typescript": "^5.3.3",
-        "vite": "^5.0.12"
+        "vite": "^5.3.5",
+        "@peerbit/vite": "^1"
     },
     "browserslist": {
         "production": [

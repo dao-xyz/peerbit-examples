@@ -51,8 +51,7 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                 }),
                 {
                     args: {
-                        role: {
-                            type: "replicator",
+                        replicate: {
                             factor: 1,
                         },
                     },
@@ -67,7 +66,6 @@ export const NameProvider = ({ children }: { children: JSX.Element }) => {
                         }
                     });
                 });
-                console.log("LAOD", db.names.index.size);
                 names.current = db;
             });
         }

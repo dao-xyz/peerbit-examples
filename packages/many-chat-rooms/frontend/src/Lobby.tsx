@@ -5,7 +5,8 @@ import { useNavigate } from "react-router-dom";
 import { getRoomPath } from "./routes";
 import { usePeer, useProgram } from "@peerbit/react";
 import { Lobby as LobbyDB, Room } from "@peerbit/example-many-chat-rooms";
-import { SearchRequest } from "@peerbit/document";
+import { ClosedError, SearchRequest } from "@peerbit/document";
+import { delay } from "@peerbit/time";
 
 const lobbyConfig = new LobbyDB({
     id: new Uint8Array(32), // 0,0,....0 choose this dynamically instead? Now it is static, => same lobby for all
@@ -15,8 +16,7 @@ export const Lobby = () => {
     const navigate = useNavigate();
     const lobby = useProgram(lobbyConfig, {
         args: {
-            role: {
-                type: "replicator",
+            replicate: {
                 factor: 1,
             },
         },
@@ -67,6 +67,12 @@ export const Lobby = () => {
                 .search(new SearchRequest(), { remote: { sync: true } })
                 .then((results) => {
                     addToLobby(results, true);
+                })
+                .catch((e) => {
+                    if (e instanceof ClosedError) {
+                        return;
+                    }
+                    throw e;
                 });
 
             return () =>

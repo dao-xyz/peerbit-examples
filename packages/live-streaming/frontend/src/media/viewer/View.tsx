@@ -312,6 +312,7 @@ const addAudioStreamListener = async (
     const decodeAudioDataQueue = new PQueue({ concurrency: 1 });
     const listener = (change: CustomEvent<DocumentsChange<Chunk>>) => {
         let resuming = false;
+        console.log("CHANGE", change.detail.added.length);
 
         if (play) {
             for (const added of change.detail.added) {
@@ -320,12 +321,7 @@ const addAudioStreamListener = async (
                 if (decodeAudioDataQueue.size > 10) {
                     decodeAudioDataQueue.clear(); // We can't keep up, clear the queue
                 }
-                /*  console.log(
-                     "DECODE CHUNK",
-                     streamDB.chunks.index.size,
-                     added.timestamp
-                 );
-  */
+
                 decodeAudioDataQueue.add(() => {
                     let zeroOffsetBuffer = new Uint8Array(added.chunk.length);
                     zeroOffsetBuffer.set(added.chunk, 0);
@@ -467,8 +463,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                 // Open the VideStream database as a viewer
                 peer.open(new MediaStreamDB(idArgs.node), {
                     args: {
-                        role: {
-                            type: "replicator",
+                        replicate: {
                             factor: 1,
                         },
                     },
@@ -637,16 +632,12 @@ export const View = (args: DBArgs | IdentityArgs) => {
         resultRef: React.MutableRefObject<StreamWithControls<any>>,
         streamToOpen: Track<any>
     ) => {
-        streamToOpen.source instanceof AudioStreamDB &&
-            console.log("A CLOSE PREV?", loadingRef.current);
         const prev = await loadingRef.current;
 
         if (prev) {
             await prev.controls.close();
             await prev.source?.drop();
         }
-        streamToOpen.source instanceof AudioStreamDB &&
-            console.log("B CLOSE PREV?", loadingRef.current);
 
         // get stream with closest bitrate
         let currentVideoTime: (() => number) | undefined = undefined;
@@ -654,7 +645,9 @@ export const View = (args: DBArgs | IdentityArgs) => {
         loadingRef.current = new Promise((resolve, reject) => {
             peer.open(streamToOpen, {
                 args: {
-                    role: "observer",
+                    replicate: {
+                        factor: 1,
+                    },
                     sync: () => true,
                 },
                 existing: "reuse",

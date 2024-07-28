@@ -37,7 +37,7 @@
         "typescript": "^5.3.3"
     },
     "dependencies": {
-        "@peerbit/document": "^6",
+        "@peerbit/document": "^7",
         "parse5": "^7.1.2",
         "peerbit": "^4",
         "uuid": "^9.0.0"
