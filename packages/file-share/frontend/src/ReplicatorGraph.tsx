@@ -10,7 +10,7 @@ import {
 } from "chart.js";
 import tailwindConfig from "./../tailwind.config.js";
 import { SharedLog } from "@peerbit/shared-log";
-import { SearchRequest } from "@peerbit/document";
+import { SearchRequest, Sort } from "@peerbit/document";
 import { iterate } from "@peerbit/indexer-interface";
 
 ChartJS.register(
@@ -127,7 +127,7 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any> }) => {
             for (const [i, rect] of (
                 await iterate(
                     properties.log.replicationIndex,
-                    new SearchRequest()
+                    new SearchRequest({ sort: [new Sort({ key: "hash" })] })
                 ).all()
             ).entries()) {
                 if (
