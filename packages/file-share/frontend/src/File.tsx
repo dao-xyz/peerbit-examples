@@ -135,17 +135,6 @@ export const File = (properties: {
                 <button
                     onClick={() => {
                         properties.delete();
-                        /*  filesRef.current
-                         .removeById(x.id)
-                         .then(() => {
-                             updateList();
-                         })
-                         .catch((error) => {
-                             alert(
-                                 "Failed to delete: " +
-                                 error.message
-                             );
-                         }); */
                     }}
                     className="flex flex-row border border-1 items-center p-2 btn btn-elevated"
                 >
