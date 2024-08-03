@@ -1,22 +1,28 @@
-# create-svelte
+# Peerbit Svelte example 
 
-Everything you need to build a Svelte project, powered by [`create-svelte`](https://github.com/sveltejs/kit/tree/main/packages/create-svelte).
+A simple example where each node that starts will send a "Hello" message. Open the app url in multiple tabs to see the messages being sent.
 
-## Creating a project
+Peerbit related code is found in [`src/db.ts`](https://github.com/dao-xyz/peerbit-examples/blob/master/packages/svelte-example/src/db.ts) 
 
-If you're seeing this, you've probably already done this step. Congrats!
+[`createClient`](https://github.com/dao-xyz/peerbit-examples/blob/93bb2848f118c7ecb69ee7b7ab3e980ca542ad05/packages/svelte-example/src/db.ts#L43) method takes a boolean argument which lets you control whether you want to use a local relay server or not. To launch a local server see https://peerbit.org/#/modules/deploy/server/?id=testing-locally.
 
-```bash
-# create a new project in the current directory
-npm create svelte@latest
 
-# create a new project in my-app
-npm create svelte@latest my-app
+
+
+## Setup
+Run 
+
+```bash 
+yarn 
 ```
+
+in the root of the peerbit-examples repo 
+
 
 ## Developing
 
-Once you've created a project and installed dependencies with `npm install` (or `pnpm install` or `yarn`), start a development server:
+
+Inside this project run
 
 ```bash
 npm run dev
@@ -25,14 +31,5 @@ npm run dev
 npm run dev -- --open
 ```
 
-## Building
+to launch dev server
 
-To create a production version of your app:
-
-```bash
-npm run build
-```
-
-You can preview the production build with `npm run preview`.
-
-> To deploy your app, you may need to install an [adapter](https://kit.svelte.dev/docs/adapters) for your target environment.
