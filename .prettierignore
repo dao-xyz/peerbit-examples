@@ -8,3 +8,5 @@ coverage
 **/frontend/build
 **/frontend/dist
 **/public/**
+**/static/**
+**/.svelte-kit/**

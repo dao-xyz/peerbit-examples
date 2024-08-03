@@ -23,8 +23,8 @@ describe("index", () => {
         });
         const client = await session.peers[1].open<AppPreview>(db.address);
         await client.waitFor(db.node.identity.publicKey);
-        const resposne = await client.resolve("https://twitch.tv/ppy");
-        expect(resposne?.title).toEqual("Twitch");
+        const response = await client.resolve("https://twitch.tv/ppy");
+        expect(response?.title).toEqual("Twitch");
 
         /* const peer = await Peerbit.create();
         await peer.bootstrap()
