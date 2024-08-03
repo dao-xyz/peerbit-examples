@@ -1,7 +1,6 @@
 import React, { useContext } from "react";
 import { Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
-import { webSockets } from "@libp2p/websockets";
 import { DirectSub } from "@peerbit/pubsub";
 import { yamux } from "@chainsafe/libp2p-yamux";
 import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
@@ -10,13 +9,16 @@ import { v4 as uuid } from "uuid";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { FastMutex } from "./lockstorage.js";
 import sodium from "libsodium-wrappers";
-import * as filters from "@libp2p/websockets/filters";
+
 import { useMount } from "./useMount.js";
 import { createClient, createHost } from "@peerbit/proxy-window";
 import { ProgramClient } from "@peerbit/program";
-import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { webRTC } from "@libp2p/webrtc";
 import { identify } from "@libp2p/identify";
+import { webSockets } from "@libp2p/websockets";
+import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
+
+import * as filters from "@libp2p/websockets/filters";
 import { detectIncognito } from "detectincognitojs";
 
 export type ConnectionStatus =
