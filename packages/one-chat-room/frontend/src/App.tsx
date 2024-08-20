@@ -38,7 +38,6 @@ export const App = () => {
             network={
                 import.meta.env.MODE === "development" ? "local" : "remote"
             }
-            inMemory={true}
         >
             <ThemeProvider theme={theme}>
                 <CssBaseline />
