@@ -383,7 +383,7 @@ export class Files extends Program<Args> {
                 local: true,
                 remote: {
                     throwOnMissing: true,
-                    sync: true, // sync here because this, because we might want to access it offline, even though we are not replicators
+                    replicate: true, // sync here because this, because we might want to access it offline, even though we are not replicators
                 },
             }
         );

@@ -496,7 +496,7 @@ export const View = (args: DBArgs | IdentityArgs) => {
                         .then(() => {
                             updateStreamChoice();
                             videoStream.current.getLatest({
-                                remote: { sync: true },
+                                remote: { replicate: true },
                             });
                         })
                         .catch((e) => {
@@ -648,7 +648,6 @@ export const View = (args: DBArgs | IdentityArgs) => {
                     replicate: {
                         factor: 1,
                     },
-                    sync: () => true,
                 },
                 existing: "reuse",
             })

@@ -377,7 +377,7 @@ export const Room = (properties: { room: RoomDB }) => {
                         (
                             await room.elements.index.search(
                                 new SearchRequest({ query: [] }),
-                                { remote: { sync: true } }
+                                { remote: { replicate: true } }
                             )
                         ).length
                     );

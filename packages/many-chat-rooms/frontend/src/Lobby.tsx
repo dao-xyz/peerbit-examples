@@ -64,7 +64,7 @@ export const Lobby = () => {
             );
 
             lobby.program.rooms.index
-                .search(new SearchRequest(), { remote: { sync: true } })
+                .search(new SearchRequest(), { remote: { replicate: true } })
                 .then((results) => {
                     addToLobby(results, true);
                 })

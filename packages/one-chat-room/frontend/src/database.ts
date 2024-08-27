@@ -195,7 +195,7 @@ export class Room extends Program<Args> {
             }),
             {
                 remote: {
-                    sync: true,
+                    replicate: true,
                 },
                 local: true,
             }
@@ -264,7 +264,7 @@ export class Room extends Program<Args> {
             }),
             {
                 remote: {
-                    sync: true,
+                    replicate: true,
                 },
                 local: true,
             }

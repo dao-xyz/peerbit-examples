@@ -170,7 +170,7 @@ export const Room = () => {
 
         room.program.messages.index
             .search(new SearchRequest({ query: [] }), {
-                remote: { sync: true },
+                remote: { replicate: true },
             })
             .then((results) => {
                 results.forEach(addPostToView);

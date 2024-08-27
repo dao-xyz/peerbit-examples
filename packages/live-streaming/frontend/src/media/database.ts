@@ -58,18 +58,10 @@ import {
 } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import { v4 as uuid } from "uuid";
-import { write, length } from "@protobufjs/utf8";
 import { concat } from "uint8arrays";
-import { Entry } from "@peerbit/log";
 import { randomBytes } from "@peerbit/crypto";
 import { ReplicationOptions } from "@peerbit/shared-log";
-
-const utf8Encode = (value: string) => {
-    const l = length(value);
-    const arr = new Uint8Array(l);
-    write(value, arr, 0);
-    return arr;
-};
+import { createDocumentDomain, CustomDomain } from "./domain";
 
 @variant(0)
 export class Chunk {
@@ -144,13 +136,12 @@ export class MediaStreamInfo {
 
 type Args = {
     replicate?: ReplicationOptions;
-    sync?: (entry: Entry<any>) => boolean;
 };
 
 @variant("track-source")
 export abstract class TrackSource {
     @field({ type: Documents })
-    private _chunks: Documents<Chunk, ChunkIndexable>;
+    private _chunks: Documents<Chunk, ChunkIndexable, CustomDomain>;
 
     constructor() {
         this._chunks = new Documents({
@@ -187,7 +178,11 @@ export abstract class TrackSource {
                 },
             },
             replicate: args?.replicate,
-            sync: args?.sync,
+            domain: createDocumentDomain(this.chunks, {
+                fromValue: (value) => Number(value.timestamp),
+                fromMissing: (entry) =>
+                    Number(entry.meta.clock.timestamp.wallTime / BigInt(1e6)),
+            }),
         });
     }
 
@@ -339,12 +334,11 @@ export class MediaStreamDB extends Program<Args> {
             },
             canOpen: (_) => Promise.resolve(false), // dont open subdbs by opening this db
             replicate: args?.replicate,
-            sync: args?.sync,
         });
     }
 
     async getLatest(
-        options?: SearchOptions<Track<AudioStreamDB | WebcodecsStreamDB>>
+        options?: SearchOptions<Track<AudioStreamDB | WebcodecsStreamDB>, any>
     ): Promise<Track<AudioStreamDB | WebcodecsStreamDB>[]> {
         const latest = await this.streams.index.search(
             new SearchRequest({

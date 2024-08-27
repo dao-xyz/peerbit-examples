@@ -286,7 +286,7 @@ const allowCommitsFromSameSigners =
     (document: Documents<any>) => async (props: CanPerformOperations<any>) => {
         // allow all operations if the are signed by the same authors
         // i.e. for all the related commits ('next') the signatures should be the same
-        const previousCommits = props.entry.next;
+        const previousCommits = props.entry.meta.next;
         for (const commit of previousCommits) {
             const prevSignatures = (await document.log.log.get(commit))
                 ?.signatures;
