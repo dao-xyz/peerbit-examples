@@ -1206,7 +1206,11 @@ export class MediaStreamDB extends Program<{}> {
                         );
                     };
                     try {
-                        while (loopCondition() && iterator) {
+                        while (
+                            loopCondition() &&
+                            iterator &&
+                            iterator.done() !== true
+                        ) {
                             // buffer bufferTime worth of video
                             if (session !== currentSession) {
                                 return;
