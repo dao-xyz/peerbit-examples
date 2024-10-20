@@ -3,17 +3,17 @@ import { Files, LargeFile } from "..";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
 import { waitForResolved } from "@peerbit/time";
-
+import { expect } from "chai";
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
 
-    beforeAll(async () => {
+    before(async () => {
         peer = await Peerbit.create();
         peer2 = await Peerbit.create();
         await peer.dial(peer2);
     });
 
-    afterAll(async () => {
+    after(async () => {
         await peer.stop();
         await peer2.stop();
     });
@@ -35,10 +35,10 @@ describe("index", () => {
             new Uint8Array(
                 (await filestoreReader.getByName("tiny file"))!.bytes
             )
-        ).toEqual(smallFile);
+        ).to.eq(smallFile);
 
         await filestore.removeByName("tiny file");
-        expect(await filestoreReader.getByName("tiny file")).toBeUndefined();
+        expect(await filestoreReader.getByName("tiny file")).to.be.undefined;
     });
 
     it("small file", async () => {
@@ -58,10 +58,10 @@ describe("index", () => {
         );
 
         const file = await filestoreReader.getByName("small file");
-        expect(equals(new Uint8Array(file!.bytes), smallFile)).toBeTrue();
+        expect(equals(new Uint8Array(file!.bytes), smallFile)).to.be.true;
 
         await filestore.removeByName("small file");
-        expect(await filestoreReader.getByName("small file")).toBeUndefined();
+        expect(await filestoreReader.getByName("small file")).to.be.undefined;
 
         // TODO check that block is removed
     });
@@ -77,7 +77,7 @@ describe("index", () => {
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +2 SmallFiles, because all chunks expect the last one will be exactly the same
             //(the last chunk will be different because it is smaller, but will also just contain 0)
-            expect(await filestore.files.index.getSize()).toEqual(3);
+            expect(await filestore.files.index.getSize()).to.eq(3);
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
                 args: { replicate: false },
@@ -87,7 +87,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.getByName("large file");
-            expect(equals(file!.bytes, largeFile)).toBeTrue();
+            expect(equals(file!.bytes, largeFile)).to.be.true;
         });
 
         it("random file", async () => {
@@ -99,7 +99,7 @@ describe("index", () => {
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +56 SmallFiles
-            expect(await filestore.files.index.getSize()).toEqual(101); // depends on the chunk size used
+            expect(await filestore.files.index.getSize()).to.eq(101); // depends on the chunk size used
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
                 args: { replicate: false },
@@ -111,12 +111,11 @@ describe("index", () => {
             const file = (await filestoreReader.getByName(
                 "random large file"
             ))!;
-            expect(equals(file!.bytes, largeFile)).toBeTrue();
+            expect(equals(file!.bytes, largeFile)).to.be.true;
 
             await filestore.removeByName("random large file");
-            expect(
-                await filestoreReader.getByName("random large file")
-            ).toBeUndefined();
+            expect(await filestoreReader.getByName("random large file")).to.be
+                .undefined;
         });
 
         it("replicates", async () => {
@@ -132,12 +131,12 @@ describe("index", () => {
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
             // +56 SmallFiles
-            expect(await filestore.files.index.getSize()).toEqual(101); // depends on the chunk size used
+            expect(await filestore.files.index.getSize()).to.eq(101); // depends on the chunk size used
 
             await waitForResolved(async () =>
-                expect(
-                    await filestoreReplicator2.files.index.getSize()
-                ).toEqual(101)
+                expect(await filestoreReplicator2.files.index.getSize()).to.eq(
+                    101
+                )
             );
         });
 
@@ -169,7 +168,7 @@ describe("index", () => {
                      },
                  }
              );
-             expect(results).toHaveLength(1);
+             expect(results).to.have.length(1);
              const f0 = results[0] as LargeFile;
              const allChunks = await f0.fetchChunks(filestoreReader);
  

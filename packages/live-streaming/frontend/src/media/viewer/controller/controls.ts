@@ -1,8 +1,7 @@
 export interface ControlFunctions {
-    setLive: () => void;
     play: () => void;
     pause: () => void;
-    setProgress: (value: number) => void;
+    setProgress: (value: number | "live") => void;
     mute?: () => void;
     unmute?: () => void;
     setVolume?: (value: number) => void;
@@ -10,6 +9,8 @@ export interface ControlFunctions {
 }
 export interface ControlStates {
     isPlaying: boolean;
-    progress: number;
+    progress?: number | "live";
+    maxTime: number;
+    currentTime: number;
 }
 export type ControlInterface = ControlFunctions & ControlStates;

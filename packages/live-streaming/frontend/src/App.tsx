@@ -1,44 +1,8 @@
 import { HashRouter } from "react-router-dom";
-import {
-    createTheme,
-    responsiveFontSizes,
-    ThemeProvider,
-    CssBaseline,
-} from "@mui/material";
 import { Content } from "./Content";
 import { PeerProvider } from "@peerbit/react";
-import blue from "@mui/material/colors/amber";
-import { inIframe } from "@peerbit/react";
-
-/* import { logger, enable } from "@libp2p/logger";
-enable("libp2p:*"); */
-
-let theme = createTheme({
-    palette: {
-        mode: "dark",
-        primary: blue,
-        background: inIframe()
-            ? {
-                  default: "transparent",
-              }
-            : {},
-    },
-    typography: {
-        fontFamily: [
-            "-apple-system",
-            "BlinkMacSystemFont",
-            '"Segoe UI"',
-            "Roboto",
-            '"Helvetica Neue"',
-            "Arial",
-            "sans-serif",
-            '"Apple Color Emoji"',
-            '"Segoe UI Emoji"',
-            '"Segoe UI Symbol"',
-        ].join(","),
-    },
-});
-theme = responsiveFontSizes(theme);
+import "./index.css";
+document.documentElement.classList.add("dark");
 
 export const App = () => {
     return (
@@ -49,12 +13,12 @@ export const App = () => {
                 import.meta.env.MODE === "development" ? "local" : "remote"
             }
         >
-            <ThemeProvider theme={theme}>
-                <CssBaseline />
-                <HashRouter basename="/">
-                    <Content />
-                </HashRouter>
-            </ThemeProvider>
+            {/*  <ThemeProvider theme={theme}>
+                <CssBaseline /> */}
+            <HashRouter basename="/">
+                <Content />
+            </HashRouter>
+            {/*    </ThemeProvider> */}
         </PeerProvider>
     );
 };

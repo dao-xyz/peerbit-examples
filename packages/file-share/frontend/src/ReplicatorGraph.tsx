@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import { useEffect, useRef } from "react";
 import {
     Chart as ChartJS,
     CategoryScale,
@@ -9,9 +9,8 @@ import {
     Legend,
 } from "chart.js";
 import tailwindConfig from "./../tailwind.config.js";
-import { SharedLog } from "@peerbit/shared-log";
-import { SearchRequest, Sort } from "@peerbit/document";
-import { iterate } from "@peerbit/indexer-interface";
+import { ReplicationRangeIndexable, SharedLog } from "@peerbit/shared-log";
+import { Sort } from "@peerbit/document";
 
 ChartJS.register(
     BarController,
@@ -124,28 +123,40 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any> }) => {
             let dataSets: { data: number[][] }[] = [{ data: [] }, { data: [] }];
             let labels: string[] = [];
             let myIndex = -1;
-            for (const [i, rect] of (
-                await iterate(
-                    properties.log.replicationIndex,
-                    new SearchRequest({ sort: [new Sort({ key: "hash" })] })
-                ).all()
-            ).entries()) {
-                if (
-                    rect.value.hash ===
-                    properties.log.node.identity.publicKey.hashcode()
-                ) {
+            const iterator = properties.log.replicationIndex.iterate({
+                sort: [new Sort({ key: "hash" })],
+            });
+            for (const [i, rect] of (await iterator.all()).entries()) {
+                const value = rect.value as ReplicationRangeIndexable; // TODO why do we need this type check?
+
+                let isMySegment =
+                    value.hash ===
+                    properties.log.node.identity.publicKey.hashcode();
+                if (isMySegment) {
                     labels.push("you");
+                    console.log(
+                        "IS ME",
+                        value,
+                        await properties.log.replicationIndex.iterate().all(),
+                        properties.log.address
+                    );
                     myIndex = i;
                 } else {
-                    labels.push(rect.value.hash.slice(0, 5) + "...");
+                    labels.push(value.hash.slice(0, 5) + "...");
                 }
 
-                if (rect.value.widthNormalized === 1) {
+                if (value.widthNormalized === 1) {
                     dataSets[0].data[i] = [0, 1];
                     dataSets[1].data[i] = [0, 0];
                 } else {
-                    dataSets[0].data[i] = [rect.value.start1, rect.value.end1];
-                    dataSets[1].data[i] = [rect.value.start2, rect.value.end2];
+                    dataSets[0].data[i] = [
+                        value.start1 / 0xffffffff,
+                        value.end1 / 0xffffffff,
+                    ];
+                    dataSets[1].data[i] = [
+                        value.start2 / 0xffffffff,
+                        value.end2 / 0xffffffff,
+                    ];
                 }
             }
             if (chartRef.current) {

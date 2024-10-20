@@ -22,7 +22,7 @@
         "react": "*"
     },
     "dependencies": {
-        "@chainsafe/libp2p-yamux": "^6",
+        "@chainsafe/libp2p-yamux": "^7",
         "@emotion/react": "^11.11.3",
         "@emotion/styled": "^11.11.0",
         "@mui/icons-material": "^5.15.7",
@@ -34,7 +34,7 @@
         "peerbit": "^4",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
-        "react-router-dom": "^6.16.0",
+        "react-router-dom": "^6.27.0",
         "react-use": "^17.4.0"
     },
     "devDependencies": {
@@ -48,12 +48,11 @@
     "scripts": {
         "clean": "shx rm -rf lib/*",
         "build": "yarn clean && tsc -p tsconfig.json",
-        "test": "jest"
+        "test": "mocha"
     },
     "eslintConfig": {
         "extends": [
-            "react-app",
-            "react-app/jest"
+            "react-app"
         ]
     },
     "browserslist": {

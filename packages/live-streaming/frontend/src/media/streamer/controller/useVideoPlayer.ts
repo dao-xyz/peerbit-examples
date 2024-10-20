@@ -47,7 +47,6 @@ const useVideoPlayer = (videoElement?: HTMLVideoElement): ControlInterface => {
             setIsPlaying(true);
         },
         pause: () => {
-            console.log("pause", videoElement);
             videoElement?.pause();
             setIsPlaying(false);
         },

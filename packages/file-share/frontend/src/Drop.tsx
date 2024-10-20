@@ -72,7 +72,7 @@ export const Drop = () => {
             existing: "reuse",
             args: {
                 replicate: {
-                    limits: { cpu: { max: 0, monitor: undefined as any } },
+                    limits: { cpu: { max: 1, monitor: undefined } },
                 },
             },
         }
@@ -84,7 +84,7 @@ export const Drop = () => {
     const [limitStorage, setLimitStorage] = useState<boolean>(false);
 
     const [role, setRole] = useState<"replicator" | "observer">("replicator");
-    const [limitCPU, setLimitCPU] = useState<number | undefined>(0);
+    const [limitCPU, setLimitCPU] = useState<number | undefined>(1);
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
     // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
@@ -97,7 +97,7 @@ export const Drop = () => {
         saveRoleLocalStorage(files.program, JSON.stringify(roleOptions)); // Save role in localstorage for next time
         await files.program.files.log.replicate(false);
         if (roleOptions !== false) {
-            files.program.files.log.replicate(roleOptions);
+            await files.program.files.log.replicate(roleOptions);
         }
     };
 
@@ -199,7 +199,7 @@ export const Drop = () => {
                     role === "replicator"
                         ? {
                               limits: {
-                                  cpu: { max: 0, monitor: undefined as any },
+                                  cpu: { max: 1, monitor: undefined },
                               },
                           }
                         : false
@@ -237,7 +237,6 @@ export const Drop = () => {
         if (files.program.files.log.closed) {
             return;
         }
-        console.log("UPDATE LIST?");
 
         // TODO don't reload the whole list, just add the new elements..
         try {
@@ -264,7 +263,6 @@ export const Drop = () => {
                 "Failed to resolve complete file list: " + error?.message
             );
         }
-        console.log("UPDATE DONE");
     };
 
     const download = async (

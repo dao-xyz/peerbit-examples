@@ -5,7 +5,7 @@ describe("bootstrap", () => {
     let peer: Peerbit;
     let peer2: Peerbit;
 
-    afterAll(async () => {
+    after(async () => {
         await peer.stop();
         await peer2?.stop();
     });
@@ -152,7 +152,7 @@ describe("bootstrap", () => {
 
             const platform = await peer.open(new BlogPosts());
 
-            await waitForResolved(() => expect(platform.posts.log.getReplicatorsSorted().length).toBeGreaterThan(1))
+            await waitForResolved(() => expect(platform.posts.log.getReplicatorsSorted().length).to.be.greaterThan(1))
             await platform.alias.put(new Alias({ name: author, publicKey: peer.identity.publicKey }));
             for (const post of posts) {
                 await platform.posts.put(new Post({ title: post.title, content: post.content }));
@@ -166,7 +166,7 @@ describe("bootstrap", () => {
         const platform = await peer.open(new BlogPosts(), { args: { role: 'observer' } });
         await peer.bootstrap() //  await peer.dial(remoteAddress)
 
-        await waitForResolved(() => expect(platform.posts.log.getReplicatorsSorted().length).toBeGreaterThan(0))
+        await waitForResolved(() => expect(platform.posts.log.getReplicatorsSorted().length).to.be.greaterThan(0))
         const posts = await platform.getLatestPosts(1000);
         console.log(posts.length) */
     });

@@ -9,6 +9,7 @@ peerbit/
 keystore-test
 **/__tests__/**/tmp
 /tmp
+**/tmp
 **/public/peerbit/**
 nginx_secrets
 nginx

@@ -1,3 +1,6 @@
+/// <reference types="@webgpu/types" />
+// for some reason online inlining webgpu/types seem to actually work (instead of using types or typeRoots in tsconfig.json)
+
 import { Renderer } from "../interface";
 import fullscreenTexturedQuadWGSL from "./fullscreenTexturedQuad.wgsl?raw";
 import sampleExternalTextureWGSL from "./sampleExternalTexture.frag.wgsl?raw";

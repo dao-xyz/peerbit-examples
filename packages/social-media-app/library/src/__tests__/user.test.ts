@@ -1,6 +1,7 @@
 import { TestSession } from "@peerbit/test-utils";
 import { BrowsingHistory } from "../user.js";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
+import { expect } from "chai";
 
 describe("user", () => {
     let session: TestSession;
@@ -21,7 +22,7 @@ describe("user", () => {
             await history.insert(
                 new SimpleWebManifest({ url: "https://example.com" })
             );
-            expect(await history.visits.index.getSize()).toEqual(1);
+            expect(await history.visits.index.getSize()).to.eq(1);
 
             // close and reload
             await history.close();
@@ -30,7 +31,7 @@ describe("user", () => {
                 rootTrust: session.peers[0].identity.publicKey,
             });
             await session.peers[0].open(historyAgain);
-            expect(await historyAgain.visits.index.getSize()).toEqual(1);
+            expect(await historyAgain.visits.index.getSize()).to.eq(1);
         });
     });
 });

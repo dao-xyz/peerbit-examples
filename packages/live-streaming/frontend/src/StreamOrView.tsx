@@ -1,41 +1,42 @@
-import { usePeer } from "@peerbit/react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
-import { getKeyFromStreamKey } from "./routes";
 import { Stream } from "./media/streamer/Stream";
 import { View } from "./media/viewer/View";
-import { PublicSignKey } from "@peerbit/crypto";
+import { MediaStreamDB } from "./media/database";
 
 export const StreamOrView = () => {
     const { peer } = usePeer();
+
     const params = useParams();
-    const [idArgs, setIdArgs] = useState<{
-        node: PublicSignKey;
-    }>();
+
     const [isStreamer, setIsStreamer] = useState<boolean | undefined>(
         undefined
     );
 
+    const mediaStream = useProgram<MediaStreamDB>(params.address, {
+        args: { replicate: { factor: 1 } },
+        existing: "reuse",
+    });
+
     // TODO
     useEffect(() => {
-        if (!peer || !params.node || !params.node) {
+        if (!peer || !mediaStream?.program) {
             return;
         }
-
-        const node = getKeyFromStreamKey(params.node);
-        setIsStreamer(peer.identity.publicKey.equals(node));
-        setIdArgs({ node });
-    }, [peer?.identity.publicKey.hashcode(), params?.node]);
-
+        setIsStreamer(
+            peer.identity.publicKey.equals(mediaStream.program.owner)
+        );
+    }, [mediaStream?.program?.address]);
     return (
         <>
             {isStreamer !== undefined && (
                 <>
                     {isStreamer ? (
-                        <Stream node={idArgs.node}></Stream>
+                        <Stream stream={mediaStream.program}></Stream>
                     ) : (
                         /*       <Box sx={{ backgroundColor: 'red', width: '100%', height: '100%' }}> RED</Box> */
-                        <View node={idArgs.node}></View>
+                        <View stream={mediaStream.program}></View>
                     )}
                 </>
             )}

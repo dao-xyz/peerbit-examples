@@ -17,15 +17,24 @@ THIS SOFTWARE.
 
 import { FastMutex } from "../lockstorage.js";
 import sinon from "sinon";
-
 import nodelocalstorage from "node-localstorage";
-import { jest } from "@jest/globals";
+import { expect } from "chai";
 import { delay } from "@peerbit/time";
-var LocalStorage = nodelocalstorage.LocalStorage;
-var localStorage = new LocalStorage("./tmp/FastMutex");
-globalThis.localStorage = localStorage;
+
 describe("FastMutex", () => {
     let sandbox;
+
+    before(() => {
+        var LocalStorage = nodelocalstorage!.LocalStorage;
+        var localStorage = new LocalStorage("./tmp/FastMutex");
+        localStorage.clear();
+        globalThis.localStorage = localStorage;
+    });
+
+    after(() => {
+        globalThis.localStorage.clear();
+    });
+
     beforeEach(() => {
         sandbox = sinon.createSandbox();
         localStorage.clear();
@@ -33,15 +42,15 @@ describe("FastMutex", () => {
     afterEach(() => {
         sandbox.restore();
         localStorage.clear();
-        expect(localStorage.length).toEqual(0);
+        expect(localStorage.length).to.eq(0);
     });
 
     it("should immediately establish a lock when there is no contention", async () => {
         const fm1 = new FastMutex({ localStorage: localStorage });
 
-        expect(fm1.isLocked("clientId")).toBeFalse();
+        expect(fm1.isLocked("clientId")).to.be.false;
         const stats = await fm1.lock("clientId");
-        expect(fm1.isLocked("clientId")).toBeTrue();
+        expect(fm1.isLocked("clientId")).to.be.true;
     });
 
     it("When another client has a lock (Y is not 0), it should restart to acquire a lock at a later time", function () {
@@ -59,7 +68,7 @@ describe("FastMutex", () => {
         }, 20);
 
         return fm1.lock(key).then(() => {
-            expect(fm1.getLockedInfo(key)).toBeDefined();
+            expect(fm1.getLockedInfo(key)).to.exist;
         });
     });
 
@@ -81,9 +90,9 @@ describe("FastMutex", () => {
         stub.onCall(4).returns("uniqueId");
 
         return fm.lock(key).then((stats) => {
-            expect(stats.restartCount).toEqual(1);
-            expect(stats.locksLost).toEqual(1);
-            expect(stats.contentionCount).toEqual(1);
+            expect(stats.restartCount).to.eq(1);
+            expect(stats.locksLost).to.eq(1);
+            expect(stats.contentionCount).to.eq(1);
         });
     });
 
@@ -103,10 +112,10 @@ describe("FastMutex", () => {
         const spy = sandbox.spy(fm, "lock");
 
         return fm.lock(key).then((stats) => {
-            expect(stats.restartCount).toEqual(0);
-            expect(stats.locksLost).toEqual(0);
-            expect(stats.contentionCount).toEqual(1);
-            expect(spy.callCount).toEqual(1);
+            expect(stats.restartCount).to.eq(0);
+            expect(stats.locksLost).to.eq(0);
+            expect(stats.contentionCount).to.eq(1);
+            expect(spy.callCount).to.eq(1);
         });
     });
 
@@ -127,20 +136,20 @@ describe("FastMutex", () => {
         /* eslint-disable jest/valid-expect-in-promise */
         const lock1Promise = fm1.lock("lock1").then((stats) => {
             lock1Acquired = true;
-            expect(localStorage.getItem(yPrefix + "lock1")).toBeDefined();
+            expect(localStorage.getItem(yPrefix + "lock1")).to.exist;
             return stats;
         });
 
         /* eslint-disable jest/valid-expect-in-promise */
         const lock2Promise = fm2.lock("lock2").then((stats) => {
             lock2Acquired = true;
-            expect(localStorage.getItem(yPrefix + "lock2")).toBeDefined();
+            expect(localStorage.getItem(yPrefix + "lock2")).to.exist;
             return stats;
         });
 
         await Promise.all([lock1Promise, lock2Promise]).then(() => {
-            expect(lock1Acquired).toBeTrue();
-            expect(lock2Acquired).toBeTrue();
+            expect(lock1Acquired).to.be.true;
+            expect(lock2Acquired).to.be.true;
         });
     });
 
@@ -154,11 +163,11 @@ describe("FastMutex", () => {
         return fm1
             .lock(key)
             .then(() => {
-                expect(fm1.getItem("yLock" + key)).toEqual("releaseTestId");
+                expect(fm1.getItem("yLock" + key)).to.eq("releaseTestId");
                 return fm1.release(key);
             })
             .then(() => {
-                expect(fm1.getItem("yLock" + key)).toBeUndefined();
+                expect(fm1.getItem("yLock" + key)).to.be.undefined;
             });
     });
 
@@ -176,7 +185,7 @@ describe("FastMutex", () => {
             .then(() => {
                 // before the lock is released, try to establish another lock:
                 var lock2Promise = fm2.lock("clientId");
-                expect(fm1LockReleased).toBeFalse();
+                expect(fm1LockReleased).to.be.false;
 
                 // in a few milliseconds, release the lock
                 setTimeout(() => {
@@ -188,14 +197,11 @@ describe("FastMutex", () => {
             })
             .then((lock2) => {
                 // this will only execute once the other lock was released
-                expect(fm1LockReleased).toBeTrue();
+                expect(fm1LockReleased).to.be.true;
             });
     });
 
-    it("should throw if lock is never acquired after set time period", function () {
-        jest.setTimeout(1000);
-        // this.slow(500);
-
+    it("should throw if lock is never acquired after set time period", () => {
         const fm1 = new FastMutex({ localStorage: localStorage, timeout: 50 });
         const fm2 = new FastMutex({ localStorage: localStorage, timeout: 50 });
 
@@ -204,10 +210,10 @@ describe("FastMutex", () => {
             return fm2.lock("timeoutTest");
         });
 
-        return expect(p).rejects.toThrowError();
+        expect(p).eventually.to.throw();
     });
 
-    it("should ignore expired locks", () => {
+    it("should ignore expired locks", async () => {
         const fm1 = new FastMutex({
             localStorage: localStorage,
             timeout: 5000,
@@ -221,9 +227,10 @@ describe("FastMutex", () => {
 
         localStorage.setItem("yLocktimeoutTest", JSON.stringify(expiredRecord));
         expect(
-            JSON.parse(localStorage.getItem("yLocktimeoutTest")).value
-        ).toEqual("oldclient");
-        return expect(fm1.lock("timeoutTest")).toResolve();
+            JSON.parse(localStorage.getItem("yLocktimeoutTest")!).value
+        ).to.eq("oldclient");
+
+        await fm1.lock("timeoutTest"); // should not throw
     });
 
     it("should reset the client stats after lock is released", async () => {
@@ -233,19 +240,20 @@ describe("FastMutex", () => {
         let keepLock = true;
         let keepLockFn = () => keepLock;
         await fm1.lock("resetStats", keepLockFn);
-        expect(fm1.isLocked("resetStats")).toBeTrue();
+        expect(fm1.isLocked("resetStats")).to.be.true;
         keepLock = false;
         await delay(100); // await timeout
-        expect(fm1.isLocked("resetStats")).toBeFalse();
+        expect(fm1.isLocked("resetStats")).to.be.false;
         const p = fm1.lock("resetStats").then(() => fm1.release("resetStats"));
-        await expect(p).toResolve();
+
+        await p; // should not throw
     });
 
     it("can keep lock with callback function", async () => {
         const fm1 = new FastMutex({ localStorage: localStorage, timeout: 50 });
         await fm1.lock("x");
         await fm1.release("x");
-        expect(fm1.isLocked("x")).toBeFalse();
+        expect(fm1.isLocked("x")).to.be.false;
         await fm1.lock("x").then(() => fm1.release("x"));
     });
 
@@ -259,6 +267,7 @@ describe("FastMutex", () => {
 
         // try to acquire a lock after `timeout`:
         await delay(50);
-        await expect(fm1.lock("resetStats")).toResolve();
+
+        await fm1.lock("resetStats"); // should not throw
     });
 });

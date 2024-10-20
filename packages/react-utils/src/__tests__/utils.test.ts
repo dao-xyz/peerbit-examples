@@ -4,13 +4,19 @@ import { FastMutex } from "../lockstorage";
 import { delay } from "@peerbit/time";
 import { default as sodium } from "libsodium-wrappers";
 import { v4 as uuid } from "uuid";
-var LocalStorage = nodelocalstorage.LocalStorage;
-var localStorage = new LocalStorage("./tmp/getKeypair");
-globalThis.localStorage = localStorage;
+import { expect } from "chai";
 
 describe("getKeypair", () => {
-    beforeAll(async () => {
+    before(async () => {
         await sodium.ready;
+
+        var LocalStorage = nodelocalstorage.LocalStorage;
+        var localStorage = new LocalStorage("./tmp/getKeypair");
+        globalThis.localStorage = localStorage;
+    });
+
+    after(() => {
+        globalThis.localStorage.clear();
     });
 
     it("can aquire multiple keypairs", async () => {
@@ -25,16 +31,16 @@ describe("getKeypair", () => {
             lockCondition
         );
         const { key: keypair2, path: path2 } = await getFreeKeypair(id, mutex);
-        expect(keypair!.equals(keypair2!)).toBeFalse();
-        expect(path1).not.toEqual(path2);
+        expect(keypair!.equals(keypair2!)).to.be.false;
+        expect(path1).not.to.eq(path2);
         lock = false;
         await delay(timeout);
         const { path: path3, key: keypair3 } = await getFreeKeypair(id, mutex);
-        expect(path3).toEqual(path1);
-        expect(keypair3.equals(keypair)).toBeTrue();
+        expect(path3).to.eq(path1);
+        expect(keypair3.equals(keypair)).to.be.true;
 
         const allKeypair = await getAllKeyPairs(id);
-        expect(allKeypair.map((x) => x.publicKey.hashcode())).toEqual([
+        expect(allKeypair.map((x) => x.publicKey.hashcode())).to.deep.eq([
             keypair3.publicKey.hashcode(),
             keypair2.publicKey.hashcode(),
         ]);
@@ -50,18 +56,18 @@ describe("getKeypair", () => {
             id,
             mutex,
             lockCondition,
-            true
+            { releaseLockIfSameId: true }
         );
         const { key: keypair2, path: path2 } = await getFreeKeypair(
             id,
             mutex,
             undefined,
-            true
+            { releaseLockIfSameId: true }
         );
-        expect(keypair!.equals(keypair2!)).toBeTrue();
-        expect(path1).toEqual(path2);
+        expect(keypair!.equals(keypair2!)).to.be.true;
+        expect(path1).to.eq(path2);
         const allKeypair = await getAllKeyPairs(id);
-        expect(allKeypair).toHaveLength(1);
+        expect(allKeypair).to.have.length(1);
     });
 
     it("releases manually", async () => {
@@ -73,11 +79,11 @@ describe("getKeypair", () => {
 
         const { key: keypair2, path: path2 } = await getFreeKeypair(id, mutex);
 
-        expect(path1).not.toEqual(path2);
+        expect(path1).not.to.eq(path2);
         releaseKey(path1, mutex);
-        expect(mutex.getLockedInfo(path1)).toBeUndefined();
+        expect(mutex.getLockedInfo(path1)).to.be.undefined;
         const { key: keypair3, path: path3 } = await getFreeKeypair(id, mutex);
 
-        expect(path1).toEqual(path3); // we can now acquire key at path1 again, since we released it
+        expect(path1).to.eq(path3); // we can now acquire key at path1 again, since we released it
     });
 });

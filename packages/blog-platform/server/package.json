@@ -25,14 +25,12 @@
         "clean": "shx rm -rf lib/*",
         "build": "yarn clean && tsc -p tsconfig.json",
         "start": "ts-node --esm ./src/bin.ts",
-        "test": "node ../../../node_modules/.bin/jest test  -c  ../../../jest.config.ts --runInBand --forceExit",
-        "test:unit": "node ../../../node_modules/.bin/jest test  -c  ../../../jest.config.unit.ts --runInBand --forceExit",
-        "test:integration": "node ../../../node_modules/.bin/jest test -c  ../../../jest.config.integration.ts --runInBand --forceExit",
+        "test": "mocha",
         "watch": "nodemon"
     },
     "devDependencies": {
         "@peerbit/test-utils": "^2",
-        "typescript": "^5.3.3",
+        "typescript": "^5.6.3",
         "@types/express": "^4",
         "nodemon": "^3"
     },

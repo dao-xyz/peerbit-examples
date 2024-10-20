@@ -3,8 +3,13 @@ import { Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
 import { DirectSub } from "@peerbit/pubsub";
 import { yamux } from "@chainsafe/libp2p-yamux";
-import { getFreeKeypair, getTabId, inIframe } from "./utils.js";
-import { noise } from "@dao-xyz/libp2p-noise";
+import {
+    getFreeKeypair,
+    getTabId,
+    inIframe,
+    cookiesWhereClearedJustNow,
+} from "./utils.js";
+import { noise } from "@chainsafe/libp2p-noise";
 import { v4 as uuid } from "uuid";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { FastMutex } from "./lockstorage.js";
@@ -13,7 +18,6 @@ import sodium from "libsodium-wrappers";
 import { useMount } from "./useMount.js";
 import { createClient, createHost } from "@peerbit/proxy-window";
 import { ProgramClient } from "@peerbit/program";
-import { webRTC } from "@libp2p/webrtc";
 import { identify } from "@libp2p/identify";
 import { webSockets } from "@libp2p/websockets";
 import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
@@ -116,6 +120,7 @@ export const PeerProvider = (options: PeerOptions) => {
                 : (options as TopOptions);
 
             if (nodeOptions.type !== "proxy") {
+                const releaseFirstLock = cookiesWhereClearedJustNow();
                 const nodeId =
                     nodeOptions.keypair ||
                     (
@@ -126,10 +131,13 @@ export const PeerProvider = (options: PeerOptions) => {
                                 timeout: 1000,
                             }),
                             undefined,
-                            true // reuse keypairs from same tab, (force release)
+                            {
+                                releaseFirstLock, // when clearing cookies sometimes the localStorage is not cleared immediately so we need to release the lock forcefully. TODO investigate why this is happening
+                                releaseLockIfSameId: true, // reuse keypairs from same tab, (force release)
+                            }
                         )
                     ).key;
-                const peerId = await nodeId.toPeerId();
+                const peerId = nodeId.toPeerId();
 
                 let directory: string | undefined = undefined;
                 if (
@@ -163,11 +171,10 @@ export const PeerProvider = (options: PeerOptions) => {
                                 /* "/webrtc" */
                             ], // TMP disable because flaky behaviour with libp2p 1.8.1
                         },
-                        connectionEncryption: [noise()],
+                        connectionEncrypters: [noise()],
                         peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
                         connectionManager: {
                             maxConnections: 100,
-                            minConnections: 1,
                         },
 
                         streamMuxers: [yamux()],
@@ -216,8 +223,10 @@ export const PeerProvider = (options: PeerOptions) => {
                     },
                     directory,
                 });
-                console.log("Create done");
-                console.log(newPeer?.identity.publicKey.hashcode());
+                console.log("Client created", {
+                    directory,
+                    peerHash: newPeer?.identity.publicKey.hashcode(),
+                });
 
                 setConnectionState("connecting");
 

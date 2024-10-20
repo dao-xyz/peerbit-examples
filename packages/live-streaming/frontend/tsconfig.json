@@ -16,14 +16,15 @@
         "experimentalDecorators": true,
         "noEmit": true,
         "jsx": "react-jsx",
-        "types": [
+        "typeRoots": [
+            "../../../node_modules/@types",
             "@types/dom-webcodecs",
             "@types/audioworklet",
             "@types/dom-mediacapture-transform",
             "@webgpu/types"
         ]
     },
-    "include": ["src"],
+    "include": ["src", "src/__tests__"],
     "references": [
         {
             "path": "./tsconfig.node.json"

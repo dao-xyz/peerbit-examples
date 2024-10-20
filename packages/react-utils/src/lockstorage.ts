@@ -32,7 +32,7 @@ export class FastMutex {
         xPrefix = "_MUTEX_LOCK_X_",
         yPrefix = "_MUTEX_LOCK_Y_",
         timeout = 5000,
-        localStorage = undefined,
+        localStorage = undefined as any,
     } = {}) {
         this.clientId = clientId;
         this.xPrefix = xPrefix;

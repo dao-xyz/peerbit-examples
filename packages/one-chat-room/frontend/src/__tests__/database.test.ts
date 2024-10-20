@@ -1,6 +1,8 @@
 import { Peerbit } from "peerbit";
 import { Post, Room } from "../database";
 import { delay } from "@peerbit/time";
+import { expect } from "chai";
+
 describe("Room", () => {
     let peer: Peerbit, peer2: Peerbit;
 
@@ -37,16 +39,16 @@ describe("Room", () => {
 
         let earlier = await roomObserve.loadEarlier();
 
-        expect(earlier).toHaveLength(2);
+        expect(earlier).to.have.length(2);
 
         earlier = await roomObserve.loadEarlier();
-        expect(earlier).toHaveLength(0);
+        expect(earlier).to.have.length(0);
 
         await room.messages.put(
             new Post({ from: peer.identity.publicKey, message: "third" })
         );
         earlier = await roomObserve.loadLater();
-        expect(earlier).toHaveLength(1);
+        expect(earlier).to.have.length(1);
     });
 
     it("later", async () => {
@@ -69,15 +71,15 @@ describe("Room", () => {
             peer.identity.publicKey
         );
         let later = await roomObserve.loadLater();
-        expect(later).toHaveLength(2);
+        expect(later).to.have.length(2);
 
         later = await roomObserve.loadLater();
-        expect(later).toHaveLength(0);
+        expect(later).to.have.length(0);
 
         await room.messages.put(
             new Post({ from: peer.identity.publicKey, message: "third" })
         );
         later = await roomObserve.loadLater();
-        expect(later).toHaveLength(1);
+        expect(later).to.have.length(1);
     });
 });

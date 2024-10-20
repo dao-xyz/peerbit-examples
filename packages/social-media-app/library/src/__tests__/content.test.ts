@@ -1,7 +1,7 @@
 import { TestSession } from "@peerbit/test-utils";
 import { Room, RoomContent } from "../content.js";
 import { SearchRequest } from "@peerbit/document";
-import { Peerbit } from "peerbit";
+import { expect } from "chai";
 
 describe("content", () => {
     describe("room", () => {
@@ -22,22 +22,22 @@ describe("content", () => {
                 })
             );
             const abc = await root.getCreateRoomByPath(["a", "b", "c"]);
-            expect(abc).toHaveLength(1);
-            expect(abc[0].name).toEqual("c");
+            expect(abc).to.have.length(1);
+            expect(abc[0].name).to.eq("c");
 
             const abd = await root.getCreateRoomByPath(["a", "b", "d"]);
-            expect(abd).toHaveLength(1);
-            expect(abd[0].name).toEqual("d");
+            expect(abd).to.have.length(1);
+            expect(abd[0].name).to.eq("d");
 
             const ab = await root.findRoomsByPath(["a", "b"]);
-            expect(ab.rooms.map((x) => x.name)).toEqual(["b"]);
+            expect(ab.rooms.map((x) => x.name)).to.eq(["b"]);
 
             const elementsInB = await ab.rooms[0].elements.index.search(
                 new SearchRequest()
             );
             expect(
                 elementsInB.map((x) => (x.content as RoomContent).room.name)
-            ).toEqual(["c", "d"]);
+            ).to.eq(["c", "d"]);
         });
 
         it("determinstic with seed", async () => {
@@ -60,15 +60,15 @@ describe("content", () => {
                 })
             );
 
-            expect(rootA.address).toEqual(rootB.address);
+            expect(rootA.address).to.eq(rootB.address);
 
             const pathB = await rootB.getCreateRoomByPath(["a", "b", "c"]);
             for (const room of pathB) {
                 await session.peers[0].open(room);
             }
 
-            expect(typeof pathA[pathA.length - 1].address).toEqual("string");
-            expect(pathA[pathA.length - 1].address).toEqual(
+            expect(typeof pathA[pathA.length - 1].address).to.eq("string");
+            expect(pathA[pathA.length - 1].address).to.eq(
                 pathB[pathB.length - 1].address
             );
         });

@@ -1,43 +1,33 @@
 import { useRef, useState, useEffect, useCallback } from "react";
+import * as Slider from "@radix-ui/react-slider";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import * as Select from "@radix-ui/react-select";
 import {
-    Box,
-    Button,
-    Grid,
-    IconButton,
-    ListItemIcon,
-    ListItemText,
-    Menu,
-    MenuItem,
-    MenuList,
-    Select,
-    Slider,
-    Typography,
-} from "@mui/material";
-import Divider from "@mui/material/Divider";
-import PlayArrowIcon from "@mui/icons-material/PlayArrow";
-import PauseIcon from "@mui/icons-material/Pause";
-import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
-import VideoSettingsIcon from "@mui/icons-material/VideoSettings";
-import TuneIcon from "@mui/icons-material/Tune";
-import SlowMotionVideoIcon from "@mui/icons-material/SlowMotionVideo";
-import StreamIcon from "@mui/icons-material/Stream";
+    MdPlayArrow,
+    MdPause,
+    MdChevronLeft,
+    MdVideoSettings,
+    MdTune,
+    MdSlowMotionVideo,
+    MdStream,
+    MdVideoCameraFront,
+    MdOndemandVideo,
+    MdPresentToAll,
+    MdTvOff,
+    MdCheck,
+    MdFullscreen,
+    MdVolumeUp,
+    MdVolumeOff,
+    MdReplay10,
+} from "react-icons/md";
+import { ControlInterface } from "./controls";
 import {
     SourceSetting,
     StreamType,
     Resolution,
     resolutionToSourceSetting,
 } from "./../../controls/settings.js";
-import VideoCameraFrontIcon from "@mui/icons-material/VideoCameraFront";
-import OndemandVideoIcon from "@mui/icons-material/OndemandVideo";
-import PresentToAllIcon from "@mui/icons-material/PresentToAll";
-import TvOffIcon from "@mui/icons-material/TvOff";
-import { Check, Fullscreen } from "@mui/icons-material";
-import VolumeUpIcon from "@mui/icons-material/VolumeUp";
-import VolumeOffIcon from "@mui/icons-material/VolumeOff";
-
-import Replay10Icon from "@mui/icons-material/Replay10";
 import "./../../controls/Controls.css";
-import { ControlInterface } from "./controls";
 
 export const Controls = (
     props: {
@@ -48,26 +38,28 @@ export const Controls = (
         viewRef: HTMLCanvasElement;
     } & ControlInterface
 ) => {
-    const [showControls, setShowControls] = useState(false);
-
+    const [showControls, setShowControls] = useState(true);
     const [speed, setSpeed] = useState(1);
     const [muted, setMuted] = useState(false);
     const [prevMuteVolume, setPrevMuteVolume] = useState(1);
     const [volume, setVolume] = useState(0.66);
     const [isPlaying, setIsPlaying] = useState(props.isPlaying ?? false);
-    const addShowControlsListener = (ref: HTMLElement) => {
-        ref.addEventListener("mouseenter", () => {
-            setShowControls(true);
-        });
-        ref.addEventListener("mouseleave", () => {
-            setShowControls(false);
-        });
-    };
-    const controlRef = useCallback((node) => {
-        if (node) addShowControlsListener(node);
-    }, []);
 
-    /*  let controls = (props as { controls: ControlFunctions }).controls || useVideoPlayer({ videoElement: (props as { videoRef: HTMLVideoElement }).videoRef }); */
+    const [selectedResolutions, setSelectedResolutions] = useState<
+        Resolution[]
+    >(props.selectedResolution || []);
+    const [prevSettings, setPrevSettings] = useState<StreamType>({
+        type: "noise",
+    });
+
+    // State to manage menu navigation
+    const [menuStack, setMenuStack] = useState<string[]>(["main"]);
+
+    const controlRef = useCallback((node) => {
+        if (node) {
+            // Add event listeners if needed
+        }
+    }, []);
 
     const togglePlay = () => {
         const isPlayingNow = !isPlaying;
@@ -79,69 +71,23 @@ export const Controls = (
         if (!props.viewRef) {
             return;
         }
-
-        addShowControlsListener(props.viewRef);
+        // Add event listeners to viewRef if needed
     }, [props.viewRef]);
 
-    const [videoSettingsAnchor, setVideoSettingsAnchor] =
-        useState<null | HTMLElement>(null);
-    const [settingsOpen, setSettingsOpen] = useState<
-        "main" | "resolution" | "source" | undefined
-    >(undefined);
-
-    let [selectedResolutions, setSelectedResolutions] = useState<Resolution[]>(
-        []
-    );
-    const [sourceType, setSourceType] = useState<StreamType>({ type: "noise" });
-    const [prevSettings, setPrevSettings] = useState<StreamType>({
-        type: "noise",
-    });
-
-    useEffect(() => {
-        if (props.selectedResolution) {
-            setSelectedResolutions(props.selectedResolution);
-        }
-    }, [props.selectedResolution]);
-    const handleVideoSettingsClose = () => {
-        setSettingsOpen(undefined);
-
-        /*   if (sourceType.type === "camera" || sourceType.type === "screen") {
-              sourceType.settings = selectedResolutions.map((x) =>
-                  resolutionToSourceSetting(x)
-              );
-          } else if (sourceType.type === "media") {
-              sourceType.settings = [
-                  {
-                      audio: new AudioInfo({ bitrate: 1e5 }),
-                      video: {
-                          bitrate: resolutionToSourceSetting(720).video.bitrate,
-                      },
-                  },
-              ];
-          } */
-
-        /*  const currentJSON = JSON.stringify(sourceType);
-         console.log('CHANGE?', currentJSON, currentJSON !== JSON.stringify(prevSettings))
-         if (currentJSON !== JSON.stringify(prevSettings)) {
-             // TODO perf
-             setPrevSettings(JSON.parse(currentJSON)); // clone so we don't modify it later
-             props.onStreamTypeChange(sourceType);
-         } */
+    const goToSubmenu = (menu: string) => {
+        setMenuStack((prevStack) => [...prevStack, menu]);
     };
 
-    const handleSourceTypeChange = (type: StreamType) => {
-        if (!props.onStreamTypeChange) {
-            return;
-        }
-
-        const currentJSON = JSON.stringify(type);
-        if (currentJSON !== JSON.stringify(prevSettings)) {
-            setPrevSettings(JSON.parse(currentJSON));
-            props.onStreamTypeChange(type);
-        }
-        setSourceType(type);
-        handleVideoSettingsClose();
+    const goBack = () => {
+        setMenuStack((prevStack) => {
+            if (prevStack.length > 1) {
+                return prevStack.slice(0, -1);
+            }
+            return prevStack;
+        });
     };
+
+    const currentMenu = menuStack[menuStack.length - 1];
 
     const toggleMute = () => {
         if (!muted) {
@@ -165,7 +111,7 @@ export const Controls = (
         let compatibleResolutions = selectedResolutions.filter((x) =>
             props.resolutionOptions.includes(x)
         );
-        if (compatibleResolutions.length === selectedResolutions.length) {
+        if (compatibleResolutions.length !== selectedResolutions.length) {
             if (compatibleResolutions.length > 0) {
                 setSelectedResolutions(compatibleResolutions);
             } else {
@@ -185,7 +131,6 @@ export const Controls = (
             if (newResolutions.length === 1) {
                 return; // don't allow to unselect all!
             }
-
             newResolutions.splice(index, 1);
         } else {
             newResolutions = [resolution];
@@ -193,13 +138,10 @@ export const Controls = (
         newResolutions.sort();
 
         let change =
-            JSON.stringify(newResolutions) !=
+            JSON.stringify(newResolutions) !==
             JSON.stringify(selectedResolutions);
 
-        setSelectedResolutions(
-            // On autofill we get a stringified value.
-            newResolutions
-        );
+        setSelectedResolutions(newResolutions);
 
         if (change) {
             props.onQualityChange(
@@ -208,409 +150,121 @@ export const Controls = (
         }
     };
 
+    // Helper function to format time
+    const formatTime = (timeInMillisecond: number): string => {
+        const totalSeconds = Math.floor(timeInMillisecond / 1e3);
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const seconds = totalSeconds % 60;
+
+        if (hours > 0) {
+            return `${hours}:${minutes.toString().padStart(2, "0")}:${seconds
+                .toString()
+                .padStart(2, "0")}`;
+        } else {
+            return `${minutes}:${seconds.toString().padStart(2, "0")}`;
+        }
+    };
+    console.log(props.currentTime, props.maxTime, props.progress);
+
     return (
-        <Grid
-            container
+        <div
             ref={controlRef}
-            direction="column"
-            className="controls"
-            sx={{ opacity: showControls ? 1 : 0 }}
+            className={`controls flex flex-col ${
+                showControls ? "opacity-100" : "opacity-0"
+            }`}
         >
-            {/*   TODO   <Grid
-                item
-                display="flex"
-                justifyContent="center"
-                sx={{ width: "100%", height: "15px", marginTop: "-14px" }}
+            {/* Progress Bar */}
+            <div
+                className="flex justify-center w-full"
+                style={{ marginTop: "-3px" }} // Adjust as needed to align with top of control bar
             >
-                <Slider
-                    sx={{ borderRadius: "0px" }}
-                    size="small"
+                <Slider.Root
+                    className="relative flex items-center select-none touch-none w-full h-1 group"
+                    value={[
+                        props.progress === "live"
+                            ? 1
+                            : props.currentTime / props.maxTime || 0,
+                    ]}
                     min={0}
-                    max={100}
-                    value={(props.progress || 0) * 100}
-                    onChange={(e) =>
-                        props.setProgress(Number(e.target["value"]))
-                    }
-                />
-            </Grid> */}
-            <Grid
-                container
-                item
-                direction="row"
-                justifyContent="center"
-                alignItems="center"
-            >
-                <Grid item justifyContent="center">
-                    <IconButton onClick={togglePlay} sx={{ borderRadius: 0 }}>
-                        {!props.isPlaying ? <PlayArrowIcon /> : <PauseIcon />}
-                    </IconButton>
-                </Grid>
+                    max={1}
+                    step={0.001}
+                    onValueChange={(value) => {
+                        const p = value[0];
+                        props.setProgress(p);
+                    }}
+                >
+                    <Slider.Track className="bg-gray-200 opacity-30 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-80 transition-all">
+                        <Slider.Range className="absolute bg-primary-500 rounded-full h-full" />
+                    </Slider.Track>
+                    <Slider.Thumb className="block w-3 h-3 bg-blue-500 rounded-full group-hover:scale-125 transition-transform" />
+                </Slider.Root>
+            </div>
 
-                <>
-                    <Grid item>
-                        <Button color="inherit" onClick={props.setLive}>
-                            Live
-                        </Button>
-                    </Grid>
-                    <Grid item justifyContent="center">
-                        <IconButton onClick={() => {}} sx={{ borderRadius: 0 }}>
-                            <Replay10Icon />
-                        </IconButton>
-                    </Grid>
+            {/* Control Bar */}
+            <div className="flex items-center justify-between w-full px-2">
+                {/* Left Controls */}
+                <div className="flex items-center">
+                    {/* Play/Pause Button */}
+                    <button onClick={togglePlay} className="p-1">
+                        {!props.isPlaying ? (
+                            <MdPlayArrow size={20} />
+                        ) : (
+                            <MdPause size={20} />
+                        )}
+                    </button>
+
+                    {/* Live Button */}
+                    <button
+                        onClick={() => props.setProgress("live")}
+                        className="p-1 text-gray-800"
+                    >
+                        {props.progress === "live" ? (
+                            <span className="text-blue-500 font-bold text-sm">
+                                Live
+                            </span>
+                        ) : (
+                            <span className="text-sm">Live</span>
+                        )}
+                    </button>
+
+                    {/* Time Display */}
+                    <div
+                        className="p-1 text-gray-800 font-mono text-xs"
+                        style={{ minWidth: "70px", textAlign: "center" }}
+                    >
+                        {formatTime(props.currentTime)}/
+                        {formatTime(props.maxTime)}
+                    </div>
+
+                    {/* Replay Button */}
+                    <button
+                        onClick={() => {
+                            /* Add replay functionality */
+                        }}
+                        className="p-1"
+                    >
+                        <MdReplay10 size={20} />
+                    </button>
+
+                    {/* Mute Button */}
                     {props.mute && (
-                        <Grid id="volume-button" item justifyContent="center">
-                            <IconButton
-                                onClick={toggleMute}
-                                sx={{ borderRadius: 0 }}
-                            >
-                                {muted ? <VolumeOffIcon /> : <VolumeUpIcon />}
-                            </IconButton>
-                        </Grid>
+                        <button onClick={toggleMute} className="p-1">
+                            {muted ? (
+                                <MdVolumeOff size={20} />
+                            ) : (
+                                <MdVolumeUp size={20} />
+                            )}
+                        </button>
                     )}
-                    {props.setVolume && (
-                        <Grid
-                            id="volume-slider"
-                            item
-                            justifyContent="center"
-                            display="none"
-                            sx={{ width: "75px", pl: 1 }}
-                        >
-                            <Slider
-                                size="small"
-                                aria-label="Volume"
-                                value={volume || 1}
-                                max={1}
-                                step={0.005}
-                                onChange={(e, v) => {
-                                    setNewVolume(v as number);
-                                }}
-                            />
-                        </Grid>
-                    )}
-                </>
+                </div>
 
-                <Grid item sx={{ ml: "auto" }}>
-                    <IconButton
-                        sx={{ borderRadius: 0 }}
-                        onClick={(e) => {
-                            setVideoSettingsAnchor(e.currentTarget);
-                            setSettingsOpen("main");
-                        }}
-                    >
-                        <VideoSettingsIcon />
-                    </IconButton>
-                    <Menu
-                        anchorEl={videoSettingsAnchor}
-                        id="account-menu"
-                        open={settingsOpen === "main"}
-                        onClose={handleVideoSettingsClose}
-                        PaperProps={{
-                            elevation: 0,
-                            sx: {
-                                width: "250px",
-                                maxWidth: "100%",
-                                overflow: "visible",
-                                filter: "drop-shadow(0px 2px 8px rgba(0,0,0,0.32))",
-                                mb: 1.5,
-                                "& .MuiAvatar-root": {
-                                    width: 32,
-                                    height: 32,
-                                    ml: -0.5,
-                                    mr: 1,
-                                },
-                                "&:before": {
-                                    content: '""',
-                                    display: "block",
-                                    position: "absolute",
-                                    bottom: -10,
-                                    right: 14,
-                                    width: 10,
-                                    height: 10,
-                                    bgcolor: "background.paper",
-                                    transform: "translateY(-50%) rotate(45deg)",
-                                    zIndex: 0,
-                                },
-                            },
-                        }}
-                        transformOrigin={{
-                            horizontal: "right",
-                            vertical: "bottom",
-                        }}
-                        anchorOrigin={{ horizontal: "right", vertical: "top" }}
-                    >
-                        <MenuList dense disablePadding>
-                            <MenuItem>
-                                <ListItemIcon>
-                                    <SlowMotionVideoIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Playbackrate</ListItemText>
-                                <Select
-                                    sx={{
-                                        ml: "auto",
-                                        minHeight: 0,
-                                        display: "flex",
-                                        alignItems: "center",
-                                        boxShadow: "none",
-                                        ".MuiOutlinedInput-notchedOutline": {
-                                            border: 0,
-                                        },
-                                    }}
-                                    size="small"
-                                    className="velocity"
-                                    /* renderValue={(v) => <Typography variant="body2" sx={{}}>Speed {v}x</Typography>} */
-                                    value={speed}
-                                    onChange={(e) =>
-                                        props.setSpeed(Number(e.target.value))
-                                    }
-                                >
-                                    <MenuItem value={0.5}>0.5x</MenuItem>
-                                    <MenuItem value={1}>1x</MenuItem>
-                                    <MenuItem value={1.25}>1.25x</MenuItem>
-                                    <MenuItem value={2}>2x</MenuItem>
-                                </Select>
-                            </MenuItem>
-                            <MenuItem
-                                onClick={() => setSettingsOpen("resolution")}
-                                disabled={props.resolutionOptions.length === 0}
-                            >
-                                <ListItemIcon>
-                                    <TuneIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Quality</ListItemText>
-                                <Typography sx={{ ml: "auto" }} variant="body2">
-                                    {selectedResolutions.length > 2
-                                        ? `${selectedResolutions[0]}p, ${
-                                              selectedResolutions[1]
-                                          }p, (+${
-                                              selectedResolutions.length - 2
-                                          })`
-                                        : selectedResolutions
-                                              .map((x) => x + "p")
-                                              .join(", ")}
-                                </Typography>
-                            </MenuItem>
-                        </MenuList>
-                    </Menu>
-
-                    <Menu
-                        anchorEl={videoSettingsAnchor}
-                        id="resolutions-menu"
-                        open={settingsOpen === "resolution"}
-                        onClose={handleVideoSettingsClose}
-                        PaperProps={{
-                            elevation: 0,
-                            sx: {
-                                overflow: "visible",
-                                filter: "drop-shadow(0px 2px 8px rgba(0,0,0,0.32))",
-                                mb: 1.5,
-                                "& .MuiAvatar-root": {
-                                    width: 32,
-                                    height: 32,
-                                    ml: -0.5,
-                                    mr: 1,
-                                },
-                            },
-                        }}
-                        transformOrigin={{
-                            horizontal: "right",
-                            vertical: "bottom",
-                        }}
-                        anchorOrigin={{ horizontal: "right", vertical: "top" }}
-                    >
-                        <MenuList dense disablePadding>
-                            <MenuItem
-                                onClick={() => {
-                                    handleVideoSettingsClose();
-                                    setSettingsOpen("main");
-                                }}
-                            >
-                                <ListItemIcon>
-                                    <ChevronLeftIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Quality</ListItemText>
-                            </MenuItem>
-                            <Divider />
-                            {props.resolutionOptions.map((resolution) => (
-                                <MenuItem
-                                    /*   labelId="demo-multiple-name-label"
-                                  id="demo-multiple-name"
-                                  multiple
-                                  value={selectedResolutions} */
-                                    /*                             onChange={handleResolutionChange} */
-                                    /*  input={<OutlinedInput label="Resolution" /> */
-                                    /*  MenuProps={MenuProps} */
-
-                                    onClick={() =>
-                                        handleResolutionChange(resolution)
-                                    }
-                                    key={resolution}
-                                    value={resolution}
-                                >
-                                    <ListItemText> {resolution}p</ListItemText>
-                                    {selectedResolutions.includes(
-                                        resolution
-                                    ) && <Check fontSize="small" />}
-                                </MenuItem>
-                            ))}
-                        </MenuList>
-                    </Menu>
-
-                    <Menu
-                        anchorEl={videoSettingsAnchor}
-                        id="source-menu"
-                        open={settingsOpen === "source"}
-                        onClose={handleVideoSettingsClose}
-                        PaperProps={{
-                            elevation: 0,
-                            sx: {
-                                width: "175px",
-                                overflow: "visible",
-                                filter: "drop-shadow(0px 2px 8px rgba(0,0,0,0.32))",
-                                mb: 1.5,
-                                "& .MuiAvatar-root": {
-                                    width: 32,
-                                    height: 32,
-                                    ml: -0.5,
-                                    mr: 1,
-                                },
-                            },
-                        }}
-                        transformOrigin={{
-                            horizontal: "right",
-                            vertical: "bottom",
-                        }}
-                        anchorOrigin={{ horizontal: "right", vertical: "top" }}
-                    >
-                        <MenuList dense disablePadding>
-                            <MenuItem
-                                onClick={() => {
-                                    handleVideoSettingsClose();
-                                    setSettingsOpen("main");
-                                }}
-                            >
-                                <ListItemIcon>
-                                    <ChevronLeftIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Source</ListItemText>
-                            </MenuItem>
-                            <Divider />
-                            <MenuItem
-                                onClick={() =>
-                                    handleSourceTypeChange({
-                                        type: "camera",
-                                    })
-                                }
-                            >
-                                <ListItemIcon>
-                                    <VideoCameraFrontIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Camera</ListItemText>
-                                {sourceType.type === "camera" && (
-                                    <Check
-                                        sx={{ ml: "auto" }}
-                                        fontSize="small"
-                                    />
-                                )}
-                            </MenuItem>
-                            <MenuItem
-                                onClick={() =>
-                                    handleSourceTypeChange({
-                                        type: "screen",
-                                    })
-                                }
-                            >
-                                <ListItemIcon>
-                                    <PresentToAllIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Screen</ListItemText>
-                                {sourceType.type === "screen" && (
-                                    <Check
-                                        sx={{ ml: "auto" }}
-                                        fontSize="small"
-                                    />
-                                )}
-                            </MenuItem>
-                            <MenuItem
-                                onClick={() => {
-                                    document
-                                        .getElementById("media-file-select")
-                                        .click();
-                                }}
-                            >
-                                <ListItemIcon>
-                                    <OndemandVideoIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Media</ListItemText>
-                                <input
-                                    id="media-file-select"
-                                    hidden
-                                    accept="video/*"
-                                    multiple
-                                    type="file"
-                                    onClick={(event) =>
-                                        (event.target["value"] = "")
-                                    }
-                                    onChange={(event) => {
-                                        if (event.target.files.length === 0) {
-                                            return;
-                                        }
-                                        handleSourceTypeChange({
-                                            type: "media",
-                                            src: URL.createObjectURL(
-                                                event.target.files[0]
-                                            ),
-                                        });
-                                    }}
-                                />
-
-                                {sourceType.type === "media" && (
-                                    <Check
-                                        sx={{ ml: "auto" }}
-                                        fontSize="small"
-                                    />
-                                )}
-                            </MenuItem>
-                            <MenuItem
-                                onClick={() =>
-                                    handleSourceTypeChange({ type: "noise" })
-                                }
-                            >
-                                <ListItemIcon>
-                                    <TvOffIcon fontSize="small" />
-                                </ListItemIcon>
-                                <ListItemText>Noise</ListItemText>
-                                {sourceType.type === "noise" && (
-                                    <Check
-                                        sx={{ ml: "auto" }}
-                                        fontSize="small"
-                                    />
-                                )}
-                            </MenuItem>
-                        </MenuList>
-                    </Menu>
-
-                    {/*  <Select
-            size="small"
-            className="velocity"
-            value={playerState?.speed}
-            onChange={(e) => handleVideoSpeed(e)}
-        >
-            <MenuItem value={0.5}>0.5x</MenuItem>
-            <MenuItem value={1}>1x</MenuItem>
-            <MenuItem value={1.25}>1.25x</MenuItem>
-            <MenuItem value={2}>2x</MenuItem>
-        </Select> */}
-                </Grid>
-
-                {/*  <Grid item justifyContent="center">
-                    <IconButton onClick={() => { }} sx={{ borderRadius: 0 }}>
-                        <FitScreen />
-                    </IconButton>
-                </Grid> */}
-                {(props.viewRef?.requestFullscreen ||
-                    props.viewRef?.["webkitExitFullscreen"]) && (
-                    <Grid item justifyContent="center">
-                        <IconButton
+                {/* Right Controls */}
+                <div className="flex items-center">
+                    {/* Fullscreen Button */}
+                    {(props.viewRef?.requestFullscreen ||
+                        props.viewRef?.["webkitExitFullscreen"]) && (
+                        <button
                             onClick={() => {
                                 if (props.viewRef) {
                                     if (props.viewRef.requestFullscreen) {
@@ -622,13 +276,186 @@ export const Controls = (
                                     }
                                 }
                             }}
-                            sx={{ borderRadius: 0 }}
+                            className="p-1"
                         >
-                            <Fullscreen />
-                        </IconButton>
-                    </Grid>
-                )}
-            </Grid>
-        </Grid>
+                            <MdFullscreen size={20} />
+                        </button>
+                    )}
+
+                    {/* Settings Menu */}
+                    <DropdownMenu.Root
+                        onOpenChange={(open) => {
+                            if (!open) {
+                                setMenuStack(["main"]); // Reset to main menu when closed
+                            }
+                        }}
+                    >
+                        <DropdownMenu.Trigger asChild>
+                            <button className="p-1">
+                                <MdVideoSettings size={20} />
+                            </button>
+                        </DropdownMenu.Trigger>
+                        <DropdownMenu.Portal>
+                            <DropdownMenu.Content
+                                className="bg-white dark:bg-gray-800 shadow-lg rounded p-2 w-64"
+                                sideOffset={5}
+                                side="top"
+                                align="end"
+                            >
+                                {currentMenu !== "main" && (
+                                    <button
+                                        onClick={goBack}
+                                        className="flex items-center p-2 mb-2"
+                                    >
+                                        <MdChevronLeft
+                                            size={16}
+                                            className="mr-2"
+                                        />
+                                        <span>Back</span>
+                                    </button>
+                                )}
+
+                                {/* Main Menu */}
+                                {currentMenu === "main" && (
+                                    <>
+                                        <DropdownMenu.Item
+                                            onSelect={(event) => {
+                                                event.preventDefault();
+                                                goToSubmenu("playbackRate");
+                                            }}
+                                            className="menu-item"
+                                        >
+                                            <div className="flex items-center">
+                                                <MdSlowMotionVideo
+                                                    size={16}
+                                                    className="mr-2"
+                                                />
+                                                <span>Playback Rate</span>
+                                            </div>
+                                        </DropdownMenu.Item>
+
+                                        <DropdownMenu.Item
+                                            onSelect={(event) => {
+                                                event.preventDefault();
+                                                goToSubmenu("quality");
+                                            }}
+                                            className="menu-item"
+                                        >
+                                            <div className="flex items-center">
+                                                <MdTune
+                                                    size={16}
+                                                    className="mr-2"
+                                                />
+                                                <span>Quality</span>
+                                                <span className="ml-auto text-sm text-gray-500">
+                                                    {selectedResolutions.length >
+                                                    2
+                                                        ? `${
+                                                              selectedResolutions[0]
+                                                          }p, ${
+                                                              selectedResolutions[1]
+                                                          }p, (+${
+                                                              selectedResolutions.length -
+                                                              2
+                                                          })`
+                                                        : selectedResolutions
+                                                              .map(
+                                                                  (x) => x + "p"
+                                                              )
+                                                              .join(", ")}
+                                                </span>
+                                            </div>
+                                        </DropdownMenu.Item>
+                                    </>
+                                )}
+
+                                {/* Playback Rate Submenu */}
+                                {currentMenu === "playbackRate" && (
+                                    <div className="flex flex-col">
+                                        <div className="flex items-center">
+                                            <MdSlowMotionVideo
+                                                size={16}
+                                                className="mr-2"
+                                            />
+                                            <span>Playback Rate</span>
+                                        </div>
+                                        <Select.Root
+                                            value={String(speed)}
+                                            onValueChange={(value) => {
+                                                setSpeed(Number(value));
+                                                props.setSpeed(Number(value));
+                                            }}
+                                        >
+                                            <Select.Trigger className="ml-auto flex items-center">
+                                                <Select.Value />
+                                                <Select.Icon />
+                                            </Select.Trigger>
+                                            <Select.Content>
+                                                <Select.Viewport>
+                                                    <Select.Item value="0.5">
+                                                        <Select.ItemText>
+                                                            0.5x
+                                                        </Select.ItemText>
+                                                    </Select.Item>
+                                                    <Select.Item value="1">
+                                                        <Select.ItemText>
+                                                            1x
+                                                        </Select.ItemText>
+                                                    </Select.Item>
+                                                    <Select.Item value="1.25">
+                                                        <Select.ItemText>
+                                                            1.25x
+                                                        </Select.ItemText>
+                                                    </Select.Item>
+                                                    <Select.Item value="2">
+                                                        <Select.ItemText>
+                                                            2x
+                                                        </Select.ItemText>
+                                                    </Select.Item>
+                                                </Select.Viewport>
+                                            </Select.Content>
+                                        </Select.Root>
+                                    </div>
+                                )}
+
+                                {/* Quality Submenu */}
+                                {currentMenu === "quality" && (
+                                    <>
+                                        {props.resolutionOptions.map(
+                                            (resolution) => (
+                                                <DropdownMenu.Item
+                                                    key={resolution}
+                                                    onSelect={(event) => {
+                                                        event.preventDefault();
+                                                        handleResolutionChange(
+                                                            resolution
+                                                        );
+                                                    }}
+                                                    className="menu-item"
+                                                >
+                                                    <div className="flex items-center">
+                                                        <span>
+                                                            {resolution}p
+                                                        </span>
+                                                        {selectedResolutions.includes(
+                                                            resolution
+                                                        ) && (
+                                                            <MdCheck
+                                                                size={16}
+                                                                className="ml-auto"
+                                                            />
+                                                        )}
+                                                    </div>
+                                                </DropdownMenu.Item>
+                                            )
+                                        )}
+                                    </>
+                                )}
+                            </DropdownMenu.Content>
+                        </DropdownMenu.Portal>
+                    </DropdownMenu.Root>
+                </div>
+            </div>
+        </div>
     );
 };

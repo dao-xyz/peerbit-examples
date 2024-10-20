@@ -4,13 +4,23 @@ import { FastMutex } from "./lockstorage";
 import { v4 as uuid } from "uuid";
 import sodium from "libsodium-wrappers";
 
+const TAB_ID_KEY = "TAB_ID";
+export const cookiesWhereClearedJustNow = () => {
+    const lastPersistedAt = localStorage.getItem("lastPersistedAt");
+    if (lastPersistedAt) {
+        return false;
+    }
+    localStorage.setItem("lastPersistedAt", Date.now().toString());
+    return true;
+};
+
 export const getTabId = () => {
-    const idFromStorage = sessionStorage.getItem("TAB_ID");
+    const idFromStorage = sessionStorage.getItem(TAB_ID_KEY);
     if (idFromStorage) {
         return idFromStorage;
     } else {
         const id = uuid(); // generate unique UUID
-        sessionStorage.setItem("TAB_ID", id);
+        sessionStorage.setItem(TAB_ID_KEY, id);
         return id;
     }
 };
@@ -30,7 +40,10 @@ export const getFreeKeypair = async (
     id: string = "",
     lock: FastMutex = new FastMutex({ clientId: getTabId() }),
     lockCondition: () => boolean = () => true,
-    releaseLockIfSameId?: boolean
+    options?: {
+        releaseLockIfSameId?: boolean;
+        releaseFirstLock?: boolean;
+    }
 ) => {
     await sodium.ready;
     const idCounterKey = ID_COUNTER_KEY + id;
@@ -39,8 +52,22 @@ export const getFreeKeypair = async (
     for (let i = 0; i < 10000; i++) {
         const key = getKeyId(id, i);
         let lockedInfo = lock.getLockedInfo(key);
+        console.log(
+            "KEY KEY AT",
+            key,
+            id,
+            i,
+            lockedInfo,
+            lockedInfo === lock.clientId,
+            options
+        );
+
         if (lockedInfo) {
-            if (lockedInfo === lock.clientId && releaseLockIfSameId) {
+            if (
+                (lockedInfo === lock.clientId &&
+                    options?.releaseLockIfSameId) ||
+                options?.releaseFirstLock
+            ) {
                 await lock.release(key); // Release lock
             } else {
                 continue;

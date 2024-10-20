@@ -5,6 +5,7 @@ import {
     StringMatchMethod,
     StringMatch,
 } from "@peerbit/document";
+import { expect } from "chai";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -31,11 +32,10 @@ describe("index", () => {
             });
             await platform.posts.put(post);
 
-            await expect(platform.getPostAuthor(post.id)).resolves.toEqual(
-                peer.identity.publicKey
-            );
+            const result = await platform.getPostAuthor(post.id);
+            expect(result).to.eq(peer.identity.publicKey);
             const myPosts = await platform.getMyPosts();
-            expect(myPosts).toHaveLength(1);
+            expect(myPosts).to.have.length(1);
 
             const viewer = await peer2.open<BlogPosts>(platform.address, {
                 args: { replicate: false },
@@ -56,7 +56,7 @@ describe("index", () => {
                     ],
                 })
             );
-            expect(foundPost).toHaveLength(1);
+            expect(foundPost).to.have.length(1);
         });
     });
 
@@ -64,7 +64,7 @@ describe("index", () => {
         it("get set", async () => {
             const platform = await peer.open(new BlogPosts());
             const alias = await platform.getAlias(peer.identity.publicKey);
-            expect(alias).toBeUndefined();
+            expect(alias).to.be.undefined;
 
             await platform.alias.put(
                 new Alias({
@@ -74,7 +74,7 @@ describe("index", () => {
             );
 
             const alias2 = await platform.getAlias(peer.identity.publicKey);
-            expect(alias2).toBe("Peerbit");
+            expect(alias2).to.equal("Peerbit");
         });
     });
 });

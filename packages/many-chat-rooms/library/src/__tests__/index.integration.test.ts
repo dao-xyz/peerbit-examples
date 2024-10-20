@@ -6,18 +6,18 @@ import {
     StringMatch,
     StringMatchMethod,
 } from "@peerbit/document";
-import { waitForResolved } from "@peerbit/time";
+import { expect } from "chai";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
 
-    beforeAll(async () => {
+    before(async () => {
         peer = await Peerbit.create();
         peer2 = await Peerbit.create();
         await peer.dial(peer2);
     });
 
-    afterAll(async () => {
+    after(async () => {
         await peer.stop();
         await peer2.stop();
     });
@@ -54,11 +54,11 @@ describe("index", () => {
             })
         );
 
-        expect(results.length).toEqual(1);
-        expect(results[0].id).toEqual(roomBFrom2.id);
+        expect(results.length).to.eq(1);
+        expect(results[0].id).to.eq(roomBFrom2.id);
 
         // TODO auto open (?)
-        // await waitForResolved(() => expect(results[0].closed).toBeFalse()); // because peer1 is also a replicator (will open automatically)
+        // await waitForResolved(() => expect(results[0].closed).to.be.false); // because peer1 is also a replicator (will open automatically)
 
         // Put a message
         const helloWorldPostFrom2 = new Post({
@@ -80,6 +80,6 @@ describe("index", () => {
                     remote: false,
                 })
         );
-        expect(helloWorldPostFrom1!.message).toEqual("hello world");
+        expect(helloWorldPostFrom1!.message).to.eq("hello world");
     });
 });

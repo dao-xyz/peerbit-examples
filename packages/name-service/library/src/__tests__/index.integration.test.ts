@@ -2,15 +2,16 @@ import { Peerbit } from "peerbit";
 import { Name, Names } from "..";
 import { Ed25519Keypair, PreHash } from "@peerbit/crypto";
 import { randomBytes } from "@peerbit/crypto";
+import { expect } from "chai";
 
 describe("index", () => {
     let peer: Peerbit;
 
-    beforeAll(async () => {
+    before(async () => {
         peer = await Peerbit.create();
     });
 
-    afterAll(async () => {
+    after(async () => {
         await peer.stop();
     });
 
@@ -19,15 +20,13 @@ describe("index", () => {
         const names = await peer.open(new Names({ id: randomBytes(32) }));
 
         await names.names.put(new Name(peer.identity.publicKey, "aa"));
-        expect((await names.getName(peer.identity.publicKey))?.name).toEqual(
+        expect((await names.getName(peer.identity.publicKey))?.name).to.eq(
             "aa"
         );
         await names.names.put(new Name(peer.identity.publicKey, "a"));
-        expect((await names.getName(peer.identity.publicKey))?.name).toEqual(
-            "a"
-        );
+        expect((await names.getName(peer.identity.publicKey))?.name).to.eq("a");
         await names.names.put(new Name(peer.identity.publicKey, "aa"));
-        expect((await names.getName(peer.identity.publicKey))?.name).toEqual(
+        expect((await names.getName(peer.identity.publicKey))?.name).to.eq(
             "aa"
         );
     });
@@ -43,9 +42,7 @@ describe("index", () => {
                 kp.signer(PreHash.NONE),
             ],
         });
-        expect((await names.getName(peer.identity.publicKey))?.name).toEqual(
-            "a"
-        );
-        expect((await names.getName(kp.publicKey))?.name).toEqual("a");
+        expect((await names.getName(peer.identity.publicKey))?.name).to.eq("a");
+        expect((await names.getName(kp.publicKey))?.name).to.eq("a");
     });
 });

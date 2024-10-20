@@ -1,16 +1,21 @@
 import { Routes, Route } from "react-router";
-import { PublicSignKey } from "@peerbit/crypto";
-import { serialize, deserialize } from "@dao-xyz/borsh";
 import { CreateStream } from "./CreateStream";
 import { StreamOrView } from "./StreamOrView";
-import { base64url } from "multiformats/bases/base64";
-export const STREAM = "s/:node";
+import { MediaStreamDB } from "./media/database";
+import { Params } from "react-router-dom";
+export const STREAM = "s/:address";
 
-export const getStreamPath = (node: PublicSignKey) =>
+/* export const getStreamPath = (node: PublicSignKey) =>
     "s/" + base64url.encode(serialize(node));
 
 export const getKeyFromStreamKey = (key: string) =>
-    deserialize(base64url.decode(key), PublicSignKey);
+    deserialize(base64url.decode(key), PublicSignKey); */
+
+export const getMediaStreamAddress = (params: Readonly<Params<string>>) =>
+    params.address;
+export const getStreamPath = (db: MediaStreamDB) => {
+    return "s/" + db.address;
+};
 
 export function BaseRoutes() {
     return (

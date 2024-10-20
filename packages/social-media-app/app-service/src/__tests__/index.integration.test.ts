@@ -1,6 +1,7 @@
 import { TestSession } from "@peerbit/test-utils";
 import { AppPreview } from "..";
 import { v4 as uuid } from "uuid";
+import { expect } from "chai";
 describe("index", () => {
     let session: TestSession;
 
@@ -24,14 +25,14 @@ describe("index", () => {
         const client = await session.peers[1].open<AppPreview>(db.address);
         await client.waitFor(db.node.identity.publicKey);
         const response = await client.resolve("https://twitch.tv/ppy");
-        expect(response?.title).toEqual("Twitch");
+        expect(response?.title).to.eq("Twitch");
 
         /* const peer = await Peerbit.create();
         await peer.bootstrap()
         const _imp = AppPreview // else we don't seem to import the program
         const client = await peer.open<AppPreview>("zb2rhXREnAbm5Twtm2ahJM7QKT6FoQGNksWv5jp7o5W6BQ7au");
         const resposne = await client.resolve("https://twitch.tv");
-        expect(resposne?.title).toEqual("Twitch"); */
+        expect(resposne?.title).to.eq("Twitch"); */
     });
 
     it("has reasonable timeout", async () => {
@@ -44,6 +45,6 @@ describe("index", () => {
         const client = await session.peers[1].open<AppPreview>(db.address);
         await client.waitFor(db.node.identity.publicKey);
         await client.resolve(`https://thissitedoesnotexist${uuid()}.com`);
-        expect(+new Date() - t0).toBeLessThan(5000);
+        expect(+new Date() - t0).to.be.lessThan(5000);
     });
 });

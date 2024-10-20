@@ -169,7 +169,7 @@ export const Room = () => {
         room.program.messages.events.addEventListener("change", changeListener);
 
         room.program.messages.index
-            .search(new SearchRequest({ query: [] }), {
+            .search(new SearchRequest({ query: [], fetch: 0xffffffff }), {
                 remote: { replicate: true },
             })
             .then((results) => {

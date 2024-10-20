@@ -27,8 +27,6 @@
         "isolatedModules": true,
         "emitDecoratorMetadata": true,
         "experimentalDecorators": true,
-        "typeRoots": ["node_modules/@types"],
         "skipLibCheck": true
-    },
-    "files": ["global.d.ts"]
+    }
 }

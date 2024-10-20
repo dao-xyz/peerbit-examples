@@ -1,0 +1,14 @@
+{
+    "require": ["ts-node/register", "chai-extend/chai-global.js"],
+    "node-option": [
+        "experimental-specifier-resolution=node",
+        "loader=ts-node/esm",
+        "no-warnings"
+    ],
+    "extension": ["ts"],
+    "parallel": false,
+    "spec": ["**/*.spec.ts", "**/*.test.ts", "**/*.integration.test.ts"],
+    "ignore": ["**/node_modules/**", "**/dist/**"],
+    "timeout": "40000",
+    "exit": true
+}
