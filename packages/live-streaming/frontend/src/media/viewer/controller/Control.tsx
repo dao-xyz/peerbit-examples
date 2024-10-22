@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect, useCallback } from "react";
+import { useRef, useState, useEffect } from "react";
 import * as Slider from "@radix-ui/react-slider";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Select from "@radix-ui/react-select";
@@ -9,16 +9,11 @@ import {
     MdVideoSettings,
     MdTune,
     MdSlowMotionVideo,
-    MdStream,
-    MdVideoCameraFront,
-    MdOndemandVideo,
-    MdPresentToAll,
-    MdTvOff,
-    MdCheck,
-    MdFullscreen,
     MdVolumeUp,
     MdVolumeOff,
     MdReplay10,
+    MdFullscreen,
+    MdCheck,
 } from "react-icons/md";
 import { ControlInterface } from "./controls";
 import {
@@ -38,7 +33,7 @@ export const Controls = (
         viewRef: HTMLCanvasElement;
     } & ControlInterface
 ) => {
-    const [showControls, setShowControls] = useState(true);
+    const [showControls, setShowControls] = useState(false);
     const [speed, setSpeed] = useState(1);
     const [muted, setMuted] = useState(false);
     const [prevMuteVolume, setPrevMuteVolume] = useState(1);
@@ -55,11 +50,8 @@ export const Controls = (
     // State to manage menu navigation
     const [menuStack, setMenuStack] = useState<string[]>(["main"]);
 
-    const controlRef = useCallback((node) => {
-        if (node) {
-            // Add event listeners if needed
-        }
-    }, []);
+    // Reference to the controls div
+    const controlRef = useRef<HTMLDivElement>(null);
 
     const togglePlay = () => {
         const isPlayingNow = !isPlaying;
@@ -71,8 +63,80 @@ export const Controls = (
         if (!props.viewRef) {
             return;
         }
-        // Add event listeners to viewRef if needed
+
+        const handleMouseEnter = () => {
+            setShowControls(true);
+        };
+
+        const handleMouseLeave = (e: MouseEvent) => {
+            if (
+                controlRef.current &&
+                !controlRef.current.contains(e.relatedTarget as Node)
+            ) {
+                setShowControls(false);
+            }
+        };
+
+        props.viewRef.addEventListener("mouseenter", handleMouseEnter);
+        props.viewRef.addEventListener("mouseleave", handleMouseLeave);
+
+        return () => {
+            props.viewRef.removeEventListener("mouseenter", handleMouseEnter);
+            props.viewRef.removeEventListener("mouseleave", handleMouseLeave);
+        };
     }, [props.viewRef]);
+
+    useEffect(() => {
+        if (!controlRef.current) {
+            return;
+        }
+
+        const handleMouseEnter = () => {
+            setShowControls(true);
+        };
+
+        const handleMouseLeave = (e: MouseEvent) => {
+            if (
+                props.viewRef &&
+                !props.viewRef.contains(e.relatedTarget as Node)
+            ) {
+                setShowControls(false);
+            }
+        };
+
+        controlRef.current.addEventListener("mouseenter", handleMouseEnter);
+        controlRef.current.addEventListener("mouseleave", handleMouseLeave);
+
+        return () => {
+            controlRef.current?.removeEventListener(
+                "mouseenter",
+                handleMouseEnter
+            );
+            controlRef.current?.removeEventListener(
+                "mouseleave",
+                handleMouseLeave
+            );
+        };
+    }, [controlRef.current]);
+
+    useEffect(() => {
+        const handleDocumentClick = (e: MouseEvent) => {
+            if (
+                props.viewRef &&
+                !props.viewRef.contains(e.target as Node) &&
+                controlRef.current &&
+                !controlRef.current.contains(e.target as Node)
+            ) {
+                setShowControls(false);
+            }
+        };
+
+        document.addEventListener("click", handleDocumentClick);
+
+        return () => {
+            document.removeEventListener("click", handleDocumentClick);
+        };
+    }, [props.viewRef, controlRef.current]);
 
     const goToSubmenu = (menu: string) => {
         setMenuStack((prevStack) => [...prevStack, menu]);
@@ -165,7 +229,6 @@ export const Controls = (
             return `${minutes}:${seconds.toString().padStart(2, "0")}`;
         }
     };
-    console.log(props.currentTime, props.maxTime, props.progress);
 
     return (
         <div
@@ -194,7 +257,7 @@ export const Controls = (
                         props.setProgress(p);
                     }}
                 >
-                    <Slider.Track className="bg-gray-200 opacity-30 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-80 transition-all">
+                    <Slider.Track className="bg-gray-200 opacity-50 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-80 transition-all">
                         <Slider.Range className="absolute bg-primary-500 rounded-full h-full" />
                     </Slider.Track>
                     <Slider.Thumb className="block w-3 h-3 bg-blue-500 rounded-full group-hover:scale-125 transition-transform" />
@@ -217,30 +280,34 @@ export const Controls = (
                     {/* Live Button */}
                     <button
                         onClick={() => props.setProgress("live")}
-                        className="p-1 text-gray-800"
+                        className="pl-2 pr-2 text-gray-800 flex items-center justify-center"
                     >
                         {props.progress === "live" ? (
-                            <span className="text-blue-500 font-bold text-sm">
+                            <span className="text-primary-500 text-xs font-bold  text-center ">
                                 Live
                             </span>
                         ) : (
-                            <span className="text-sm">Live</span>
+                            <span className="text-xs  text-center ">Live</span>
                         )}
                     </button>
 
                     {/* Time Display */}
-                    <div
-                        className="p-1 text-gray-800 font-mono text-xs"
-                        style={{ minWidth: "70px", textAlign: "center" }}
-                    >
-                        {formatTime(props.currentTime)}/
+                    <div className="font-mono text-xs min-w-[70px] text-center">
+                        {props.progress !== "live" &&
+                            `${formatTime(props.currentTime)}/`}
                         {formatTime(props.maxTime)}
                     </div>
 
-                    {/* Replay Button */}
+                    {/* Rewind 10 seconds Button */}
                     <button
                         onClick={() => {
-                            /* Add replay functionality */
+                            props.setProgress(
+                                Math.max(
+                                    (props.currentTime - 10 * 1e3) /
+                                        props.maxTime,
+                                    0
+                                )
+                            );
                         }}
                         className="p-1"
                     >

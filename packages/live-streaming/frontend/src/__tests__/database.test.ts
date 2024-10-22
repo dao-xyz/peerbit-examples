@@ -520,7 +520,49 @@ describe("MediaStream", () => {
                 );
 
                 await waitForResolved(() =>
-                    expect(maxTime).to.eq(chunks[chunks.length - 1].chunk.time)
+                    expect(maxTime).to.eq(
+                        chunks[chunks.length - 1].track.startTime +
+                            chunks[chunks.length - 1].chunk.time
+                    )
+                );
+            });
+
+            it("start before first chunk", async () => {
+                let framesPerTrack = 2;
+
+                const { mediaStreams, track1, viewerStreams } =
+                    await createScenario({
+                        delay: 1000,
+                        first: {
+                            start: 10,
+                            size: framesPerTrack,
+                            end: 1010,
+                            type: "video",
+                        },
+                    });
+                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+                // start playing from track1 and then assume we will start playing from track2
+                const progress = 0;
+                let maxTime = 0;
+                iterator = await viewerStreams.iterate(progress, {
+                    onProgress: (ev) => {
+                        chunks.push(ev);
+                    },
+                    changeProcessor: (change) => change, // allow concurrent tracks
+                    onMaxTimeChange: (newMaxTime) => {
+                        maxTime = newMaxTime.maxTime;
+                    },
+                });
+                const expecteChunkCount = framesPerTrack;
+                await waitForResolved(() =>
+                    expect(chunks.length).to.eq(expecteChunkCount)
+                );
+                await waitForResolved(() =>
+                    expect(maxTime).to.eq(
+                        chunks[chunks.length - 1].track.startTime +
+                            chunks[chunks.length - 1].chunk.time
+                    )
                 );
             });
         });

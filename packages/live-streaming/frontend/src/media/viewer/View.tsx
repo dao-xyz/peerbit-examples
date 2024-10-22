@@ -10,13 +10,7 @@ import {
     TracksIterator,
 } from "../database.js";
 import { Grid } from "@mui/material";
-import { PublicSignKey } from "@peerbit/crypto";
-import {
-    DocumentsChange,
-    ResultsIterator,
-    SearchRequest,
-    SortDirection,
-} from "@peerbit/document";
+
 import "./View.css";
 import CatOffline from "/catbye64.png";
 import { Controls } from "./controller/Control.js";
@@ -24,11 +18,8 @@ import { ControlFunctions } from "./controller/controls.js";
 import { Resolution } from "../controls/settings.js";
 import { renderer } from "./video/renderer.js";
 import PQueue from "p-queue";
-import { equals } from "uint8arrays";
 import { getKeepAspectRatioBoundedSize } from "../MaintainAspectRatio.js";
 import ClickOnceForAudio from "./ClickOnceForAudio.js";
-import { delay } from "@peerbit/time";
-import { hrtime } from "@peerbit/time";
 
 let inBackground = false;
 document.addEventListener("visibilitychange", () => {
@@ -43,93 +34,8 @@ const addVideoStreamListener = (
     streamDB: Track<WebcodecsStreamDB>,
     play: boolean
 ) => {
-    let abortController = new AbortController();
-    let pendingFrames: VideoFrame[] = [];
-    let underflow = true;
     let currentTime = 0;
-    let lastFrame: VideoFrame | undefined = undefined;
-    let nextFrameMicro: number = 0;
 
-    /*   let scheduleNextFrameImmediate = () => {
-          nextFrameMicro = 0;
-      };
-  
-      let scheduleNextFramePerfectly = () => {
-          const nextFrame = pendingFrames[0];
-          if (!nextFrame) {
-              underflow = true;
-  
-              return;
-          }
-  
-          underflow = false;
-  
-          const delta = lastFrame
-              ? (nextFrame.timestamp - lastFrame.timestamp) * 1000
-              : 0;
-  
-          if (delta < 0) {
-              console.error(
-                  "SCHEDULE NEXT DELTA",
-                  nextFrame.timestamp / 1e6,
-                  delta / 1e6
-              );
-          } else {
-              console.log(
-                  "SCHEDULE NEXT DELTA",
-                  nextFrame.timestamp / 1e6,
-                  delta / 1e6
-              );
-          }
-          lastFrame = nextFrame;
-          nextFrameMicro = Number(hrtime.bigint()) / 1e3 + delta;
-      };
-  
-      let scheduleFrameFunction: () => void = scheduleNextFrameImmediate;
-  
-      let onRenderFrame: (() => void) | undefined = undefined;
-  
-      let session = 0;
-      const renderLoop = (currentSession: number = session) => {
-          if (currentSession !== session) {
-              return;
-          }
-  
-          if (abortController.signal.aborted) {
-              return;
-          }
-  
-          if (nextFrameMicro < Number(hrtime.bigint()) / 1e3) {
-              renderFrame();
-          }
-  
-          requestAnimationFrame(() => renderLoop(currentSession));
-      };
-      const renderFrame = () => {
-          if (!play) {
-              return;
-          }
-  
-          let frame = pendingFrames.shift();
-          if (!frame) {
-              underflow = true;
-              return;
-          }
-  
-          onRenderFrame?.();
-          currentTime = frame.timestamp;
-  
-          if (document.visibilityState === "hidden") {
-              // is the app hidden?
-              console.log("HIDDEN");
-  
-              frame.close();
-          } else {
-              // this is the step where the rendering  happens
-              renderer.draw(frame);
-          }
-      };
-   */
     let decoder: VideoDecoder;
     let waitForKeyFrame = true;
 
@@ -162,28 +68,6 @@ const addVideoStreamListener = (
 
     configureDecoder();
 
-    /*  const clearPending = async () => {
-         if (pendingFrames.length > 0) {
-             pendingFrames.forEach((p) => {
-                 p.close();
-             });
-             pendingFrames = [];
-         }
-     };
-     const handleFrame = (frame: VideoFrame) => {
-         //  console.log("RECEIVED FRAME", pendingFrames.length, frame, inBackground, underflow)
-         if (inBackground) {
-             // don't push frames in background
-             frame.close();
-             clearPending();
-             return;
-         }
-         pendingFrames.push(frame);
-         if (underflow) {
-             scheduleFrameFunction();
-         }
-     };
-  */
     const processChunk = (chunk: Chunk) => {
         const encodedChunk = new EncodedVideoChunk({
             timestamp: Number(chunk.time),
@@ -218,10 +102,6 @@ const addVideoStreamListener = (
         if (decoder.state !== "closed") {
             decoder.close();
         }
-        /*  lastFrame = undefined;
-         waitForKeyFrame = true;
-         console.log("CLEANUP DONE ");
-         abortController = new AbortController(); */
     };
 
     return {
