@@ -3,6 +3,7 @@ import {
     AudioStreamDB,
     Chunk,
     MediaStreamDB,
+    shiftToU32,
     Track,
     TracksIterator,
     WebcodecsStreamDB,
@@ -10,6 +11,7 @@ import {
 import { delay, waitForResolved } from "@peerbit/time";
 import { equals } from "uint8arrays";
 import { expect } from "chai";
+import sinon from "sinon";
 
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
 
@@ -171,18 +173,11 @@ describe("MediaStream", () => {
                     source: new AudioStreamDB({ sampleRate: 44100 }),
                     start: 0,
                     end: 100,
-                }),
-                {
-                    args: {
-                        replicate: "streamer",
-                    },
-                }
+                })
             );
-            const listenTrack = await viewer.open(track1.clone(), {
-                args: {
-                    replicate: "live",
-                },
-            });
+
+            const listenTrack = await viewer.open(track1.clone());
+            await listenTrack.source.replicate("live");
 
             const receivedChunks: Chunk[] = [];
 
@@ -199,7 +194,7 @@ describe("MediaStream", () => {
             await listenTrack.waitFor(streamer.identity.publicKey);
 
             await track1.source.chunks.put(
-                new Chunk({ time: 0n, chunk: new Uint8Array([1, 2, 3]) })
+                new Chunk({ time: 0, chunk: new Uint8Array([1, 2, 3]) })
             );
             await waitForResolved(() =>
                 expect(receivedChunks).to.have.length(1)
@@ -450,6 +445,179 @@ describe("MediaStream", () => {
             await waitForResolved(() =>
                 expect(chunks.map((x) => x.chunk.id)).to.deep.eq([c1.id, c4.id])
             );
+        });
+
+        it("closing iterator will end track", async () => {
+            const { mediaStreams, track1, viewerStreams } =
+                await createScenario({
+                    first: { start: 10, size: 1 },
+                });
+            let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+            let viewerTracks: Track<AudioStreamDB | WebcodecsStreamDB>[] = [];
+
+            iterator = await viewerStreams.iterate("live", {
+                onProgress: (ev) => {
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    viewerTracks.push(...tracks);
+                },
+            });
+
+            await waitForResolved(() => expect(viewerTracks).to.have.length(1));
+
+            await waitForResolved(
+                () => expect(viewerTracks[0].closed).to.be.false
+            );
+            await iterator.close();
+            expect(viewerTracks[0].closed).to.be.true;
+        });
+
+        it("closing iterator with keep alive with prevent further replication when closing", async () => {
+            const { mediaStreams, track1, viewerStreams } =
+                await createScenario({
+                    first: { start: 0, size: 0 },
+                });
+            let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+            let viewerTracks: Track<AudioStreamDB | WebcodecsStreamDB>[] = [];
+
+            iterator = await viewerStreams.iterate("live", {
+                keepTracksOpen: true, // keep tracks alive after closing
+                onProgress: (ev) => {
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    viewerTracks.push(...tracks);
+                },
+            });
+            await waitForResolved(() => expect(viewerTracks).to.have.length(1));
+
+            await track1.source.chunks.put(
+                new Chunk({
+                    chunk: new Uint8Array([0]),
+                    time: 0 * MILLISECONDS_TO_MICROSECONDS,
+                    type: "key",
+                })
+            );
+
+            await waitForResolved(() => expect(chunks).to.have.length(1));
+            await waitForResolved(
+                () => expect(viewerTracks[0].closed).to.be.false
+            );
+            await iterator.close();
+
+            expect(viewerTracks[0].closed).to.be.false;
+
+            // try inserting one more chunk and make sure it does not reach the viewer
+            await track1.source.chunks.put(
+                new Chunk({
+                    chunk: new Uint8Array([0]),
+                    time: chunks[0].chunk.timeBN + 1n, // this does not matter since live feed is only looking at entry commit timestamps and not actual Chunk timestamp (TODO?)
+                    type: "key",
+                })
+            );
+
+            await delay(1500); // wait for some times for the chunks to propagate
+            expect(chunks).to.have.length(1);
+            expect(viewerTracks[0].source.chunks.log.log.length).to.eq(1);
+        });
+
+        it("closing iterator with keep alive with prevent further replication when non-live iterating", async () => {
+            const { mediaStreams, track1, viewerStreams } =
+                await createScenario({
+                    first: { start: 0, size: 0 },
+                });
+            let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+            let viewerTracks: Track<AudioStreamDB | WebcodecsStreamDB>[] = [];
+
+            const firstIterator = await viewerStreams.iterate("live", {
+                keepTracksOpen: true, // keep tracks alive after closing
+                onProgress: (ev) => {
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    viewerTracks.push(...tracks);
+                },
+            });
+
+            await waitForResolved(() => expect(viewerTracks).to.have.length(1));
+
+            const secondIterator = await viewerStreams.iterate(0, {
+                keepTracksOpen: true, // keep tracks alive after closing
+                onProgress: (ev) => {
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    viewerTracks.push(...tracks);
+                },
+            });
+
+            await waitForResolved(() => expect(viewerTracks).to.have.length(2));
+
+            expect(viewerTracks[0] === viewerTracks[1]).to.be.true;
+            const segments =
+                await viewerTracks[0].source.chunks.log.replicationIndex
+                    .iterate({
+                        query: {
+                            hash: viewerStreams.node.identity.publicKey.hashcode(),
+                        },
+                    })
+                    .all();
+            expect(segments).to.have.length(1);
+            expect(segments[0].value.end2).to.be.closeTo(
+                shiftToU32(+new Date()),
+                1000
+            );
+
+            await firstIterator.close();
+            await secondIterator.close();
+        });
+
+        it("will reuse segment", async () => {
+            const { mediaStreams, track1, viewerStreams } =
+                await createScenario({
+                    first: { start: 0, size: 0 },
+                });
+            let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+            let viewerTracks: Track<AudioStreamDB | WebcodecsStreamDB>[] = [];
+
+            const firstIterator = await viewerStreams.iterate("live", {
+                keepTracksOpen: true, // keep tracks alive after closing
+                onProgress: (ev) => {
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    viewerTracks.push(...tracks);
+                },
+            });
+
+            await waitForResolved(() => expect(viewerTracks).to.have.length(1));
+
+            const secondIterator = await viewerStreams.iterate("live", {
+                keepTracksOpen: true, // keep tracks alive after closing
+                onProgress: (ev) => {
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    viewerTracks.push(...tracks);
+                },
+            });
+
+            await waitForResolved(() => expect(viewerTracks).to.have.length(2));
+
+            expect(viewerTracks[0] === viewerTracks[1]).to.be.true;
+            const segments =
+                await viewerTracks[0].source.chunks.log.replicationIndex
+                    .iterate({
+                        query: {
+                            hash: viewerStreams.node.identity.publicKey.hashcode(),
+                        },
+                    })
+                    .all();
+            expect(segments).to.have.length(1);
+
+            await firstIterator.close();
+            await secondIterator.close();
         });
     });
 
@@ -926,6 +1094,110 @@ describe("MediaStream", () => {
                 } catch (e) {
                     throw e;
                 }
+            });
+        });
+
+        describe("life cycle", () => {
+            it("will reuse track for new iterator", async () => {
+                let trackCount = 2;
+
+                const { mediaStreams, track1, viewerStreams } =
+                    await createScenario({
+                        delay: 999,
+                        first: { start: 0, size: trackCount, end: 999 },
+                    });
+                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+                // start playing from track1 and then assume we will start playing from track2
+                let maxTime = 0;
+                let tracks: Track<any>[] = [];
+                iterator = await viewerStreams.iterate(0, {
+                    keepTracksOpen: true, // this option will prevent closing
+                    onProgress: (ev) => {
+                        chunks.push(ev);
+                    },
+                    onMaxTimeChange: (newMaxTime) => {
+                        maxTime = newMaxTime.maxTime;
+                    },
+                    onTracksChange: (change) => {
+                        tracks.push(...change);
+                    },
+                });
+                await waitForResolved(() =>
+                    expect(chunks.length).to.eq(trackCount)
+                );
+                await waitForResolved(() =>
+                    expect(maxTime).to.eq(
+                        chunks[chunks.length - 1].track.startTime +
+                            chunks[chunks.length - 1].chunk.time
+                    )
+                );
+                expect(tracks).to.have.length(1);
+                expect(tracks[0].closed).to.be.false;
+
+                chunks = [];
+                maxTime = 0;
+
+                // do the same iterator again and expect same results
+
+                const closeCall = sinon.spy(tracks[0].close);
+                tracks[0].close = closeCall;
+
+                iterator = await viewerStreams.iterate(0, {
+                    keepTracksOpen: true, // this option will prevent closing
+                    onProgress: (ev) => {
+                        chunks.push(ev);
+                    },
+                    onMaxTimeChange: (newMaxTime) => {
+                        maxTime = newMaxTime.maxTime;
+                    },
+                    onTracksChange: (change) => {
+                        tracks.push(...change);
+                    },
+                });
+
+                await waitForResolved(() =>
+                    expect(chunks.length).to.eq(trackCount)
+                );
+                await waitForResolved(() =>
+                    expect(maxTime).to.eq(
+                        chunks[chunks.length - 1].track.startTime +
+                            chunks[chunks.length - 1].chunk.time
+                    )
+                );
+
+                expect(closeCall.called).to.be.false;
+                await iterator.close();
+                expect(closeCall.called).to.be.false; // since keepTracksOpen: true
+            });
+
+            it("close all tracks", async () => {
+                let trackCount = 2;
+
+                const { mediaStreams, track1, viewerStreams } =
+                    await createScenario({
+                        delay: 999,
+                        first: { start: 0, size: trackCount, end: 999 },
+                    });
+                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+                // start playing from track1 and then assume we will start playing from track2
+                let tracks: Track<any>[] = [];
+                iterator = await viewerStreams.iterate(0, {
+                    keepTracksOpen: true, // this option will prevent closing
+                    onTracksChange: (change) => {
+                        tracks.push(...change);
+                    },
+                });
+                await waitForResolved(() => {
+                    expect(tracks).to.have.length(1);
+                    expect(tracks[0].closed).to.be.false;
+                });
+                const closeCalled = sinon.spy(tracks[0].close);
+                tracks[0].close = closeCalled;
+                await viewerStreams.close();
+
+                expect(closeCalled.calledOnce).to.be.true;
             });
         });
     });

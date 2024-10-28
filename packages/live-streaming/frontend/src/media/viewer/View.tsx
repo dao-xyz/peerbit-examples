@@ -430,6 +430,7 @@ export const View = (properties: DBArgs) => {
 
             console.log("ITERATE WITH PROGRESS", progress);
             streamListener.current = await properties.stream.iterate(progress, {
+                keepTracksOpen: true,
                 onProgress: (ev) => {
                     setCurrentTime(
                         Math.round((ev.track.startTime + ev.chunk.time) / 1e3)

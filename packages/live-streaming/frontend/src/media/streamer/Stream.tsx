@@ -167,12 +167,11 @@ const createVideoEncoder = (
                                 const r = await mediaStreamDBs.node.open(
                                     videoTrack,
                                     {
-                                        args: {
-                                            replicate: "streamer",
-                                        },
                                         /*   trim: { type: 'length', to: 10 }, */
                                     }
                                 );
+                                await r.source.replicate("streamer");
+
                                 while (videoStreamDB) {
                                     await close(false);
                                 }
@@ -285,13 +284,9 @@ const createAudioEncoder = async (
                 source: new AudioStreamDB({ sampleRate: 48000 }),
                 globalTime: openTimestamp,
                 now: () => performance.now(),
-            }),
-            {
-                args: {
-                    replicate: "streamer",
-                },
-            }
+            })
         );
+        await audioTrack.source.replicate("streamer");
 
         await mediaStreamDBs.tracks.put(audioTrack, { target: "all" });
 

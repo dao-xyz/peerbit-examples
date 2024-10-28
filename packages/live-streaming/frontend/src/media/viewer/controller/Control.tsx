@@ -43,9 +43,6 @@ export const Controls = (
     const [selectedResolutions, setSelectedResolutions] = useState<
         Resolution[]
     >(props.selectedResolution || []);
-    const [prevSettings, setPrevSettings] = useState<StreamType>({
-        type: "noise",
-    });
 
     // State to manage menu navigation
     const [menuStack, setMenuStack] = useState<string[]>(["main"]);
@@ -260,7 +257,7 @@ export const Controls = (
                     <Slider.Track className="bg-gray-200 opacity-50 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-80 transition-all">
                         <Slider.Range className="absolute bg-primary-500 rounded-full h-full" />
                     </Slider.Track>
-                    <Slider.Thumb className="block w-3 h-3 bg-blue-500 rounded-full group-hover:scale-125 transition-transform" />
+                    <Slider.Thumb className="block w-3 h-3 bg-primary-500 rounded-full group-hover:scale-125 transition-transform" />
                 </Slider.Root>
             </div>
 
