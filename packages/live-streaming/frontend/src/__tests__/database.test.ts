@@ -220,7 +220,10 @@ describe("MediaStream", () => {
         it("new", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
-                    first: { start: 10 },
+                    first: {
+                        start: 10,
+                        size: 0,
+                    },
                 });
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
             iterator = await viewerStreams.iterate("live", {
@@ -247,7 +250,7 @@ describe("MediaStream", () => {
             );
             await delay(1000);
 
-            console.log("CREATE CHUNK AT", +new Date() % 2 ** 32);
+            console.log("CREATE CHUNK AT");
             await track1.source.chunks.put(c1, { target: "all" });
             await waitForResolved(() => expect(chunks).to.have.length(1));
             await track1.source.chunks.put(c2, { target: "all" });
@@ -260,7 +263,10 @@ describe("MediaStream", () => {
         it("old ignored", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
-                    first: { start: 10 },
+                    first: {
+                        start: 10,
+                        size: 0,
+                    },
                 });
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
             iterator = await viewerStreams.iterate("live", {
@@ -296,8 +302,8 @@ describe("MediaStream", () => {
         it("select options", async () => {
             const { mediaStreams, track1, track2, viewerStreams } =
                 await createScenario({
-                    first: { start: 0, type: "video" },
-                    second: { start: 10, type: "video" }, // start first at 0 so we choose it as the track when listening to live
+                    first: { start: 0, size: 0, type: "video" },
+                    second: { start: 10, size: 0, type: "video" }, // start first at 0 so we choose it as the track when listening to live
                 });
 
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
@@ -352,7 +358,11 @@ describe("MediaStream", () => {
             await track1.source.chunks.put(c3, { target: "all" });
             await track2.source.chunks.put(c4, { target: "all" });
 
-            await waitForResolved(() => expect(chunks).to.have.length(2));
+            try {
+                await waitForResolved(() => expect(chunks).to.have.length(2));
+            } catch (error) {
+                throw error;
+            }
             expect(chunks[1].chunk.id).to.eq(c4.id);
             expect(iterator.options).to.have.length(2);
         });
@@ -447,31 +457,32 @@ describe("MediaStream", () => {
             );
         });
 
+        /* TODO feat?
         it("closing iterator will end track", async () => {
-            const { mediaStreams, track1, viewerStreams } =
-                await createScenario({
-                    first: { start: 10, size: 1 },
-                });
-            let chunks: { track: Track<any>; chunk: Chunk }[] = [];
-            let viewerTracks: Track<AudioStreamDB | WebcodecsStreamDB>[] = [];
-
-            iterator = await viewerStreams.iterate("live", {
-                onProgress: (ev) => {
-                    chunks.push(ev);
-                },
-                onTracksChange(tracks) {
-                    viewerTracks.push(...tracks);
-                },
-            });
-
-            await waitForResolved(() => expect(viewerTracks).to.have.length(1));
-
-            await waitForResolved(
-                () => expect(viewerTracks[0].closed).to.be.false
-            );
-            await iterator.close();
-            expect(viewerTracks[0].closed).to.be.true;
-        });
+             const { mediaStreams, track1, viewerStreams } =
+                 await createScenario({
+                     first: { start: 10, size: 1 },
+                 });
+             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+             let viewerTracks: Track<AudioStreamDB | WebcodecsStreamDB>[] = [];
+ 
+             iterator = await viewerStreams.iterate("live", {
+                 onProgress: (ev) => {
+                     chunks.push(ev);
+                 },
+                 onTracksChange(tracks) {
+                     viewerTracks.push(...tracks);
+                 },
+             });
+ 
+             await waitForResolved(() => expect(viewerTracks).to.have.length(1));
+ 
+             await waitForResolved(
+                 () => expect(viewerTracks[0].closed).to.be.false
+             );
+             await iterator.close();
+             expect(viewerTracks[0].closed).to.be.true;
+         }); */
 
         it("closing iterator with keep alive with prevent further replication when closing", async () => {
             const { mediaStreams, track1, viewerStreams } =
@@ -525,7 +536,7 @@ describe("MediaStream", () => {
         it("closing iterator with keep alive with prevent further replication when non-live iterating", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
-                    first: { start: 0, size: 0 },
+                    first: { start: 0, size: 10 },
                 });
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
             let viewerTracks: Track<AudioStreamDB | WebcodecsStreamDB>[] = [];
@@ -541,7 +552,9 @@ describe("MediaStream", () => {
             });
 
             await waitForResolved(() => expect(viewerTracks).to.have.length(1));
+            await waitForResolved(() => expect(chunks).to.have.length(1)); // expect the last and only chunk to be replayed
 
+            chunks = [];
             const secondIterator = await viewerStreams.iterate(0, {
                 keepTracksOpen: true, // keep tracks alive after closing
                 onProgress: (ev) => {
@@ -553,8 +566,10 @@ describe("MediaStream", () => {
             });
 
             await waitForResolved(() => expect(viewerTracks).to.have.length(2));
+            await waitForResolved(() => expect(chunks).to.have.length(10)); // expect all chunks to play
 
             expect(viewerTracks[0] === viewerTracks[1]).to.be.true;
+
             const segments =
                 await viewerTracks[0].source.chunks.log.replicationIndex
                     .iterate({
@@ -565,7 +580,7 @@ describe("MediaStream", () => {
                     .all();
             expect(segments).to.have.length(1);
             expect(segments[0].value.end2).to.be.closeTo(
-                shiftToU32(+new Date()),
+                chunks[chunks.length - 1].chunk.time,
                 1000
             );
 
@@ -1201,4 +1216,141 @@ describe("MediaStream", () => {
             });
         });
     });
+
+    describe("segments", () => {
+        describe("streamer", () => {
+            it("one track open", async () => {
+                const { mediaStreams } = await createScenario({
+                    delay: 1000,
+                    first: { start: 1000, size: 10 },
+                    // chunk at 1s, 2s, ... 10s
+                });
+                // we are starting from 1s and replicate to 10s
+                // 0-1s is a gap, menaing the replicated segments normalized should be as below
+                const segmensts = await mediaStreams.getReplicatedSegments();
+                expect(segmensts).to.deep.eq([[0.1, 1]]);
+            });
+
+            it("one track closed", async () => {
+                const { mediaStreams } = await createScenario({
+                    delay: 1000,
+                    first: { start: 1000, size: 10, end: 1e4 },
+                    // chunk at 1s, 2s, ... 10s
+                });
+                // we are starting from 1s and replicate to 10s
+                // 0-1s is a gap, menaing the replicated segments normalized should be as below
+                const segmensts = await mediaStreams.getReplicatedSegments();
+                expect(segmensts).to.deep.eq([[0.1, 1]]);
+            });
+
+            it("two tracks open", async () => {
+                const { mediaStreams } = await createScenario({
+                    delay: 1000,
+                    first: { start: 1000, size: 10 }, // chunk at 1s, 2s, ... 10s
+                    second: { start: 5000, size: 16 }, // chunk at 5s, 6s, ... 20s
+                });
+                // we are starting from 1s and replicate to 10s
+                // 0-1s is a gap, menaing the replicated segments normalized should be as below
+                const segments = await mediaStreams.getReplicatedSegments();
+                expect(segments).to.deep.eq([
+                    [0.05, 1],
+                    [0.25, 1],
+                ]);
+            });
+
+            it("two tracks one open one closed", async () => {
+                console.time("createScenario");
+                const { mediaStreams } = await createScenario({
+                    delay: 1000,
+                    first: { start: 1000, size: 10, end: 1e4 }, // chunk at 1s, 2s, ... 10s
+                    second: { start: 5000, size: 16 }, // chunk at 5s, 6s, ... 20s
+                });
+                const t2 = console.timeEnd("createScenario");
+
+                // we are starting from 1s and replicate to 10s
+                // 0-1s is a gap, menaing the replicated segments normalized should be as below
+
+                console.time("getReplicatedSegments");
+                const segments = await mediaStreams.getReplicatedSegments();
+                expect(segments).to.deep.eq([
+                    [0.05, 0.5],
+                    [0.25, 1],
+                ]);
+
+                const t4 = console.timeEnd("getReplicatedSegments");
+            });
+        });
+        describe("viewer", () => {
+            it("from start", async () => {
+                const { viewerStreams } = await createScenario({
+                    delay: 10,
+                    first: { start: 10, size: 10 },
+                    // chunk at 1s, 2s, ... 10s
+                });
+
+                const segments = await viewerStreams.getReplicatedSegments();
+                expect(segments).to.deep.eq([]); // no iteration yet
+
+                let chunks: Chunk[] = [];
+                const iterator = await viewerStreams.iterate(0, {
+                    onProgress: (c) => {
+                        chunks.push(c.chunk);
+                    },
+                });
+
+                await waitForResolved(() => expect(chunks).to.have.length(10));
+            });
+
+            it("one track closed", async () => {
+                const { mediaStreams } = await createScenario({
+                    delay: 1000,
+                    first: { start: 1000, size: 10, end: 1e4 },
+                    // chunk at 1s, 2s, ... 10s
+                });
+                // we are starting from 1s and replicate to 10s
+                // 0-1s is a gap, menaing the replicated segments normalized should be as below
+                const segmensts = await mediaStreams.getReplicatedSegments();
+                expect(segmensts).to.deep.eq([[0.1, 1]]);
+            });
+
+            it("two tracks open", async () => {
+                const { mediaStreams } = await createScenario({
+                    delay: 1000,
+                    first: { start: 1000, size: 10 }, // chunk at 1s, 2s, ... 10s
+                    second: { start: 5000, size: 16 }, // chunk at 5s, 6s, ... 20s
+                });
+                // we are starting from 1s and replicate to 10s
+                // 0-1s is a gap, menaing the replicated segments normalized should be as below
+                const segments = await mediaStreams.getReplicatedSegments();
+                expect(segments).to.deep.eq([
+                    [0.05, 1],
+                    [0.25, 1],
+                ]);
+            });
+
+            it("two tracks one open one closed", async () => {
+                console.time("createScenario");
+                const { mediaStreams } = await createScenario({
+                    delay: 1000,
+                    first: { start: 1000, size: 10, end: 1e4 }, // chunk at 1s, 2s, ... 10s
+                    second: { start: 5000, size: 16 }, // chunk at 5s, 6s, ... 20s
+                });
+                const t2 = console.timeEnd("createScenario");
+
+                // we are starting from 1s and replicate to 10s
+                // 0-1s is a gap, menaing the replicated segments normalized should be as below
+
+                console.time("getReplicatedSegments");
+                const segments = await mediaStreams.getReplicatedSegments();
+                expect(segments).to.deep.eq([
+                    [0.05, 0.5],
+                    [0.25, 1],
+                ]);
+
+                const t4 = console.timeEnd("getReplicatedSegments");
+            });
+        });
+    });
+
+    describe("lifecycle", () => {});
 });

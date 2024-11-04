@@ -64,11 +64,11 @@ import { Program } from "@peerbit/program";
 import { concat } from "uint8arrays";
 import { randomBytes } from "@peerbit/crypto";
 import { delay, waitFor, AbortError } from "@peerbit/time";
-import PQueue from "p-queue";
+import pQueue from "p-queue";
 import { equals } from "uint8arrays";
 import { createDocumentDomain, CustomDomain } from "./domain";
-import pQueue from "p-queue";
 import { ReplicationRangeIndexable } from "@peerbit/shared-log";
+import pDefer from "p-defer";
 
 /*
 const utf8Encode = (value: string) => {
@@ -252,14 +252,16 @@ export abstract class TrackSource {
             },
             replicate: false,
             domain: createDocumentDomain(this.chunks, {
-                fromEntry: (entry) => {
+                /* fromEntry: (entry) => {
                     const out = shiftToU32(
                         Number(
                             entry.meta.clock.timestamp.wallTime / BigInt(1e6)
                         )
                     );
-                    /*   console.trace("OUT", out) */
                     return out;
+                }, */
+                fromValue(value, _entry) {
+                    return shiftToU32(Number(value!.time));
                 },
             }),
         });
@@ -322,7 +324,7 @@ export abstract class TrackSource {
         );
     }
 
-    async last(): Promise<Chunk | undefined> {
+    async last(options?: { localOnly: boolean }): Promise<Chunk | undefined> {
         return (
             await this.chunks.index.search(
                 new SearchRequest({
@@ -334,12 +336,14 @@ export abstract class TrackSource {
                     ],
                     fetch: 1,
                 }),
-                {
-                    local: true,
-                    remote: {
-                        eager: true,
-                    },
-                }
+                options?.localOnly
+                    ? { local: true, remote: false }
+                    : {
+                          local: true,
+                          remote: {
+                              eager: true,
+                          },
+                      }
             )
         )?.[0];
     }
@@ -347,24 +351,46 @@ export abstract class TrackSource {
     lastLivestreamingSegmentId: Uint8Array;
     async replicate(args: "live" | "streamer" | false) {
         if (args === "live") {
-            /*  // get latest chunk 
-             await this.waitForStreamer()
-             const last = await this.last()
-             let lastTime = last?.time || 0 */
-
+            // get latest chunk
+            await this.waitForStreamer();
+            const last = await this.last();
+            let lastTime = last?.time || 0;
             await this.chunks.log.replicate({
                 id:
                     this.lastLivestreamingSegmentId ||
                     (this.lastLivestreamingSegmentId = randomBytes(32)),
                 factor: 24 * 60 * 60 * 1e3,
-                offset: shiftToU32(+new Date()),
+                offset: lastTime,
                 normalized: false,
                 strict: true,
             });
+
+            console.log(
+                "REPLICATE",
+                lastTime + " --> " + (lastTime + 24 * 60 * 60 * 1e3)
+            );
+
+            /*   await this.chunks.log.replicate({
+                  id:
+                      this.lastLivestreamingSegmentId ||
+                      (this.lastLivestreamingSegmentId = randomBytes(32)),
+                  factor: 24 * 60 * 60 * 1e3,
+                  offset: shiftToU32(+new Date()),
+                  normalized: false,
+                  strict: true,
+              }); */
         } else {
             await this.endPreviousLivestreamSubscription();
             return this.chunks.log.replicate(
-                args === "streamer" ? { factor: 1 } : args ?? { factor: 1 }
+                args === "streamer"
+                    ? {
+                          factor: 1,
+                          offset: 0,
+                      }
+                    : args ?? {
+                          factor: 1,
+                          offset: 0,
+                      }
             );
         }
     }
@@ -382,11 +408,12 @@ export abstract class TrackSource {
             throw new Error("Unexpected, missing livestreaming segment");
         }
 
-        let now = shiftToU32(+new Date());
+        let last = (await this.last({ localOnly: true }))?.time || 0;
+        console.log("MARK END LAST", last);
         await this.chunks.log.replicate({
             id: segment.value.id,
             offset: segment.value.start1,
-            factor: now - segment.value.start1, // TODO wthis is wrong potentially if we wrap around u32 and segment.value.start1 is before and now is after
+            factor: Math.max(last - segment.value.start1, 0), // TODO wthis is wrong potentially if we wrap around u32 and segment.value.start1 is before and now is after
             normalized: false,
             strict: true,
         });
@@ -672,7 +699,8 @@ export class MediaStreamDB extends Program<{}> {
     tracks: Documents<Track<AudioStreamDB | WebcodecsStreamDB>, TrackIndexable>;
 
     private maxTime: number | undefined = undefined;
-    private openedTracks: Track<WebcodecsStreamDB | AudioStreamDB>[] = [];
+    private openedTracks: Map<string, Track<WebcodecsStreamDB | AudioStreamDB>>;
+    private closeController = new AbortController();
 
     constructor(owner: PublicSignKey) {
         // force the id of the program to be the same for all stream
@@ -692,6 +720,7 @@ export class MediaStreamDB extends Program<{}> {
     }
 
     async open(args?: {}): Promise<void> {
+        this.closeController = new AbortController();
         await this.tracks.open({
             type: Track,
             canPerform: async (props) => {
@@ -706,13 +735,43 @@ export class MediaStreamDB extends Program<{}> {
             },
             canOpen: (_) => Promise.resolve(false), // dont open subdbs by opening this db
             replicate: {
+                // this is expected to always be true for all users
                 factor: 1,
+                offset: 0,
             },
             index: {
                 type: TrackIndexable,
             },
         });
-        this.openedTracks = [];
+        this.openedTracks = new Map();
+
+        // open all tracks that are added
+        const onChange = async (
+            change: CustomEvent<
+                DocumentsChange<Track<AudioStreamDB | WebcodecsStreamDB>>
+            >
+        ) => {
+            if (change.detail.added) {
+                for (const track of change.detail.added) {
+                    await this.openTrack(track);
+                }
+            }
+        };
+        this.tracks.events.addEventListener("change", onChange);
+        this.closeController.signal.addEventListener("abort", () => {
+            this.tracks.events.removeEventListener("change", onChange);
+        });
+        await this.tracks.log.reset();
+
+        /* 
+                // open all indexed tracks 
+                const iterator = await this.tracks.index.iterate(new SearchRequest({}), { local: true, remote: false })
+                while (iterator.done() !== true) {
+                    const next = await iterator.next(100);
+                    for (const track of next) {
+        
+                    }
+                } */
     }
 
     async getLatest(
@@ -745,13 +804,26 @@ export class MediaStreamDB extends Program<{}> {
 
         return tracks;
     }
+    private async openTrack(track: Track<any>) {
+        const openTrack = await this.node.open(track, {
+            existing: "reuse",
+            args: {
+                sender: this.owner,
+            },
+        });
 
-    private async subscribeForMaxTime(
-        onChange: (maybeNewMaxtime: number) => void
-    ) {
+        const alreadyOpen = openTrack !== track;
+        if (!alreadyOpen) {
+            this.openedTracks.set(openTrack.address, openTrack);
+        }
+        return openTrack;
+    }
+
+    private subscribeForMaxTime(onChange: (maybeNewMaxtime: number) => void) {
         let singleQueue = new pQueue({ concurrency: 1 });
 
         const fn = () => async () => {
+            console.time("a");
             const notClosed: Track[] = await this.tracks.index.search(
                 new SearchRequest({
                     query: [
@@ -767,37 +839,43 @@ export class MediaStreamDB extends Program<{}> {
                     },
                 }
             );
+            console.timeEnd("a");
 
             let maxTime: number | undefined = undefined;
             if (notClosed.length > 0) {
+                console.time("b");
+
                 for (const track of notClosed) {
-                    const openTrack = await this.node.open(track, {
-                        existing: "reuse",
-                        args: {
-                            sender: this.owner,
-                        },
-                    });
-
-                    const alreadyOpen = openTrack !== track;
-                    if (!alreadyOpen) {
-                        this.openedTracks.push(openTrack);
-                    }
-
+                    const openTrack = await this.openTrack(track);
                     // TODO assumption, streamer is always replicator, is this correct?
                     // if this is not true, then fetching the latest chunk needs to some kind of warmup period
-                    await openTrack.source.chunks.log.waitForReplicator(
-                        this.owner
-                    );
+
+                    console.time("wait for replicator");
+                    if (!this.node.identity.publicKey.equals(this.owner)) {
+                        await openTrack.source.chunks.log.waitForReplicator(
+                            this.owner
+                        );
+                    }
+                    console.timeEnd("wait for replicator");
 
                     // TODO listen to updates ?
+                    console.time("get last");
                     maxTime =
                         openTrack.startTime +
                         ((await openTrack.source.last())?.time || 0);
-                    if (!alreadyOpen) {
-                        await openTrack.close();
-                    }
+
+                    /*  TODO?    
+                     if (!alreadyOpen) {
+                              await openTrack.close();
+                    } 
+                     */
+                    console.timeEnd("get last");
                 }
+
+                console.timeEnd("b");
             } else {
+                console.time("c");
+
                 // check closed
                 const latestClosed = (
                     await this.tracks.index.search(
@@ -825,8 +903,16 @@ export class MediaStreamDB extends Program<{}> {
                             ? Math.max(maxTime, latestClosed.endTime)
                             : latestClosed.endTime;
                 }
+
+                console.timeEnd("c");
             }
-            maxTime != null && onChange(maxTime);
+            if (
+                maxTime != null &&
+                (this.maxTime == null || maxTime > this.maxTime)
+            ) {
+                this.maxTime = maxTime;
+                onChange(maxTime);
+            }
         };
 
         const listener =
@@ -841,7 +927,6 @@ export class MediaStreamDB extends Program<{}> {
                     "replicator:join",
                     listener
                 );
-                this.maxTime = undefined;
             },
         };
     }
@@ -853,7 +938,7 @@ export class MediaStreamDB extends Program<{}> {
     async iterate(
         progress: number | "live",
         opts?: {
-            keepTracksOpen?: boolean;
+            keepTracksOpen?: boolean; // TODO not used yet
             changeProcessor?: TrackChangeProcessor;
             onProgress?: (properties: { track: Track; chunk: Chunk }) => void;
             onMaxTimeChange?: (properties: { maxTime: number }) => void;
@@ -861,7 +946,7 @@ export class MediaStreamDB extends Program<{}> {
             onTracksChange?: (tracks: Track[]) => void;
         }
     ): Promise<TracksIterator> {
-        const openTrackQueue = new PQueue({ concurrency: 1 });
+        const openTrackQueue = new pQueue({ concurrency: 1 });
         const changeProcessor =
             opts?.changeProcessor || oneVideoAndOneAudioChangeProcessor;
         let close: () => void;
@@ -907,10 +992,14 @@ export class MediaStreamDB extends Program<{}> {
             maybeNewMaxTime
         ) => {
             if (this.maxTime == null || maybeNewMaxTime > this.maxTime) {
-                this.maxTime = maybeNewMaxTime;
-                onMaxTimeChange?.(this.maxTime);
-                opts?.onMaxTimeChange?.({ maxTime: maybeNewMaxTime });
+                onMaxTimeChangeWrapped(maybeNewMaxTime);
             }
+        };
+
+        let onMaxTimeChangeWrapped = (newMaxTime: number) => {
+            this.maxTime = newMaxTime;
+            onMaxTimeChange?.(this.maxTime);
+            opts?.onMaxTimeChange?.({ maxTime: newMaxTime });
         };
 
         if (this.maxTime != null) {
@@ -921,7 +1010,7 @@ export class MediaStreamDB extends Program<{}> {
         let stopMaxTimeSync: (() => void) | undefined = undefined;
 
         if (typeof progress === "number" && progress < 1) {
-            const out = await this.subscribeForMaxTime(onMaxTimeMaybeChange);
+            const out = this.subscribeForMaxTime(onMaxTimeChangeWrapped);
             stopMaxTimeSync = out.stop;
 
             // convert progress bar value into a media time
@@ -948,9 +1037,11 @@ export class MediaStreamDB extends Program<{}> {
             if (index >= 0) {
                 const element = currentTracks.splice(index, 1)[0];
                 opts?.onTracksChange?.(currentTracks.map((x) => x.track));
-                !opts?.keepTracksOpen
-                    ? await element.track.close()
-                    : await element.track.source.endPreviousLivestreamSubscription();
+                /* !opts?.keepTracksOpen
+                    ? await element.track.source.endPreviousLivestreamSubscription().finally(() => {
+                        return element.track.close()
+                    })
+                    : */ await element.track.source.endPreviousLivestreamSubscription();
                 /*  console.log("REMOVE TRACK", {
                      startTime: track.startTime,
                      endTime: track.endTime,
@@ -1179,7 +1270,7 @@ export class MediaStreamDB extends Program<{}> {
             if (track !== prevTrack) {
                 // already open
             } else {
-                this.openedTracks.push(track);
+                this.openedTracks.set(track.address, track);
             }
 
             if (startProgressBarMediaTime() === "live") {
@@ -1373,9 +1464,12 @@ export class MediaStreamDB extends Program<{}> {
                 open,
                 close: () => {
                     close();
-                    return !opts?.keepTracksOpen
-                        ? track.close()
-                        : track.source.endPreviousLivestreamSubscription();
+                    return track.source.endPreviousLivestreamSubscription();
+                    /* return !opts?.keepTracksOpen
+                        ? track.source.endPreviousLivestreamSubscription().finally(() => {
+                            return track.close()
+                        })
+                        : track.source.endPreviousLivestreamSubscription(); */
                 },
             };
 
@@ -1516,7 +1610,12 @@ export class MediaStreamDB extends Program<{}> {
                                   }),
                               ],
                           }),
-                    { remote: true, local: true }
+                    {
+                        remote: {
+                            replicate: true,
+                        },
+                        local: true,
+                    }
                 );
             };
             let tracksIterator: ReturnType<typeof createIterator> | undefined =
@@ -1661,7 +1760,7 @@ export class MediaStreamDB extends Program<{}> {
             paused = true;
 
             openTrackQueue.pause();
-            await Promise.allSettled([
+            await Promise.all([
                 close(),
                 ...currentTracks.map((x) => x.close?.()),
             ]);
@@ -1686,14 +1785,66 @@ export class MediaStreamDB extends Program<{}> {
         };
     }
 
-    async getReplicatedRanges(): Promise<ReplicationRangeIndexable[]> {
+    async getReplicatedSegments(): Promise<[number, number][]> {
         // for all open tracks fetch all my segments are return them
-        const ret: ReplicationRangeIndexable[] = [];
-        for (const track of this.openedTracks) {
+        const ret: [number, number][] = [];
+
+        console.time("getMaxTime");
+        if (this.maxTime == null) {
+            let promise = pDefer();
+            let fn = this.subscribeForMaxTime((newMaxTime: number) => {
+                promise.resolve(newMaxTime);
+            });
+
+            let timeout = setTimeout(() => {
+                promise.reject(new Error("Failed to get max time"));
+            }, 1e4);
+
+            const onAbort = () => {
+                promise.reject(new Error("Closed"));
+            };
+
+            this.closeController.signal.addEventListener("abort", onAbort);
+            promise.promise.finally(() => {
+                clearTimeout(timeout);
+                this.closeController.signal.removeEventListener(
+                    "abort",
+                    onAbort
+                );
+                fn.stop();
+            });
+            await promise.promise;
+        }
+        console.timeEnd("getMaxTime");
+
+        let maxTime = this.maxTime;
+        if (maxTime == null || maxTime === 0) {
+            // assume no video, hence no meaningful segments exist, though very unlikely
+            return [];
+        }
+
+        for (const track of this.openedTracks.values()) {
+            let trackEndTime = track.endTime ?? maxTime;
+            const normalize = (posU32: number) => {
+                return (
+                    Math.min(posU32 + track.startTime, trackEndTime) / maxTime
+                );
+            };
+
             const ranges =
                 await track.source.chunks.log.getMyReplicationSegments();
+
             for (const range of ranges) {
-                ret.push(range);
+                // we now need to rormalize the ranges to global time [0,1]
+                ret.push([normalize(range.start1), normalize(range.end1)]);
+
+                if (
+                    range.start2 !== range.start1 &&
+                    range.end2 !== range.start2
+                ) {
+                    // wrapped around, not expected but..
+                    ret.push([normalize(range.start1), normalize(range.end1)]);
+                }
             }
         }
         return ret;
@@ -1701,18 +1852,20 @@ export class MediaStreamDB extends Program<{}> {
 
     private async closeOpenTracks() {
         const toClose = this.openedTracks;
-        this.openedTracks = [];
-        for (const track of toClose) {
+        this.openedTracks = new Map();
+        for (const track of toClose.values()) {
             await track.close();
         }
     }
 
     async close(args?: any) {
+        this.closeController.abort();
         await this.closeOpenTracks();
         return super.close(args);
     }
 
     async drop(args?: any) {
+        this.closeController.abort();
         await this.closeOpenTracks();
         return super.drop(args);
     }
