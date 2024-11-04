@@ -168,6 +168,7 @@ export const PeerProvider = (options: PeerOptions) => {
                     libp2p: {
                         addresses: {
                             listen: [
+                                "/p2p-circuit",
                                 /* "/webrtc" */
                             ], // TMP disable because flaky behaviour with libp2p 1.8.1
                         },
@@ -194,18 +195,14 @@ export const PeerProvider = (options: PeerOptions) => {
                                       webSockets({
                                           filter: filters.all,
                                       }),
-                                      circuitRelayTransport({
-                                          discoverRelays: 1,
-                                      }),
+                                      circuitRelayTransport(),
                                       /*    webRTC(), */ // TMP disable because flaky behaviour with libp2p 1.8.1
                                   ],
                               }
                             : {
                                   transports: [
                                       webSockets({ filter: filters.wss }),
-                                      circuitRelayTransport({
-                                          discoverRelays: 1,
-                                      }),
+                                      circuitRelayTransport(),
                                       /*   webRTC(), */ // TMP disable because flaky behaviour with libp2p 1.8.1
                                   ],
                               }),
