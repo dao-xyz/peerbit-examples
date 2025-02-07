@@ -208,10 +208,7 @@ export class LargeFile extends AbstractFile {
 
         properties?.progress?.(0);
 
-        console.log("LISTS CHUNKS!");
         const allChunks = await this.fetchChunks(files);
-        console.log("RECEIVED CHUNKS: " + allChunks);
-        console.log("FETCH CHUNKS");
 
         const fetchQueue = new PQueue({ concurrency: 10 });
         let fetchError: Error | undefined = undefined;
@@ -276,7 +273,6 @@ export class LargeFile extends AbstractFile {
                 return chunkValue;
             })
         );
-        console.log("FETCH DONE");
         return (
             properties?.as == "chunks"
                 ? chunkContentResolved

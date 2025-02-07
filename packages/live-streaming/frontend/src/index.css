@@ -42,7 +42,6 @@ code {
     .btn {
         @apply py-2 px-4 rounded;
         @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
-
     }
 
     .btn-icon {
@@ -53,6 +52,7 @@ code {
     .btn:hover {
         @apply bg-primary-200;
         @apply dark:bg-primary-400;
+        @apply cursor-pointer;
 
     }
 
@@ -73,7 +73,7 @@ code {
         .btn-icon:hover {
             @apply bg-primary-200;
             @apply dark:bg-primary-400;
-
+            @apply cursor-pointer;
         }
     }
 

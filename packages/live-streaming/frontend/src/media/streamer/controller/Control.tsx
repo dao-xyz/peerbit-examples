@@ -16,6 +16,8 @@ import {
     MdFullscreen,
     MdVolumeUp,
     MdVolumeOff,
+    MdUpload,
+    MdCancel,
 } from "react-icons/md";
 import {
     SourceSetting,
@@ -25,6 +27,10 @@ import {
 } from "../../controls/settings.js";
 import "./../../controls/Controls.css";
 import useVideoPlayer from "./useVideoPlayer.js";
+import { Spinner } from "../../../utils/Spinner.js";
+import { Share } from "../../controls/Share.js";
+import { Tracks } from "../../controls/TracksAndProgress.js";
+import { MediaStreamDB } from "./../../database.js";
 
 export const Controls = (props: {
     resolutionOptions: Resolution[];
@@ -35,6 +41,7 @@ export const Controls = (props: {
     viewRef: HTMLCanvasElement | HTMLVideoElement;
     alwaysShow: boolean | undefined;
     muted?: boolean;
+    mediaStreams: MediaStreamDB;
 }) => {
     const [showControls, setShowControls] = useState(props.alwaysShow || false);
     const [isMenuOpen, setIsMenuOpen] = useState(false);
@@ -131,6 +138,20 @@ export const Controls = (props: {
         setSelectedResolutions(props.selectedResolution || []);
     }, [props.selectedResolution]);
 
+    const resolvePlayIcon = () => {
+        if (sourceType.type === "upload-media") {
+            return <MdUpload size={24} />;
+        }
+        return <MdPlayArrow size={24} />;
+    };
+
+    const resolvePauseIcon = () => {
+        if (sourceType.type === "upload-media") {
+            return <Spinner size={24} />;
+        }
+        return <MdPause size={24} />;
+    };
+
     return (
         <div
             ref={controlRef}
@@ -141,11 +162,9 @@ export const Controls = (props: {
             <div className="flex items-center justify-center w-full">
                 <div className="flex justify-center">
                     <button onClick={togglePlay} className="p-2">
-                        {!controls.isPlaying ? (
-                            <MdPlayArrow size={24} />
-                        ) : (
-                            <MdPause size={24} />
-                        )}
+                        {!controls.isPlaying
+                            ? resolvePlayIcon()
+                            : resolvePauseIcon()}
                     </button>
                 </div>
                 {controls.mute && (
@@ -179,8 +198,10 @@ export const Controls = (props: {
                         </RadixSlider.Root>
                     </div>
                 )}
-
-                <div className="ml-auto">
+                <div className="ml-auto mr-2">
+                    <Share size={24} />
+                </div>
+                <div>
                     <RadixMenu.Root
                         onOpenChange={(open) => {
                             setIsMenuOpen(open);
@@ -328,7 +349,7 @@ export const Controls = (props: {
                                                     size={16}
                                                     className="mr-2"
                                                 />
-                                                <span>Media</span>
+                                                <span>Video</span>
                                                 <input
                                                     id="media-file-select"
                                                     hidden
@@ -350,7 +371,7 @@ export const Controls = (props: {
                                                         ) {
                                                             handleSourceTypeChange(
                                                                 {
-                                                                    type: "media",
+                                                                    type: "upload-media",
                                                                     src: URL.createObjectURL(
                                                                         target
                                                                             .files[0]
@@ -361,7 +382,7 @@ export const Controls = (props: {
                                                     }}
                                                 />
                                                 {sourceType.type ===
-                                                    "media" && (
+                                                    "upload-media" && (
                                                     <MdCheck
                                                         size={16}
                                                         className="ml-auto"
@@ -369,6 +390,7 @@ export const Controls = (props: {
                                                 )}
                                             </div>
                                         </RadixMenu.Item>
+
                                         <RadixMenu.Item
                                             onSelect={(event) => {
                                                 event.preventDefault();
@@ -484,6 +506,11 @@ export const Controls = (props: {
                     </div>
                 )}
             </div>
+            {/* <Tracks
+                mediaStreams={props.mediaStreams}
+                currentTime={0}
+                setProgress={() => {}}
+            /> */}
         </div>
     );
 };

@@ -14,7 +14,7 @@
     },
     "dependencies": {
         "peerbit": "^4",
-        "@peerbit/document": "^7",
+        "@peerbit/document": "^9",
         "@peerbit/example-many-chat-rooms": "^0",
         "@peerbit/react": "*",
         "react": "^18.2.0",
@@ -31,7 +31,7 @@
         "@types/react-dom": "^18.2.18",
         "@vitejs/plugin-react": "^4",
         "typescript": "^5.6.3",
-        "vite": "^5.4.9",
+        "vite": "^6.0.6",
         "@peerbit/vite": "^1"
     },
     "browserslist": {

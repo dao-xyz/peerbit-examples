@@ -9,7 +9,6 @@ import { PublicSignKey, randomBytes } from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
-import { ReplicationOptions } from "@peerbit/shared-log";
 
 @variant(0)
 export class Layout {

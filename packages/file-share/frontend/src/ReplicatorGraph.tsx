@@ -20,8 +20,9 @@ ChartJS.register(
     Tooltip,
     Legend
 );
+export const MAX_U64 = 18446744073709551615n;
 
-export const ReplicatorGraph = (properties: { log: SharedLog<any> }) => {
+export const ReplicatorGraph = (properties: { log: SharedLog<any, any> }) => {
     const canvasRef = useRef(null);
     const chartRef = useRef<ChartJS>(null);
     useEffect(() => {
@@ -123,11 +124,13 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any> }) => {
             let dataSets: { data: number[][] }[] = [{ data: [] }, { data: [] }];
             let labels: string[] = [];
             let myIndex = -1;
-            const iterator = properties.log.replicationIndex.iterate({
-                sort: [new Sort({ key: "hash" })],
-            });
-            for (const [i, rect] of (await iterator.all()).entries()) {
-                const value = rect.value as ReplicationRangeIndexable; // TODO why do we need this type check?
+            const iterator = await properties.log.replicationIndex
+                .iterate({
+                    sort: [new Sort({ key: "hash" })],
+                })
+                .all();
+            for (const [i, rect] of iterator.entries()) {
+                const value = rect.value as ReplicationRangeIndexable<"u64">; // TODO why do we need this type check?
 
                 let isMySegment =
                     value.hash ===
@@ -150,12 +153,12 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any> }) => {
                     dataSets[1].data[i] = [0, 0];
                 } else {
                     dataSets[0].data[i] = [
-                        value.start1 / 0xffffffff,
-                        value.end1 / 0xffffffff,
+                        Number(value.start1) / Number(MAX_U64),
+                        Number(value.end1) / Number(MAX_U64),
                     ];
                     dataSets[1].data[i] = [
-                        value.start2 / 0xffffffff,
-                        value.end2 / 0xffffffff,
+                        Number(value.start2) / Number(MAX_U64),
+                        Number(value.end2) / Number(MAX_U64),
                     ];
                 }
             }

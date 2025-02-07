@@ -6,7 +6,6 @@ import {
     MediaStreamDB,
     Track,
     AudioStreamDB,
-    TrackSource,
     TracksIterator,
 } from "../database.js";
 import { Grid } from "@mui/material";
@@ -20,6 +19,7 @@ import { renderer } from "./video/renderer.js";
 import PQueue from "p-queue";
 import { getKeepAspectRatioBoundedSize } from "../MaintainAspectRatio.js";
 import ClickOnceForAudio from "./ClickOnceForAudio.js";
+import { ReplicationRangeIndexable } from "@peerbit/shared-log";
 
 let inBackground = false;
 document.addEventListener("visibilitychange", () => {
@@ -381,6 +381,10 @@ export const View = (properties: DBArgs) => {
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
         []
     );
+    const [replicationRanges, setReplicationRanges] = useState<
+        ReplicationRangeIndexable<"u64">[]
+    >([]);
+
     const [currentTime, setCurrentTime] = useState(0);
     const [maxTime, setMaxTime] = useState(0);
 
@@ -428,9 +432,16 @@ export const View = (properties: DBArgs) => {
             }
             console.log("CLOSED!");
 
-            console.log("ITERATE WITH PROGRESS", progress);
+            console.log(
+                "ITERATE WITH PROGRESS",
+                progress,
+                typeof progress === "number" ? progress * maxTime : progress
+            );
             streamListener.current = await properties.stream.iterate(progress, {
                 keepTracksOpen: true,
+                onUnderflow: () => {
+                    console.log("underflow");
+                },
                 onProgress: (ev) => {
                     setCurrentTime(
                         Math.round((ev.track.startTime + ev.chunk.time) / 1e3)
@@ -438,7 +449,7 @@ export const View = (properties: DBArgs) => {
                     processChunk({ track: ev.track, chunk: ev.chunk });
                 },
                 onMaxTimeChange: (ev) => {
-                    setMaxTime(ev.maxTime / 1e3);
+                    setMaxTime(Math.max(ev.maxTime / 1e3, maxTime));
                 },
                 onTracksChange: (ev) => {
                     setSelectedResolutions(
@@ -469,6 +480,13 @@ export const View = (properties: DBArgs) => {
                                 ),
                         ].sort() as Resolution[]
                     );
+                },
+                onReplicationChange: async (ev) => {
+                    const ranges =
+                        await ev.track.source.chunks.log.replicationIndex
+                            .iterate()
+                            .all();
+                    setReplicationRanges(ranges.map((x) => x.value));
                 },
             });
         });
@@ -607,8 +625,10 @@ export const View = (properties: DBArgs) => {
                         {streamerOnline && !!controls.current && (
                             <div style={{ marginTop: "-40px", width: "100%" }}>
                                 <Controls
+                                    publicKey={peer.identity.publicKey}
                                     selectedResolution={selectedResolutions}
                                     resolutionOptions={resolutionOptions}
+                                    replicationRanges={replicationRanges}
                                     viewRef={canvasRef.current}
                                     onQualityChange={(settings) => {
                                         const setting = settings[0];

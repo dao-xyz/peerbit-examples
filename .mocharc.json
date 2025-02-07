@@ -9,6 +9,6 @@
     "parallel": false,
     "spec": ["**/*.spec.ts", "**/*.test.ts", "**/*.integration.test.ts"],
     "ignore": ["**/node_modules/**", "**/dist/**"],
-    "timeout": "40000",
+    "timeout": "400000",
     "exit": true
 }

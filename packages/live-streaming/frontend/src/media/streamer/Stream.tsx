@@ -6,6 +6,7 @@ import {
     Track,
     MediaStreamDB,
     AudioStreamDB,
+    hrtimeMicroSeconds,
 } from "../database";
 import { Buffer } from "buffer";
 import { waitFor } from "@peerbit/time";
@@ -77,14 +78,9 @@ const createVideoEncoder = (
         }
 
         if (videoStreamDB) {
-            videoStreamDB.source.close();
-            videoStreamDB.setEnd();
-
             // update the track with the end timer
-
-            await mediaStreamDBs.tracks.put(videoStreamDB, {
-                target: "all",
-            });
+            //   await videoStreamDB.close() TODD should we also close? (we have disabled this because we need to ensure replication before doing this)
+            await mediaStreamDBs.setEnd(videoStreamDB);
 
             console.log(
                 "CLOSE VIDEO STREAM",
@@ -127,7 +123,7 @@ const createVideoEncoder = (
                             /*   timestamp: videoStreamDB?.timestamp, ??? */
                         }),
                         globalTime: openTimestamp,
-                        now: () => performance.now(),
+                        now: hrtimeMicroSeconds,
                     });
 
                     let change = false;
@@ -200,24 +196,14 @@ const createVideoEncoder = (
                     lastVideoChunkTimestamp = chunk.timestamp;
                     // console.log("VIDEO PUT CHUNK", toBase64(videoStreamDB.id), lastVideoChunkTimestamp, "bytes");
 
-                    try {
-                        await videoStreamDB.source.chunks.put(
-                            new Chunk({
-                                type: chunk.type,
-                                chunk: arr,
-                                time: lastVideoChunkTimestamp,
-                                /*  duration: chunk.duration, */
-                            }),
-                            {
-                                /* target: "all", */
-                                meta: { next: [] },
-                                unique: true,
-                            }
-                        );
-                    } catch (error) {
-                        console.error("FFF", openVideoStreamQueue.size, error);
-                        throw error;
-                    }
+                    await videoStreamDB.put(
+                        new Chunk({
+                            type: chunk.type,
+                            chunk: arr,
+                            time: lastVideoChunkTimestamp,
+                            /*  duration: chunk.duration, */
+                        })
+                    );
 
                     //   console.log(mem / ((+new Date) - s0) * 1000)
                 }
@@ -283,7 +269,7 @@ const createAudioEncoder = async (
                 sender: mediaStreamDBs.node.identity.publicKey,
                 source: new AudioStreamDB({ sampleRate: 48000 }),
                 globalTime: openTimestamp,
-                now: () => performance.now(),
+                now: hrtimeMicroSeconds,
             })
         );
         await audioTrack.source.replicate("streamer");
@@ -332,10 +318,8 @@ const createAudioEncoder = async (
                 wavListener
             );
             await wavEncoder.current.pause();
-            await audioTrack.close();
-            console.log("CLOSE AUDIO TRACK");
-            audioTrack.setEnd();
-            mediaStreamDBs.tracks.put(audioTrack, { target: "all" });
+            // await audioTrack.close() TODD should we also close? (we have disabled this because we need to ensure replication before doing this)
+            mediaStreamDBs.setEnd(audioTrack);
         };
         return {
             close,
@@ -416,6 +400,7 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
         []
     );
+
     const videoLoadedOnce = useRef(false);
     const { peer } = usePeer();
     const { program: mediaStreamDBs } = useProgram<MediaStreamDB>(args.stream, {
@@ -438,7 +423,7 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
     const sourceId = useRef(0);
     const startId = useRef(0);
 
-    const sessionTimestampRef = useRef(performance.now());
+    const sessionTimestampRef = useRef(Number(hrtimeMicroSeconds()));
     /*     const bumpSession = useCallback(() => {
             sessionTimestampRef.current = + new Date;
         }, []); */
@@ -448,7 +433,7 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
     const [errorMessage, setErrorMessage] = useState<string | undefined>(
         undefined
     );
-    const [loop, setLoop] = useState(true);
+    const [loop, setLoop] = useState(false);
 
     const wavEncoder = useRef(new WAVEncoder());
     const loopCounter = useRef(0);
@@ -514,8 +499,6 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
         streamType?: StreamType;
         quality: SourceSetting[];
     }) => {
-        let prevStreamType = streamType.current;
-
         const updateQualitySettings = () => {
             let qualitySetting = properties.quality || quality;
             setQuality(
@@ -652,10 +635,13 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
                         import.meta.env.BASE_URL + "noise.mp4";
                     videoElementRef.load();
                     break;
-                case "media":
+
+                case "upload-media":
                     videoElementRef.src = streamType.current.src;
                     videoElementRef.load();
+                    videoElementRef.preload = "auto";
                     break;
+
                 case "camera":
                     videoElementRef.srcObject =
                         await navigator.mediaDevices.getUserMedia({
@@ -708,7 +694,7 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
             // TODO why do we need this here?
             if (
                 streamType.current.type === "noise" ||
-                streamType.current.type === "media"
+                streamType.current.type === "upload-media"
             ) {
                 setResolutionOptions(
                     RESOLUTIONS.filter((x) => x <= videoRef.videoHeight)
@@ -850,7 +836,7 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
         requestFrame();
     };
     const onEnd = async () => {
-        if (loop) {
+        if (loop || streamType.current.type === "noise") {
             loopCounter.current++;
             videoRef.current.play();
         } else {
@@ -906,7 +892,7 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
                             muted={streamType.current.type === "noise"}
                             controls={false}
                         ></video>
-                        <div className="mt-[-42px] w-full">
+                        <div className="w-full">
                             <Controls
                                 selectedResolution={
                                     quality.map(
@@ -927,6 +913,7 @@ export const Stream = (args: { stream: MediaStreamDB }) => {
                                 viewRef={videoRef.current}
                                 alwaysShow={isTouchScreen}
                                 muted={streamType.current.type === "noise"}
+                                mediaStreams={mediaStreamDBs}
                             />
                         </div>
                         {/* <Tracks db={mediaStreamDBs} /> */}

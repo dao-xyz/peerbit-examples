@@ -2,7 +2,7 @@ import { Peerbit } from "peerbit";
 import { Files, LargeFile } from "..";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
-import { waitForResolved } from "@peerbit/time";
+import { delay, waitForResolved } from "@peerbit/time";
 import { expect } from "chai";
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -35,7 +35,7 @@ describe("index", () => {
             new Uint8Array(
                 (await filestoreReader.getByName("tiny file"))!.bytes
             )
-        ).to.eq(smallFile);
+        ).to.deep.eq(smallFile);
 
         await filestore.removeByName("tiny file");
         expect(await filestoreReader.getByName("tiny file")).to.be.undefined;
@@ -111,6 +111,7 @@ describe("index", () => {
             const file = (await filestoreReader.getByName(
                 "random large file"
             ))!;
+
             expect(equals(file!.bytes, largeFile)).to.be.true;
 
             await filestore.removeByName("random large file");

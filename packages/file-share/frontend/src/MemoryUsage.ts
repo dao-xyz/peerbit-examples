@@ -1,6 +1,6 @@
 import { SharedLog } from "@peerbit/shared-log";
 import { useEffect, useState } from "react";
-export const useStorageUsage = (log?: SharedLog<any>) => {
+export const useStorageUsage = (log?: SharedLog<any, any>) => {
     const [storage, setStorage] = useState(0);
     useEffect(() => {
         if (!log) {

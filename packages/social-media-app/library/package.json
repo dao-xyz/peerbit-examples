@@ -36,7 +36,7 @@
     },
     "dependencies": {
         "@dao-xyz/app-service": "^0.0.8",
-        "@peerbit/document": "^7",
+        "@peerbit/document": "^9",
         "peerbit": "^4",
         "uuid": "^10.0.0"
     }

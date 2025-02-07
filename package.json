@@ -7,7 +7,8 @@
     "type": "module",
     "workspaces": {
         "packages": [
-            "packages/**/*"
+            "packages/**/*",
+            "packages/**/**/*"
         ],
         "nohoist": [
             "**/@babel/preset-env",
@@ -54,9 +55,8 @@
         "eslint-plugin-prettier": "^4.2.1",
         "eslint-config-react-app": "^7.0.1",
         "prettier": "^2.7.1",
-        "lerna": "^8.0.1",
+        "lerna": "8.0.1",
         "shx": "^0.3.4",
-        "start-server-and-test": "^1.14.0",
         "ts-node": "^10.9.1",
         "typescript": "^5.6.3",
         "typescript-esm": "^2.0.0",

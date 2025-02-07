@@ -37,7 +37,7 @@
     "dependencies": {
         "express": "^4",
         "peerbit": "^4",
-        "@peerbit/blog-sdk": "^0",
+        "@peerbit/blog-sdk": "^0.0.5",
         "body-parser": "^1"
     }
 }

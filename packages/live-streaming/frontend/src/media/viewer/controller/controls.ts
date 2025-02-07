@@ -1,3 +1,5 @@
+import { ReplicationRangeIndexable } from "@peerbit/shared-log";
+
 export interface ControlFunctions {
     play: () => void;
     pause: () => void;
@@ -12,5 +14,6 @@ export interface ControlStates {
     progress?: number | "live";
     maxTime: number;
     currentTime: number;
+    replicationRanges?: ReplicationRangeIndexable<"u64">[];
 }
 export type ControlInterface = ControlFunctions & ControlStates;

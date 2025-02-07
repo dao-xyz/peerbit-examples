@@ -3,7 +3,7 @@ import { NetworkTopologyGraph } from "./NetworkTopologyGraph";
 import { ReplicatorGraph } from "./ReplicatorGraph";
 import { SharedLog } from "@peerbit/shared-log";
 
-export const GraphExplorer = (properties: { log: SharedLog<any> }) => {
+export const GraphExplorer = (properties: { log: SharedLog<any, any> }) => {
     return (
         <Tabs.Root defaultValue="replication">
             <Tabs.List className="flex flex-row gap-2">

@@ -23,10 +23,15 @@ import {
     resolutionToSourceSetting,
 } from "./../../controls/settings.js";
 import "./../../controls/Controls.css";
+import { ReplicationRangeVisualization } from "../../controls/ReplicatorDensity";
+import { ReplicationRangeIndexable } from "@peerbit/shared-log";
+import { PublicSignKey } from "@peerbit/crypto";
 
 export const Controls = (
     props: {
+        publicKey: PublicSignKey;
         resolutionOptions: Resolution[];
+        replicationRanges: ReplicationRangeIndexable<"u64">[];
         selectedResolution?: Resolution[];
         onStreamTypeChange?: (settings: StreamType) => void;
         onQualityChange: (settings: SourceSetting[]) => void;
@@ -254,6 +259,12 @@ export const Controls = (
                         props.setProgress(p);
                     }}
                 >
+                    <ReplicationRangeVisualization
+                        maxTime={props.maxTime}
+                        ranges={props.replicationRanges}
+                        publicKey={props.publicKey}
+                    />
+
                     <Slider.Track className="bg-gray-200 opacity-50 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-80 transition-all">
                         <Slider.Range className="absolute bg-primary-500 rounded-full h-full" />
                     </Slider.Track>

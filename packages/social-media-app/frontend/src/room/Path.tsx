@@ -1,6 +1,6 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import * as Tags from "@yaireo/tagify/dist/react.tagify";
+import Tags from "@yaireo/tagify/dist/react.tagify";
 import "./path.css";
 import Tagify from "@yaireo/tagify";
 import { getRoomByPath } from "../routes";

@@ -6,7 +6,9 @@ describe("bootstrap", () => {
     let peer2: Peerbit;
 
     after(async () => {
-        await peer.stop();
+        // @ts-ignore
+        await peer?.stop();
+        // @ts-ignore
         await peer2?.stop();
     });
 
