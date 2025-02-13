@@ -11,6 +11,7 @@ export interface ControlFunctions {
 }
 export interface ControlStates {
     isPlaying: boolean;
+    isBuffering: boolean;
     progress?: number | "live";
     maxTime: number;
     currentTime: number;

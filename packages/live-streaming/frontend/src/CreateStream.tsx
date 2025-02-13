@@ -1,8 +1,9 @@
 import { usePeer, useProgram } from "@peerbit/react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { getStreamPath } from "./routes";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { MediaStreamDB } from "./media/database";
+
 export const CreateStream = () => {
     const { peer } = usePeer();
     const mediaStream = useProgram<MediaStreamDB>(
@@ -10,6 +11,11 @@ export const CreateStream = () => {
         { args: { replicate: { factor: 1 } }, existing: "reuse" }
     );
     const navigate = useNavigate();
+    const location = useLocation();
+
+    // Optional: Store the initial search params so they aren't lost
+    const [initialSearch] = useState(location.search);
+
     useEffect(() => {
         if (!peer?.identity.publicKey) {
             return;
@@ -17,16 +23,19 @@ export const CreateStream = () => {
         if (!mediaStream.program?.address) {
             return;
         }
-        navigate(getStreamPath(mediaStream.program));
-    }, [peer?.identity?.publicKey.hashcode(), mediaStream.program?.address]);
-    return (
-        /*  <Grid container spacing={2}>
-             <Grid item>
-                 <Button onClick={() => navigate(getStreamPath(peer.identity.publicKey, peer.identity.publicKey))} endIcon={<VideoCameraFrontIcon />}>
-                     Start stream
-                 </Button>
-             </Grid>
-         </Grid> */
-        <></>
-    );
+
+        const pathToNavigateTo = getStreamPath(mediaStream.program);
+        // Navigate while preserving the original query parameters
+        navigate({
+            pathname: pathToNavigateTo,
+            search: initialSearch, // or use location.search if you want the most current query
+        });
+    }, [
+        peer?.identity.publicKey,
+        mediaStream.program?.address,
+        navigate,
+        initialSearch,
+    ]);
+
+    return <></>;
 };

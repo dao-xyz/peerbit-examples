@@ -1,4 +1,4 @@
-import { Documents, SearchRequest } from "@peerbit/document";
+import { ClosedError, Documents, SearchRequest } from "@peerbit/document";
 import { useEffect, useState } from "react";
 export const useLocal = <T extends Record<string, any>>(
     db?: Documents<T, any>
@@ -10,12 +10,20 @@ export const useLocal = <T extends Record<string, any>>(
         }
 
         const changeListener = async () => {
-            setAll(
-                await db.index.search(new SearchRequest(), {
-                    local: true,
-                    remote: false,
-                })
-            );
+            try {
+                setAll(
+                    await db.index.search(new SearchRequest(), {
+                        local: true,
+                        remote: false,
+                    })
+                );
+            } catch (error) {
+                if (error instanceof ClosedError) {
+                    // ignore
+                    return;
+                }
+                throw error;
+            }
         };
 
         changeListener();

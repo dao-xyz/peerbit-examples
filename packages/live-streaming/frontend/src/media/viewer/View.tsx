@@ -19,7 +19,7 @@ import { renderer } from "./video/renderer.js";
 import PQueue from "p-queue";
 import { getKeepAspectRatioBoundedSize } from "../MaintainAspectRatio.js";
 import ClickOnceForAudio from "./ClickOnceForAudio.js";
-import { ReplicationRangeIndexable } from "@peerbit/shared-log";
+import { Spinner } from "../../utils/Spinner.js";
 
 let inBackground = false;
 document.addEventListener("visibilitychange", () => {
@@ -88,7 +88,6 @@ const addVideoStreamListener = (
                     }
                     waitForKeyFrame = false;
                 }
-
                 decoder.decode(encodedChunk);
             }
         }
@@ -227,6 +226,8 @@ const addAudioStreamListener = (
          *  Take one element from the queue
          */
         const frame = pendingFrames.shift();
+        console.log("AUDIO DECODE CHUNK", frame.buffer.length);
+
         const audioSource = audioContext.createBufferSource();
         audioSource.buffer = frame.buffer;
         audioSource.connect(gainNode);
@@ -381,9 +382,6 @@ export const View = (properties: DBArgs) => {
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
         []
     );
-    const [replicationRanges, setReplicationRanges] = useState<
-        ReplicationRangeIndexable<"u64">[]
-    >([]);
 
     const [currentTime, setCurrentTime] = useState(0);
     const [maxTime, setMaxTime] = useState(0);
@@ -399,8 +397,9 @@ export const View = (properties: DBArgs) => {
         []
     );
     const [isPlaying, setIsPlaying] = useState(true);
+    const [isBuffering, setIsBuffering] = useState(true);
 
-    const [cursor, setCursor] = useState<number | "live">("live");
+    const [cursor, setCursor] = useState<number | "live">(0);
 
     /* 
         const [styleHeight, setStyleHeight] = useState<'100dvh' | 'fit-content'>("fit-content");
@@ -415,22 +414,23 @@ export const View = (properties: DBArgs) => {
 
     const streamListener = useRef<TracksIterator | undefined>();
     const updateProgressQueue = useRef<PQueue>(new PQueue({ concurrency: 1 }));
+    const [liveStreamAvailable, setLiveStreamAvailable] = useState(false);
 
     const setProgress = (progress: number | "live") => {
+        setCursor(progress);
+        setIsBuffering(true);
         updateProgressQueue.current.clear();
         updateProgressQueue.current.add(async () => {
             console.log("CLOSE PREV!", progress, streamListener.current);
             /*     if (progress !== "live") {
                     return;
                 } */
-            console.log("CLOSING STREAM LISTENER");
             try {
                 await streamListener.current?.close();
             } catch (error) {
                 console.error("Failed to close stream listener", error);
                 throw error;
             }
-            console.log("CLOSED!");
 
             console.log(
                 "ITERATE WITH PROGRESS",
@@ -441,8 +441,10 @@ export const View = (properties: DBArgs) => {
                 keepTracksOpen: true,
                 onUnderflow: () => {
                     console.log("underflow");
+                    setIsBuffering(true);
                 },
                 onProgress: (ev) => {
+                    setIsBuffering(false);
                     setCurrentTime(
                         Math.round((ev.track.startTime + ev.chunk.time) / 1e3)
                     );
@@ -452,6 +454,14 @@ export const View = (properties: DBArgs) => {
                     setMaxTime(Math.max(ev.maxTime / 1e3, maxTime));
                 },
                 onTracksChange: (ev) => {
+                    let canLiveStream = false;
+                    for (const track of ev) {
+                        if (track.endTime == null) {
+                            // TODO this is actually not expected behaviour because we should be able to watch a video while uploading?
+                            canLiveStream = true;
+                        }
+                    }
+                    setLiveStreamAvailable(canLiveStream);
                     setSelectedResolutions(
                         [
                             ...ev
@@ -480,13 +490,6 @@ export const View = (properties: DBArgs) => {
                                 ),
                         ].sort() as Resolution[]
                     );
-                },
-                onReplicationChange: async (ev) => {
-                    const ranges =
-                        await ev.track.source.chunks.log.replicationIndex
-                            .iterate()
-                            .all();
-                    setReplicationRanges(ranges.map((x) => x.value));
                 },
             });
         });
@@ -625,10 +628,11 @@ export const View = (properties: DBArgs) => {
                         {streamerOnline && !!controls.current && (
                             <div style={{ marginTop: "-40px", width: "100%" }}>
                                 <Controls
-                                    publicKey={peer.identity.publicKey}
+                                    liveStreamAvailable={liveStreamAvailable}
+                                    isBuffering={isBuffering}
+                                    mediaStreams={properties.stream}
                                     selectedResolution={selectedResolutions}
                                     resolutionOptions={resolutionOptions}
-                                    replicationRanges={replicationRanges}
                                     viewRef={canvasRef.current}
                                     onQualityChange={(settings) => {
                                         const setting = settings[0];
@@ -639,17 +643,20 @@ export const View = (properties: DBArgs) => {
                                         console.log(
                                             "SELECT ",
                                             settings,
-                                            streamListener.current?.options
+                                            streamListener.current?.options()
                                         );
                                         const streamToOpen =
-                                            streamListener.current?.options.find(
-                                                (x) =>
-                                                    x.source instanceof
-                                                        WebcodecsStreamDB &&
-                                                    x.source.decoderDescription
-                                                        .codedHeight ===
-                                                        setting.video.height
-                                            );
+                                            streamListener.current
+                                                ?.options()
+                                                .find(
+                                                    (x) =>
+                                                        x.source instanceof
+                                                            WebcodecsStreamDB &&
+                                                        x.source
+                                                            .decoderDescription
+                                                            .codedHeight ===
+                                                            setting.video.height
+                                                );
 
                                         streamListener.current.selectOption(
                                             streamToOpen
@@ -683,7 +690,6 @@ export const View = (properties: DBArgs) => {
                                     currentTime={currentTime}
                                     progress={cursor}
                                     setProgress={(p) => {
-                                        setCursor(p);
                                         setProgress(p);
                                         /*  controls.current.forEach((c) => {
                                              c.setProgress(p);
@@ -716,7 +722,7 @@ export const View = (properties: DBArgs) => {
                             <Grid
                                 container
                                 direction="column"
-                                className="cat"
+                                className="video-loading"
                                 justifyContent="center"
                                 spacing={1}
                             >
@@ -734,6 +740,17 @@ export const View = (properties: DBArgs) => {
                                     <img src={CatOffline} />
                                 </Grid>
                                 <Grid item>Streamer is offline</Grid>
+                            </Grid>
+                        )}
+                        {streamerOnline && isBuffering && (
+                            <Grid
+                                container
+                                direction="column"
+                                className="video-buffering"
+                                justifyContent="center"
+                                spacing={1}
+                            >
+                                <Spinner />
                             </Grid>
                         )}
                     </div>

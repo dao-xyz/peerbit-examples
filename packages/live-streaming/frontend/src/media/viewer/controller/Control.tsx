@@ -14,6 +14,7 @@ import {
     MdReplay10,
     MdFullscreen,
     MdCheck,
+    MdReplay,
 } from "react-icons/md";
 import { ControlInterface } from "./controls";
 import {
@@ -23,15 +24,14 @@ import {
     resolutionToSourceSetting,
 } from "./../../controls/settings.js";
 import "./../../controls/Controls.css";
-import { ReplicationRangeVisualization } from "../../controls/ReplicatorDensity";
-import { ReplicationRangeIndexable } from "@peerbit/shared-log";
-import { PublicSignKey } from "@peerbit/crypto";
+import { MediaStreamDB } from "../../database";
+import { TimeSlider } from "../../controls/TimeSlider";
 
 export const Controls = (
     props: {
-        publicKey: PublicSignKey;
+        liveStreamAvailable: boolean;
+        mediaStreams?: MediaStreamDB;
         resolutionOptions: Resolution[];
-        replicationRanges: ReplicationRangeIndexable<"u64">[];
         selectedResolution?: Resolution[];
         onStreamTypeChange?: (settings: StreamType) => void;
         onQualityChange: (settings: SourceSetting[]) => void;
@@ -100,7 +100,8 @@ export const Controls = (
         const handleMouseLeave = (e: MouseEvent) => {
             if (
                 props.viewRef &&
-                !props.viewRef.contains(e.relatedTarget as Node)
+                !props.viewRef.contains(e.relatedTarget as Node) &&
+                !props.isBuffering
             ) {
                 setShowControls(false);
             }
@@ -177,6 +178,7 @@ export const Controls = (
         let compatibleResolutions = selectedResolutions.filter((x) =>
             props.resolutionOptions.includes(x)
         );
+
         if (compatibleResolutions.length !== selectedResolutions.length) {
             if (compatibleResolutions.length > 0) {
                 setSelectedResolutions(compatibleResolutions);
@@ -189,6 +191,10 @@ export const Controls = (
             }
         }
     }, [props.resolutionOptions]);
+
+    useEffect(() => {
+        setSelectedResolutions(props.selectedResolution);
+    }, [props.selectedResolution]);
 
     const handleResolutionChange = (resolution: Resolution) => {
         let newResolutions = [...selectedResolutions];
@@ -240,37 +246,13 @@ export const Controls = (
             }`}
         >
             {/* Progress Bar */}
-            <div
-                className="flex justify-center w-full"
-                style={{ marginTop: "-3px" }} // Adjust as needed to align with top of control bar
-            >
-                <Slider.Root
-                    className="relative flex items-center select-none touch-none w-full h-1 group"
-                    value={[
-                        props.progress === "live"
-                            ? 1
-                            : props.currentTime / props.maxTime || 0,
-                    ]}
-                    min={0}
-                    max={1}
-                    step={0.001}
-                    onValueChange={(value) => {
-                        const p = value[0];
-                        props.setProgress(p);
-                    }}
-                >
-                    <ReplicationRangeVisualization
-                        maxTime={props.maxTime}
-                        ranges={props.replicationRanges}
-                        publicKey={props.publicKey}
-                    />
-
-                    <Slider.Track className="bg-gray-200 opacity-50 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-80 transition-all">
-                        <Slider.Range className="absolute bg-primary-500 rounded-full h-full" />
-                    </Slider.Track>
-                    <Slider.Thumb className="block w-3 h-3 bg-primary-500 rounded-full group-hover:scale-125 transition-transform" />
-                </Slider.Root>
-            </div>
+            <TimeSlider
+                currentTime={props.currentTime}
+                maxTime={props.maxTime}
+                mediaStreamsDB={props.mediaStreams}
+                progress={props.progress}
+                setProgress={props.setProgress}
+            />
 
             {/* Control Bar */}
             <div className="flex items-center justify-between w-full px-2">
@@ -285,43 +267,52 @@ export const Controls = (
                         )}
                     </button>
 
-                    {/* Live Button */}
-                    <button
-                        onClick={() => props.setProgress("live")}
-                        className="pl-2 pr-2 text-gray-800 flex items-center justify-center"
-                    >
-                        {props.progress === "live" ? (
-                            <span className="text-primary-500 text-xs font-bold  text-center ">
-                                Live
-                            </span>
-                        ) : (
-                            <span className="text-xs  text-center ">Live</span>
-                        )}
-                    </button>
+                    {/* Live Button, show only if one of the playing tracks does not have an end */}
+                    {props.liveStreamAvailable && (
+                        <button
+                            onClick={() => props.setProgress("live")}
+                            className="pl-2 pr-2 text-gray-800 flex items-center justify-center"
+                        >
+                            {props.progress === "live" ? (
+                                <span className="text-primary-500 text-xs font-bold  text-center ">
+                                    Live
+                                </span>
+                            ) : (
+                                <span className="text-xs  text-center ">
+                                    Live
+                                </span>
+                            )}
+                        </button>
+                    )}
+
+                    {/* Rewind or replay button depending on streaming live or not */}
+                    {props.progress === "live" ? (
+                        <button
+                            onClick={() => {
+                                props.setProgress(
+                                    Math.max(
+                                        (props.currentTime - 10 * 1e3) /
+                                            props.maxTime,
+                                        0
+                                    )
+                                );
+                            }}
+                            className="p-1"
+                        >
+                            <MdReplay10 size={20} />
+                        </button>
+                    ) : (
+                        <button
+                            onClick={() => {
+                                props.setProgress(0);
+                            }}
+                            className="p-1"
+                        >
+                            <MdReplay size={20} />
+                        </button>
+                    )}
 
                     {/* Time Display */}
-                    <div className="font-mono text-xs min-w-[70px] text-center">
-                        {props.progress !== "live" &&
-                            `${formatTime(props.currentTime)}/`}
-                        {formatTime(props.maxTime)}
-                    </div>
-
-                    {/* Rewind 10 seconds Button */}
-                    <button
-                        onClick={() => {
-                            props.setProgress(
-                                Math.max(
-                                    (props.currentTime - 10 * 1e3) /
-                                        props.maxTime,
-                                    0
-                                )
-                            );
-                        }}
-                        className="p-1"
-                    >
-                        <MdReplay10 size={20} />
-                    </button>
-
                     {/* Mute Button */}
                     {props.mute && (
                         <button onClick={toggleMute} className="p-1">
@@ -332,6 +323,11 @@ export const Controls = (
                             )}
                         </button>
                     )}
+                    <div className="font-mono text-xs min-w-[70px] text-center">
+                        {props.progress !== "live" &&
+                            `${formatTime(props.currentTime)}/`}
+                        {formatTime(props.maxTime)}
+                    </div>
                 </div>
 
                 {/* Right Controls */}
@@ -421,7 +417,9 @@ export const Controls = (
                                                     size={16}
                                                     className="mr-2"
                                                 />
-                                                <span>Quality</span>
+                                                <span className="mr-2">
+                                                    Quality
+                                                </span>
                                                 <span className="ml-auto text-sm text-gray-500">
                                                     {selectedResolutions.length >
                                                     2
@@ -509,7 +507,7 @@ export const Controls = (
                                                     className="menu-item"
                                                 >
                                                     <div className="flex items-center">
-                                                        <span>
+                                                        <span className="mr-2">
                                                             {resolution}p
                                                         </span>
                                                         {selectedResolutions.includes(

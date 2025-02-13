@@ -1,9 +1,9 @@
 import { usePeer, useProgram } from "@peerbit/react";
 import { useState, useEffect } from "react";
 import { useParams } from "react-router-dom";
-import { Stream } from "./media/streamer/Stream";
 import { View } from "./media/viewer/View";
 import { MediaStreamDB } from "./media/database";
+import { Editor } from "./media/streamer/Stream";
 
 export const StreamOrView = () => {
     const { peer } = usePeer();
@@ -33,7 +33,7 @@ export const StreamOrView = () => {
             {isStreamer !== undefined && (
                 <>
                     {isStreamer ? (
-                        <Stream stream={mediaStream.program}></Stream>
+                        <Editor stream={mediaStream.program}></Editor>
                     ) : (
                         /*       <Box sx={{ backgroundColor: 'red', width: '100%', height: '100%' }}> RED</Box> */
                         <View stream={mediaStream.program}></View>

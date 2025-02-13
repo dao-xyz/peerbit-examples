@@ -3,6 +3,7 @@ import {
     AudioStreamDB,
     Chunk,
     MediaStreamDB,
+    oneVideoAndOneAudioChangeProcessor,
     Track,
     TracksIterator,
     WebcodecsStreamDB,
@@ -11,13 +12,256 @@ import { delay, hrtime, waitForResolved } from "@peerbit/time";
 import { equals } from "uint8arrays";
 import { expect } from "chai";
 import sinon from "sinon";
-import { Timestamp } from "@peerbit/log";
-import { Ed25519Keypair, PublicSignKey } from "@peerbit/crypto";
+import { Ed25519Keypair } from "@peerbit/crypto";
 import { MAX_U32, ReplicationRangeIndexable } from "@peerbit/shared-log";
 import pDefer from "p-defer";
 
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
 
+describe("oneVideoAndOneAudioChangeProcessor", () => {
+    it("preload tracks when end time not set", async () => {
+        let preload = 10;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 1e3,
+            end: undefined,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            999,
+            preload
+        );
+        expect(diff.add).to.eq(toPlay);
+        expect(diff.remove).to.be.undefined;
+    });
+
+    it("preload tracks when end time set", async () => {
+        let preload = 10;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 1e3,
+            end: 2e3,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            999,
+            preload
+        );
+        expect(diff.add).to.eq(toPlay);
+        expect(diff.remove).to.be.undefined;
+    });
+
+    it("not load track until preload when end time not set", async () => {
+        let preload = 0;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 1e3,
+            end: undefined,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            999,
+            preload
+        );
+        expect(diff.add).to.be.undefined;
+        expect(diff.remove).to.be.undefined;
+    });
+
+    it("not load track until preload when end time set", async () => {
+        let preload = 0;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 1e3,
+            end: 2e3,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            999,
+            preload
+        );
+        expect(diff.add).to.be.undefined;
+        expect(diff.remove).to.be.undefined;
+    });
+
+    it("not add track if end times are equal", async () => {
+        let preload = 10;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            999,
+            preload
+        );
+        expect(diff.add).to.be.undefined;
+        expect(diff.remove).to.be.undefined;
+    });
+
+    it("not add track if end times are equal", async () => {
+        let preload = 10;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: 1e3,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            999,
+            preload
+        );
+        expect(diff.add).to.be.undefined;
+        expect(diff.remove).to.be.undefined;
+    });
+
+    it("will schedule track loading when necessary with", async () => {
+        let preload = 500;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let end1 = 1.5e3;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: end1,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 1e3,
+            end: 2e3,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            end1 - preload + 1,
+            preload
+        );
+        const track = diff.add instanceof Track ? diff.add : diff.add?.track;
+        const when = diff.add instanceof Track ? undefined : diff.add?.when;
+        expect(track).to.eq(toPlay);
+        expect(when).to.eq(end1);
+    });
+
+    it("will schedule track with time when not overlapping", async () => {
+        let preload = 500;
+        const publicKey = (await Ed25519Keypair.create()).publicKey;
+        let end1 = 1.5e3;
+        let already = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: 0,
+            end: end1,
+        });
+        let toPlay = new Track({
+            sender: publicKey,
+            source: new AudioStreamDB({ sampleRate: 1 }),
+            start: end1 + 1,
+            end: 2e3,
+        });
+        const diff = oneVideoAndOneAudioChangeProcessor(
+            {
+                current: new Map<string, { track: Track }>([
+                    ["address", { track: already }],
+                ]),
+                options: [already],
+                add: toPlay,
+            },
+            end1 - preload + 2,
+            preload
+        );
+        expect(diff.add as Track).to.eq(toPlay);
+    });
+});
 describe("Track", () => {
     it("setEnd", async () => {
         const now = +new Date();
@@ -66,7 +310,7 @@ describe("MediaStream", () => {
             start: number;
             end?: number;
             size?: number;
-            type?: "video" | "audio";
+            type?: "video" | "audio" | WebcodecsStreamDB | AudioStreamDB;
         };
     };
     type TwoTracks = {
@@ -74,13 +318,13 @@ describe("MediaStream", () => {
             start: number;
             end?: number;
             size?: number;
-            type?: "video" | "audio";
+            type?: "video" | "audio" | WebcodecsStreamDB | AudioStreamDB;
         };
         second: {
             start: number;
             end?: number;
             size?: number;
-            type?: "video" | "audio";
+            type?: "video" | "audio" | WebcodecsStreamDB | AudioStreamDB;
         };
     };
     type ScenarioReturnType<T> = (T extends TwoTracks
@@ -111,7 +355,9 @@ describe("MediaStream", () => {
             new Track({
                 sender: streamer.identity.publicKey,
                 source:
-                    properties.first.type === "video"
+                    typeof properties.first.type === "object"
+                        ? properties.first.type
+                        : properties.first.type === "video"
                         ? new WebcodecsStreamDB({
                               decoderDescription: { codec: "av01" },
                           })
@@ -149,7 +395,9 @@ describe("MediaStream", () => {
                 new Track({
                     sender: streamer.identity.publicKey,
                     source:
-                        properties.second.type === "video"
+                        typeof properties.second.type === "object"
+                            ? properties.second.type
+                            : properties.second.type === "video"
                             ? new WebcodecsStreamDB({
                                   decoderDescription: { codec: "av01" },
                               })
@@ -201,6 +449,14 @@ describe("MediaStream", () => {
     // TODO add test for max time updates when you are not subsrcibing for live feed.
     // What is the expected option when the iterator runs out?
 
+    describe("waitFor", () => {
+        it("wait for self", async () => {
+            const mediaStreams = await streamer.open(
+                new MediaStreamDB(streamer.identity.publicKey)
+            );
+            await mediaStreams.waitFor(mediaStreams.node.identity.publicKey);
+        });
+    });
     describe("live", () => {
         it("one chunk", async () => {
             const track1 = await streamer.open(
@@ -286,7 +542,7 @@ describe("MediaStream", () => {
                 expect(iterator.current).to.have.length(1)
             );
             await waitForResolved(() =>
-                expect(iterator.options).to.have.length(2)
+                expect(iterator.options()).to.have.length(2)
             );
         });
 
@@ -317,7 +573,7 @@ describe("MediaStream", () => {
                 expect(iterator.current).to.have.length(1)
             );
             await waitForResolved(() =>
-                expect(iterator.options).to.have.length(1)
+                expect(iterator.options()).to.have.length(1)
             );
             await delay(1000);
 
@@ -337,9 +593,11 @@ describe("MediaStream", () => {
             });
 
             let maxTime: number | undefined = undefined;
-            mediaStreams.subscribeForMaxTime((time) => {
-                maxTime = time;
-            }, true);
+            mediaStreams.events.addEventListener(
+                "maxTime",
+                (ev) => (maxTime = ev.detail.maxTime)
+            );
+            mediaStreams.listenForMaxTimeChanges(true);
 
             let time = 123;
             await delay(3e3); // wait some time beofre putting the first chunk
@@ -361,12 +619,14 @@ describe("MediaStream", () => {
             let gotTrack2 = pDefer();
             let maxTimes: number[] = [];
             iterator = await viewerStreams.iterate("live", {
-                onTracksChange(track) {
-                    if (equals(track[0].id, track1.id)) {
-                        gotTrack.resolve();
-                    } else if (!equals(track[0].id, track1.id)) {
-                        // track 2
-                        gotTrack2.resolve();
+                onTracksChange(tracks) {
+                    for (const track of tracks) {
+                        if (equals(track.id, track1.id)) {
+                            gotTrack.resolve();
+                        } else if (!equals(track.id, track1.id)) {
+                            // track 2
+                            gotTrack2.resolve();
+                        }
                     }
                 },
                 onTrackOptionsChange(options) {
@@ -414,7 +674,11 @@ describe("MediaStream", () => {
                 );
             });
 
-            await waitForResolved(() => expect(chunks).to.have.length(2));
+            try {
+                await waitForResolved(() => expect(chunks).to.have.length(2));
+            } catch (error) {
+                throw error;
+            }
             expect(maxTimes).to.deep.eq([0, ts * 1e3 + 123]);
         });
 
@@ -436,7 +700,7 @@ describe("MediaStream", () => {
                  expect(iterator.current).to.have.length(1)
              );
              await waitForResolved(() =>
-                 expect(iterator.options).to.have.length(1)
+                 expect(iterator.options()).to.have.length(1)
              );
              const c1 = new Chunk({
                  chunk: new Uint8Array([103]),
@@ -499,19 +763,51 @@ describe("MediaStream", () => {
         });
 
         it("select options", async () => {
-            const { mediaStreams, track1, track2, viewerStreams } =
+            const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 0, type: "video" },
-                    second: { start: 10, type: "video" }, // start first at 0 so we choose it as the track when listening to live
                 });
 
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+            let gotFirstTrack = pDefer<Track>();
+            let gotSecondTrack = pDefer<Track>();
+
+            // we create track2 here because we really want to make sure track1 is select first by default
+            // and then we ant to announce track2 and make sure it is selectable as an option thne
+            const track2 = await streamer.open(
+                new Track({
+                    sender: streamer.identity.publicKey,
+                    source: new WebcodecsStreamDB({
+                        decoderDescription: { codec: "av01" },
+                    }),
+                    start: 0,
+                })
+            );
 
             iterator = await viewerStreams.iterate("live", {
                 onProgress: (ev) => {
                     chunks.push(ev);
                 },
+                onTracksChange(tracks) {
+                    for (const track of tracks) {
+                        if (track.address === track1.address) {
+                            gotFirstTrack.resolve(track);
+                        }
+
+                        if (
+                            track2.closed === false &&
+                            track.address === track2.address
+                        ) {
+                            gotSecondTrack.resolve(track);
+                        }
+                    }
+                },
             });
+
+            await gotFirstTrack.promise;
+
+            await mediaStreams.tracks.put(track2);
 
             const c1 = new Chunk({
                 chunk: new Uint8Array([103]),
@@ -526,7 +822,7 @@ describe("MediaStream", () => {
 
             // now we want to listen to the other track
             await waitForResolved(() =>
-                expect(iterator!.options).to.have.length(2)
+                expect(iterator!.options()).to.have.length(2)
             );
 
             await track1.put(c1, { target: "all" });
@@ -536,14 +832,19 @@ describe("MediaStream", () => {
 
             expect(chunks[0].chunk.id).to.eq(c1.id);
 
-            const secondOption = iterator.options.find((x) =>
-                equals(x.id, track2.id)
-            );
+            const secondOption = iterator
+                .options()
+                .find((x) => equals(x.id, track2.id));
             if (!secondOption) {
                 throw new Error("Missing option");
             }
             await iterator.selectOption(secondOption);
-            expect(iterator.options).to.have.length(2);
+            expect(iterator.options()).to.have.length(2);
+
+            const secondTrackFromViewer = await gotSecondTrack.promise;
+            await secondTrackFromViewer.source.chunks.index.waitFor(
+                mediaStreams.node.identity.publicKey
+            ); // wait for streamer
 
             const c3 = new Chunk({
                 chunk: new Uint8Array([104]),
@@ -561,7 +862,7 @@ describe("MediaStream", () => {
 
             await waitForResolved(() => expect(chunks).to.have.length(2));
             expect(chunks[1].chunk.id).to.eq(c4.id);
-            expect(iterator.options).to.have.length(2);
+            expect(iterator.options()).to.have.length(2);
         });
 
         it("options are updated", async () => {
@@ -602,7 +903,7 @@ describe("MediaStream", () => {
             await mediaStreams.tracks.put(track2, { target: "all" });
 
             await waitForResolved(() =>
-                expect(iterator.options).to.have.length(2)
+                expect(iterator.options()).to.have.length(2)
             );
 
             // insert some data and make sure only track1 is played
@@ -626,10 +927,10 @@ describe("MediaStream", () => {
 
             await mediaStreams.setEnd(track1, 0);
 
+            await waitForResolved(() =>
+                expect(iterator.options()).to.have.length(1)
+            );
             try {
-                await waitForResolved(() =>
-                    expect(iterator.options).to.have.length(1)
-                );
                 await waitForResolved(() =>
                     expect(iterator.current).to.have.length(1)
                 );
@@ -674,7 +975,13 @@ describe("MediaStream", () => {
                 },
             });
 
-            await waitForResolved(() => expect(viewerTracks).to.have.length(1));
+            try {
+                await waitForResolved(() =>
+                    expect(viewerTracks).to.have.length(1)
+                );
+            } catch (error) {
+                throw error;
+            }
 
             await waitForResolved(
                 () => expect(viewerTracks[0].closed).to.be.false
@@ -733,11 +1040,12 @@ describe("MediaStream", () => {
         });
 
         it("closing iterator with keep alive with prevent further replication when non-live iterating", async () => {
-            let totalTrackTime = 5000;
+            let preCreatedTrackTime = 5000;
             let dataPoints = 100;
+            let start = 0;
             const { track1, viewerStreams } = await createScenario({
-                delta: totalTrackTime / dataPoints,
-                first: { start: 0, size: dataPoints },
+                delta: preCreatedTrackTime / dataPoints,
+                first: { start, size: dataPoints },
             });
 
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
@@ -746,7 +1054,6 @@ describe("MediaStream", () => {
             >[][] = [];
 
             let startLiveFeedSubscription: bigint | undefined = undefined;
-            let hrtimeStart = hrtime.bigint();
             const firstIterator = await viewerStreams.iterate("live", {
                 keepTracksOpen: true, // keep tracks alive after closing
                 onProgress: (ev) => {
@@ -763,17 +1070,19 @@ describe("MediaStream", () => {
             );
             expect(viewerTracksChanges[0]).to.have.length(1);
 
-            let chunkTime = 999999999n;
+            let lastChunkTime = BigInt(
+                (start + preCreatedTrackTime + 999) * 1e3
+            );
             await track1.put(
                 new Chunk({
                     chunk: new Uint8Array([1, 2, 3]),
-                    time: chunkTime,
+                    time: lastChunkTime,
                 })
             );
 
             await waitForResolved(() =>
                 expect(chunks.map((x) => x.chunk.timeBN)).to.deep.eq([
-                    chunkTime,
+                    lastChunkTime,
                 ])
             );
 
@@ -803,7 +1112,6 @@ describe("MediaStream", () => {
 
             await firstIterator.close();
             expect(endLiveFeedSubscription).to.exist;
-            let hrtimeEnd = hrtime.bigint();
 
             const segments =
                 await viewerTracksChanges[0][0].source.chunks.log.replicationIndex
@@ -826,13 +1134,14 @@ describe("MediaStream", () => {
                 1e9 // 1 second
             );
 
-            console.log(" ----------- open again -------------- ");
             let viewerTracksChangesAgain: Track<
                 AudioStreamDB | WebcodecsStreamDB
             >[][] = [];
+            let firstChunk = pDefer();
             const secondIterator = await viewerStreams.iterate(0, {
                 keepTracksOpen: true, // keep tracks alive after closing
                 onProgress: (ev) => {
+                    firstChunk.resolve();
                     chunks.push(ev);
                 },
                 onTracksChange(tracks) {
@@ -840,7 +1149,11 @@ describe("MediaStream", () => {
                 },
             });
 
-            await delay(totalTrackTime);
+            await firstChunk.promise;
+            await delay(Number(lastChunkTime) / 1e3);
+            // wait for some extra time for the last chunks to propagate for async operations
+            // TODO make it so we dont need this
+            await delay(1e3);
 
             expect(viewerTracksChangesAgain).to.have.length(2); // open and close
             expect(viewerTracksChangesAgain[0]).to.have.length(1);
@@ -1066,6 +1379,7 @@ describe("MediaStream", () => {
     describe("progress", () => {
         describe("one track", () => {
             it("one chunk", async () => {
+                // test we get 1 chunk and test that we close the track after the chunk is received
                 let framesPerTrack = 1;
 
                 const { viewerStreams } = await createScenario({
@@ -1074,19 +1388,26 @@ describe("MediaStream", () => {
                 let chunks: { track: Track<any>; chunk: Chunk }[] = [];
                 let maxTime: number = 0;
 
-                // start playing from track1 and then assume we will start playing from track2
                 let onReplicationChanges: ReplicationRangeIndexable<"u64">[][] =
                     [];
 
                 let t0 = +new Date();
                 let t1: number | undefined = undefined;
                 iterator = await viewerStreams.iterate(0, {
+                    preload: 0,
                     onProgress: (ev) => {
                         t1 = +new Date();
                         chunks.push(ev);
                     },
                     onMaxTimeChange: (newMaxTime) => {
                         maxTime = newMaxTime.maxTime;
+                    },
+                    onTracksChange(tracks) {
+                        if (tracks.length === 0 && chunks.length === 0) {
+                            throw new Error(
+                                "Expected track to close after chunk was received"
+                            );
+                        }
                     },
                     onReplicationChange: async ({ track }) => {
                         onReplicationChanges.push(
@@ -1320,7 +1641,7 @@ describe("MediaStream", () => {
                 expect(timeAfterPlayDelay).to.eq(timeAfterPlay);
             });
 
-            it("time will progress on track", async () => {
+            it("time will progress on track with no chunks", async () => {
                 const { viewerStreams } = await createScenario({
                     delta: 1,
                     first: {
@@ -1331,6 +1652,7 @@ describe("MediaStream", () => {
                 });
                 let waitForTrack = pDefer();
                 iterator = await viewerStreams.iterate(0, {
+                    preload: 0, // we want to progress time as soon we get a track
                     bufferSize: 1,
                     onTracksChange: (tracks) => {
                         if (tracks[0]) {
@@ -1346,6 +1668,65 @@ describe("MediaStream", () => {
                 await delay(1e3);
                 let timeAgain = iterator.time();
                 expect(timeAgain).to.be.greaterThan(time as number);
+            });
+
+            it("time will not  progress on track while waiting for chunks", async () => {
+                const { track1, viewerStreams } = await createScenario({
+                    delta: 1,
+                    first: {
+                        start: 0,
+                        end: 10000,
+                        size: 0,
+                    },
+                });
+                await track1.put(
+                    new Chunk({
+                        chunk: new Uint8Array([123]),
+                        time: 1e3,
+                        type: "key",
+                    })
+                );
+
+                let waitForChunk = pDefer();
+                let gotTrackPromise = pDefer();
+
+                let bufferSize = 2;
+                iterator = await viewerStreams.iterate(0, {
+                    bufferSize,
+                    onTracksChange: (tracks) => {
+                        if (tracks[0]) {
+                            const iterate =
+                                tracks[0].source.chunks.index.iterate.bind(
+                                    tracks[0].source.chunks.index
+                                );
+                            tracks[0].source.chunks.index.iterate = (q, o) => {
+                                const iterator = iterate(q, o);
+                                const next = iterator.next.bind(iterator);
+                                iterator.next = async (args) => {
+                                    if (args === bufferSize) {
+                                        // only pause iterations related to the buffer loop
+                                        await waitForChunk.promise;
+                                    }
+
+                                    return next(args);
+                                };
+                                return iterator;
+                            };
+                            gotTrackPromise.resolve();
+                        }
+                    },
+                });
+                let time = iterator.time();
+                await gotTrackPromise.promise;
+                let timeWhenReceivedTrack = iterator.time();
+                expect(timeWhenReceivedTrack).to.eq(time);
+
+                await delay(1e3);
+                let timeAgain = iterator.time();
+                expect(timeAgain).to.be.eq(time as number);
+                waitForChunk.resolve();
+                await delay(6e3);
+                expect(iterator.time()).to.be.greaterThan(timeAgain as number);
             });
 
             it("will emit underflow once buffer runs out", async () => {
@@ -1367,6 +1748,7 @@ describe("MediaStream", () => {
                 let c = 0;
                 iterator = await viewerStreams.iterate(0, {
                     bufferSize,
+                    preload: 0,
                     onTracksChange(tracks) {
                         if (tracks[0]) {
                             const iterate =
@@ -1490,7 +1872,6 @@ describe("MediaStream", () => {
                 );
                 await iterator.close();
 
-                console.log(" ---------------------------- ");
                 chunks = [];
                 iterator = await viewerStreams.iterate(0, {
                     bufferTime: 10, // 10 ms,
@@ -1571,6 +1952,79 @@ describe("MediaStream", () => {
 
                 bufferPausePromise.resolve();
             });
+
+            it("will not close track until buffer is empty", async () => {
+                // test we get 1 chunk and test that we close the track after the chunk is received
+                let framesPerTrack = 11;
+
+                const { viewerStreams } = await createScenario({
+                    first: { start: 0, size: framesPerTrack },
+                });
+                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+                let maxTime: number = 0;
+
+                const endTracksPromise = pDefer();
+                const endTracksOptionPromise = pDefer();
+                iterator = await viewerStreams.iterate(0, {
+                    bufferSize: 10,
+                    onProgress: (ev) => {
+                        chunks.push(ev);
+                    },
+                    onMaxTimeChange: (newMaxTime) => {
+                        maxTime = newMaxTime.maxTime;
+                    },
+                    onTracksChange(tracks) {
+                        if (
+                            tracks.length === 0 &&
+                            chunks.length !== framesPerTrack
+                        ) {
+                            endTracksPromise.reject(
+                                new Error(
+                                    "Expected track to close after chunks was received"
+                                )
+                            );
+                        } else if (tracks.length === 0) {
+                            endTracksPromise.resolve();
+                        }
+                    },
+                    onTrackOptionsChange: (tracks) => {
+                        if (
+                            tracks.length === 0 &&
+                            chunks.length !== framesPerTrack
+                        ) {
+                            endTracksOptionPromise.reject(
+                                new Error(
+                                    "Expected track to close after chunks was received"
+                                )
+                            );
+                        } else if (tracks.length === 0) {
+                            endTracksOptionPromise.resolve();
+                        }
+                    },
+                });
+
+                try {
+                    await waitForResolved(() =>
+                        expect(chunks.length).to.eq(framesPerTrack)
+                    );
+                } catch (error) {
+                    throw error;
+                }
+
+                let timeout = setTimeout(() => {
+                    endTracksOptionPromise.reject(
+                        new Error(
+                            "Timed out waiting for track options to empty"
+                        )
+                    );
+                    endTracksPromise.reject(
+                        new Error("Timed out waiting for tracks to empty")
+                    );
+                }, 5e3);
+                await endTracksOptionPromise.promise;
+                await endTracksPromise.promise;
+                clearTimeout(timeout);
+            });
         });
 
         describe("overlapping", () => {
@@ -1620,7 +2074,6 @@ describe("MediaStream", () => {
                     onProgress: (ev) => {
                         chunks.push(ev);
                     },
-                    changeProcessor: (change) => change, // allow concurrent tracks
                 });
 
                 await delay(2000); // some delay to make sure some data is played
@@ -1633,22 +2086,21 @@ describe("MediaStream", () => {
             it("overlapping partly multiple media types", async () => {
                 let framesPerTrack = 2;
 
-                const { mediaStreams, track1, track2, viewerStreams } =
-                    await createScenario({
-                        delta: 1000,
-                        first: {
-                            start: 0,
-                            size: framesPerTrack,
-                            end: 1000,
-                            type: "video",
-                        },
-                        second: {
-                            start: 500,
-                            size: framesPerTrack,
-                            end: 1500,
-                            type: "audio",
-                        },
-                    });
+                const { viewerStreams } = await createScenario({
+                    delta: 1000,
+                    first: {
+                        start: 0,
+                        size: framesPerTrack,
+                        end: 1000,
+                        type: "video",
+                    },
+                    second: {
+                        start: 500,
+                        size: framesPerTrack,
+                        end: 1500,
+                        type: "audio",
+                    },
+                });
                 let chunks: { track: Track<any>; chunk: Chunk }[] = [];
 
                 // start playing from track1 and then assume we will start playing from track2
@@ -1657,7 +2109,6 @@ describe("MediaStream", () => {
                     onProgress: (ev) => {
                         chunks.push(ev);
                     },
-                    changeProcessor: (change) => change, // allow concurrent tracks
                 });
                 const expecteChunkCount = Math.round(
                     0.75 * (framesPerTrack * 2)
@@ -1670,14 +2121,325 @@ describe("MediaStream", () => {
                     expect(chunks.length).to.eq(expecteChunkCount)
                 );
             });
+
+            it("overlapping partly same media types", async () => {
+                let framesPerTrack = 2;
+
+                const { viewerStreams } = await createScenario({
+                    delta: 1000,
+                    first: {
+                        start: 0,
+                        size: framesPerTrack,
+                        end: 1000,
+                        type: "audio",
+                    },
+                    second: {
+                        start: 500,
+                        size: framesPerTrack,
+                        end: 1500,
+                        type: "audio",
+                    },
+                });
+                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+                // start playing from track1 and then assume we will start playing from track2
+                const progress = 0;
+                iterator = await viewerStreams.iterate(progress, {
+                    onProgress: (ev) => {
+                        chunks.push(ev);
+                    },
+                });
+                const expecteChunkCount = 3;
+                await waitForResolved(() =>
+                    expect(chunks.length).to.eq(expecteChunkCount)
+                );
+                await delay(2000);
+                await waitForResolved(() =>
+                    expect(chunks.length).to.eq(expecteChunkCount)
+                );
+            });
+
+            it("will not buffer overlapping until necessary", async () => {
+                let delta = 500;
+                let preload = 500;
+                let firstTrackEndTime = 2000;
+                let end = 3500;
+                const { viewerStreams, track2 } = await createScenario({
+                    delta: delta,
+                    first: {
+                        start: 0,
+                        size: Math.round((firstTrackEndTime - 0) / delta),
+                        end: firstTrackEndTime,
+                        type: "audio",
+                    },
+                    second: {
+                        start: 500,
+                        end,
+                        size: Math.round(end - 500) / delta,
+                        type: "audio",
+                    },
+                });
+                let chunks: Map<number, { track: Track<any>; chunk: Chunk }[]> =
+                    new Map();
+
+                // start playing from track1 and then assume we will start playing from track2
+                const progress = 0;
+                let bufferSize = 3;
+                let firstChunkPromise = pDefer();
+
+                iterator = await viewerStreams.iterate(progress, {
+                    preload,
+                    bufferSize,
+                    onProgress: (ev) => {
+                        firstChunkPromise.resolve();
+                        let timeKey = ev.track.startTime + ev.chunk.time;
+                        let arr = chunks.get(timeKey) || [];
+                        arr.push(ev);
+                        chunks.set(timeKey, arr);
+                    },
+                    onTracksChange: (tracks) => {
+                        for (const track of tracks) {
+                            if (track.address === track2.address) {
+                                const iterate =
+                                    track.source.chunks.index.iterate.bind(
+                                        track.source.chunks.index
+                                    );
+                                track.source.chunks.index.iterate = (q, o) => {
+                                    const iterator = iterate(q, o);
+                                    const next = iterator.next.bind(iterator);
+                                    iterator.next = async (args) => {
+                                        if (args === bufferSize) {
+                                            let chunks: Chunk[] = await next(
+                                                args
+                                            );
+                                            for (const chunk of chunks) {
+                                                let time =
+                                                    track.startTime +
+                                                    chunk.time;
+                                                console.log(time);
+                                                if (
+                                                    time <
+                                                    firstTrackEndTime * 1e3
+                                                ) {
+                                                    throw new Error(
+                                                        "Should not buffer chunks that are not necessary"
+                                                    );
+                                                }
+                                            }
+                                            return chunks;
+                                        }
+                                        return next(args);
+                                    };
+                                    return iterator;
+                                };
+                            }
+                        }
+                    },
+                });
+                await firstChunkPromise.promise;
+                await waitForResolved(() =>
+                    expect(chunks.size).to.eq(Math.round(end / delta))
+                );
+                for (let i = 0; i < end - delta; i += delta) {
+                    let microSeconds = i * 1e3;
+                    if (i === 1500) {
+                        expect(chunks.get(microSeconds)!.length).to.be.oneOf([
+                            1, 2,
+                        ]); // not defined behaviour yet TODO
+                    } else {
+                        expect(chunks.get(microSeconds)).to.have.length(1);
+                    }
+                }
+            });
+
+            it("time will not progress until preload", async () => {
+                const { track1, track2, viewerStreams } = await createScenario({
+                    delta: 1,
+                    first: {
+                        start: 0,
+                        end: 10000,
+                        size: 0,
+                        type: "audio",
+                    },
+                    second: {
+                        start: 0,
+                        end: 10000,
+                        size: 0,
+                        type: "video",
+                    },
+                });
+                await track1.put(
+                    new Chunk({
+                        chunk: new Uint8Array([123]),
+                        time: 1e3,
+                        type: "key",
+                    })
+                );
+                await track2.put(
+                    new Chunk({
+                        chunk: new Uint8Array([234]),
+                        time: 1e3,
+                        type: "key",
+                    })
+                );
+
+                let waitForChunk = pDefer();
+
+                let bufferSize = 2;
+                let trackCount = 0;
+                let visitedTracks: Set<string> = new Set();
+                let preload = 5e3; // 5s
+
+                iterator = await viewerStreams.iterate(0, {
+                    bufferSize,
+                    preload,
+                    onTracksChange: (tracks) => {
+                        console.log(tracks.map((x) => x.toString()));
+                        for (const track of tracks) {
+                            if (visitedTracks.has(track.address)) {
+                                continue;
+                            }
+
+                            visitedTracks.add(track.address);
+
+                            if (track.source.mediaType === "video") {
+                                // make video laggy
+                                const iterate =
+                                    track.source.chunks.index.iterate.bind(
+                                        track.source.chunks.index
+                                    );
+                                track.source.chunks.index.iterate = (q, o) => {
+                                    const iterator = iterate(q, o);
+                                    const next = iterator.next.bind(iterator);
+                                    iterator.next = async (args) => {
+                                        if (args === bufferSize) {
+                                            // only pause iterations related to the buffer loop
+                                            await waitForChunk.promise;
+                                        }
+
+                                        return next(args);
+                                    };
+                                    return iterator;
+                                };
+                            }
+
+                            trackCount++;
+                        }
+                    },
+                });
+                let timeStart = iterator.time();
+                let timeBeforeChunksArrive: number | undefined = undefined;
+                setTimeout(() => {
+                    timeBeforeChunksArrive = iterator.time() as number;
+                    waitForChunk.resolve();
+                }, preload - 2e3); // start to resolve chunks for both tracks before preload finishesh
+                await waitForChunk.promise;
+                expect(timeStart).to.eq(timeBeforeChunksArrive);
+                const timeAfterChunksArrive = iterator.time();
+                await delay(5e3);
+                let timeAgain = iterator.time();
+                expect(timeAgain).to.be.greaterThan(
+                    timeAfterChunksArrive as number
+                );
+            });
+
+            it("can select a different track of same source type", async () => {
+                let chunkCountPerTrack = 10;
+
+                const { viewerStreams, track1, track2 } = await createScenario({
+                    delta: 1e3,
+                    first: {
+                        start: 0,
+                        size: chunkCountPerTrack,
+                        type: new AudioStreamDB({ sampleRate: 1 }),
+                    },
+                    second: {
+                        start: 0,
+                        size: chunkCountPerTrack,
+                        type: new AudioStreamDB({ sampleRate: 2 }),
+                    },
+                });
+
+                let trackOptions: Map<string, Track<any>> = new Map();
+                let selectedTracks: Track<any>[][] = [];
+                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+                let selected: Track | undefined = undefined;
+                let unselected: Track | undefined = undefined;
+                let selectedUnselected = pDefer();
+                iterator = await viewerStreams.iterate(0, {
+                    onProgress: (ev) => {
+                        chunks.push(ev);
+                    },
+                    onTrackOptionsChange: (tracks) => {
+                        tracks.forEach((track) => {
+                            trackOptions.set(track.address, track);
+                        });
+                    },
+                    onTracksChange: (tracks) => {
+                        selectedTracks.push(tracks);
+
+                        if (unselected) {
+                            try {
+                                expect(selectedTracks.length).to.be.greaterThan(
+                                    1
+                                );
+                                expect(
+                                    selectedTracks[selectedTracks.length - 1]
+                                ).to.have.length(1);
+                                expect(
+                                    selectedTracks[selectedTracks.length - 1][0]
+                                        .address
+                                ).to.eq(unselected.address);
+                                selectedUnselected.resolve();
+                            } catch (error) {
+                                // ignore
+                            }
+                        }
+                    },
+                });
+                await waitForResolved(() => expect(trackOptions.size).to.eq(2));
+                await waitForResolved(() => {
+                    expect(selectedTracks).to.have.length(1);
+                    expect(selectedTracks[0]).to.have.length(1);
+                    expect(selectedTracks[0][0].address).to.be.oneOf([
+                        track1.address,
+                        track2.address,
+                    ]);
+                });
+
+                selected =
+                    selectedTracks[0][0].address === track1.address
+                        ? trackOptions.get(track1.address)!
+                        : trackOptions.get(track2.address)!;
+                unselected =
+                    selectedTracks[0][0].address === track1.address
+                        ? trackOptions.get(track2.address)!
+                        : trackOptions.get(track1.address)!;
+
+                // select the unselected track
+                await delay(3e3); // wait  for some time to consume some chunks from the first track
+                await iterator.selectOption(unselected);
+
+                await selectedUnselected.promise;
+
+                await waitForResolved(() =>
+                    expect(chunks).to.have.length(chunkCountPerTrack)
+                );
+                expect(chunks[0].track.address).to.eq(selected.address); // starts from the first track
+                expect(chunks[chunks.length - 1].track.address).to.eq(
+                    unselected.address
+                ); // ends on the second track
+            });
         });
 
         describe("sequential", () => {
             it("start at 0", async () => {
                 let trackCount = 2;
-
-                const { viewerStreams } = await createScenario({
-                    delta: 999,
+                let delta = 500;
+                let totalTime = trackCount * 2 * delta;
+                const { viewerStreams, track1, track2 } = await createScenario({
+                    delta,
                     first: { start: 0, size: trackCount, end: 999 },
                     second: { start: 1000, size: trackCount },
                 });
@@ -1687,8 +2449,11 @@ describe("MediaStream", () => {
 
                 // start playing from track1 and then assume we will start playing from track2
                 let maxTime = 0;
+                let trackOptionsPerChunk: Track[][] = [];
                 iterator = await viewerStreams.iterate(0, {
                     onProgress: (ev) => {
+                        trackOptionsPerChunk[chunks.length] =
+                            iterator.options();
                         chunks.push(ev);
                     },
                     onTracksChange(track) {
@@ -1700,8 +2465,20 @@ describe("MediaStream", () => {
                 });
 
                 await waitForResolved(() =>
-                    expect(chunks.length).to.eq(trackCount * 2)
+                    expect(chunks.length).to.be.greaterThan(0)
                 );
+                await delay(totalTime);
+
+                // assert the track options are correct for each time
+                expect(
+                    trackOptionsPerChunk.map((x) => x.map((y) => y.address))
+                ).to.deep.eq([
+                    [track1.address],
+                    [track1.address],
+                    [track2.address],
+                    [track2.address],
+                ]);
+
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
@@ -1775,8 +2552,8 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("many chunks", async () => {
-                let size = 1e4;
+            it("many chunks single track", async () => {
+                let size = 5e3;
 
                 const { mediaStreams, track1, viewerStreams } =
                     await createScenario({
@@ -1787,11 +2564,9 @@ describe("MediaStream", () => {
 
                 // start playing from track1 and then assume we will start playing from track2
                 const start = 0.23;
-                let c = 0;
                 console.log("start iterate");
                 iterator = await viewerStreams.iterate(start, {
                     onProgress: (ev) => {
-                        console.log(c++);
                         chunks.push(ev);
                     },
                 });
@@ -1800,7 +2575,62 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(chunks.length).to.closeTo(size * (1 - start), 100)
                 );
-                console.log("-------- last ------------");
+                // assert that the timestamps are correct
+                let delta = chunks[1].chunk.time - chunks[0].chunk.time;
+                for (let i = 1; i < chunks.length; i++) {
+                    expect(
+                        chunks[i].chunk.time - chunks[i - 1].chunk.time
+                    ).to.be.eq(delta);
+                }
+            });
+
+            it("many chunks concurrently", async () => {
+                let size = 100;
+
+                const { mediaStreams, track1, track2, viewerStreams } =
+                    await createScenario({
+                        delta: 1,
+                        first: { start: 0, size, type: "video" },
+                        second: { start: 0, size, type: "audio" },
+                    });
+                let chunks: Map<string, Chunk[]> = new Map();
+                chunks.set(track1.address, []);
+                chunks.set(track2.address, []);
+
+                // start playing from track1 and then assume we will start playing from track2
+                const start = 0;
+                let c = 0;
+                console.log("start iterate");
+                iterator = await viewerStreams.iterate(start, {
+                    onProgress: (ev) => {
+                        console.log(c++);
+                        chunks.get(ev.track.address)!.push(ev.chunk);
+                    },
+                });
+
+                try {
+                    await waitForResolved(() => {
+                        expect(chunks.get(track1.address)!.length).to.eq(size);
+                        expect(chunks.get(track2.address)!.length).to.eq(size);
+                    });
+                } catch (error) {
+                    throw error;
+                }
+
+                // assert that the timestamps are correct
+                let delta =
+                    chunks.get(track1.address)![1].time -
+                    chunks.get(track1.address)![0].time;
+                for (let i = 1; i < size; i++) {
+                    expect(
+                        chunks.get(track1.address)![i].time -
+                            chunks.get(track1.address)![i - 1].time
+                    ).to.be.eq(delta);
+                    expect(
+                        chunks.get(track2.address)![i].time -
+                            chunks.get(track2.address)![i - 1].time
+                    ).to.be.eq(delta);
+                }
             });
 
             it("buffers evenly", async () => {
@@ -1831,10 +2661,10 @@ describe("MediaStream", () => {
 
                 // console.log(await viewerStreams.tracks.index.search(new SearchRequest()));
 
-                let frames = 3000;
+                let frames = 3e3;
 
                 for (let i = 0; i < frames; i++) {
-                    track1.put(
+                    await track1.put(
                         new Chunk({
                             chunk: new Uint8Array([i]),
                             time: i * MILLISECONDS_TO_MICROSECONDS,
@@ -1847,8 +2677,12 @@ describe("MediaStream", () => {
                 let maxDiff = 0;
                 let lastTs: number | undefined = undefined;
                 let diffs: number[] = [];
+                let firstChunkPromise = pDefer();
                 iterator = await viewerStreams.iterate(0, {
+                    bufferTime: 1e3,
+                    preload: 1e3,
                     onProgress: (ev) => {
+                        firstChunkPromise.resolve();
                         let now = +new Date();
                         if (lastTs) {
                             maxDiff = Math.max(maxDiff, now - lastTs);
@@ -1859,6 +2693,7 @@ describe("MediaStream", () => {
                     },
                 });
 
+                await firstChunkPromise.promise;
                 await waitForResolved(() =>
                     expect(chunks.length).to.eq(frames)
                 );
@@ -1934,6 +2769,7 @@ describe("MediaStream", () => {
 
                 let chunks: { track: Track<any>; chunk: Chunk }[] = [];
                 let tracks: Track[][] = [];
+
                 iterator = await viewerStreams.iterate("live", {
                     onTracksChange(track) {
                         tracks.push(track);
@@ -1943,17 +2779,15 @@ describe("MediaStream", () => {
                     },
                 });
 
-                const t2 = 1e6 * MILLISECONDS_TO_MICROSECONDS;
+                const t2 = 1e3 * MILLISECONDS_TO_MICROSECONDS;
                 const t1 = t2 + 1;
 
-                await delay(3e3);
                 await waitForResolved(() =>
-                    expect(tracks.map((x) => x.map((y) => y.id))).to.deep.eq([
-                        [track2.id],
-                    ])
+                    expect(
+                        tracks[tracks.length - 1].map((x) => x.id)
+                    ).to.deep.eq([track2.id])
                 );
 
-                //  await delay(3e3);
                 await track1.put(
                     new Chunk({
                         chunk: new Uint8Array([0]),
@@ -1974,7 +2808,8 @@ describe("MediaStream", () => {
 
                 await iterator.close();
                 tracks = [];
-                await viewerStreams.iterate(0, {
+                chunks = [];
+                iterator = await viewerStreams.iterate(0, {
                     onTracksChange(track) {
                         tracks.push(track);
                     },
@@ -1982,11 +2817,13 @@ describe("MediaStream", () => {
                         chunks.push(ev);
                     },
                 });
+
                 await waitForResolved(() => expect(chunks).to.have.length(3)); // 2 chunks from first track, 1 from second track
+
                 await waitForResolved(() =>
                     expect(tracks.map((x) => x.map((y) => y.id))).to.deep.eq([
                         [track1.id],
-                        [],
+                        [track1.id, track2.id],
                         [track2.id],
                     ])
                 );
@@ -2064,10 +2901,14 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(chunks).to.length(halfChunks)
                 );
-                expect(tracks.map((x) => x.map((y) => y.id))).to.deep.eq([
-                    [track1.id],
-                    [],
-                ]);
+
+                await waitForResolved(() =>
+                    expect(tracks.map((x) => x.map((y) => y.id))).to.deep.eq([
+                        [track1.id],
+                        [],
+                    ])
+                );
+
                 expect(
                     await tracks[0][0].source.chunks.log.getMyReplicationSegments()
                 ).to.have.length(1);
@@ -2079,21 +2920,23 @@ describe("MediaStream", () => {
                     onTracksChange(track) {
                         tracks.push(track);
                     },
-                    onProgress: (ev) => {
+                    onProgress: async (ev) => {
                         chunks.push(ev);
                         if (chunks.length === halfChunks) {
-                            return iterator.close();
+                            await iterator.close();
                         }
                     },
                 });
 
                 await waitForResolved(() =>
-                    expect(chunks).to.length(halfChunks)
+                    expect(chunks).to.have.length(halfChunks)
                 );
-                expect(tracks.map((x) => x.map((y) => y.id))).to.deep.eq([
-                    [track1.id],
-                    [],
-                ]); // last element will be [] i.e. closed, because we will fetch batches of 60 frames and it will reach the end
+                await waitForResolved(() => {
+                    expect(tracks.map((x) => x.map((y) => y.id))).to.deep.eq([
+                        [track1.id],
+                        [],
+                    ]); // last element will be [] i.e. closed, because we will fetch batches of 60 frames and it will reach the end
+                });
                 expect(
                     await tracks[0][0].source.chunks.log.getMyReplicationSegments()
                 ).to.have.length(1);
@@ -2396,7 +3239,6 @@ describe("MediaStream", () => {
                 const closeCall = sinon.spy(tracks[0].close);
                 tracks[0].close = closeCall;
 
-                console.log("--------------------");
                 iterator = await viewerStreams.iterate(0, {
                     keepTracksOpen: true, // this option will prevent closing
                     onProgress: (ev) => {
@@ -2410,20 +3252,15 @@ describe("MediaStream", () => {
                     },
                 });
 
-                try {
-                    await waitForResolved(() =>
-                        expect(chunks.length).to.eq(chunksPerTrack)
-                    );
-                    await waitForResolved(() =>
-                        expect(maxTime).to.eq(
-                            chunks[chunks.length - 1].track.startTime +
-                                chunks[chunks.length - 1].chunk.time
-                        )
-                    );
-                } catch (error) {
-                    throw error;
-                }
-
+                await waitForResolved(() =>
+                    expect(chunks.length).to.eq(chunksPerTrack)
+                );
+                await waitForResolved(() =>
+                    expect(maxTime).to.eq(
+                        chunks[chunks.length - 1].track.startTime +
+                            chunks[chunks.length - 1].chunk.time
+                    )
+                );
                 expect(tracks).to.have.length(2);
 
                 segmentsReplicatedByViewer = await (
@@ -2433,10 +3270,6 @@ describe("MediaStream", () => {
                         hash: viewerStreams.node.identity.publicKey.hashcode(),
                     },
                 });
-                console.log(
-                    "???",
-                    tracks[1].node.identity.publicKey.hashcode()
-                );
                 expect(segmentsReplicatedByViewer).to.eq(1);
 
                 expect(closeCall.called).to.be.false;
@@ -2445,14 +3278,12 @@ describe("MediaStream", () => {
             });
 
             it("close all tracks", async () => {
-                let trackCount = 2;
+                let chunkSize = 2;
 
-                const { mediaStreams, track1, viewerStreams } =
-                    await createScenario({
-                        delta: 999,
-                        first: { start: 0, size: trackCount, end: 999 },
-                    });
-                let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+                const { viewerStreams } = await createScenario({
+                    delta: 999,
+                    first: { start: 0, size: chunkSize, end: 999 },
+                });
 
                 // start playing from track1 and then assume we will start playing from track2
                 let tracks: Track<any>[] = [];
@@ -2466,13 +3297,59 @@ describe("MediaStream", () => {
                     expect(tracks).to.have.length(1);
                     expect(tracks[0].closed).to.be.false;
                 });
+
                 const closeCalled = sinon.spy(tracks[0].close);
                 tracks[0].close = closeCalled;
                 await viewerStreams.close();
                 console.log("---- closed ---");
-                await delay(4000);
+                await delay(3000);
 
                 expect(closeCalled.calledOnce).to.be.true;
+            });
+
+            it("can drop track", async () => {
+                const mediaStreams = await streamer.open(
+                    new MediaStreamDB(streamer.identity.publicKey)
+                );
+                const track1 = await streamer.open(
+                    new Track({
+                        sender: streamer.identity.publicKey,
+                        source: new WebcodecsStreamDB({
+                            decoderDescription: { codec: "av01" },
+                        }),
+                        start: 0,
+                    })
+                );
+
+                await mediaStreams.tracks.put(track1);
+                await track1.put(
+                    new Chunk({ chunk: new Uint8Array([123]), time: 0 })
+                );
+                await track1.drop();
+                await mediaStreams.tracks.del(track1.id);
+            });
+
+            it("can drop after end", async () => {
+                const mediaStreams = await streamer.open(
+                    new MediaStreamDB(streamer.identity.publicKey)
+                );
+                const track1 = await streamer.open(
+                    new Track({
+                        sender: streamer.identity.publicKey,
+                        source: new WebcodecsStreamDB({
+                            decoderDescription: { codec: "av01" },
+                        }),
+                        start: 0,
+                    })
+                );
+
+                await mediaStreams.tracks.put(track1);
+                await mediaStreams.setEnd(track1, 10n);
+                await track1.put(
+                    new Chunk({ chunk: new Uint8Array([123]), time: 0 })
+                );
+                await track1.drop();
+                await mediaStreams.tracks.del(track1.id);
             });
         });
     });

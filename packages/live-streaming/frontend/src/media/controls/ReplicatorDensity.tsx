@@ -1,8 +1,11 @@
 import { ReplicationRangeIndexable } from "@peerbit/shared-log";
 import { PublicSignKey } from "@peerbit/crypto";
+import { MediaStreamDB } from "../database.js";
+import { useMaxTime } from "./useMaxTime";
+import { useReplicationChange } from "./useReplicationChange.js";
 
 const getBarsFromRanges = (props: {
-    publicKey: PublicSignKey;
+    publicKey?: PublicSignKey;
     maxTime: number;
     ranges?: ReplicationRangeIndexable<"u64">[];
     resolution: number;
@@ -20,12 +23,25 @@ const getBarsFromRanges = (props: {
         let endRange = range.start1 !== range.start2 ? range.end2 : range.end1;
 
         let start = Math.round(
-            (Number(startRange / 1000000n) / props.maxTime) * resolution
+            (Number(startRange) / 1000 / props.maxTime) * resolution
         );
         let end = Math.min(
-            Math.round(
-                (Number(endRange / 1000000n) / props.maxTime) * resolution
-            ),
+            Math.round((Number(endRange) / 1000 / props.maxTime) * resolution),
+            resolution
+        );
+
+        console.log(
+            "start",
+            start,
+            "end",
+            end,
+            "startRange",
+            startRange,
+            "endRange",
+            endRange,
+            "maxTime",
+            props.maxTime,
+            "resolution",
             resolution
         );
         for (let x = start; x < end; x++) {
@@ -39,17 +55,31 @@ const getBarsFromRanges = (props: {
             }
             counter.y += 1;
             counter.owned =
-                counter.owned || range.hash === props.publicKey.hashcode();
+                counter.owned ||
+                (props.publicKey && range.hash === props.publicKey.hashcode());
         }
     }
     return counters;
 };
 export const ReplicationRangeVisualization = (props: {
-    maxTime: number;
-    ranges?: ReplicationRangeIndexable<"u64">[];
-    publicKey: PublicSignKey;
+    mediaStreams?: MediaStreamDB;
 }) => {
-    let resolution = 1000;
+    let resolution = 100;
+    const { maxTime } = useMaxTime({ mediaStreams: props.mediaStreams });
+    const ranges = useReplicationChange({ mediaStreams: props.mediaStreams });
+
+    console.log(
+        "--->",
+        maxTime,
+        ranges.map((x) => {
+            return {
+                me:
+                    x.hash ===
+                    props.mediaStreams?.node.identity.publicKey.hashcode(),
+                width: x.widthNormalized,
+            };
+        })
+    );
     return (
         <>
             {/* 
@@ -57,7 +87,7 @@ export const ReplicationRangeVisualization = (props: {
           This is a container that spans the full width of the Slider.Track 
           and shows your “popularity” or “heatmap” data.
         */}
-            {props.ranges && (
+            {ranges && (
                 <div className="absolute inset-0 pointer-events-none">
                     {/**
                      * For demonstration, assume:
@@ -93,10 +123,10 @@ export const ReplicationRangeVisualization = (props: {
                         );
                     })} */}
                     {getBarsFromRanges({
-                        maxTime: props.maxTime,
-                        publicKey: props.publicKey,
+                        maxTime: maxTime,
+                        publicKey: props.mediaStreams?.node.identity.publicKey,
                         resolution,
-                        ranges: props.ranges,
+                        ranges: ranges,
                     }).map((bar, x) => {
                         return (
                             <div

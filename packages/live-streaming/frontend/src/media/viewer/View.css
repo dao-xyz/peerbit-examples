@@ -1,4 +1,4 @@
-.cat {
+.video-loading {
     display: flex;
     align-items: center;
     justify-content: space-evenly;
@@ -6,6 +6,18 @@
     width: 100%;
     height: 100%;
     background-color: #80808082;
+    margin: 0;
+    bottom: 0;
+}
+
+.video-buffering {
+    display: flex;
+    align-items: center;
+    justify-content: space-evenly;
+    position: absolute;
+    pointer-events: none;
+    width: 100%;
+    height: 100%;
     margin: 0;
     bottom: 0;
 }

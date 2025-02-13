@@ -20,7 +20,16 @@ interface NoiseType {
     type: "noise";
 }
 
-export type StreamType = UploadMedia | CameraStream | ScreenShare | NoiseType;
+interface DemoType {
+    type: "demo"; // a short video
+}
+
+export type StreamType =
+    | UploadMedia
+    | DemoType
+    | CameraStream
+    | ScreenShare
+    | NoiseType;
 
 export type Resolution = 360 | 480 | 720 | 1080 | 1440 | 2160;
 export const RESOLUTIONS: Resolution[] = [360, 480, 720, 1080, 1440, 2160];

@@ -8,7 +8,7 @@ import {
 import ChevronLeftIcon from "@mui/icons-material/ChevronLeft";
 import { Resolution } from "./settings";
 import { Check } from "@mui/icons-material";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 export const QualityMenuItem = (props: {
     multiselect: boolean;
