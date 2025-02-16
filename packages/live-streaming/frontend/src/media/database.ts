@@ -667,15 +667,30 @@ export class Track<
         return `Track { time: ${this._startTime} - ${this._endTime}, description: (${this.source.description}) }`;
     }
 
+    private _previousWallTime: bigint | undefined = undefined;
+    private _previousLogical: number | undefined = undefined;
     async put(
         chunk: Chunk,
         options?: { target?: "all" | "replicators" | "none" }
     ) {
+        const wallTime = (this._startTime + chunk.timeBN) * 1000n;
+        let logical: number | undefined = undefined;
+        if (wallTime === this._previousWallTime) {
+            if (this._previousLogical == null) {
+                this._previousLogical = 0;
+            }
+            this._previousLogical++;
+            logical = this._previousLogical;
+        } else {
+            this._previousWallTime = wallTime;
+            this._previousLogical = undefined;
+        }
         await this.source.chunks.put(chunk, {
             target: options?.target,
             meta: {
                 timestamp: new Timestamp({
-                    wallTime: (this._startTime + chunk.timeBN) * 1000n,
+                    wallTime,
+                    logical,
                 }),
                 next: [],
             },
@@ -1804,12 +1819,12 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                     }
 
                     if (filteredChange.add) {
-                        console.log("ADD TRACK FILTER", {
-                            track: (filteredChange.add instanceof Track
-                                ? filteredChange.add
-                                : filteredChange.add.track
-                            ).toString(),
-                        });
+                        /*   console.log("ADD TRACK FILTER", {
+                              track: (filteredChange.add instanceof Track
+                                  ? filteredChange.add
+                                  : filteredChange.add.track
+                              ).toString(),
+                          }); */
                         let when =
                             filteredChange.add instanceof Track
                                 ? undefined
@@ -1822,9 +1837,9 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                         );
                     }
                     if (filteredChange.remove) {
-                        console.log("RM TRACK FILTER", {
-                            track: filteredChange.remove.toString(),
-                        });
+                        /*  console.log("RM TRACK FILTER", {
+                             track: filteredChange.remove.toString(),
+                         }); */
                         await removeTrack({
                             track: filteredChange.remove,
                             clearPending: true,
@@ -1888,9 +1903,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                     change: CustomEvent<DocumentsChange<Chunk>>
                 ) => {
                     for (const chunk of change.detail.added) {
-                        console.log("LIVE PENDING  --> ", {
-                            time: track.startTime + chunk.time,
-                        });
                         await onPending({ chunk, track });
                     }
                 };
@@ -1983,7 +1995,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                             }
 
                             const newChunks = await iterator.next(bufferSize);
-                            console.log("RESULTS FROM NEXT ", newChunks.length);
                             if (newChunks.length > 0) {
                                 for (const chunk of newChunks) {
                                     await onPending({ chunk, track });
@@ -2298,7 +2309,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                         // set the playback start time
                         playbackTime = progressValue;
                         tracksIterator = createIterator(progressValue);
-                        console.log("reset iterator", progressValue);
                     }
 
                     const bufferAhead = 1e6; // microseconds
@@ -2310,11 +2320,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                             return;
                         }
                         const current = await tracksIterator.next(1);
-                        console.log(
-                            "fetched track",
-                            current.map((x) => x.toString())
-                        );
-
                         if (current.length === 0) {
                             if (!fetchedOnce) {
                                 // reset the iterator to potentially fetch a new track later
@@ -2482,7 +2487,9 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
 
     public async setEnd(track: Track<any>, time?: bigint | number) {
         if (track.endTime == null) {
-            track.setEnd(time);
+            track.setEnd(
+                typeof time === "number" ? BigInt(Math.ceil(time)) : time
+            );
             await this.tracks.put(track, {
                 target: "all",
             });

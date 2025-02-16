@@ -27,6 +27,8 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { FiAlertCircle } from "react-icons/fi"; // Using react-icons for icons
 import { FirstMenuSelect } from "./controller/FirstMenuSelect";
 import pDefer from "p-defer";
+import { isSafari } from "../utils";
+import { convertGPUFrameToCPUFrame } from "./convertGPUFrameToCPUFrame";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
@@ -75,8 +77,9 @@ const createVideoEncoder = (properties: {
         | {
               type: "0";
           };
+    preferCPUEncoding: () => Promise<boolean>;
 }): VideoStream => {
-    let videoStreamDB: Track<WebcodecsStreamDB> | undefined = undefined;
+    let videoTrack: Track<WebcodecsStreamDB> | undefined = undefined;
     let encoder: VideoEncoder | undefined = undefined;
     let abortController = new AbortController();
 
@@ -88,17 +91,18 @@ const createVideoEncoder = (properties: {
             encoder.close();
         }
 
-        if (videoStreamDB) {
+        if (videoTrack) {
             // update the track with the end timer
             //   await videoStreamDB.close() TODD should we also close? (we have disabled this because we need to ensure replication before doing this)
             await properties.mediaStreamDBs.setEnd(
-                videoStreamDB,
+                videoTrack,
                 properties.time.type === "live" ? undefined : lastChunkTimestamp
             );
 
             console.log(
                 "CLOSE VIDEO STREAM",
-                videoStreamDB.source.decoderConfigJSON
+                videoTrack.source.decoderConfigJSON,
+                closeEncoder
             );
         }
     };
@@ -111,20 +115,34 @@ const createVideoEncoder = (properties: {
 
         console.log("NEW ENCODER!");
 
-        if (videoStreamDB) {
+        if (videoTrack) {
             // TODO
-            await properties.mediaStreamDBs.setEnd(
-                videoStreamDB,
-                properties.time.type === "live" ? undefined : lastChunkTimestamp
-            );
-            videoStreamDB = undefined;
+            if (videoTrack.endTime == null) {
+                await properties.mediaStreamDBs.setEnd(
+                    videoTrack,
+                    properties.time.type === "live"
+                        ? undefined
+                        : lastChunkTimestamp
+                );
+                await videoTrack.close();
+            }
+
+            videoTrack = undefined;
         }
 
         encoder = new VideoEncoder({
-            error: (e) => {
+            error: async (e) => {
                 console.error(e);
                 const msg = "Failed to encode video.\n" + e.toString();
-                properties.setErrorMessage(msg);
+                console.log(msg, e.toString().includes("OperationError"));
+                if (
+                    e.toString().includes("OperationError") &&
+                    (await properties.preferCPUEncoding())
+                ) {
+                    return; // preferCPUEncoding will make us retry encoding but without gpu loading
+                } else {
+                    properties.setErrorMessage(msg);
+                }
             },
             output: async (chunk, metadata) => {
                 if (skip) {
@@ -134,7 +152,7 @@ const createVideoEncoder = (properties: {
                 chunk.copyTo(arr);
 
                 if (metadata.decoderConfig) {
-                    const videoTrack = new Track<WebcodecsStreamDB>({
+                    const videoTrackToOpen = new Track<WebcodecsStreamDB>({
                         sender: properties.mediaStreamDBs.owner,
                         source: new WebcodecsStreamDB({
                             decoderDescription: metadata.decoderConfig,
@@ -153,7 +171,7 @@ const createVideoEncoder = (properties: {
                     });
 
                     let change = false;
-                    if (videoStreamDB) {
+                    if (videoTrack) {
                         /*  if (
                                     videoTrack.session >
                                     videoStreamDB.session
@@ -161,8 +179,8 @@ const createVideoEncoder = (properties: {
                                     // ok!
                                     change = true;
                                 } else  */ if (
-                            videoTrack.source.decoderConfigJSON !==
-                            videoStreamDB.source.decoderConfigJSON
+                            videoTrackToOpen.source.decoderConfigJSON !==
+                            videoTrack.source.decoderConfigJSON
                         ) {
                             // ok!
                             change = true;
@@ -171,7 +189,7 @@ const createVideoEncoder = (properties: {
 
                             console.log(
                                 "NO CHANGE",
-                                videoStreamDB.source.decoderConfigJSON
+                                videoTrack.source.decoderConfigJSON
                             );
                         }
                     } else {
@@ -186,29 +204,31 @@ const createVideoEncoder = (properties: {
                             .add(async () => {
                                 //  console.log('open video stream db!', videoStreamDB?.timestamp)
 
-                                const r =
+                                const newVideoTrack =
                                     await properties.mediaStreamDBs.node.open(
-                                        videoTrack,
+                                        videoTrackToOpen,
                                         {
                                             /*   trim: { type: 'length', to: 10 }, */
                                         }
                                     );
-                                await r.source.replicate("streamer");
+                                await newVideoTrack.source.replicate(
+                                    "streamer"
+                                );
 
-                                while (videoStreamDB) {
-                                    await close(false);
-                                }
+                                await close(false); // do we need to call this more times? like while not closed close(false)? (TODO that was the previous behaviour)
 
                                 console.log(
                                     "PUT VIDEO TRACK",
                                     properties.mediaStreamDBs.address,
-                                    r.startTime
+                                    newVideoTrack.startTime
                                 );
-                                await properties.mediaStreamDBs.tracks.put(r);
-                                trackPromise.resolve(r);
+                                await properties.mediaStreamDBs.tracks.put(
+                                    newVideoTrack
+                                );
+                                trackPromise.resolve(newVideoTrack);
                                 abortController = new AbortController();
-                                videoStreamDB = r;
-                                return r;
+                                videoTrack = newVideoTrack;
+                                return newVideoTrack;
                             })
                             .finally(() => {
                                 skip = false;
@@ -216,7 +236,7 @@ const createVideoEncoder = (properties: {
                     }
                 }
                 if (
-                    await waitFor(() => videoStreamDB, {
+                    await waitFor(() => videoTrack, {
                         signal: abortController.signal,
                     })
                 ) {
@@ -224,14 +244,19 @@ const createVideoEncoder = (properties: {
                     lastChunkTimestamp = chunk.timestamp;
                     // console.log("VIDEO PUT CHUNK", toBase64(videoStreamDB.id), lastVideoChunkTimestamp, "bytes");
 
-                    await videoStreamDB.put(
-                        new Chunk({
-                            type: chunk.type,
-                            chunk: arr,
-                            time: lastChunkTimestamp,
-                            /*  duration: chunk.duration, */
-                        })
-                    );
+                    try {
+                        await videoTrack.put(
+                            new Chunk({
+                                type: chunk.type,
+                                chunk: arr,
+                                time: lastChunkTimestamp,
+                                /*  duration: chunk.duration, */
+                            })
+                        );
+                    } catch (error) {
+                        console.error("Failed to put chunk", error);
+                        throw error;
+                    }
                     //   console.log(mem / ((+new Date) - s0) * 1000)
                 }
             },
@@ -257,9 +282,9 @@ const createVideoEncoder = (properties: {
         if (encoder?.state !== "closed") {
             encoder.close();
         }
-        if (videoStreamDB) {
-            await videoStreamDB.drop();
-            await properties.mediaStreamDBs.tracks.del(videoStreamDB.id);
+        if (videoTrack) {
+            await videoTrack.drop();
+            await properties.mediaStreamDBs.tracks.del(videoTrack.id);
             console.log(
                 "SIZE AFTER DELETE",
                 await properties.mediaStreamDBs.tracks.index.getSize()
@@ -270,7 +295,7 @@ const createVideoEncoder = (properties: {
     const controls = {
         setting: properties.quality,
         encoder: () => encoder,
-        stream: () => videoStreamDB,
+        stream: () => videoTrack,
         close,
         drop,
         open,
@@ -298,14 +323,16 @@ const createAudioEncoder = async (properties: {
     let initialized = false;
 
     console.log("CREATE AUDIO RECORDER");
-
+    let audioTrack: Track<AudioStreamDB> | undefined = undefined;
     const init = async () => {
         await properties.wavEncoder.current.init(properties.videoRef);
         if (properties.wavEncoder.current.source == null) {
-            return; // no audio
+            console.log("No audio found");
+            return null; // no audio
         }
 
         if (initialized) {
+            console.log("Already initialized");
             return;
         }
 
@@ -313,7 +340,7 @@ const createAudioEncoder = async (properties: {
 
         let startPlayTime = 0;
 
-        const audioTrack = await properties.mediaStreamDBs.node.open(
+        audioTrack = await properties.mediaStreamDBs.node.open(
             new Track({
                 sender: properties.mediaStreamDBs.node.identity.publicKey,
                 source: new AudioStreamDB({ sampleRate: 48000 }),
@@ -392,13 +419,12 @@ const createAudioEncoder = async (properties: {
 
         const drop = async () => {
             await closeEncoder();
-            await properties.mediaStreamDBs.tracks.del(audioTrack.id);
-            await audioTrack.drop();
         };
+        console.log("done init audio");
         return {
             close,
             pause: () => {
-                console.log("PAUSE AUDIO");
+                console.trace("PAUSE AUDIO");
                 properties.wavEncoder.current.pause();
             },
             drop,
@@ -418,14 +444,12 @@ const createAudioEncoder = async (properties: {
         };
     };
 
-    let audioControlsPromise:
-        | Promise<{
-              close: () => void;
-              pause: () => Promise<void> | void;
-              play: () => Promise<void> | void;
-              drop: () => Promise<void>;
-          }>
-        | undefined = undefined;
+    let audioControlsPromise: Promise<{
+        close: () => void;
+        pause: () => Promise<void> | void;
+        play: () => Promise<void> | void;
+        drop: () => Promise<void>;
+    }> | null = undefined;
 
     const onPlay = async () => {
         let controls = await audioControlsPromise;
@@ -443,22 +467,26 @@ const createAudioEncoder = async (properties: {
         audioControlsPromise = undefined;
     };
     const onPause = async () => {
-        reset();
+        const controls = await audioControlsPromise;
+        controls?.pause();
     };
 
     const drop = async () => {
+        if (audioTrack) {
+            await properties.mediaStreamDBs.tracks.del(audioTrack.id);
+            await audioTrack.drop();
+        }
+
         const controls = await audioControlsPromise;
         await controls?.drop();
     };
     const onUnmute = async (ev) => {
         let wasMuted = muted;
-
         if (!properties.videoRef.muted && wasMuted) {
             await onPlay();
         } else if (properties.videoRef.muted && !wasMuted) {
             onPause();
         }
-
         muted = properties.videoRef.muted;
     };
     properties.videoRef.addEventListener("volumechange", onUnmute);
@@ -489,6 +517,9 @@ const resolveTimeStampRefValue = (
 
 const trackScheduling: "live" | "0" = "0";
 
+const shouldRerenderOnChange = (sourceType: StreamType) =>
+    sourceType.type === "upload-media" || sourceType.type === "demo";
+
 export const Renderer = (args: { stream: MediaStreamDB }) => {
     const [quality, setQuality] = useState<SourceSetting[]>([DEFAULT_QUALITY]);
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
@@ -517,10 +548,17 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     }>(undefined);
     const tickWorkerRef = useRef<Worker>();
     const lastFrameRate = useRef(30);
-    const scheduleFrameFn = useRef<() => void>();
+    const scheduleFrameFn =
+        useRef<
+            (
+                now: DOMHighResTimeStamp,
+                metadata: VideoFrameCallbackMetadata
+            ) => void
+        >();
     const sourceId = useRef(0);
     const startId = useRef(0);
 
+    const preferCPUEncodingRef = useRef(false);
     const sessionTimestampRef = useRef<number | undefined>(undefined);
 
     let videoRef = useRef<HTMLVideoElementWithCaptureStream>();
@@ -545,7 +583,8 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         if (!tickWorkerRef.current) {
             tickWorkerRef.current = new TickWorker();
             const tickListener = () => {
-                scheduleFrameFn.current?.();
+                // TODO background safari?
+                scheduleFrameFn.current?.(undefined, undefined);
             };
 
             let listener = () => {
@@ -619,32 +658,81 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         };
     }, [mediaStreamDBs?.address]);
 
-    const dropAll = async () => {
-        // we should rerender all so so lets just drop all dbs and pretend we are fresh
-        if (videoEncoders.current) {
-            for (const encoder of videoEncoders.current) {
-                await encoder.drop();
-            }
-            videoEncoders.current = [];
-        }
-
-        if (audioCapture.current) {
-            await audioCapture.current.drop();
-            audioCapture.current = undefined;
-        }
-    };
-
     const updateStream = async (properties: {
         streamType?: StreamType;
         quality: SourceSetting[];
     }) => {
-        const updateQualitySettings = () => {
+        preferCPUEncodingRef.current = false;
+
+        const updateQualitySettingsState = () => {
             let qualitySetting = properties.quality || quality;
             setQuality(
                 [...qualitySetting].sort(
                     (a, b) => b.video.height - a.video.height
                 )
             );
+        };
+
+        const dropAll = async () => {
+            // we should rerender all so so lets just drop all dbs and pretend we are fresh
+            if (videoEncoders.current) {
+                for (const encoder of videoEncoders.current) {
+                    await encoder.drop();
+                }
+                videoEncoders.current = [];
+            }
+
+            if (audioCapture.current) {
+                await audioCapture.current.drop();
+                audioCapture.current = undefined;
+            }
+        };
+
+        const updateQualitySettings = async (rerender?: boolean) => {
+            let existingVideoEncoders: VideoStream[] = [];
+
+            const shouldRerender =
+                rerender ?? shouldRerenderOnChange(sourceTypeRef.current);
+
+            if (shouldRerender) {
+                sessionTimestampRef.current = undefined;
+                videoRef?.current?.pause();
+                await dropAll();
+                await createAndAssignAudioEcoder(); // we need to recreate the audio encoder because we are changing the source
+            }
+
+            // Check removed qualities
+            for (const encoder of videoEncoders.current) {
+                let stream = properties.quality.find(
+                    (x) =>
+                        encoder.stream()?.source.decoderDescription
+                            .codedHeight === x.video.height
+                );
+                if (!stream) {
+                    await encoder.close();
+                } else {
+                    existingVideoEncoders.push(encoder);
+                }
+            }
+
+            // Create new video streams for new qualities
+            const newVideoStreams = await createNewVideoEncoders(
+                videoEncoders.current,
+                properties.quality
+            );
+
+            videoEncoders.current = [
+                ...newVideoStreams,
+                ...existingVideoEncoders,
+            ];
+
+            updateQualitySettingsState();
+
+            if (shouldRerender) {
+                videoRef.current.currentTime = 0;
+            }
+
+            videoRef.current.play();
         };
 
         const createNewVideoEncoders = async (
@@ -674,6 +762,15 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                                   },
                         quality,
                         setErrorMessage: (msg) => setErrorMessage(msg),
+                        preferCPUEncoding: async () => {
+                            if (!preferCPUEncodingRef.current) {
+                                console.log("PREFER CPU ENCODING");
+                                preferCPUEncodingRef.current = true;
+                                await updateQualitySettings(true);
+                                return true;
+                            }
+                            return false;
+                        },
                     });
 
                     await controls.open();
@@ -704,71 +801,11 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
 
         if (!properties.streamType) {
             // only quality has changed
-
-            let existingVideoEncoders: VideoStream[] = [];
-
-            const shouldRerender =
-                sourceTypeRef.current.type === "upload-media" ||
-                sourceTypeRef.current.type === "demo";
-
-            if (shouldRerender) {
-                sessionTimestampRef.current = undefined;
-                videoRef?.current?.pause();
-                await dropAll();
-
-                await createAndAssignAudioEcoder(); // we need to recreate the audio encoder because we are changing the source
-            }
-
-            // Check removed qualities
-            for (const encoder of videoEncoders.current) {
-                let stream = properties.quality.find(
-                    (x) =>
-                        encoder.stream()?.source.decoderDescription
-                            .codedHeight === x.video.height
-                );
-                if (!stream) {
-                    await encoder.close();
-                } else {
-                    existingVideoEncoders.push(encoder);
-                }
-            }
-
-            // Create new video streams for new qualities
-            const newVideoStreams = await createNewVideoEncoders(
-                videoEncoders.current,
-                properties.quality
-            );
-
-            videoEncoders.current = [
-                ...newVideoStreams,
-                ...existingVideoEncoders,
-            ];
-
-            updateQualitySettings();
-
-            if (shouldRerender) {
-                videoRef.current.currentTime = 0;
-                videoRef.current.play();
-            }
+            await updateQualitySettings();
 
             return; // nothing more to do
         } else {
-            // stream type has changed
             sourceTypeRef.current = properties.streamType;
-
-            //  Cleanup video from previous soruce
-            /* if (!prevStreamType) {
-                bumpSession(); // should we do this, what about the DEFAULT_QUALTIY IS ALREADY IN QUALITY?
-            } */
-            /* 
-            // remove existing encoders
-            for (const encoder of videoEncoders.current) {
-                await encoder.close();
-            }
-
-            // close before video pause (to make the closing "clean")
-            await audioCapture.current?.close(); 
-            */
 
             await dropAll();
 
@@ -795,7 +832,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                 properties.quality
             );
 
-            updateQualitySettings();
+            updateQualitySettingsState();
 
             // update for new source type
 
@@ -816,6 +853,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                     videoElementRef.src =
                         import.meta.env.BASE_URL + "noise.mp4";
                     videoElementRef.load();
+
                     break;
                 case "demo":
                     videoElementRef.muted = true;
@@ -863,6 +901,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
 
                     break;
             }
+            videoRef.current.play();
         }
     };
 
@@ -900,10 +939,12 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         let lastFrame: number | undefined = undefined;
         let framesSinceLastBackground = 0;
         let lastFrameTimestamp = -1;
+        let firstFrameHighresTimestamp: undefined | number = undefined;
         const requestFrame = () => {
             if (!inBackground && "requestVideoFrameCallback" in videoRef) {
                 videoRef.requestVideoFrameCallback(frameFn);
             } else {
+                console.log("USE TICK WORKER");
                 tickWorkerRef.current.postMessage({
                     type: "next",
                     tps: clampedFrameRate(lastFrameRate.current),
@@ -911,117 +952,144 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
             }
         };
 
-        const frameFn = async () => {
-            if (sourceIdOnStart !== sourceId.current) {
-                return; // new source, expect a reboot of the frame loop cycle
-            }
-
-            if (!inBackground) {
-                const now = performance.now();
-                if (lastFrame != null && framesSinceLastBackground > 10) {
-                    lastFrameRate.current = 1000 / (now - lastFrame);
+        const frameFn = async (
+            domHighRes?: DOMHighResTimeStamp,
+            metadata?: VideoFrameCallbackMetadata
+        ) => {
+            try {
+                if (sourceIdOnStart !== sourceId.current) {
+                    return; // new source, expect a reboot of the frame loop cycle
                 }
-                lastFrame = now;
-                framesSinceLastBackground++;
-            } else {
-                lastFrame = undefined;
-                framesSinceLastBackground = 0;
-            }
+                const now = domHighRes || performance.now();
 
-            /// console.log(counter / ((+new Date() - t0) / 1000));
-            const timestamp =
-                loopCounter.current > 0
-                    ? (loopCounter.current * videoRef.duration +
-                          videoRef.currentTime) *
-                      1e6
-                    : undefined;
-            const frame = new VideoFrame(videoRef, {
-                timestamp,
-            });
+                if (!inBackground) {
+                    if (lastFrame != null && framesSinceLastBackground > 10) {
+                        lastFrameRate.current = 1000 / (now - lastFrame);
+                    }
+                    lastFrame = now;
+                    framesSinceLastBackground++;
+                } else {
+                    lastFrame = undefined;
+                    framesSinceLastBackground = 0;
+                }
 
-            let newTimestamp = frame.timestamp;
-            if (newTimestamp === lastFrameTimestamp) {
+                if (firstFrameHighresTimestamp == null) {
+                    firstFrameHighresTimestamp = now;
+                }
+                const observedMediaTime =
+                    !metadata ||
+                    (metadata.presentedFrames > 0 && metadata.mediaTime === 0)
+                        ? (now - firstFrameHighresTimestamp) * 1e3
+                        : Math.round(metadata.mediaTime * 1e6);
+                const timestamp =
+                    loopCounter.current > 0
+                        ? (loopCounter.current * videoRef.duration +
+                              observedMediaTime) *
+                          1e6
+                        : isSafari
+                        ? observedMediaTime
+                        : undefined;
+
+                let frame = new VideoFrame(videoRef, {
+                    timestamp,
+                });
+
+                let beforeTimeStamp = frame.timestamp;
+                console.log("--------> ", preferCPUEncodingRef.current);
+                if (preferCPUEncodingRef.current) {
+                    frame = convertGPUFrameToCPUFrame(videoRef, frame);
+                }
+                // console.log("FRAME", { domHighRes, metadata, timestamp, frameCounter, currentTime: videoRef.currentTime, out: frame.timestamp, outBefore: beforeTimeStamp });
+
+                let newTimestamp = frame.timestamp;
+                /* if (newTimestamp === lastFrameTimestamp) {
+                    frame.close();
+                    return;
+                } */
+
+                lastFrameTimestamp = newTimestamp;
+                for (const videoEncoder of videoEncoders.current) {
+                    const encoder = videoEncoder.encoder();
+                    if (encoder.state !== "closed") {
+                        if (
+                            videoEncoder.video &&
+                            (videoEncoder.video.height !==
+                                videoRef.videoHeight ||
+                                videoEncoder.video.width !==
+                                    videoRef.videoWidth)
+                        ) {
+                            // Reinitialize a new stream, size the aspect ratio has changed
+                            let limitedQualities = quality.filter(
+                                (x) => x.video.height <= videoRef.videoHeight
+                            );
+                            if (limitedQualities.length !== quality.length) {
+                                frame.close();
+                                await updateStream({
+                                    streamType: sourceTypeRef.current,
+                                    quality: limitedQualities,
+                                });
+                                return;
+                            } else {
+                                await videoEncoder.open();
+                            }
+                            //  console.log('resolution change reopen!', videoEncoder.video.height, videoRef.videoHeight)
+                        }
+
+                        videoEncoder.video = {
+                            height: videoRef.videoHeight,
+                            width: videoRef.videoWidth,
+                        };
+
+                        if (encoder.state === "unconfigured") {
+                            let scaler =
+                                videoEncoder.setting.video.height /
+                                videoRef.videoHeight;
+                            // console.log('set bitrate', videoEncoder.setting.video.bitrate)
+                            encoder.configure({
+                                codec: "vp09.00.51.08.01.01.01.01.00" /*  "vp09.00.10.08" */ /* isSafari
+                                    ? "avc1.428020"
+                                    : "av01.0.04M.10" */ /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
+                                height: videoEncoder.setting.video.height,
+                                width: videoRef.videoWidth * scaler,
+                                bitrate: videoEncoder.setting.video.bitrate,
+                                latencyMode: "realtime",
+                                bitrateMode: "variable",
+                            });
+                        }
+
+                        if (encoder.state === "configured") {
+                            if (encoder.encodeQueueSize > 30) {
+                                // Too many frames in flight, encoder is overwhelmed
+                                // let's drop this frame.
+                                encoder.flush();
+
+                                // TODO in non streaming mode, slow down the playback
+                            } else {
+                                // console.log({ frameCounter, playedFrame: metadata?.presentedFrames, droppedFrames: (metadata?.presentedFrames ?? 0) - frameCounter })
+                                frameCounter++;
+                                const insertKeyframe =
+                                    Math.round(
+                                        frameCounter /
+                                            videoEncoders.current.length
+                                    ) %
+                                        60 ===
+                                    0;
+
+                                //let t1 = +new Date;
+                                //        console.log("PUT CHUNK", encoder.encodeQueueSize, (t1 - t0));
+                                // t0 = t1;
+                                encoder.encode(frame, {
+                                    keyFrame: insertKeyframe,
+                                });
+                            }
+                        }
+                    }
+                }
                 frame.close();
-                return;
+            } catch (error) {
+                console.error("err?", error);
+                throw error;
             }
-
-            lastFrameTimestamp = newTimestamp;
-
-            for (const videoEncoder of videoEncoders.current) {
-                const encoder = videoEncoder.encoder();
-                if (encoder.state !== "closed") {
-                    if (
-                        videoEncoder.video &&
-                        (videoEncoder.video.height !== videoRef.videoHeight ||
-                            videoEncoder.video.width !== videoRef.videoWidth)
-                    ) {
-                        // Reinitialize a new stream, size the aspect ratio has changed
-                        let limitedQualities = quality.filter(
-                            (x) => x.video.height <= videoRef.videoHeight
-                        );
-                        if (limitedQualities.length !== quality.length) {
-                            frame.close();
-                            await updateStream({
-                                streamType: sourceTypeRef.current,
-                                quality: limitedQualities,
-                            });
-                            return;
-                        } else {
-                            await videoEncoder.open();
-                        }
-                        //  console.log('resolution change reopen!', videoEncoder.video.height, videoRef.videoHeight)
-                    }
-
-                    videoEncoder.video = {
-                        height: videoRef.videoHeight,
-                        width: videoRef.videoWidth,
-                    };
-
-                    if (encoder.state === "unconfigured") {
-                        let scaler =
-                            videoEncoder.setting.video.height /
-                            videoRef.videoHeight;
-                        // console.log('set bitrate', videoEncoder.setting.video.bitrate)
-                        encoder.configure({
-                            codec: "vp09.00.51.08.01.01.01.01.00" /*  "vp09.00.10.08" */ /* isSafari
-                                ? "avc1.428020"
-                                : "av01.0.04M.10" */ /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
-                            height: videoEncoder.setting.video.height,
-                            width: videoRef.videoWidth * scaler,
-                            bitrate: videoEncoder.setting.video.bitrate,
-                            /*          latencyMode: "realtime",
-                                     bitrateMode: "variable", */
-                        });
-                    }
-
-                    if (encoder.state === "configured") {
-                        if (encoder.encodeQueueSize > 30) {
-                            // Too many frames in flight, encoder is overwhelmed
-                            // let's drop this frame.
-                            encoder.flush();
-
-                            // TODO in non streaming mode, slow down the playback
-                        } else {
-                            frameCounter++;
-                            const insertKeyframe =
-                                Math.round(
-                                    frameCounter / videoEncoders.current.length
-                                ) %
-                                    60 ===
-                                0;
-
-                            //let t1 = +new Date;
-                            //        console.log("PUT CHUNK", encoder.encodeQueueSize, (t1 - t0));
-                            // t0 = t1;
-                            encoder.encode(frame, {
-                                keyFrame: insertKeyframe,
-                            });
-                        }
-                    }
-                }
-            }
-
-            await frame.close();
             requestFrame();
         };
         scheduleFrameFn.current = frameFn;
@@ -1074,11 +1142,44 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                 </div> */}
                 <div className="container">
                     <div className="video-wrapper">
+                        <video
+                            crossOrigin="anonymous"
+                            data-iframe-height
+                            ref={(ref) => {
+                                videoRef.current =
+                                    ref as HTMLVideoElementWithCaptureStream;
+                            }}
+                            height="auto"
+                            width="100%"
+                            onPlay={(e) =>
+                                onRender(
+                                    e.currentTarget as HTMLVideoElementWithCaptureStream
+                                )
+                            }
+                            onPause={() => {
+                                onPause();
+                            }}
+                            onEnded={() => {
+                                onEnd();
+                            }}
+                            autoPlay
+                            onClick={() =>
+                                videoRef.current.paused
+                                    ? videoRef.current.play()
+                                    : videoRef.current.pause()
+                            }
+                            muted={sourceTypeRef.current?.type === "noise"}
+                            controls={false}
+                            className={
+                                sourceType == null
+                                    ? "absolute left-[-9999px] right-[-9999px]"
+                                    : ""
+                            }
+                        ></video>
                         {sourceType == null ? (
                             <div className="">
                                 <FirstMenuSelect
                                     setSourceType={(settings) => {
-                                        console.log("HERE", settings);
                                         setSourceType(settings);
                                         updateStream({
                                             streamType: settings,
@@ -1090,37 +1191,6 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                             </div>
                         ) : (
                             <>
-                                <video
-                                    crossOrigin="anonymous"
-                                    data-iframe-height
-                                    ref={(ref) => {
-                                        videoRef.current =
-                                            ref as HTMLVideoElementWithCaptureStream;
-                                    }}
-                                    height="auto"
-                                    width="100%"
-                                    onPlay={(e) =>
-                                        onRender(
-                                            e.currentTarget as HTMLVideoElementWithCaptureStream
-                                        )
-                                    }
-                                    onPause={() => {
-                                        onPause();
-                                    }}
-                                    onEnded={() => {
-                                        onEnd();
-                                    }}
-                                    autoPlay
-                                    onClick={() =>
-                                        videoRef.current.paused
-                                            ? videoRef.current.play()
-                                            : videoRef.current.pause()
-                                    }
-                                    muted={
-                                        sourceTypeRef.current?.type === "noise"
-                                    }
-                                    controls={false}
-                                ></video>
                                 <div className="w-full">
                                     <Controls
                                         selectedResolution={
@@ -1140,6 +1210,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                                         onQualityChange={(settings) => {
                                             updateStream({ quality: settings });
                                         }}
+                                        onVolumeChange={() => {}}
                                         videoRef={videoRef.current}
                                         viewRef={videoRef.current}
                                         alwaysShow={true}

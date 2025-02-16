@@ -30,20 +30,6 @@ const getBarsFromRanges = (props: {
             resolution
         );
 
-        console.log(
-            "start",
-            start,
-            "end",
-            end,
-            "startRange",
-            startRange,
-            "endRange",
-            endRange,
-            "maxTime",
-            props.maxTime,
-            "resolution",
-            resolution
-        );
         for (let x = start; x < end; x++) {
             let counter = counters[x];
             if (!counter) {
@@ -67,19 +53,6 @@ export const ReplicationRangeVisualization = (props: {
     let resolution = 100;
     const { maxTime } = useMaxTime({ mediaStreams: props.mediaStreams });
     const ranges = useReplicationChange({ mediaStreams: props.mediaStreams });
-
-    console.log(
-        "--->",
-        maxTime,
-        ranges.map((x) => {
-            return {
-                me:
-                    x.hash ===
-                    props.mediaStreams?.node.identity.publicKey.hashcode(),
-                width: x.widthNormalized,
-            };
-        })
-    );
     return (
         <>
             {/* 

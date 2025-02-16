@@ -33,6 +33,7 @@ export const Controls = (props: {
     sourceType: StreamType | undefined;
     setSourceType?: (settings: StreamType | undefined) => void;
     onQualityChange: (settings: SourceSetting[]) => void;
+    onVolumeChange?: (volume: number) => void;
     videoRef?: HTMLVideoElement;
     viewRef?: HTMLCanvasElement | HTMLVideoElement;
     alwaysShow: boolean | undefined;
@@ -94,9 +95,11 @@ export const Controls = (props: {
             setPrevMuteVolume(volume);
             controls.setVolume(0.0000001);
             controls.mute();
+            props.onVolumeChange?.(0);
         } else {
             controls.setVolume(prevMuteVolume);
             controls.unmute();
+            props.onVolumeChange?.(prevMuteVolume);
         }
         setMuted(!muted);
     };

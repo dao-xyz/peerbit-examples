@@ -69,6 +69,7 @@ const addVideoStreamListener = (
     configureDecoder();
 
     const processChunk = (chunk: Chunk) => {
+        console.log("got chunk", chunk.time, chunk.chunk.length);
         const encodedChunk = new EncodedVideoChunk({
             timestamp: Number(chunk.time),
             type: chunk.type as "key" | "delta",
@@ -226,7 +227,6 @@ const addAudioStreamListener = (
          *  Take one element from the queue
          */
         const frame = pendingFrames.shift();
-        console.log("AUDIO DECODE CHUNK", frame.buffer.length);
 
         const audioSource = audioContext.createBufferSource();
         audioSource.buffer = frame.buffer;
