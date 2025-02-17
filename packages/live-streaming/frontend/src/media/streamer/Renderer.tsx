@@ -979,7 +979,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                 if (sourceIdOnStart !== sourceId.current) {
                     return; // new source, expect a reboot of the frame loop cycle
                 }
-                const now = domHighRes || performance.now();
+                const now = domHighRes ?? performance.now();
 
                 if (!inBackground) {
                     if (lastFrame != null && framesSinceLastBackground > 10) {
@@ -995,6 +995,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                 if (firstFrameHighresTimestamp == null) {
                     firstFrameHighresTimestamp = now;
                 }
+
                 const observedMediaTime =
                     !metadata ||
                     (metadata.presentedFrames > 0 && metadata.mediaTime === 0)
@@ -1013,8 +1014,12 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                     timestamp,
                 });
 
-                let beforeTimeStamp = frame.timestamp;
-                console.log("--------> ", preferCPUEncodingRef.current);
+                console.log("--------> ", {
+                    timestamp,
+                    frameTimestamp: frame.timestamp,
+                    observedMediaTime,
+                    firstFrameHighresTimestamp,
+                });
                 if (preferCPUEncodingRef.current) {
                     frame = convertGPUFrameToCPUFrame(videoRef, frame);
                 }
@@ -1026,80 +1031,85 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                     return;
                 } */
 
-                lastFrameTimestamp = newTimestamp;
-                for (const videoEncoder of videoEncoders.current) {
-                    const encoder = videoEncoder.encoder();
-                    if (encoder.state !== "closed") {
-                        if (
-                            videoEncoder.video &&
-                            (videoEncoder.video.height !==
-                                videoRef.videoHeight ||
-                                videoEncoder.video.width !==
-                                    videoRef.videoWidth)
-                        ) {
-                            // Reinitialize a new stream, size the aspect ratio has changed
-                            let limitedQualities = quality.filter(
-                                (x) => x.video.height <= videoRef.videoHeight
-                            );
-                            if (limitedQualities.length !== quality.length) {
-                                frame.close();
-                                await updateStream({
-                                    streamType: sourceTypeRef.current,
-                                    quality: limitedQualities,
-                                });
-                                return;
-                            } else {
-                                await videoEncoder.open();
+                if (newTimestamp !== lastFrameTimestamp) {
+                    lastFrameTimestamp = newTimestamp;
+                    for (const videoEncoder of videoEncoders.current) {
+                        const encoder = videoEncoder.encoder();
+                        if (encoder.state !== "closed") {
+                            if (
+                                videoEncoder.video &&
+                                (videoEncoder.video.height !==
+                                    videoRef.videoHeight ||
+                                    videoEncoder.video.width !==
+                                        videoRef.videoWidth)
+                            ) {
+                                // Reinitialize a new stream, size the aspect ratio has changed
+                                let limitedQualities = quality.filter(
+                                    (x) =>
+                                        x.video.height <= videoRef.videoHeight
+                                );
+                                if (
+                                    limitedQualities.length !== quality.length
+                                ) {
+                                    frame.close();
+                                    await updateStream({
+                                        streamType: sourceTypeRef.current,
+                                        quality: limitedQualities,
+                                    });
+                                    return;
+                                } else {
+                                    await videoEncoder.open();
+                                }
+                                //  console.log('resolution change reopen!', videoEncoder.video.height, videoRef.videoHeight)
                             }
-                            //  console.log('resolution change reopen!', videoEncoder.video.height, videoRef.videoHeight)
-                        }
 
-                        videoEncoder.video = {
-                            height: videoRef.videoHeight,
-                            width: videoRef.videoWidth,
-                        };
+                            videoEncoder.video = {
+                                height: videoRef.videoHeight,
+                                width: videoRef.videoWidth,
+                            };
 
-                        if (encoder.state === "unconfigured") {
-                            let scaler =
-                                videoEncoder.setting.video.height /
-                                videoRef.videoHeight;
-                            // console.log('set bitrate', videoEncoder.setting.video.bitrate)
-                            encoder.configure({
-                                codec: "vp09.00.51.08.01.01.01.01.00" /*  "vp09.00.10.08" */ /* isSafari
-                                    ? "avc1.428020"
-                                    : "av01.0.04M.10" */ /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
-                                height: videoEncoder.setting.video.height,
-                                width: videoRef.videoWidth * scaler,
-                                bitrate: videoEncoder.setting.video.bitrate,
-                                latencyMode: "realtime",
-                                bitrateMode: "variable",
-                            });
-                        }
-
-                        if (encoder.state === "configured") {
-                            if (encoder.encodeQueueSize > 30) {
-                                // Too many frames in flight, encoder is overwhelmed
-                                // let's drop this frame.
-                                encoder.flush();
-
-                                // TODO in non streaming mode, slow down the playback
-                            } else {
-                                // console.log({ frameCounter, playedFrame: metadata?.presentedFrames, droppedFrames: (metadata?.presentedFrames ?? 0) - frameCounter })
-                                frameCounter++;
-                                const insertKeyframe =
-                                    Math.round(
-                                        frameCounter /
-                                            videoEncoders.current.length
-                                    ) %
-                                        60 ===
-                                    0;
-
-                                //let t1 = +new Date;
-                                //        console.log("PUT CHUNK", encoder.encodeQueueSize, (t1 - t0));
-                                // t0 = t1;
-                                encoder.encode(frame, {
-                                    keyFrame: insertKeyframe,
+                            if (encoder.state === "unconfigured") {
+                                let scaler =
+                                    videoEncoder.setting.video.height /
+                                    videoRef.videoHeight;
+                                // console.log('set bitrate', videoEncoder.setting.video.bitrate)
+                                encoder.configure({
+                                    codec: "vp09.00.51.08.01.01.01.01.00" /*  "vp09.00.10.08" */ /* isSafari
+                                        ? "avc1.428020"
+                                        : "av01.0.04M.10" */ /* "vp09.00.10.08", */ /* "avc1.428020" ,*/, //"av01.0.04M.10", // "av01.0.08M.10",//"av01.2.15M.10.0.100.09.16.09.0" //
+                                    height: videoEncoder.setting.video.height,
+                                    width: videoRef.videoWidth * scaler,
+                                    bitrate: videoEncoder.setting.video.bitrate,
+                                    latencyMode: "realtime",
+                                    bitrateMode: "variable",
                                 });
+                            }
+
+                            if (encoder.state === "configured") {
+                                if (encoder.encodeQueueSize > 30) {
+                                    // Too many frames in flight, encoder is overwhelmed
+                                    // let's drop this frame.
+                                    encoder.flush();
+
+                                    // TODO in non streaming mode, slow down the playback
+                                } else {
+                                    // console.log({ frameCounter, playedFrame: metadata?.presentedFrames, droppedFrames: (metadata?.presentedFrames ?? 0) - frameCounter })
+                                    frameCounter++;
+                                    const insertKeyframe =
+                                        Math.round(
+                                            frameCounter /
+                                                videoEncoders.current.length
+                                        ) %
+                                            60 ===
+                                        0;
+
+                                    //let t1 = +new Date;
+                                    //        console.log("PUT CHUNK", encoder.encodeQueueSize, (t1 - t0));
+                                    // t0 = t1;
+                                    encoder.encode(frame, {
+                                        keyFrame: insertKeyframe,
+                                    });
+                                }
                             }
                         }
                     }
