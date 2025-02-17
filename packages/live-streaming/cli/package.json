@@ -13,7 +13,7 @@
         "import": "./lib/esm/index.js"
     },
     "bin": {
-        "blog": "./lib/esm/bin.js"
+        "videoseed": "./lib/esm/bin.js"
     },
     "files": [
         "lib",
