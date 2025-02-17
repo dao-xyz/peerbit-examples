@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { MediaStreamDB, Track } from "../database.js";
+import { MediaStreamDB, Track } from "@peerbit/video-lib";
 import { ReplicationRangeIndexable } from "@peerbit/shared-log";
 
 export const useReplicationChange = (props: {

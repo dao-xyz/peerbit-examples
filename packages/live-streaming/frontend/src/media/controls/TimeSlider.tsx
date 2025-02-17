@@ -1,6 +1,6 @@
 import * as RadixSlider from "@radix-ui/react-slider";
 import { ReplicationRangeVisualization } from "./ReplicatorDensity";
-import { MediaStreamDB } from "../database.js";
+import { MediaStreamDB } from "@peerbit/video-lib";
 
 export const TimeSlider = (props: {
     mediaStreamsDB: MediaStreamDB;

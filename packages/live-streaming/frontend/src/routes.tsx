@@ -1,7 +1,7 @@
 import { Routes, Route } from "react-router";
 import { CreateStream } from "./CreateStream";
 import { StreamOrView } from "./StreamOrView";
-import { MediaStreamDB } from "./media/database";
+import { MediaStreamDB } from "@peerbit/video-lib";
 import { Params } from "react-router-dom";
 export const STREAM = "s/:address";
 

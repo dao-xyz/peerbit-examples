@@ -7,7 +7,8 @@ import {
     MediaStreamDB,
     AudioStreamDB,
     hrtimeMicroSeconds,
-} from "../database";
+    MediaStreamDBs,
+} from "@peerbit/video-lib";
 import { Buffer } from "buffer";
 import { waitFor } from "@peerbit/time";
 import {
@@ -531,14 +532,19 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     const sourceTypeRef = useRef<StreamType | undefined>();
 
     const videoLoadedOnce = useRef(false);
-    const { program: mediaStreamDBs } = useProgram<MediaStreamDB>(args.stream, {
-        args: {
-            replicate: {
-                factor: 1,
-            },
-        },
+    const { program: mediaStreamDB } = useProgram<MediaStreamDB>(args.stream, {
         existing: "reuse",
     });
+
+    const { program: mediaStreamDBs } = useProgram<MediaStreamDBs>(
+        new MediaStreamDBs(),
+        {
+            existing: "reuse",
+            args: {
+                replicate: false,
+            },
+        }
+    );
     const videoEncoders = useRef<VideoStream[]>([]);
     const audioCapture = useRef<{
         pause: () => void | Promise<void>;
@@ -622,7 +628,12 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     }, []);
 
     useEffect(() => {
-        if (videoLoadedOnce.current || !mediaStreamDBs) {
+        if (
+            videoLoadedOnce.current ||
+            !mediaStreamDB ||
+            !mediaStreamDBs ||
+            mediaStreamDBs?.closed
+        ) {
             return;
         }
 
@@ -630,33 +641,41 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
             updateStream({ streamType: { type: "noise" }, quality: quality });
         }
 
+        // announce it in the discovery db so other replicators (non browser) nodes can find it and replicate it
+        mediaStreamDBs.mediaStreams.put(mediaStreamDB);
+
         videoLoadedOnce.current = true;
-    }, [videoRef.current, mediaStreamDBs?.address]);
+    }, [
+        videoRef.current,
+        mediaStreamDB?.address,
+        mediaStreamDBs?.address,
+        mediaStreamDBs?.closed,
+    ]);
 
     useEffect(() => {
-        if (!videoRef.current?.src || !mediaStreamDBs?.address) {
+        if (!videoRef.current?.src || !mediaStreamDB?.address) {
             return;
         }
 
         if (typeof videoRef.current.duration === "number") {
             const timeInMicroseconds = videoRef.current.duration * 1e6;
-            mediaStreamDBs.maybeUpdateMaxTime(timeInMicroseconds);
+            mediaStreamDB.maybeUpdateMaxTime(timeInMicroseconds);
         }
-    }, [videoRef.current?.duration, mediaStreamDBs?.address]);
+    }, [videoRef.current?.duration, mediaStreamDB?.address]);
 
     useEffect(() => {
-        if (!mediaStreamDBs?.address) {
+        if (!mediaStreamDB?.address) {
             return;
         }
-        const stopMaxTime = mediaStreamDBs.listenForMaxTimeChanges(true).stop;
+        const stopMaxTime = mediaStreamDB.listenForMaxTimeChanges(true).stop;
 
         const stopReplicationInfo =
-            mediaStreamDBs.listenForReplicationInfo().stop;
+            mediaStreamDB.listenForReplicationInfo().stop;
         return () => {
             stopMaxTime();
             stopReplicationInfo();
         };
-    }, [mediaStreamDBs?.address]);
+    }, [mediaStreamDB?.address]);
 
     const updateStream = async (properties: {
         streamType?: StreamType;
@@ -750,7 +769,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                 ) {
                     // console.log("new quality!", videoEncoders.current.map(x => x.setting.video.height), "-->", q.video.height)
                     let controls = createVideoEncoder({
-                        mediaStreamDBs,
+                        mediaStreamDBs: mediaStreamDB,
                         time:
                             (trackScheduling as any) === "live"
                                 ? {
@@ -783,7 +802,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
 
         const createAndAssignAudioEcoder = async () => {
             audioCapture.current = await createAudioEncoder({
-                mediaStreamDBs,
+                mediaStreamDBs: mediaStreamDB,
                 time:
                     (trackScheduling as any) === "live"
                         ? {
@@ -1218,7 +1237,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                                             sourceTypeRef.current?.type ===
                                             "noise"
                                         }
-                                        mediaStreams={mediaStreamDBs}
+                                        mediaStreams={mediaStreamDB}
                                     />
                                 </div>
                             </>

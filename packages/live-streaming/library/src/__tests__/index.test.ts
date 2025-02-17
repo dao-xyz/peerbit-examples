@@ -3,11 +3,12 @@ import {
     AudioStreamDB,
     Chunk,
     MediaStreamDB,
+    MediaStreamDBs,
     oneVideoAndOneAudioChangeProcessor,
     Track,
     TracksIterator,
     WebcodecsStreamDB,
-} from "../media/database";
+} from "../index.js";
 import { delay, hrtime, waitForResolved } from "@peerbit/time";
 import { equals } from "uint8arrays";
 import { expect } from "chai";
@@ -15,6 +16,7 @@ import sinon from "sinon";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { MAX_U32, ReplicationRangeIndexable } from "@peerbit/shared-log";
 import pDefer from "p-defer";
+import path from "path";
 
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
 
@@ -3352,5 +3354,131 @@ describe("MediaStream", () => {
                 await mediaStreams.tracks.del(track1.id);
             });
         });
+    });
+});
+
+describe("MediaStreams", () => {
+    let replicator: Peerbit,
+        streamer: Peerbit,
+        cleanup: (() => Promise<void>) | undefined;
+
+    let replicatorPath = path.join(
+        "tmp",
+        "video-stream-lib",
+        "MediaStreams",
+        String(+new Date())
+    );
+    before(async () => {
+        global.requestAnimationFrame = function (cb) {
+            return setTimeout(cb, 10);
+        };
+
+        streamer = await Peerbit.create();
+        replicator = await Peerbit.create({
+            directory: replicatorPath,
+        });
+        await streamer.dial(replicator);
+    });
+
+    after(async () => {
+        await replicator.stop();
+        await streamer.stop();
+    });
+
+    afterEach(async () => {
+        await cleanup?.();
+    });
+
+    it("address is deterministic", async () => {
+        const streamerStreams = await streamer.open(new MediaStreamDBs());
+        const viewerStreams = await replicator.open(streamerStreams.clone());
+        expect(viewerStreams.address).to.eq(streamerStreams.address);
+    });
+
+    it("will start replicating things that are added by default", async () => {
+        const track1 = await streamer.open(
+            new Track({
+                sender: streamer.identity.publicKey,
+                source: new WebcodecsStreamDB({
+                    decoderDescription: { codec: "av01" },
+                }),
+                start: 0,
+            })
+        );
+
+        await track1.put(new Chunk({ chunk: new Uint8Array([123]), time: 0 }));
+
+        expect(await track1.source.chunks.log.calculateCoverage()).to.eq(1); // only the streamer replicates
+
+        const mediaStreams = await streamer.open(
+            new MediaStreamDB(streamer.identity.publicKey)
+        );
+        await mediaStreams.tracks.put(track1);
+
+        const streamerStreams = await streamer.open(new MediaStreamDBs(), {
+            args: { replicate: false },
+        });
+
+        await streamerStreams.mediaStreams.put(mediaStreams);
+
+        let replicatorStreams = await replicator.open(new MediaStreamDBs(), {
+            args: { replicate: true },
+        });
+        await delay(3e3);
+
+        try {
+            await waitForResolved(async () =>
+                expect(await mediaStreams.tracks.log.calculateCoverage()).to.eq(
+                    2
+                )
+            ); // streamer + replicator replicates
+        } catch (error) {
+            throw error;
+        }
+
+        try {
+            await waitForResolved(async () =>
+                expect(
+                    await track1.source.chunks.log.calculateCoverage()
+                ).to.eq(2)
+            ); // streamer + replicator replicates
+        } catch (error) {
+            throw error;
+        }
+
+        // also make sure replicator can restart
+
+        const assert = async () => {
+            await waitForResolved(async () => {
+                const streams = await replicatorStreams.mediaStreams.index
+                    .iterate({}, { local: true, remote: false })
+                    .all();
+                const firstStream = streams[0];
+                expect(firstStream).to.exist;
+                const tracks = await firstStream.tracks.index
+                    .iterate({}, { local: true, remote: false })
+                    .all();
+                const firstTrack = tracks[0];
+                expect(firstTrack).to.exist;
+
+                const chunks = await firstTrack.source.chunks.index
+                    .iterate({}, { local: true, remote: false })
+                    .all();
+                expect(chunks).to.have.length(1);
+            });
+        };
+        await assert();
+
+        await replicator.stop();
+
+        replicator = await Peerbit.create({
+            directory: replicatorPath,
+        });
+
+        replicatorStreams = await replicator.open(new MediaStreamDBs(), {
+            args: { replicate: true },
+        });
+
+        await assert();
     });
 });

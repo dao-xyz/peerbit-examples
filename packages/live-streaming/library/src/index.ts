@@ -61,9 +61,13 @@ import {
     CustomDocumentDomain,
     createDocumentDomain,
 } from "@peerbit/document";
-import { IndexedResults, NotStartedError } from "@peerbit/indexer-interface";
+import {
+    id,
+    IndexedResults,
+    NotStartedError,
+} from "@peerbit/indexer-interface";
 import { ClosedError, Program, ProgramEvents } from "@peerbit/program";
-import { concat } from "uint8arrays";
+import { concat, fromString } from "uint8arrays";
 import { randomBytes } from "@peerbit/crypto";
 import { delay, waitFor, AbortError } from "@peerbit/time";
 import PQueue from "p-queue";
@@ -384,7 +388,7 @@ export abstract class TrackSource {
     lastLivestreamingSegmentId: Uint8Array | undefined;
     lastLivestreamingSegmentStart: bigint | undefined;
 
-    async replicate(args: "live" | "streamer" | false) {
+    async replicate(args: "live" | "streamer" | "all" | false) {
         if (args === "live") {
             /*  // get latest chunk 
              await this.waitForStreamer()
@@ -425,7 +429,9 @@ export abstract class TrackSource {
         } else {
             await this.endPreviousLivestreamSubscription();
             return this.chunks.log.replicate(
-                args === "streamer" ? { factor: 1 } : args ?? { factor: 1 }
+                args === "streamer" || args === "all"
+                    ? { factor: 1 }
+                    : args ?? { factor: 1 }
             );
         }
     }
@@ -921,7 +927,40 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
         });
     }
 
-    async open(args?: {}): Promise<void> {
+    private _trackChangeListener: (
+        change: CustomEvent<
+            DocumentsChange<Track<AudioStreamDB | WebcodecsStreamDB>>
+        >
+    ) => void;
+    private replicateTracksByDefault: boolean = false;
+    async open(args?: { replicateTracksByDefault?: boolean }): Promise<void> {
+        this.openedTracks = new Map();
+        this.replicateTracksByDefault = args?.replicateTracksByDefault || false;
+
+        if (this.replicateTracksByDefault) {
+            this._trackChangeListener = async (ev) => {
+                for (const added of ev.detail.added) {
+                    await this.node.open(added, {
+                        args: {
+                            sender: this.owner,
+                            startTime: added.startTimeBigInt,
+                        },
+                        existing: "reuse",
+                    });
+                    await added.source.replicate("all");
+                }
+
+                for (const removed of ev.detail.removed) {
+                    await removed.close();
+                }
+            };
+
+            this.tracks.events.addEventListener(
+                "change",
+                this._trackChangeListener
+            );
+        }
+
         await this.tracks.open({
             type: Track,
             canPerform: async (props) => {
@@ -934,7 +973,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                 }
                 return false;
             },
-            canOpen: (_) => Promise.resolve(false), // dont open subdbs by opening this db
+            canOpen: (_) => Promise.resolve(false),
             replicate: {
                 factor: 1,
             },
@@ -942,7 +981,43 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                 type: TrackIndexable,
             },
         });
-        this.openedTracks = new Map();
+    }
+
+    async afterOpen(): Promise<void> {
+        await super.afterOpen();
+        if (this.replicateTracksByDefault) {
+            const openTrack = async (track: Track) => {
+                await this.node.open(track, {
+                    args: {
+                        sender: this.owner,
+                        startTime: track.startTimeBigInt,
+                    },
+                    existing: "reuse",
+                });
+                //  await track.source.replicate("all"); already replicated so this call is not needed (TODO dedup??)
+            };
+            this._trackChangeListener = async (ev) => {
+                for (const added of ev.detail.added) {
+                    await openTrack(added);
+                }
+
+                for (const removed of ev.detail.removed) {
+                    await removed.close();
+                }
+            };
+
+            this.tracks.events.addEventListener(
+                "change",
+                this._trackChangeListener
+            );
+
+            // open all local tracks
+            for (const track of await this.tracks.index
+                .iterate({}, { local: true, remote: false })
+                .all()) {
+                await openTrack(track);
+            }
+        }
     }
 
     async getLatest(
@@ -2497,6 +2572,11 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
     }
 
     async close(args?: any) {
+        this._trackChangeListener &&
+            this.tracks.events.removeEventListener(
+                "change",
+                this._trackChangeListener
+            );
         await this.closeOpenTracks();
         return super.close(args);
     }
@@ -2504,5 +2584,100 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
     async drop(args?: any) {
         await this.closeOpenTracks();
         return super.drop(args);
+    }
+}
+
+class MediaStreamDBIndexable {
+    @id({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: PublicSignKey })
+    owner: PublicSignKey;
+
+    constructor(mediaStream: MediaStreamDB) {
+        this.id = mediaStream.id;
+        this.owner = mediaStream.owner;
+    }
+}
+
+/**
+ * A database containing media streams so we can replicate any streams
+ */
+@variant("media-streams-library")
+export class MediaStreamDBs extends Program {
+    @field({ type: Documents })
+    mediaStreams: Documents<MediaStreamDB, MediaStreamDBIndexable>;
+
+    constructor() {
+        super();
+        this.mediaStreams = new Documents({
+            id: sha256Sync(fromString("media-streams-library")),
+        });
+    }
+
+    private _replicateAll: boolean = false;
+    s;
+    private _streamListener: (
+        args: CustomEvent<DocumentsChange<MediaStreamDB>>
+    ) => void;
+    async open(args?: { replicate: boolean }) {
+        this._replicateAll = args?.replicate ?? false;
+        if (this._replicateAll) {
+            this._streamListener = async (
+                ev: CustomEvent<DocumentsChange<MediaStreamDB>>
+            ) => {
+                for (const added of ev.detail.added) {
+                    await this.node.open<MediaStreamDB>(added, {
+                        args: {
+                            replicateTracksByDefault: true,
+                        },
+                        existing: "reuse",
+                    });
+                }
+
+                for (const removed of ev.detail.removed) {
+                    await removed.close();
+                }
+            };
+
+            this.mediaStreams.events.addEventListener(
+                "change",
+                this._streamListener
+            );
+        }
+
+        await this.mediaStreams.open({
+            type: MediaStreamDB,
+            index: {
+                type: MediaStreamDBIndexable,
+            },
+            canOpen: () => false, // we do it manually below
+        });
+    }
+
+    async afterOpen(): Promise<void> {
+        await super.afterOpen();
+        if (this._replicateAll) {
+            // open all local streams
+            for (const stream of await this.mediaStreams.index
+                .iterate({}, { local: true, remote: false })
+                .all()) {
+                await this.node.open(stream, {
+                    args: {
+                        replicateTracksByDefault: true,
+                    },
+                    existing: "reuse",
+                });
+            }
+        }
+    }
+
+    close(from?: Program): Promise<boolean> {
+        this._streamListener &&
+            this.mediaStreams.events.removeEventListener(
+                "change",
+                this._streamListener
+            );
+        return super.close(from);
     }
 }

@@ -21,7 +21,7 @@ import {
 import "./../../controls/Controls.css";
 import useVideoPlayer from "./useVideoPlayer.js";
 import { Spinner } from "../../../utils/Spinner.js";
-import { MediaStreamDB } from "./../../database.js";
+import { MediaStreamDB } from "@peerbit/video-lib";
 import { SourceSelect } from "./MenuSourceSelect.js";
 import { ResolutionSelect } from "./ResolutionSelect.js";
 import { useLocation } from "react-router-dom";

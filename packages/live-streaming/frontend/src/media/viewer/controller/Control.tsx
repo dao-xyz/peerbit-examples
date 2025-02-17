@@ -24,7 +24,7 @@ import {
     resolutionToSourceSetting,
 } from "./../../controls/settings.js";
 import "./../../controls/Controls.css";
-import { MediaStreamDB } from "../../database";
+import { MediaStreamDB } from "@peerbit/video-lib";
 import { TimeSlider } from "../../controls/TimeSlider";
 
 export const Controls = (

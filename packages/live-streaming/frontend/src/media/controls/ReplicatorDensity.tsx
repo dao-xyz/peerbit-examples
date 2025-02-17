@@ -1,6 +1,6 @@
 import { ReplicationRangeIndexable } from "@peerbit/shared-log";
 import { PublicSignKey } from "@peerbit/crypto";
-import { MediaStreamDB } from "../database.js";
+import { MediaStreamDB } from "@peerbit/video-lib";
 import { useMaxTime } from "./useMaxTime";
 import { useReplicationChange } from "./useReplicationChange.js";
 

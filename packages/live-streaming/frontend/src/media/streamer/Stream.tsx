@@ -1,6 +1,6 @@
 import { useLocal } from "@peerbit/react";
 import { Tracks } from "../controls/Tracks";
-import { MediaStreamDB } from "../database";
+import { MediaStreamDB } from "@peerbit/video-lib";
 import { View } from "../viewer/View";
 import { Renderer } from "./Renderer";
 import { Share } from "../controls/Share";

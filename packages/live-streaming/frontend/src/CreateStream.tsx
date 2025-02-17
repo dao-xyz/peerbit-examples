@@ -2,13 +2,13 @@ import { usePeer, useProgram } from "@peerbit/react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { getStreamPath } from "./routes";
 import { useEffect, useState } from "react";
-import { MediaStreamDB } from "./media/database";
+import { MediaStreamDB } from "@peerbit/video-lib";
 
 export const CreateStream = () => {
     const { peer } = usePeer();
     const mediaStream = useProgram<MediaStreamDB>(
         peer && new MediaStreamDB(peer.identity.publicKey),
-        { args: { replicate: { factor: 1 } }, existing: "reuse" }
+        { existing: "reuse" }
     );
     const navigate = useNavigate();
     const location = useLocation();

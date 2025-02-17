@@ -1,4 +1,4 @@
-import { Track, MediaStreamDB } from "../database.js";
+import { Track, MediaStreamDB } from "@peerbit/video-lib";
 import { useLocal } from "@peerbit/react";
 import { useMaxTime } from "./useMaxTime.js";
 import { useEffect, useMemo } from "react";

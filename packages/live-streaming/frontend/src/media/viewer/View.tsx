@@ -7,7 +7,7 @@ import {
     Track,
     AudioStreamDB,
     TracksIterator,
-} from "../database.js";
+} from "@peerbit/video-lib";
 import { Grid } from "@mui/material";
 
 import "./View.css";

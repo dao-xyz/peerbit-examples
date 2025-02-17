@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { MediaStreamDB } from "../database.js";
+import { MediaStreamDB } from "@peerbit/video-lib";
 
 export const useMaxTime = (props?: { mediaStreams?: MediaStreamDB }) => {
     const [maxTime, setMaxTime] = useState<number | undefined>(undefined);
@@ -9,7 +9,6 @@ export const useMaxTime = (props?: { mediaStreams?: MediaStreamDB }) => {
         }
         const maxTimeListener = (ev: { detail: { maxTime: number } }) => {
             setMaxTime(ev.detail.maxTime);
-            console.log("set max time", ev.detail.maxTime);
         };
         if (props.mediaStreams.maxTime != null) {
             maxTimeListener({
