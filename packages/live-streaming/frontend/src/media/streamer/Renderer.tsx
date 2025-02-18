@@ -31,6 +31,7 @@ import pDefer from "p-defer";
 import { isSafari } from "../utils";
 import { convertGPUFrameToCPUFrame } from "./convertGPUFrameToCPUFrame";
 import { Tracks } from "../controls/Tracks.js";
+import { Share } from "../controls/Share.js";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
@@ -219,11 +220,6 @@ const createVideoEncoder = (properties: {
 
                                 await close(false); // do we need to call this more times? like while not closed close(false)? (TODO that was the previous behaviour)
 
-                                console.log(
-                                    "PUT VIDEO TRACK",
-                                    properties.mediaStreamDBs.address,
-                                    newVideoTrack.startTime
-                                );
                                 await properties.mediaStreamDBs.tracks.put(
                                     newVideoTrack
                                 );
@@ -1199,7 +1195,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                             }
                         ></video>
                         {sourceType == null ? (
-                            <div className="">
+                            <div className="mt-4 mb-4">
                                 <FirstMenuSelect
                                     setSourceType={(settings) => {
                                         setSourceType(settings);
@@ -1248,12 +1244,14 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                     </div>
                 </div>
             </div>
-            <Tracks
-                mediaStreams={args.stream}
-                currentTime={0}
-                setProgress={() => {}}
-                videoRef={videoRef.current}
-            />
+            {sourceType != null && (
+                <Tracks
+                    mediaStreams={args.stream}
+                    currentTime={0}
+                    setProgress={() => {}}
+                    videoRef={videoRef.current}
+                />
+            )}
             {errorMessage && (
                 <Dialog.Root open={true}>
                     <Dialog.Portal>

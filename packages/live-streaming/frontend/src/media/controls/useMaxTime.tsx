@@ -8,8 +8,6 @@ export const useMaxTime = (props?: {
     const [maxTime, setMaxTime] = useState<number | undefined>(
         (props?.videoRef?.duration ?? 0) * 1e6
     );
-    props?.videoRef &&
-        console.log(!!props?.videoRef, maxTime, props.videoRef.duration * 1e6);
 
     const maybeUpdateMaxTime = (newMaxtime: number) => {
         setMaxTime((prev) =>

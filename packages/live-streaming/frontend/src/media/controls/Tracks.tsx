@@ -13,12 +13,10 @@ export const Tracks = (props: {
 }) => {
     // Subscribe to local tracks from the database
     const tracks = useLocal(props.mediaStreams?.tracks);
-
     const { maxTime } = useMaxTime({
         mediaStreams: props.mediaStreams,
         videoRef: props.videoRef,
     });
-    console.log("Tracks videoref: " + !!props.videoRef, maxTime);
 
     // Calculate the horizontal positioning (assuming times are in microseconds)
     const getLocation = useMemo(

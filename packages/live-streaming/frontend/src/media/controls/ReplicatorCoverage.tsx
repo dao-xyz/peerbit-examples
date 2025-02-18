@@ -2,7 +2,7 @@ import { Track, MediaStreamDB } from "@peerbit/video-lib";
 import { useLocal } from "@peerbit/react";
 import { useEffect, useRef, useState } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
-import { FaLeaf } from "react-icons/fa";
+import { FaLeaf, FaSeedling } from "react-icons/fa";
 
 export const ReplicatorCoverage = (props: { mediaStreams?: MediaStreamDB }) => {
     const tracks = useLocal(props.mediaStreams?.tracks);
@@ -69,8 +69,20 @@ export const ReplicatorCoverage = (props: { mediaStreams?: MediaStreamDB }) => {
                             }}
                             className="ml-1"
                         >
-                            <FaLeaf size={20} className="fill-green-500" />
-                            <span className="ml-1">{minCoverage}x</span>
+                            <div className={`flex flex-row`}>
+                                <FaSeedling
+                                    className="text-green-400"
+                                    size={20}
+                                />
+
+                                {minCoverage > 0 && (
+                                    <div className="ml-[-5px] mt-[-10px]">
+                                        <span className="text-xs bg-green-400 rounded-full p-[2px] leading-[5px] !text-black">
+                                            {minCoverage}x
+                                        </span>
+                                    </div>
+                                )}
+                            </div>
                         </div>
                     </Tooltip.Trigger>
                     <Tooltip.Portal>
