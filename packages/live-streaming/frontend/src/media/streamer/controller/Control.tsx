@@ -26,6 +26,7 @@ import { SourceSelect } from "./MenuSourceSelect.js";
 import { ResolutionSelect } from "./ResolutionSelect.js";
 import { useLocation } from "react-router-dom";
 import { TimeSlider } from "../../controls/TimeSlider.js";
+import { ReplicatorCoverage } from "../../controls/ReplicatorCoverage.js";
 
 export const Controls = (props: {
     resolutionOptions: Resolution[];
@@ -239,6 +240,7 @@ export const Controls = (props: {
                             </RadixSlider.Root>
                         </div>
                     )}
+                    <ReplicatorCoverage mediaStreams={props.mediaStreams} />
                     <div className="ml-auto">
                         <RadixMenu.Root
                             onOpenChange={(open) => {

@@ -131,6 +131,10 @@ code {
         @apply w-8 h-8
     }
 
+    .tooltip {
+        @apply bg-gray-900 text-white p-3 rounded shadow-lg max-w-xs whitespace-normal
+    }
+
     button[disabled=disabled], button:disabled {
         box-shadow: none !important;
         transform: none !important;

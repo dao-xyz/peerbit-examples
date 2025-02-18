@@ -69,7 +69,12 @@ const addVideoStreamListener = (
     configureDecoder();
 
     const processChunk = (chunk: Chunk) => {
-        console.log("got chunk", chunk.time, chunk.chunk.length);
+        console.log(
+            "got chunk",
+            streamDB.startTime,
+            chunk.time,
+            chunk.chunk.length
+        );
         const encodedChunk = new EncodedVideoChunk({
             timestamp: Number(chunk.time),
             type: chunk.type as "key" | "delta",

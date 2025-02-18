@@ -30,6 +30,7 @@ import { FirstMenuSelect } from "./controller/FirstMenuSelect";
 import pDefer from "p-defer";
 import { isSafari } from "../utils";
 import { convertGPUFrameToCPUFrame } from "./convertGPUFrameToCPUFrame";
+import { Tracks } from "../controls/Tracks.js";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
@@ -242,6 +243,9 @@ const createVideoEncoder = (properties: {
                     })
                 ) {
                     mem += arr.byteLength;
+                    properties.mediaStreamDBs.maybeUpdateMaxTime(
+                        chunk.timestamp
+                    );
                     lastChunkTimestamp = chunk.timestamp;
                     // console.log("VIDEO PUT CHUNK", toBase64(videoStreamDB.id), lastVideoChunkTimestamp, "bytes");
 
@@ -651,17 +655,6 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         mediaStreamDBs?.address,
         mediaStreamDBs?.closed,
     ]);
-
-    useEffect(() => {
-        if (!videoRef.current?.src || !mediaStreamDB?.address) {
-            return;
-        }
-
-        if (typeof videoRef.current.duration === "number") {
-            const timeInMicroseconds = videoRef.current.duration * 1e6;
-            mediaStreamDB.maybeUpdateMaxTime(timeInMicroseconds);
-        }
-    }, [videoRef.current?.duration, mediaStreamDB?.address]);
 
     useEffect(() => {
         if (!mediaStreamDB?.address) {
@@ -1255,6 +1248,12 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                     </div>
                 </div>
             </div>
+            <Tracks
+                mediaStreams={args.stream}
+                currentTime={0}
+                setProgress={() => {}}
+                videoRef={videoRef.current}
+            />
             {errorMessage && (
                 <Dialog.Root open={true}>
                     <Dialog.Portal>

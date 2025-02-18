@@ -1,19 +1,24 @@
 import { Track, MediaStreamDB } from "@peerbit/video-lib";
 import { useLocal } from "@peerbit/react";
 import { useMaxTime } from "./useMaxTime.js";
-import { useEffect, useMemo } from "react";
+import { useMemo } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
 
 export const Tracks = (props: {
     mediaStreams?: MediaStreamDB;
     progress?: number | "live";
+    videoRef: HTMLVideoElement;
     currentTime: number;
     setProgress: (value: number | "live") => void;
 }) => {
     // Subscribe to local tracks from the database
     const tracks = useLocal(props.mediaStreams?.tracks);
 
-    const { maxTime } = useMaxTime({ mediaStreams: props.mediaStreams });
+    const { maxTime } = useMaxTime({
+        mediaStreams: props.mediaStreams,
+        videoRef: props.videoRef,
+    });
+    console.log("Tracks videoref: " + !!props.videoRef, maxTime);
 
     // Calculate the horizontal positioning (assuming times are in microseconds)
     const getLocation = useMemo(
@@ -100,7 +105,7 @@ export const Tracks = (props: {
                                                 </Tooltip.Trigger>
                                                 <Tooltip.Content
                                                     side="top"
-                                                    className="bg-gray-900 text-white p-3 rounded shadow-lg max-w-xs whitespace-normal break-all"
+                                                    className="tooltip break-all"
                                                 >
                                                     {track.source.description}
                                                     <Tooltip.Arrow className="fill-current text-gray-900" />
