@@ -62,6 +62,7 @@ function rgbToHex({ r, g, b }: { r: number; g: number; b: number }) {
         const hex = c.toString(16);
         return hex.length === 1 ? "0" + hex : hex;
     };
+    // Fix: use backticks for template literal
     return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 }
 
@@ -81,8 +82,6 @@ const interpolateColor = (
 
 // Map a replication count to either an inline style (for an interpolated color)
 // or a Tailwind class when fully replicated.
-// In this scheme, a count of 1 (or 0) is red and when count reaches the threshold,
-// we use the bg-primary-500 class.
 const getBarStyle = (
     count: number
 ): { style?: React.CSSProperties; className?: string } => {
@@ -122,6 +121,10 @@ export const ReplicationRangeVisualization = (props: {
           })
         : Array.from({ length: resolution }, () => ({ count: 0 }));
 
+    // Normalize: use the highest count (or 10, if counts are low) as the denominator
+    const maxCount = bars.reduce((max, bar) => Math.max(max, bar.count), 0);
+    const normalizationDenom = Math.max(maxCount, 10);
+
     return (
         <>
             {ranges && (
@@ -134,9 +137,11 @@ export const ReplicationRangeVisualization = (props: {
                                 style={{
                                     position: "absolute",
                                     left: `${(x / resolution) * 100}%`,
-                                    top: 0,
+                                    bottom: 0,
                                     width: `${100 / resolution}%`,
-                                    height: "5px",
+                                    height: `${Math.round(
+                                        (bar.count / normalizationDenom) * 30
+                                    )}px`,
                                     ...style,
                                 }}
                                 className={className}

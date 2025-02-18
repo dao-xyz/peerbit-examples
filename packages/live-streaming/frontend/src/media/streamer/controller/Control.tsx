@@ -27,6 +27,7 @@ import { ResolutionSelect } from "./ResolutionSelect.js";
 import { useLocation } from "react-router-dom";
 import { TimeSlider } from "../../controls/TimeSlider.js";
 import { ReplicatorCoverage } from "../../controls/ReplicatorCoverage.js";
+import { Share } from "../../controls/Share.js";
 
 export const Controls = (props: {
     resolutionOptions: Resolution[];
@@ -184,24 +185,26 @@ export const Controls = (props: {
         <>
             <div
                 ref={controlRef}
-                className={`controls flex flex-col ${
+                className={`controls w-full flex flex-col ${
                     showControls ? "opacity-100" : "opacity-0"
                 }`}
             >
                 {/* if stream type is not set, also show video controls in the center of the screen where the videoRef is taking it place */}
                 {props.videoRef && (
-                    <TimeSlider
-                        currentTime={props.videoRef.currentTime * 1e3}
-                        maxTime={props.videoRef.duration * 1e3}
-                        mediaStreamsDB={props.mediaStreams}
-                        progress={0}
-                        setProgress={() => {}}
-                    ></TimeSlider>
+                    <div className="w-full">
+                        <TimeSlider
+                            currentTime={props.videoRef.currentTime * 1e3}
+                            maxTime={props.videoRef.duration * 1e3}
+                            mediaStreamsDB={props.mediaStreams}
+                            progress={0}
+                            setProgress={() => {}}
+                        ></TimeSlider>
+                    </div>
                 )}
 
-                <div className="flex items-center justify-center w-full">
+                <div className="flex items-center justify-center w-full gap-2 pl-2 pr-2">
                     <div className="flex justify-center">
-                        <button onClick={togglePlay} className="p-2">
+                        <button onClick={togglePlay}>
                             {!controls.isPlaying
                                 ? resolvePlayIcon()
                                 : resolvePauseIcon()}
@@ -209,7 +212,7 @@ export const Controls = (props: {
                     </div>
                     {controls.mute && (
                         <div id="volume-button" className="flex justify-center">
-                            <button onClick={toggleMute} className="p-2">
+                            <button onClick={toggleMute}>
                                 {muted ? (
                                     <MdVolumeOff size={24} />
                                 ) : (
@@ -221,7 +224,7 @@ export const Controls = (props: {
                     {controls.setVolume && (
                         <div
                             id="volume-slider"
-                            className="flex justify-center w-[75px] pl-1"
+                            className="flex justify-center w-[75px] "
                             style={{ display: "none" }}
                         >
                             <RadixSlider.Root
@@ -242,6 +245,9 @@ export const Controls = (props: {
                     )}
                     <ReplicatorCoverage mediaStreams={props.mediaStreams} />
                     <div className="ml-auto">
+                        <Share />
+                    </div>
+                    <div className="flex item-center">
                         <RadixMenu.Root
                             onOpenChange={(open) => {
                                 setIsMenuOpen(open);
@@ -254,7 +260,7 @@ export const Controls = (props: {
                             }}
                         >
                             <RadixMenu.Trigger asChild>
-                                <button className="p-2">
+                                <button>
                                     <MdVideoSettings size={24} />
                                 </button>
                             </RadixMenu.Trigger>

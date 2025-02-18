@@ -31,7 +31,6 @@ import pDefer from "p-defer";
 import { isSafari } from "../utils";
 import { convertGPUFrameToCPUFrame } from "./convertGPUFrameToCPUFrame";
 import { Tracks } from "../controls/Tracks.js";
-import { Share } from "../controls/Share.js";
 
 interface HTMLVideoElementWithCaptureStream extends HTMLVideoElement {
     captureStream(fps?: number): MediaStream;
