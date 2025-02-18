@@ -520,6 +520,7 @@ const trackScheduling: "live" | "0" = "0";
 const shouldRerenderOnChange = (sourceType: StreamType) =>
     sourceType.type === "upload-media" || sourceType.type === "demo";
 
+const preferCPUEncodingDefault = isSafari;
 export const Renderer = (args: { stream: MediaStreamDB }) => {
     const [quality, setQuality] = useState<SourceSetting[]>([DEFAULT_QUALITY]);
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
@@ -563,7 +564,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     const sourceId = useRef(0);
     const startId = useRef(0);
 
-    const preferCPUEncodingRef = useRef(false);
+    const preferCPUEncodingRef = useRef(preferCPUEncodingDefault);
     const sessionTimestampRef = useRef<number | undefined>(undefined);
 
     let videoRef = useRef<HTMLVideoElementWithCaptureStream>();
@@ -669,7 +670,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         streamType?: StreamType;
         quality: SourceSetting[];
     }) => {
-        preferCPUEncodingRef.current = false;
+        preferCPUEncodingRef.current = preferCPUEncodingDefault;
 
         const updateQualitySettingsState = () => {
             let qualitySetting = properties.quality || quality;
@@ -1162,6 +1163,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                         <video
                             crossOrigin="anonymous"
                             data-iframe-height
+                            playsInline
                             ref={(ref) => {
                                 videoRef.current =
                                     ref as HTMLVideoElementWithCaptureStream;
