@@ -9,114 +9,137 @@ const getBarsFromRanges = (props: {
     maxTime: number;
     ranges?: ReplicationRangeIndexable<"u64">[];
     resolution: number;
-}): { y: number; owned?: boolean }[] => {
-    let resolution = props.resolution;
-    let counters = new Array<{ y: number; owned: boolean }>(resolution);
-    if (!props.ranges || props.ranges.length === 0) {
-        return counters.map((x) => {
-            return { y: 0, owned: false };
-        });
+}): { count: number }[] => {
+    const { resolution, maxTime, ranges } = props;
+    // Create an array of bars with an initial count of 0
+    let bars = Array.from({ length: resolution }, () => ({ count: 0 }));
+
+    if (!ranges || ranges.length === 0) {
+        return bars;
     }
-    for (let range of props.ranges) {
-        let startRange =
+
+    for (let range of ranges) {
+        const startRange =
             range.start1 !== range.start2 ? range.start2 : range.start1;
-        let endRange = range.start1 !== range.start2 ? range.end2 : range.end1;
+        const endRange =
+            range.start1 !== range.start2 ? range.end2 : range.end1;
 
         let start = Math.round(
-            (Number(startRange) / 1000 / props.maxTime) * resolution
+            (Number(startRange) / 1000 / maxTime) * resolution
         );
         let end = Math.min(
-            Math.round((Number(endRange) / 1000 / props.maxTime) * resolution),
+            Math.round((Number(endRange) / 1000 / maxTime) * resolution),
             resolution
         );
 
         for (let x = start; x < end; x++) {
-            let counter = counters[x];
-            if (!counter) {
-                counter = {
-                    y: 0,
-                    owned: false,
-                };
-                counters[x] = counter;
-            }
-            counter.y += 1;
-            counter.owned =
-                counter.owned ||
-                (props.publicKey && range.hash === props.publicKey.hashcode());
+            bars[x].count += 1;
         }
     }
-    return counters;
+    return bars;
 };
+
+// -- Helper functions for color interpolation --
+
+function hexToRgb(hex: string) {
+    hex = hex.replace("#", "");
+    if (hex.length === 3) {
+        hex = hex
+            .split("")
+            .map((x) => x + x)
+            .join("");
+    }
+    const num = parseInt(hex, 16);
+    return {
+        r: (num >> 16) & 255,
+        g: (num >> 8) & 255,
+        b: num & 255,
+    };
+}
+
+function rgbToHex({ r, g, b }: { r: number; g: number; b: number }) {
+    const toHex = (c: number) => {
+        const hex = c.toString(16);
+        return hex.length === 1 ? "0" + hex : hex;
+    };
+    return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
+}
+
+// Linearly interpolate between two hex colors given a t in [0, 1]
+const interpolateColor = (
+    t: number,
+    color1: string,
+    color2: string
+): string => {
+    const c1 = hexToRgb(color1);
+    const c2 = hexToRgb(color2);
+    const r = Math.round(c1.r + (c2.r - c1.r) * t);
+    const g = Math.round(c1.g + (c2.g - c1.g) * t);
+    const b = Math.round(c1.b + (c2.b - c1.b) * t);
+    return rgbToHex({ r, g, b });
+};
+
+// Map a replication count to either an inline style (for an interpolated color)
+// or a Tailwind class when fully replicated.
+// In this scheme, a count of 1 (or 0) is red and when count reaches the threshold,
+// we use the bg-primary-500 class.
+const getBarStyle = (
+    count: number
+): { style?: React.CSSProperties; className?: string } => {
+    const replicationThreshold = 5; // Adjust this threshold as needed.
+    const red = "#ff0000"; // Unreplicated color
+    const primaryHex = "#3b82f6"; // Hex value matching bg-primary-500
+
+    // Compute a normalized value (t) where:
+    // count === 1 results in t = 0 (red),
+    // count >= replicationThreshold results in t = 1 (primary)
+    const t = Math.max(
+        0,
+        Math.min(1, (count - 1) / (replicationThreshold - 1))
+    );
+    const color = interpolateColor(t, red, primaryHex);
+
+    // If the bar is fully replicated, return the Tailwind class.
+    if (t >= 1) {
+        return { className: "bg-primary-500" };
+    } else {
+        return { style: { backgroundColor: color } };
+    }
+};
+
 export const ReplicationRangeVisualization = (props: {
     mediaStreams?: MediaStreamDB;
 }) => {
-    let resolution = 100;
+    const resolution = 100;
     const { maxTime } = useMaxTime({ mediaStreams: props.mediaStreams });
     const ranges = useReplicationChange({ mediaStreams: props.mediaStreams });
+    const bars = ranges
+        ? getBarsFromRanges({
+              maxTime,
+              publicKey: props.mediaStreams?.node.identity.publicKey,
+              resolution,
+              ranges,
+          })
+        : Array.from({ length: resolution }, () => ({ count: 0 }));
+
     return (
         <>
-            {/* 
-          === Replicator Density Overlay ===
-          This is a container that spans the full width of the Slider.Track 
-          and shows your “popularity” or “heatmap” data.
-        */}
             {ranges && (
                 <div className="absolute inset-0 pointer-events-none">
-                    {/**
-                     * For demonstration, assume:
-                     *   - props.maxTime is the total length in ms
-                     *   - each entry in props.replicatorDensity has
-                     *       { time: number; density: number }
-                     *     where time is in ms and density is in [0..1].
-                     */}
-
-                    {/* {props.ranges.map((range, idx) => {
-                        // Convert the time to a % of total duration
-                        const leftPercent = (Number(range.start1 / 1000000n) / props.maxTime) * 100;
-                        const widthPercent = (Number(range.width / 1000000n) / props.maxTime) * 100;
-
-                        //  console.log("range", range, leftPercent, widthPercent, props.maxTime);
-
-                        // Convert density to a vertical height or color strength, etc.
-                        const barHeight = 5;
-                        return (
-                            <div
-                                key={idx}
-                                // Position the bar in the timeline
-                                style={{
-                                    position: "absolute",
-                                    left: `${leftPercent}%`,
-                                    bottom: 2,
-                                    width: widthPercent + "%",
-                                    height: `${barHeight}px`,
-
-                                }}
-                                className="bg-primary-500"
-                            />
-                        );
-                    })} */}
-                    {getBarsFromRanges({
-                        maxTime: maxTime,
-                        publicKey: props.mediaStreams?.node.identity.publicKey,
-                        resolution,
-                        ranges: ranges,
-                    }).map((bar, x) => {
+                    {bars.map((bar, x) => {
+                        const { style, className } = getBarStyle(bar.count);
                         return (
                             <div
                                 key={x}
-                                // Position the bar in the timeline
                                 style={{
                                     position: "absolute",
                                     left: `${(x / resolution) * 100}%`,
-                                    bottom: 2,
-                                    width: 100 / resolution + "%",
-                                    height: `${bar.y * 5}px`,
+                                    top: 0,
+                                    width: `${100 / resolution}%`,
+                                    height: "5px",
+                                    ...style,
                                 }}
-                                className={
-                                    bar.owned
-                                        ? "bg-primary-500"
-                                        : "bg-primary-500"
-                                }
+                                className={className}
                             />
                         );
                     })}

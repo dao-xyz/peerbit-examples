@@ -499,16 +499,20 @@ export const View = (properties: DBArgs) => {
         if (!peer || !properties.stream || properties.stream.closed) {
             return;
         }
-        properties.stream
-            .waitFor(properties.stream.owner)
-            .then(async () => {
-                setStreamerOnline(true);
-                setProgress(cursor);
-            })
-            .catch((e) => {
-                console.error("Failed to find streamer");
-                console.error(e);
-            });
+        if (cursor === "live") {
+            properties.stream
+                .waitFor(properties.stream.owner)
+                .then(async () => {
+                    setStreamerOnline(true);
+                    setProgress(cursor);
+                })
+                .catch((e) => {
+                    console.error("Failed to find streamer");
+                    console.error(e);
+                });
+        } else {
+            setProgress(cursor);
+        }
 
         return () => {
             // TODO are we doing everything we need here?
@@ -562,6 +566,7 @@ export const View = (properties: DBArgs) => {
     let setVideoSize = () =>
         renderer.resize({ width: videoWidth(), height: videoHeight() });
 
+    const showVideo = streamerOnline || (cursor !== "live" && controls.current);
     return (
         <Grid container direction="column">
             <Grid item>
@@ -625,7 +630,7 @@ export const View = (properties: DBArgs) => {
                                 height="300px"
                             />
                         </ClickOnceForAudio>
-                        {streamerOnline && !!controls.current && (
+                        {showVideo && (
                             <div style={{ marginTop: "-40px", width: "100%" }}>
                                 <Controls
                                     liveStreamAvailable={liveStreamAvailable}
@@ -718,7 +723,7 @@ export const View = (properties: DBArgs) => {
                                 ></Controls>
                             </div>
                         )}
-                        {!streamerOnline && (
+                        {!streamerOnline && cursor === "live" && (
                             <Grid
                                 container
                                 direction="column"
@@ -742,7 +747,7 @@ export const View = (properties: DBArgs) => {
                                 <Grid item>Streamer is offline</Grid>
                             </Grid>
                         )}
-                        {streamerOnline && isBuffering && (
+                        {showVideo && isBuffering && (
                             <Grid
                                 container
                                 direction="column"

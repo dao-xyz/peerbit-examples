@@ -36,10 +36,10 @@ export const TimeSlider = (props: {
                     mediaStreams={props.mediaStreamsDB}
                 />
 
-                <RadixSlider.Track className="bg-gray-200 opacity-50 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-80 transition-all">
-                    <RadixSlider.Range className="absolute bg-primary-500 rounded-full h-full" />
+                <RadixSlider.Track className="bg-gray-200 opacity-0 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-50 transition-all">
+                    <RadixSlider.Range className="absolute bg-primary-500 opacity-90 rounded-full h-full" />
                 </RadixSlider.Track>
-                <RadixSlider.Thumb className="block w-3 h-3 bg-primary-500 rounded-full group-hover:scale-125 transition-transform" />
+                <RadixSlider.Thumb className="block w-3 h-3 bg-gray-200 rounded-full group-hover:scale-125 transition-transform" />
             </RadixSlider.Root>
         </div>
     );

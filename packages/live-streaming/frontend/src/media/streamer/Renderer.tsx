@@ -1014,12 +1014,12 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                     timestamp,
                 });
 
-                console.log("--------> ", {
+                /* console.log("Render frame: ", {
                     timestamp,
                     frameTimestamp: frame.timestamp,
                     observedMediaTime,
                     firstFrameHighresTimestamp,
-                });
+                }); */
                 if (preferCPUEncodingRef.current) {
                     frame = convertGPUFrameToCPUFrame(videoRef, frame);
                 }
