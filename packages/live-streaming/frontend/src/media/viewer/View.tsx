@@ -756,7 +756,7 @@ export const View = (properties: DBArgs) => {
                             <Grid
                                 container
                                 direction="column"
-                                className="video-buffering"
+                                className="center-middle"
                                 justifyContent="center"
                                 spacing={1}
                             >
