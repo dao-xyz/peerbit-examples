@@ -10,7 +10,7 @@ import {
     MediaStreamDBs,
 } from "@peerbit/video-lib";
 import { Buffer } from "buffer";
-import { waitFor } from "@peerbit/time";
+import { AbortError, TimeoutError, waitFor } from "@peerbit/time";
 import {
     SourceSetting,
     StreamType,
@@ -89,6 +89,10 @@ const createVideoEncoder = (properties: {
     let closeListener = () => abortController.abort();
 
     properties.mediaStreamDBs.events.addEventListener("close", closeListener);
+    let aborted = false;
+    abortController.signal.addEventListener("abort", () => {
+        aborted = true;
+    });
 
     abortController.signal.addEventListener("abort", () => {
         properties.mediaStreamDBs.events.removeEventListener(
@@ -127,8 +131,6 @@ const createVideoEncoder = (properties: {
         let skip = false;
         let mem = 0;
 
-        console.log("NEW ENCODER!");
-
         if (videoTrack) {
             // TODO
             if (videoTrack.endTime == null) {
@@ -149,6 +151,7 @@ const createVideoEncoder = (properties: {
                 console.error(e);
                 const msg = "Failed to encode video.\n" + e.toString();
                 console.log(msg, e.toString().includes("OperationError"));
+                abortController.abort();
                 if (
                     e.toString().includes("OperationError") &&
                     (await properties.preferCPUEncoding())
@@ -244,38 +247,49 @@ const createVideoEncoder = (properties: {
                             });
                     }
                 }
-                if (
-                    await waitFor(() => videoTrack, {
-                        signal: abortController.signal,
-                    })
-                ) {
-                    mem += arr.byteLength;
-                    properties.mediaStreamDBs.maybeUpdateMaxTime(
-                        chunk.timestamp
-                    );
-                    lastChunkTimestamp = chunk.timestamp;
-                    // console.log("VIDEO PUT CHUNK", toBase64(videoStreamDB.id), lastVideoChunkTimestamp, "bytes");
-
-                    try {
-                        await videoTrack.put(
-                            new Chunk({
-                                type: chunk.type,
-                                chunk: arr,
-                                time: lastChunkTimestamp,
-                                /*  duration: chunk.duration, */
-                            })
+                try {
+                    if (
+                        await waitFor(() => videoTrack, {
+                            signal: abortController.signal,
+                        })
+                    ) {
+                        mem += arr.byteLength;
+                        properties.mediaStreamDBs.maybeUpdateMaxTime(
+                            chunk.timestamp
                         );
-                    } catch (error) {
-                        console.error("Failed to put chunk", error);
-                        throw error;
+                        lastChunkTimestamp = chunk.timestamp;
+                        // console.log("VIDEO PUT CHUNK", toBase64(videoStreamDB.id), lastVideoChunkTimestamp, "bytes");
+
+                        try {
+                            await videoTrack.put(
+                                new Chunk({
+                                    type: chunk.type,
+                                    chunk: arr,
+                                    time: lastChunkTimestamp,
+                                    /*  duration: chunk.duration, */
+                                })
+                            );
+                        } catch (error) {
+                            console.error("Failed to put chunk", error);
+                            throw error;
+                        }
+                        //   console.log(mem / ((+new Date) - s0) * 1000)
                     }
-                    //   console.log(mem / ((+new Date) - s0) * 1000)
+                } catch (error) {
+                    if (
+                        error instanceof AbortError ||
+                        error instanceof TimeoutError
+                    ) {
+                        return;
+                    }
+                    throw error;
                 }
             },
         });
 
         const closeFn = encoder.close.bind(encoder);
         encoder.close = () => {
+            abortController.abort();
             console.log("CLOSE!");
             try {
                 closeFn();
