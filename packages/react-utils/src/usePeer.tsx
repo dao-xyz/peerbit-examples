@@ -223,6 +223,8 @@ export const PeerProvider = (options: PeerOptions) => {
                 console.log("Client created", {
                     directory,
                     peerHash: newPeer?.identity.publicKey.hashcode(),
+                    network:
+                        nodeOptions.network === "local" ? "local" : "remote",
                 });
 
                 setConnectionState("connecting");
