@@ -89,6 +89,7 @@ const createVideoEncoder = (properties: {
     let closeListener = () => abortController.abort();
 
     properties.mediaStreamDBs.events.addEventListener("close", closeListener);
+
     abortController.signal.addEventListener("abort", () => {
         properties.mediaStreamDBs.events.removeEventListener(
             "close",
