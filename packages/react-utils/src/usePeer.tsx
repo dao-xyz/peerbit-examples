@@ -260,7 +260,7 @@ export const PeerProvider = (options: PeerOptions) => {
                     }
 
                     if (nodeOptions.host) {
-                        newPeer = await createHost(newPeer);
+                        newPeer = await createHost(newPeer as Peerbit);
                     }
                 };
 
