@@ -8,13 +8,6 @@ import fs from "fs";
 import events from "events";
 events.setMaxListeners(100);
 
-const dotsIfLongerThan = (string: string, length: number) => {
-    if (string.length > length) {
-        return string.slice(0, length) + "...";
-    }
-    return string;
-};
-
 export const start = async (directory?: string | null) => {
     // if directoy is not provided open in a default directory
     if (directory === undefined) {
