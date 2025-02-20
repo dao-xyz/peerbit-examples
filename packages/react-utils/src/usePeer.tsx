@@ -177,6 +177,9 @@ export const PeerProvider = (options: PeerOptions) => {
                         connectionManager: {
                             maxConnections: 100,
                         },
+                        connectionMonitor: {
+                            enabled: false,
+                        },
 
                         streamMuxers: [yamux()],
                         ...(nodeOptions.network === "local"

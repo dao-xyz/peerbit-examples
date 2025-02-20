@@ -974,11 +974,12 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
             }
         }
 
-        let frameCounter = 0;
+        let totalFrameCounter = 0;
         let lastFrame: number | undefined = undefined;
         let framesSinceLastBackground = 0;
         let lastFrameTimestamp = -1;
         let firstFrameHighresTimestamp: undefined | number = undefined;
+
         const maxEncoderQueueSize = 30;
         const requestFrame = () => {
             if (!inBackground && "requestVideoFrameCallback" in videoRef) {
@@ -1000,6 +1001,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                 if (sourceIdOnStart !== sourceId.current) {
                     return; // new source, expect a reboot of the frame loop cycle
                 }
+
                 const now = domHighRes ?? performance.now();
 
                 if (!inBackground) {
@@ -1124,7 +1126,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                                     } else {
                                         const droppedFrames = Math.max(
                                             (metadata?.presentedFrames ?? 0) -
-                                                frameCounter,
+                                                totalFrameCounter,
                                             0
                                         );
                                         /*  console.log({ droppedFrames })
@@ -1132,15 +1134,15 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                                              videoRef.playbackRate = 0.3;
                                          } */
                                         console.log({
-                                            frameCounter,
+                                            frameCounter: totalFrameCounter,
                                             playedFrame:
                                                 metadata?.presentedFrames,
                                             droppedFrames,
                                         });
-                                        frameCounter++;
+                                        totalFrameCounter++;
                                         const insertKeyframe =
                                             Math.round(
-                                                frameCounter /
+                                                totalFrameCounter /
                                                     videoEncoders.current.length
                                             ) %
                                                 60 ===
@@ -1180,6 +1182,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         requestFrame();
     };
     const onEnd = async () => {
+        console.log("end?");
         if (loop || sourceTypeRef.current.type === "noise") {
             loopCounter.current++;
             videoRef.current.play();
@@ -1192,6 +1195,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     };
 
     const onPause = async () => {
+        console.log("pause?");
         if (sourceTypeRef.current == null) {
             return;
         }
