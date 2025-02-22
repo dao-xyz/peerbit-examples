@@ -504,27 +504,28 @@ export const View = (properties: DBArgs) => {
         if (!peer || !properties.stream || properties.stream.closed) {
             return;
         }
-        if (cursor === "live") {
-            properties.stream
-                .waitFor(properties.stream.owner)
-                .then(async () => {
-                    setStreamerOnline(true);
-                    setProgress(cursor);
-                })
-                .catch((e) => {
-                    console.error("Failed to find streamer");
-                    console.error(e);
-                });
-        } else {
-            setProgress(cursor);
-        }
+        setProgress(cursor);
 
-        return () => {
-            // TODO are we doing everything we need here?
-            /*       currentVideoRef.current?.controls.close();
-                  currentAudioRef.current?.controls.close(); */
-        };
+        return () => {};
     }, [peer?.identity.publicKey.hashcode(), properties.stream?.address]);
+
+    useEffect(() => {
+        if (!peer || !properties.stream || properties.stream.closed) {
+            return;
+        }
+        properties.stream
+            .waitFor(properties.stream.owner)
+            .then(async () => {
+                setStreamerOnline(true);
+            })
+            .catch((e) => {
+                setStreamerOnline(false);
+                console.error("Failed to find streamer");
+                console.error(e);
+            });
+
+        return () => {};
+    }, [cursor === "live"]);
 
     const processChunk = async (properties: {
         track: Track<any>;
