@@ -2546,8 +2546,10 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
     private async closeOpenTracks() {
         const toClose = this.openedTracks;
         this.openedTracks = new Map();
-        for (const [_address, track] of toClose) {
-            await track.close();
+        if (toClose) {
+            for (const [_address, track] of toClose) {
+                await track.close();
+            }
         }
     }
 
