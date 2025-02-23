@@ -673,6 +673,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         }
 
         // announce it in the discovery db so other replicators (non browser) nodes can find it and replicate it
+        console.log({ discovery: mediaStreamDB.address });
         mediaStreamDBs.mediaStreams.put(mediaStreamDB);
 
         videoLoadedOnce.current = true;
