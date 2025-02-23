@@ -961,20 +961,6 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         startId.current = sourceId.current;
         const sourceIdOnStart = startId.current;
 
-        if (videoRef && sourceTypeRef?.current) {
-            // TODO why do we need this here?
-            if (
-                sourceTypeRef.current.type === "noise" ||
-                sourceTypeRef.current.type === "upload-media"
-            ) {
-                setResolutionOptions(
-                    RESOLUTIONS.filter((x) => x <= videoRef.videoHeight)
-                );
-            } else {
-                setResolutionOptions(RESOLUTIONS);
-            }
-        }
-
         let totalFrameCounter = 0;
         let lastFrame: number | undefined = undefined;
         let framesSinceLastBackground = 0;
@@ -1250,6 +1236,27 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                             }}
                             onEnded={() => {
                                 onEnd();
+                            }}
+                            onResize={(ev) => {
+                                if (videoRef && sourceTypeRef?.current) {
+                                    // TODO why do we need this here?
+                                    if (
+                                        sourceTypeRef.current.type ===
+                                            "noise" ||
+                                        sourceTypeRef.current.type ===
+                                            "upload-media"
+                                    ) {
+                                        setResolutionOptions(
+                                            RESOLUTIONS.filter(
+                                                (x) =>
+                                                    x <=
+                                                    ev.currentTarget.videoHeight
+                                            )
+                                        );
+                                    } else {
+                                        setResolutionOptions(RESOLUTIONS);
+                                    }
+                                }
                             }}
                             autoPlay
                             onClick={() =>
