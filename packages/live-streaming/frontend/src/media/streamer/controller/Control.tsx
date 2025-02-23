@@ -193,9 +193,10 @@ export const Controls = (props: {
                 {props.videoRef && (
                     <div className="w-full">
                         <TimeSlider
-                            currentTime={props.videoRef.currentTime * 1e3}
-                            maxTime={props.videoRef.duration * 1e3}
+                            currentTime={props.videoRef.currentTime * 1e6}
+                            maxTime={props.videoRef.duration * 1e6}
                             mediaStreamsDB={props.mediaStreams}
+                            videoRef={props.videoRef}
                             progress={0}
                             setProgress={() => {}}
                         ></TimeSlider>

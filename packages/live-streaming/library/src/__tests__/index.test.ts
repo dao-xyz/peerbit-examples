@@ -15,7 +15,7 @@ import { expect } from "chai";
 import sinon from "sinon";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { MAX_U32, ReplicationRangeIndexable } from "@peerbit/shared-log";
-import pDefer from "p-defer";
+import pDefer, { DeferredPromise } from "p-defer";
 import path from "path";
 
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
@@ -554,12 +554,21 @@ describe("MediaStream", () => {
                     first: { start: 10 },
                 });
             let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+            let listenTrack: DeferredPromise<Track> = pDefer();
             iterator = await viewerStreams.iterate("live", {
                 onProgress: (ev) => {
                     console.log("GOT CHUNK", ev.chunk.timeBN);
                     chunks.push(ev);
                 },
+
+                onTracksChange(tracks) {
+                    if (tracks.length > 0) {
+                        listenTrack.resolve(tracks[0]);
+                    }
+                },
             });
+            (await listenTrack.promise).waitFor(streamer.identity.publicKey);
             const c1 = new Chunk({
                 chunk: new Uint8Array([101]),
                 time: 8888888 * MILLISECONDS_TO_MICROSECONDS,
@@ -571,14 +580,6 @@ describe("MediaStream", () => {
                 type: "key",
             });
 
-            await waitForResolved(() =>
-                expect(iterator.current).to.have.length(1)
-            );
-            await waitForResolved(() =>
-                expect(iterator.options()).to.have.length(1)
-            );
-            await delay(1000);
-
             await track1.put(c1, { target: "all" });
             await waitForResolved(() => expect(chunks).to.have.length(1));
             await track1.put(c2, { target: "all" });
@@ -586,6 +587,110 @@ describe("MediaStream", () => {
 
             expect(chunks[0].chunk.id).to.eq(c1.id);
             expect(chunks[1].chunk.id).to.eq(c2.id);
+        });
+
+        it("live after progress", async () => {
+            const { mediaStreams, track1, viewerStreams } =
+                await createScenario({
+                    first: { start: 0, size: 0 },
+                });
+            let chunks: { track: Track<any>; chunk: Chunk }[] = [];
+
+            const c1 = new Chunk({
+                chunk: new Uint8Array([101]),
+                time: 0 * MILLISECONDS_TO_MICROSECONDS, // this one seems to render at wrong time
+                type: "key",
+            });
+            const c2 = new Chunk({
+                chunk: new Uint8Array([102]),
+                time: (0 + 1) * MILLISECONDS_TO_MICROSECONDS,
+                type: "key",
+            });
+            await track1.put(c1, { target: "all" });
+            await track1.put(c2, { target: "all" });
+
+            let listenTrackDeferred: DeferredPromise<Track> = pDefer();
+            let maxTimeFromCallback = -1;
+            iterator = await viewerStreams.iterate(0, {
+                onProgress: (ev) => {
+                    console.log("GOT CHUNK", ev.chunk.timeBN);
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    if (tracks.length > 0) {
+                        listenTrackDeferred.resolve(tracks[0]);
+                    }
+                },
+                onMaxTimeChange: (ev) => {
+                    maxTimeFromCallback = ev.maxTime;
+                },
+            });
+            await listenTrackDeferred.promise;
+
+            await waitForResolved(() => expect(chunks).to.have.length(2));
+            expect(maxTimeFromCallback).to.eq(1 * MILLISECONDS_TO_MICROSECONDS);
+
+            expect(chunks[0].chunk.id).to.eq(c1.id);
+            expect(chunks[1].chunk.id).to.eq(c2.id);
+
+            await iterator.close();
+            listenTrackDeferred = pDefer();
+
+            iterator = await viewerStreams.iterate("live", {
+                onProgress: (ev) => {
+                    console.log("GOT CHUNK", ev.chunk.timeBN);
+                    chunks.push(ev);
+                },
+                onTracksChange(tracks) {
+                    if (tracks.length > 0) {
+                        listenTrackDeferred.resolve(tracks[0]);
+                    }
+                },
+                onMaxTimeChange: (ev) => {
+                    maxTimeFromCallback = ev.maxTime;
+                },
+            });
+            await listenTrackDeferred.promise;
+
+            const c3 = new Chunk({
+                chunk: new Uint8Array([101]),
+                time: (8888888 + 2) * MILLISECONDS_TO_MICROSECONDS,
+                type: "key",
+            });
+
+            let last = (8888888 + 3) * MILLISECONDS_TO_MICROSECONDS;
+            const c4 = new Chunk({
+                chunk: new Uint8Array([102]),
+                time: last,
+                type: "key",
+            });
+
+            let maxTime = -1;
+
+            viewerStreams.events.addEventListener("maxTime", (ev) => {
+                maxTime = ev.detail.maxTime;
+            });
+
+            await track1.put(c3, { target: "all" });
+            await waitForResolved(() => expect(chunks).to.have.length(3));
+            await track1.put(c4, { target: "all" });
+            await waitForResolved(() => expect(chunks).to.have.length(4));
+
+            expect(chunks[2].chunk.id).to.eq(c3.id);
+            expect(chunks[3].chunk.id).to.eq(c4.id);
+
+            const allSegmentsFromStreamer =
+                await track1.source.chunks.log.replicationIndex.iterate().all();
+            let listenTrack = await listenTrackDeferred.promise;
+            const allSegmentsFromViewer =
+                await listenTrack.source.chunks.log.replicationIndex
+                    .iterate()
+                    .all();
+
+            expect(allSegmentsFromStreamer).to.have.length(3);
+            expect(allSegmentsFromViewer).to.have.length(3);
+            expect(maxTime).to.eq(last);
+            expect(maxTimeFromCallback).to.eq(last);
         });
 
         it("subscribeForMaxTime for streamer", async () => {
@@ -3163,13 +3268,9 @@ describe("MediaStream", () => {
                     },
                 });
 
-                try {
-                    await waitForResolved(() =>
-                        expect(chunks.length).to.eq(chunksCount * 2)
-                    );
-                } catch (error) {
-                    throw error;
-                }
+                await waitForResolved(() =>
+                    expect(chunks.length).to.eq(chunksCount * 2)
+                );
             });
         });
 

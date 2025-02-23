@@ -289,7 +289,7 @@ const createVideoEncoder = (properties: {
 
         const closeFn = encoder.close.bind(encoder);
         encoder.close = () => {
-            abortController.abort();
+            //  abortController.abort(); TODO?
             console.log("CLOSE!");
             try {
                 closeFn();
@@ -388,6 +388,7 @@ const createAudioEncoder = async (properties: {
             target: "all",
         });
 
+        let lastAudioTimestamp = -1;
         const wavListener = (ev: {
             data: { audioBuffer: Uint8Array };
             timeStamp: number;
@@ -404,15 +405,20 @@ const createAudioEncoder = async (properties: {
                   lastAudioTime = currentTime; */
             // console.log("AUDIO PUT CHUNK", { id: toBase64(audioTrack.id), timestamp, diff: wavEncoder.current.audioContext.currentTime * 1e6 - startPlayTime, timeStamp: ev.timeStamp, startPlayTime, wavEncoderTime: wavEncoder.current.audioContext.currentTime });
 
+            let thisTime = Math.round(
+                properties.wavEncoder.current.audioContext.currentTime * 1e6 -
+                    startPlayTime
+            );
+            if (thisTime == lastAudioTimestamp) {
+                thisTime++;
+            }
+            lastAudioTimestamp = thisTime;
+
             audioTrack.put(
                 new Chunk({
                     type: "key",
                     chunk: audioBuffer,
-                    time: Math.round(
-                        properties.wavEncoder.current.audioContext.currentTime *
-                            1e6 -
-                            startPlayTime
-                    ),
+                    time: thisTime,
                 })
             );
             /*     lastAudioTimestamp = timestamp; */
@@ -436,10 +442,7 @@ const createAudioEncoder = async (properties: {
             // await audioTrack.close() TODD should we also close? (we have disabled this because we need to ensure replication before doing this)
             properties.mediaStreamDBs.setEnd(
                 audioTrack,
-                properties.time.type === "live"
-                    ? undefined
-                    : properties.wavEncoder.current.audioContext.currentTime *
-                          1e6
+                properties.time.type === "live" ? undefined : lastAudioTimestamp
             );
         };
 
@@ -895,9 +898,8 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
 
                     break;
                 case "demo":
-                    videoElementRef.muted = true;
                     videoElementRef.src =
-                        import.meta.env.BASE_URL + "corgi.mp4";
+                        import.meta.env.BASE_URL + "parrot.mp4";
                     videoElementRef.preload = "auto";
                     videoElementRef.load();
                     break;
@@ -1026,9 +1028,8 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                         : Math.round(metadata.mediaTime * 1e6);
                 const timestamp =
                     loopCounter.current > 0
-                        ? (loopCounter.current * videoRef.duration +
-                              observedMediaTime) *
-                          1e6
+                        ? loopCounter.current * videoRef.duration * 1e6 +
+                          observedMediaTime
                         : isSafari
                         ? observedMediaTime
                         : undefined;
@@ -1133,12 +1134,12 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                                          if (metadata?.presentedFrames && metadata?.presentedFrames > 10 && droppedFrames / metadata.presentedFrames > 0.1) {
                                              videoRef.playbackRate = 0.3;
                                          } */
-                                        console.log({
+                                        /* console.log({
                                             frameCounter: totalFrameCounter,
                                             playedFrame:
                                                 metadata?.presentedFrames,
                                             droppedFrames,
-                                        });
+                                        }); */
                                         totalFrameCounter++;
                                         const insertKeyframe =
                                             Math.round(

@@ -504,6 +504,7 @@ export const View = (properties: DBArgs) => {
         if (!peer || !properties.stream || properties.stream.closed) {
             return;
         }
+        properties.stream.listenForMaxTimeChanges(true);
         setProgress(cursor);
 
         return () => {};
@@ -651,11 +652,6 @@ export const View = (properties: DBArgs) => {
                                             return;
                                         }
 
-                                        console.log(
-                                            "SELECT ",
-                                            settings,
-                                            streamListener.current?.options()
-                                        );
                                         const streamToOpen =
                                             streamListener.current
                                                 ?.options()

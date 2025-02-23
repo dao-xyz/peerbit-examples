@@ -4,11 +4,18 @@ import { MediaStreamDB } from "@peerbit/video-lib";
 
 export const TimeSlider = (props: {
     mediaStreamsDB: MediaStreamDB;
+    videoRef?: HTMLVideoElement;
     progress: number | "live";
     currentTime: number;
     setProgress: (progress: number | "live") => void;
     maxTime: number;
 }) => {
+    /* console.log("SLIDER", props.progress === "live"
+        ? 1
+        : props.currentTime / props.maxTime || 0, {
+        maxTime: props.maxTime,
+        currnetTime: props.currentTime
+    }) */
     return (
         <div
             className="flex justify-center w-full"
@@ -34,6 +41,7 @@ export const TimeSlider = (props: {
             >
                 <ReplicationRangeVisualization
                     mediaStreams={props.mediaStreamsDB}
+                    videoRef={props.videoRef}
                 />
 
                 <RadixSlider.Track className="bg-gray-200 opacity-0 relative flex-grow rounded-full h-full group-hover:h-2 group-hover:opacity-50 transition-all">

@@ -1417,9 +1417,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
         // Find max media time
         // That is the media time corresponding to the track with the latest chunk
         let startProgressBarMediaTime: () => number | "live" | undefined;
-        let onMaxTimeChange:
-            | ((time: number) => Promise<void> | void)
-            | undefined = undefined;
 
         let laggingSources: Map<string, number> = new Map();
         let laggiestTime: number | undefined = undefined;
@@ -1428,6 +1425,12 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
         };
 
         let accumulatedLag: number = 0;
+
+        let maxtimeListener = (ev: { detail: { maxTime: number } }) => {
+            opts?.onMaxTimeChange?.({ maxTime: ev.detail.maxTime });
+        };
+
+        this.events.addEventListener("maxTime", maxtimeListener);
 
         const totalLag = (now = Number(hrtimeMicroSeconds())) => {
             const currentLag = laggiestTime != null ? now - laggiestTime : 0;
@@ -1508,17 +1511,17 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
 
             let currentTrack = currentTracks.get(properties.track.idString);
             if (!currentTrack) {
-                throw new Error(
-                    "Unexpected missing track buffer: " +
-                        properties.track.toString()
-                );
+                if (!closed) {
+                    console.warn(
+                        "Unexpected missing track buffer: " +
+                            properties.track.toString()
+                    );
+                }
+                return;
             }
             currentTrack.chunks.push(properties.chunk);
 
-            if (this.maxTime == null || currentPlayedTime > this.maxTime) {
-                this.maxTime = currentPlayedTime;
-                await onMaxTimexChangeWrapped?.(currentPlayedTime);
-            }
+            this.maybeUpdateMaxTime?.(currentPlayedTime);
         };
 
         let onProgressWrapped: (properties: {
@@ -1552,13 +1555,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
             return listenForReplicationInfoStop();
         };
 
-        let onMaxTimexChangeWrapped: (
-            newMaxTime: number
-        ) => Promise<void> | void = async (newMaxTime) => {
-            await onMaxTimeChange?.(newMaxTime);
-            await opts?.onMaxTimeChange?.({ maxTime: newMaxTime });
-        };
-
         if (this.maxTime != null) {
             // previous iteration yielded a maxTime that we want to annouce to the caller (else this might never be emitted again)
             await opts?.onMaxTimeChange?.({ maxTime: this.maxTime });
@@ -1584,7 +1580,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
             const out = this.listenForMaxTimeChanges(opts?.keepTracksOpen);
 
             let listener = (ev: { detail: { maxTime: number } }) => {
-                onMaxTimexChangeWrapped(ev.detail.maxTime);
+                this.maybeUpdateMaxTime(ev.detail.maxTime);
             };
             this.events.addEventListener("maxTime", listener);
             stopMaxTimeSync = () => {
@@ -1736,10 +1732,14 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                             startAt <= (currentTime as number);
 
                         if (isLaterThanStartProgress()) {
+                            let donePreloading = preloadIsDone();
+                            if (donePreloading) {
+                                startTimer();
+                            }
                             if (
-                                preloadIsDone() &&
+                                donePreloading &&
                                 (isReadyToPlay ||
-                                    startPlayAt == null ||
+                                    /*  startPlayAt == null || */
                                     isLagging(track.address))
                             ) {
                                 updateLatestFrame(
@@ -1747,7 +1747,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                                     track,
                                     chunk.time
                                 );
-                                startTimer();
                                 await onProgressWrapped({
                                     chunk: chunk,
                                     track: track,
@@ -2020,13 +2019,6 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                     return undefined;
                 };
 
-                onMaxTimeChange = async (changeValue: number | undefined) => {
-                    /* console.log("MAXTIME CHANGE", changeValue, this.maxTime); */
-                    // TODO what is expected here? when we receive new max time should we restart in some to aggregate more frames?
-                    // iterator = await createIterator();
-                    /// await iterator?.close();
-                };
-
                 const bufferLoop = async (currentSession: number) => {
                     if (!iterator) {
                         iterator = await createIterator();
@@ -2104,12 +2096,10 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
 
                                 console.log("RM TRACK NO MORE CHUNKS", {
                                     deleteImmediately:
-                                        currentTracks.get(track.idString)
-                                            ?.chunks.length === 0,
+                                        trackWithBuffer.chunks.length === 0,
                                     done: iterator?.done(),
-                                    pendingFrames: currentTracks.get(
-                                        track.idString
-                                    )?.chunks.length,
+                                    pendingFrames:
+                                        trackWithBuffer.chunks.length,
                                     track: track.toString(),
                                     address: track.address,
                                 });
@@ -2209,8 +2199,8 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                 },
                 chunks: [],
             };
-            await open();
             currentTracks.set(trackWithBuffer.track.idString, trackWithBuffer);
+            await open();
             /* console.log(
                 "ADDED TO CURRENT",
                 trackWithBuffer.track.startTime,
@@ -2521,6 +2511,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
 
             currentTracks.clear();
             this.events.removeEventListener("close", closeListener);
+            this.events.removeEventListener("maxTime", maxtimeListener);
             tracksSize > 0 && opts?.onTracksChange?.([]);
             optionsSize > 0 && opts?.onTrackOptionsChange?.([]);
         };

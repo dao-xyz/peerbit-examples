@@ -108,16 +108,20 @@ const getBarStyle = (
 
 export const ReplicationRangeVisualization = (props: {
     mediaStreams?: MediaStreamDB;
+    videoRef?: HTMLVideoElement;
 }) => {
     const resolution = 100;
-    const { maxTime } = useMaxTime({ mediaStreams: props.mediaStreams });
+    const { maxTime } = useMaxTime({
+        mediaStreams: props.mediaStreams,
+        videoRef: props.videoRef,
+    });
     const ranges = useReplicationChange({ mediaStreams: props.mediaStreams });
     const bars = ranges
         ? getBarsFromRanges({
               maxTime,
               publicKey: props.mediaStreams?.node.identity.publicKey,
               resolution,
-              ranges,
+              ranges: [...ranges.values()].flat(),
           })
         : Array.from({ length: resolution }, () => ({ count: 0 }));
 
@@ -140,7 +144,7 @@ export const ReplicationRangeVisualization = (props: {
                                     bottom: 0,
                                     width: `${100 / resolution}%`,
                                     height: `${Math.round(
-                                        (bar.count / normalizationDenom) * 30
+                                        (bar.count / normalizationDenom) * 15
                                     )}px`,
                                     ...style,
                                 }}

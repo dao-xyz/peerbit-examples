@@ -6,7 +6,11 @@ export const useMaxTime = (props?: {
     videoRef?: HTMLVideoElement;
 }) => {
     const [maxTime, setMaxTime] = useState<number | undefined>(
-        (props?.videoRef?.duration ?? 0) * 1e6
+        ((Number.isFinite(props?.videoRef?.duration)
+            ? props?.videoRef?.duration
+            : 0) ??
+            props?.mediaStreams?.maxTime ??
+            0) * 1e6
     );
 
     const maybeUpdateMaxTime = (newMaxtime: number) => {
