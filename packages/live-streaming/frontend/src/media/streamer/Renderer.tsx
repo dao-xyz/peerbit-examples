@@ -898,8 +898,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
 
                     break;
                 case "demo":
-                    videoElementRef.src =
-                        import.meta.env.BASE_URL + "parrot.mp4";
+                    videoElementRef.src = import.meta.env.BASE_URL + "bird.mp4";
                     videoElementRef.preload = "auto";
                     videoElementRef.load();
                     break;
