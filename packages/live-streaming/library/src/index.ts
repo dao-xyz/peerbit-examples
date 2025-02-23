@@ -2609,12 +2609,12 @@ export class MediaStreamDBs extends Program {
     }
 
     private _replicateAll: boolean = false;
-    s;
+
     private _streamListener: (
         args: CustomEvent<DocumentsChange<MediaStreamDB>>
     ) => void;
     async open(args?: { replicate: boolean }) {
-        this._replicateAll = args?.replicate ?? false;
+        this._replicateAll = args?.replicate ?? true;
         if (this._replicateAll) {
             this._streamListener = async (
                 ev: CustomEvent<DocumentsChange<MediaStreamDB>>
