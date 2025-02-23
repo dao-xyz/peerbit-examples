@@ -6,7 +6,7 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import events from "events";
-events.setMaxListeners(101);
+events.setMaxListeners(102);
 
 export const start = async (directory?: string | null) => {
     // if directoy is not provided open in a default directory
