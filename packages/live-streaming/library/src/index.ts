@@ -284,11 +284,6 @@ export abstract class TrackSource {
                 // nano seconds between the insertion
                 mergeSegmentMaxDelta: 1e9, // 1 second of delta. I.e. if we buffer video from two segments and there is a gap of 1 second in walltime between the commit, we merge the segments
                 fromEntry: (entry) => {
-                    /*  const out = BigInt(
-                         entry.meta.clock.timestamp.wallTime / BigInt(1e6)
-                     );
-                     console.log("OUT", out, entry.meta.clock.timestamp.wallTime)
-                     return out; */
                     return entry.meta.clock.timestamp.wallTime;
                 },
             }),
