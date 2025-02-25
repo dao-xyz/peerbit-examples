@@ -386,18 +386,14 @@ export class Files extends Program<Args> {
         return files;
     }
 
-    async listLocalChunks(parent: LargeFile) {
-        const files = await this.files.index.search(
+    async countLocalChunks(parent: LargeFile): Promise<number> {
+        const count = await this.files.index.index.count(
             new SearchRequest({
                 query: new StringMatch({ key: "parentId", value: parent.id }),
                 fetch: 0xffffffff,
-            }),
-            {
-                local: true,
-                remote: false,
-            }
+            })
         );
-        return files;
+        return count;
     }
 
     /**
