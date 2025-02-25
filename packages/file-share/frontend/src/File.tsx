@@ -14,7 +14,7 @@ export const File = (properties: {
 }) => {
     const [progress, setProgess] = useState<number | null>(null);
     const [failedDownload, setFailedDownload] = useState<boolean>(false);
-    const [replicatedChunksRatio, setReplicaatedChunksRatio] = useState(0);
+    const [replicatedChunksRatio, setReplicatedChunksRatio] = useState(0);
 
     useEffect(() => {
         if (!properties.files) {
@@ -23,12 +23,12 @@ export const File = (properties: {
 
         let fetchLocalChunks = () =>
             properties.files
-                .listLocalChunks(properties.file as LargeFile)
-                .then((r) => {
+                .countLocalChunks(properties.file as LargeFile)
+                .then((count) => {
                     properties.file instanceof LargeFile &&
-                        setReplicaatedChunksRatio(
+                        setReplicatedChunksRatio(
                             Math.round(
-                                (r.length * 100) /
+                                (count * 100) /
                                     (properties.file as LargeFile).fileIds
                                         .length
                             )
