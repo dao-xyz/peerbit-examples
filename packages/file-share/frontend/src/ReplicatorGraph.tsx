@@ -137,12 +137,21 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any, any> }) => {
                     properties.log.node.identity.publicKey.hashcode();
                 if (isMySegment) {
                     labels.push("you");
-                    console.log(
-                        "IS ME",
-                        value,
-                        await properties.log.replicationIndex.iterate().all(),
-                        properties.log.address
-                    );
+                    /*  console.log(
+                         "IS ME",
+                         value,
+                         (
+                             await properties.log.replicationIndex
+                                 .iterate()
+                                 .all()
+                         ).map((x) => {
+                             return {
+                                 hash: x.value.hash,
+                                 w: x.value.widthNormalized,
+                             };
+                         }),
+                         properties.log.address
+                     ); */
                     myIndex = i;
                 } else {
                     labels.push(value.hash.slice(0, 5) + "...");
