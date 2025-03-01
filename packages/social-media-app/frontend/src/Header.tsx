@@ -1,10 +1,10 @@
 import { useEffect, useRef, useState, forwardRef } from "react";
 import { useNames } from "./names/useNames";
 import { MdSave, MdEdit } from "react-icons/md";
-import { Path } from "./room/Path";
+import { Path } from "./canvas/Path";
 import { MdOutlineDarkMode, MdOutlineLightMode } from "react-icons/md";
 import { PiUserCircleThin } from "react-icons/pi";
-import Logo from "/android-chrome-192x192.png";
+import Logo from "/android-icon-192x192.png";
 
 export const Header = forwardRef((props: any, ref) => {
     const [theme, setTheme] = useState<"dark" | "light">(localStorage.theme);
@@ -59,7 +59,8 @@ export const Header = forwardRef((props: any, ref) => {
                 XYZ
             </span> */}
             {/* <img src={Logo} width="20px" /> */}
-            <div className="ml-auto mr-auto max-w-xl flex-1 max-h-[40px] overflow-visible">
+            <img className="ml-auto mr-2" src={Logo} width="35px" />
+            <div className="mr-auto max-w-xl flex-1 max-h-[40px] overflow-visible">
                 <Path></Path>
             </div>
             <button

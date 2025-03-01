@@ -24,6 +24,10 @@ code {
     pointer-events: none !important;
 }
 
+
+
+
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -59,10 +63,70 @@ code {
         @apply bg-neutral-50;
         @apply dark:bg-neutral-950;
     }
+
     span {
         @apply text-neutral-950;
         @apply dark:text-neutral-50;
     }
+
+    /* Base styling for headers */
+    h1,
+    h2,
+    h3,
+    h4,
+    h5 {
+        line-height: 1.2;
+        margin: 0.5em 0;
+        margin-block-start: 0.67em;
+        margin-block-end: 0.67em;
+        margin-inline-start: 0px;
+        margin-inline-end: 0px;
+        font-weight: bold;
+        unicode-bidi: isolate;
+    }
+
+    /* Individual header styles */
+    h1 {
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin-bottom: 0.6em;
+    }
+
+    h2 {
+        font-size: 2rem;
+        font-weight: 600;
+        margin-bottom: 0.5em;
+    }
+
+    h3 {
+        font-size: 1.75rem;
+        font-weight: 500;
+        margin-bottom: 0.5em;
+    }
+
+    h4 {
+        font-size: 1.5rem;
+        font-weight: 500;
+        margin-bottom: 0.5em;
+    }
+
+    h5 {
+        font-size: 1.25rem;
+        font-weight: 400;
+        margin-bottom: 0.4em;
+    }
+
+    hr {
+        /* Remove default border */
+        height: 1px;
+        /* Set the thickness */
+        margin: 2rem 0;
+        /* Vertical spacing to separate sections */
+    }
+
+
+
+
 }
 
 
@@ -71,35 +135,37 @@ code {
         @apply text-neutral-950;
         @apply dark:text-neutral-50;
     }
-       
+
     .btn {
-        @apply  py-2 px-4 rounded;
+        @apply py-2 px-4 rounded;
     }
-    
+
     .btn-icon {
         @apply text-neutral-800;
         @apply dark:text-neutral-200;
     }
+
     .btn:hover {
         @apply bg-primary-200;
         @apply dark:bg-primary-400;
 
     }
-    
-    .btn:active{
+
+    .btn:active {
         @apply bg-primary-400;
         @apply dark:bg-primary-600;
-   }
+    }
 
     .btn-icon:hover {
         @apply bg-primary-200;
         @apply dark:bg-primary-400;
 
     }
-    .btn-icon:active{
+
+    .btn-icon:active {
         @apply bg-primary-400 !important;
         @apply dark:bg-primary-600 !important;
-       
+
     }
 
     .btn-icon {
@@ -111,6 +177,7 @@ code {
         outline: none;
         @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
     }
+
     .btn-toggle[data-state='on'] {
         @apply bg-primary-400;
         @apply dark:bg-primary-600;
@@ -118,10 +185,10 @@ code {
         transform: translateY(4px) !important;
     }
 
- 
+
     .btn-toggle:focus {
-        
-       /*  box-shadow: 0 0 0 2px black; */
+
+        /*  box-shadow: 0 0 0 2px black; */
         outline: none;
     }
 
@@ -131,8 +198,7 @@ code {
         @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
     }
 
-    .btn-elevated:active 
-    {
+    .btn-elevated:active {
         box-shadow: 0 1px #666 !important;
         transform: translateY(4px) !important;
     }
@@ -140,31 +206,68 @@ code {
     .btn-icon-sx>* {
         @apply w-4 h-4
     }
-    
+
     .btn-icon-md>* {
         @apply w-6 h-6
     }
-    
+
     .btn-icon-lg>* {
         @apply w-6 h-6
     }
-    
+
     .btn-icon-lg>* {
         @apply w-8 h-8
     }
-   
- 
+
+
     .content-container {
         height: calc(100vh - 60px);
     }
-   
-    
- 
+
+    .menu-item {
+        @apply flex items-center w-full p-2;
+
+        /*  @apply py-2 px-4; */
+        @apply text-neutral-800;
+        @apply dark:text-neutral-200;
+        @apply hover:bg-primary-200;
+        @apply dark:hover:bg-primary-400;
+        cursor: pointer;
+
+    }
+
+    .menu-item:hover {
+        @apply bg-primary-200;
+        @apply dark:bg-primary-400;
+    }
+
+    .menu-item:active {
+        @apply bg-primary-400;
+        @apply dark:bg-primary-600;
+    }
+
+    .menu-item:focus {
+        @apply bg-primary-200;
+        @apply dark:bg-primary-400;
+    }
+
+    .menu-item[data-disabled] {
+        @apply text-neutral-400;
+        @apply dark:text-neutral-600;
+        @apply cursor-not-allowed;
+    }
+
+    .outline-auto {
+        outline: auto;
+    }
+
+
+
 }
 
 
 .tagify {
- /*    flex-wrap: nowrap;
+    /*    flex-wrap: nowrap;
     overflow: auto; */
     border-radius: 1rem;
     display: flex;
@@ -172,9 +275,9 @@ code {
 
     --tag-bg: transparent;
     --tag-border-radius: 0.75rem;
-    --tag-hover:  theme('colors.primary.200');
+    --tag-hover: theme('colors.primary.200');
     --tags-focus-border-color: theme('colors.primary.400');
-    --placeholder-color:  theme('colors.neutral.400');
+    --placeholder-color: theme('colors.neutral.400');
     /*     --tags-border-color: transparent; */
 }
 
@@ -185,9 +288,9 @@ code {
 .tagify__tag {
     @apply border-neutral-200 dark:border-neutral-400 border-solid border-[2px] rounded-xl;
 }
-.tagify__tag__removeBtn
-{
-  @apply dark:text-white
+
+.tagify__tag__removeBtn {
+    @apply dark:text-white
 }
 
 
@@ -196,12 +299,11 @@ code {
 }
 
 .tagify__tag-text, .tagify__input {
-	white-space: nowrap !important;
-} 
+    white-space: nowrap !important;
+}
 
 
 /* .tagify__input
 {
     @apply before:opacity-100 !important
 } */
-

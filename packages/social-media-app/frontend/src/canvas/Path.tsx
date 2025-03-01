@@ -4,7 +4,7 @@ import Tags from "@yaireo/tagify/dist/react.tagify";
 import "./path.css";
 import Tagify from "@yaireo/tagify";
 import { getRoomByPath } from "../routes";
-import { getRoomPathFromURL } from "../useRooms";
+import { getRoomPathFromURL } from "../useSpaces";
 import { MdSearch } from "react-icons/md";
 
 // Tagify settings object
@@ -114,46 +114,76 @@ export const Path = () => {
             {focus ? (
                 <Tags
                     tagifyRef={tagifyRef}
+                    className={""}
                     settings={{
                         ...settings,
 
                         templates: {
-                            tag(tagData: any, _ref: Tagify) {
-                                let isFirst = _ref.value.length === 0;
-                                let _s = _ref.settings;
+                            /*   if (!focus) {
+                           return `<tag title="${tagData.title || tagData.value} tabIndex="${_s.a11y.focusableTags ? 0 : -1}" ${this.getAttributes(tagData)} class="${_s.classNames.tag} ${tagData.class || ""} m-0 !border-hidden !pointer-events-none" ><div>${(isFirst ? "" : "/")}${(tagData[_s.tagTextProp] || tagData.value)}</div></tag>`
+                       } */
 
-                                /*   if (!focus) {
-                                  return `<tag title="${tagData.title || tagData.value} tabIndex="${_s.a11y.focusableTags ? 0 : -1}" ${this.getAttributes(tagData)} class="${_s.classNames.tag} ${tagData.class || ""} m-0 !border-hidden !pointer-events-none" ><div>${(isFirst ? "" : "/")}${(tagData[_s.tagTextProp] || tagData.value)}</div></tag>`
-                              } */
+                            /*  tag(tagData: any, _ref: Tagify) {
+                                 let isFirst = _ref.value.length === 0;
+                                 let _s = _ref.settings;
+ 
+                          
+ 
+                                 let prefix = "";
+                                 let prefixCss = "";
+                                 if (!isFirst) {
+                                     prefix = `<span class="${_s.classNames.tagText} absolute -left-3">/</span>`;
+                                     prefixCss = "ml-5";
+                                 }
+ 
+                                 let tagString = `<tag title="${tagData.title || tagData.value
+                                     }"
+                       contenteditable='false'
+                       spellcheck='false'
+                       tabIndex="${_s.a11y.focusableTags ? 0 : -1}"
+                       className="${_s.classNames.tag} ${tagData.class || ""
+                                     } ${prefixCss} leading-[13px]"
+                       ${this.getAttributes(tagData)}>
+             ${prefix}
+               <x title='' class="${_s.classNames.tagX
+                                     }" role='button' aria-label='remove tag'></x>
+               <div>
+                   <span class="${_s.classNames.tagText}">${tagData[_s.tagTextProp] || tagData.value
+                                     }</span>
+               </div>
+           </tag>`;
+                                 return tagString;
+                             }, */
 
-                                let prefix = "";
-                                let prefixCss = "";
-                                if (!isFirst) {
-                                    prefix = `<span class="${_s.classNames.tagText} absolute -left-3">/</span>`;
-                                    prefixCss = "ml-5";
-                                }
-
-                                let tagString = `<tag title="${
+                            tag(tagData, { settings: _s }) {
+                                return `<tag title="${
                                     tagData.title || tagData.value
                                 }"
-                      contenteditable='false'
-                      spellcheck='false'
-                      tabIndex="${_s.a11y.focusableTags ? 0 : -1}"
-                      class="${_s.classNames.tag} ${
+                                            contenteditable='false'
+                                            tabIndex="${
+                                                _s.a11y.focusableTags ? 0 : -1
+                                            }"
+                                            class="${_s.classNames.tag} ${
                                     tagData.class || ""
-                                } ${prefixCss} leading-[13px]"
-                      ${this.getAttributes(tagData)}>
-            ${prefix}
-              <x title='' class="${
-                  _s.classNames.tagX
-              }" role='button' aria-label='remove tag'></x>
-              <div>
-                  <span class="${_s.classNames.tagText}">${
+                                }"
+                                            ${this.getAttributes(tagData)}>
+                                    <x title='' tabIndex="${
+                                        _s.a11y.focusableTags ? 0 : -1
+                                    }" class="${
+                                    _s.classNames.tagX
+                                }" role='button' aria-label='remove tag'></x>
+                                    <div>
+                                        <span ${
+                                            _s.mode === "select" && _s.userInput
+                                                ? "contenteditable='true'"
+                                                : ""
+                                        } autocapitalize="false" autocorrect="off" spellcheck='false' class="${
+                                    _s.classNames.tagText
+                                }">${
                                     tagData[_s.tagTextProp] || tagData.value
                                 }</span>
-              </div>
-          </tag>`;
-                                return tagString;
+                                    </div>
+                                </tag>`;
                             },
                         },
                     }}

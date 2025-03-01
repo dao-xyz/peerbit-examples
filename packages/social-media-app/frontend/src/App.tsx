@@ -2,7 +2,7 @@ import { releaseKey } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
 import { NameProvider } from "./names/useNames";
 import { getRootKeypair } from "./keys";
-import { RoomProvider } from "./useRooms";
+import { SpaceProvider } from "./useSpaces";
 import { HashRouter } from "react-router-dom";
 import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
@@ -65,6 +65,7 @@ const setTheme = () => {
         (!("theme" in localStorage) &&
             window.matchMedia("(prefers-color-scheme: dark)").matches)
     ) {
+        localStorage.setItem("theme", "dark");
         document.documentElement.classList.add("dark");
     } else {
         document.documentElement.classList.remove("dark");
@@ -81,8 +82,7 @@ const setTheme = () => {
 
     /* document.documentElement.classList.remove('dark') */
 };
-console.log(keypair.publicKey.toString());
-const HEIGHT = 50;
+
 import { inIframe } from "@peerbit/react";
 
 export const App = () => {
@@ -106,7 +106,7 @@ export const App = () => {
             <NameProvider>
                 <HashRouter basename="/">
                     <AppProvider>
-                        <RoomProvider>
+                        <SpaceProvider>
                             <>
                                 {!inIframe() && <Header></Header>}
                                 <div
@@ -118,7 +118,7 @@ export const App = () => {
                                     <BaseRoutes />
                                 </div>
                             </>
-                        </RoomProvider>
+                        </SpaceProvider>
                     </AppProvider>
                 </HashRouter>
             </NameProvider>

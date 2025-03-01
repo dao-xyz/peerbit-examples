@@ -346,7 +346,7 @@ code {
         @apply dark:bg-primary-400;
     }
 
-    .menu-item:disabled {
+    .menu-item[data-disabled] {
         @apply text-neutral-400;
         @apply dark:text-neutral-600;
         @apply cursor-not-allowed;

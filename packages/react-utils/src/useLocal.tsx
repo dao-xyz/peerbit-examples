@@ -1,7 +1,10 @@
 import { ClosedError, Documents, SearchRequest } from "@peerbit/document";
 import { useEffect, useState } from "react";
 export const useLocal = <T extends Record<string, any>>(
-    db?: Documents<T, any>
+    db?: Documents<T, any>,
+    options?: {
+        onChanges?: (all: T[]) => void;
+    }
 ) => {
     const [all, setAll] = useState<T[]>([]);
     useEffect(() => {
@@ -11,12 +14,14 @@ export const useLocal = <T extends Record<string, any>>(
 
         const changeListener = async () => {
             try {
-                setAll(
-                    await db.index.search(new SearchRequest(), {
-                        local: true,
-                        remote: false,
-                    })
-                );
+                const all = await db.index.search(new SearchRequest(), {
+                    local: true,
+                    remote: false,
+                });
+                setAll((_prev) => {
+                    options?.onChanges?.(all);
+                    return all;
+                });
             } catch (error) {
                 if (error instanceof ClosedError) {
                     // ignore

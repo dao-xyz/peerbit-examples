@@ -18,7 +18,7 @@
         "@dao-xyz/social": "^0",
         "react-grid-layout-next": "^2.2.0",
         "@peerbit/peer-names": "^0.0.1",
-        "iframe-resizer": "^4.3.4",
+        "iframe-resizer": "^5",
         "peerbit": "^4",
         "@peerbit/react": "*",
         "react": "^18.2.0",
@@ -29,7 +29,8 @@
         "react-icons": "^5.3.0",
         "@radix-ui/react-toggle": "^1.0.3",
         "@headlessui/react": "^1.7.15",
-        "axios": "^1.4.0"
+        "axios": "^1.4.0",
+        "marked-react": "^3"
     },
     "devDependencies": {
         "@types/react": "^18.2.46",

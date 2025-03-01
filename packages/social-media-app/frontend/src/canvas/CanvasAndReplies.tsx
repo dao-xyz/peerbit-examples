@@ -1,15 +1,15 @@
 import { usePeer } from "@peerbit/react";
-import { useRooms } from "../useRooms.js";
-import { useEffect, useState } from "react";
-import { Room as RoomView } from "./Room.js";
-import { Header } from "./Header.js";
-import { CreateRoom } from "./CreateRoom.js";
-import { Spinner } from "../utils/Spinner.js";
-import { inIframe } from "@peerbit/react";
+import { useSpaces } from "../useSpaces.js";
+import { useEffect } from "react";
+import { Canvas as CanvasView } from "./Canvas.js";
+import { Replies as RepliesView } from "./Replies.js";
 
-export const Rooms = () => {
+import { CreateRoom } from "./CreateSpace.js";
+import { Spinner } from "../utils/Spinner.js";
+
+export const CanvasAndReplies = () => {
     const { peer } = usePeer();
-    const { root, location, loading, path } = useRooms();
+    const { root, canvases: location, loading, path } = useSpaces();
 
     useEffect(() => {
         if (!peer || !root) {
@@ -17,9 +17,6 @@ export const Rooms = () => {
         }
     }, [peer?.identity.publicKey.hashcode(), root]);
 
-    if (inIframe()) {
-        console.log("???", location, path, root);
-    }
     return (
         <>
             {location.length === 0 && (
@@ -41,8 +38,13 @@ export const Rooms = () => {
                 </div>
             )}
             {location.length > 0 &&
-                location.map((room, ix) => (
-                    <RoomView key={ix} room={room}></RoomView>
+                location.map((canvas, ix) => (
+                    <div key={ix} className="flex flex-col">
+                        <div className="p-5 rounded-md">
+                            <CanvasView canvas={canvas}></CanvasView>
+                        </div>
+                        <RepliesView canvas={canvas}></RepliesView>
+                    </div>
                 ))}
         </>
     );

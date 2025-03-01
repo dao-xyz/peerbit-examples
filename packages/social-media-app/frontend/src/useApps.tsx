@@ -7,13 +7,20 @@ import React, {
     useReducer,
 } from "react";
 import { AppPreview, SimpleWebManifest } from "@dao-xyz/app-service";
-import { BrowsingHistory } from "@dao-xyz/social";
+import {
+    AbstractStaticContent,
+    BrowsingHistory,
+    StaticContent,
+    StaticImage,
+    StaticMarkdownText,
+} from "@dao-xyz/social";
 import {
     SearchRequest,
     StringMatch,
     Or,
     StringMatchMethod,
 } from "@peerbit/document";
+import { Constructor } from "@dao-xyz/borsh";
 
 interface IApps {
     apps: SimpleWebManifest[];
@@ -40,21 +47,57 @@ export const getRoomPathFromURL = (pathname: string): string[] => {
     return path;
 };
 
-interface CuratedApp {
+interface CuratedWebApp {
+    type: "web";
     match: string | string[];
     title?: string | ((manifest: SimpleWebManifest) => string);
     prefixReplace: string;
     suffixReplace: string;
 }
 
+interface CuratedNativeApp {
+    type: "native";
+    match: string | string[];
+    title: string;
+    content: Constructor<AbstractStaticContent>;
+    manifest: SimpleWebManifest;
+}
+
+type CuratedApp = CuratedNativeApp | CuratedWebApp;
+
 const curatedApps: CuratedApp[] = [
     {
+        type: "native",
+        match: "text",
+        title: "Text",
+        content: StaticMarkdownText,
+        manifest: new SimpleWebManifest({
+            url: "native:text",
+            title: "Text",
+            metaDescription: "A simple text editor",
+            icon: "/chat-icon.svg",
+        }),
+    },
+    {
+        type: "native",
+        match: "Image",
+        title: "Image",
+        content: StaticImage,
+        manifest: new SimpleWebManifest({
+            url: "native:image",
+            title: "Image",
+            metaDescription: "A simple text editor",
+        }),
+    },
+    {
+        type: "web",
         match: "https://kick.com",
         title: "Kick.com",
         prefixReplace: "https://player.kick.com",
         suffixReplace: "?autoplay=true",
     },
     {
+        type: "web",
         match: "https://twitch.tv/",
         title: (manifest: SimpleWebManifest) =>
             "Twitch Channel " +
@@ -63,6 +106,7 @@ const curatedApps: CuratedApp[] = [
         suffixReplace: "&parent=" + window.location.host,
     },
     {
+        type: "web",
         match: [
             "https://www.youtube.com/watch?v=",
             "https://youtube.com/watch?v=",
@@ -72,37 +116,45 @@ const curatedApps: CuratedApp[] = [
     },
 ];
 
-const getCuratedManifest = (
-    curated: CuratedApp,
-    url: string,
-    fromManifest: SimpleWebManifest
-): SimpleWebManifest => {
-    if (typeof curated.title === "string") {
+const getCuratedManifest = (props: {
+    curated: CuratedApp;
+    url: string;
+    fromManifest: SimpleWebManifest;
+}): SimpleWebManifest => {
+    if (typeof props.curated.title === "string") {
         return new SimpleWebManifest({
-            ...fromManifest,
-            title: curated.title,
-            url,
+            ...props.fromManifest,
+            title: props.curated.title,
+            url: props.url,
         });
     }
     return new SimpleWebManifest({
-        ...fromManifest,
-        title: curated.title ? curated.title(fromManifest) : fromManifest.title,
-        url,
+        ...props.fromManifest,
+        title: props.curated.title
+            ? props.curated.title(props.fromManifest)
+            : props.fromManifest.title,
+        url: props.url,
     });
 };
-const getCurated = (url: string) => {
+
+const getCurated = (rawInput: string, maybeUrl?: string) => {
     for (const app of curatedApps) {
         for (const match of Array.isArray(app.match)
             ? app.match
             : [app.match]) {
-            if (url.startsWith(match)) {
+            console.log("MATCH ?" + rawInput, match);
+            if (match.startsWith(rawInput)) {
+                return app;
+            }
+
+            if (maybeUrl?.startsWith(match)) {
                 return app;
             }
         }
     }
 };
 
-const resolveCuratedUrl = (app: CuratedApp, url: string) => {
+const resolveCuratedUrl = (app: CuratedWebApp, url: string) => {
     for (const match of Array.isArray(app.match) ? app.match : [app.match]) {
         if (url.startsWith(match)) {
             let newUrl =
@@ -129,7 +181,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
     );
 
     useEffect(() => {
-        if (!peer) {
+        if (!peer || (true as any)) {
             return;
         }
 
@@ -163,51 +215,55 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
             search: async (urlOrName) => {
                 let result: Map<string, SimpleWebManifest> = new Map();
 
-                let maybeUrl: string | undefined = undefined;
+                let providedUrl: string | undefined = undefined;
                 try {
                     new URL(urlOrName);
-                    maybeUrl = urlOrName;
+                    providedUrl = urlOrName;
                 } catch (error) {
                     try {
                         let withProtocol = "https://" + urlOrName;
                         new URL(withProtocol);
-                        maybeUrl = withProtocol;
+                        providedUrl = withProtocol;
                     } catch (error) {
                         urlOrName = undefined;
                     }
                 }
 
-                const resolvedFromUrl = await appServiceRef.current.resolve(
-                    maybeUrl
-                );
-                if (resolvedFromUrl) {
-                    result.set(urlOrName, resolvedFromUrl);
+                const resolvedManifestFromUrl =
+                    await appServiceRef.current?.resolve(providedUrl);
+                if (resolvedManifestFromUrl) {
+                    result.set(urlOrName, resolvedManifestFromUrl);
                 }
 
                 // Curated apps are url transformations that are wanted
                 // e.g. embedding twitch directly does not work, but there are embeddable urls that we actually want to use
                 // though end users might just want to copy a raw twitch url and are expecting viewable results
-                const curatedApp = maybeUrl && getCurated(maybeUrl);
-                let curatedUrl =
-                    curatedApp && resolveCuratedUrl(curatedApp, maybeUrl);
-                if (resolvedFromUrl && curatedApp) {
-                    console.log(
-                        "CURATED",
-                        curatedUrl,
-                        getCuratedManifest(
-                            curatedApp,
-                            curatedUrl,
-                            resolvedFromUrl
-                        )
-                    );
-                    result.set(
-                        curatedUrl,
-                        getCuratedManifest(
-                            curatedApp,
-                            curatedUrl,
-                            resolvedFromUrl
-                        )
-                    );
+                const curatedApp = getCurated(urlOrName, providedUrl);
+                console.log("RESOLVED CURATED FROM", urlOrName, curatedApp);
+
+                if (curatedApp) {
+                    if (curatedApp.type === "web") {
+                        let curatedUrl =
+                            curatedApp &&
+                            resolveCuratedUrl(curatedApp, providedUrl);
+                        if (resolvedManifestFromUrl) {
+                            result.set(
+                                curatedUrl,
+                                getCuratedManifest({
+                                    curated: curatedApp,
+                                    url: curatedUrl,
+                                    fromManifest: resolvedManifestFromUrl,
+                                })
+                            );
+                        }
+                    } else {
+                        console.log(
+                            "SET RESULT",
+                            curatedApp.title,
+                            curatedApp.manifest
+                        );
+                        result.set(curatedApp.title, curatedApp.manifest);
+                    }
                 }
 
                 // historical searches
@@ -240,6 +296,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                         }
                     }
                 }
+
                 return [...result.values()];
             },
             resolve: async (url) => {

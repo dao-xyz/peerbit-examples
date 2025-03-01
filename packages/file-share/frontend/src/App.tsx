@@ -4,8 +4,12 @@ import { HashRouter } from "react-router-dom";
 import { Footer } from "./Footer";
 /* import { enable } from "@libp2p/logger";
 enable("libp2p:*"); */
-document.documentElement.classList.add("dark");
+/* import { logger } from "@peerbit/logger";
 
+const loggefr = logger({ module: "shared-log" })
+loggefr.level = 'trace'
+loggefr.trace("hello") */
+document.documentElement.classList.add("dark");
 export const App = () => {
     return (
         <PeerProvider

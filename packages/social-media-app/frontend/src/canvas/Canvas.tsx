@@ -8,16 +8,17 @@ import {
     forwardRef,
 } from "react";
 
-import { TEXT_APP } from "../routes.js";
-import { inIframe, usePeer } from "@peerbit/react";
+import { inIframe, useLocal, usePeer } from "@peerbit/react";
 import {
-    Room as RoomDB,
+    Canvas as CanvasDB,
     Element,
     Layout,
     IFrameContent,
     ElementContent,
+    StaticContent,
+    StaticMarkdownText,
 } from "@dao-xyz/social";
-import iFrameResize from "iframe-resizer";
+import iFrameResizer from "@iframe-resizer/parent";
 import { SearchRequest } from "@peerbit/document";
 import { useNames } from "../names/useNames.js";
 import "react-grid-layout-next/css/styles.css";
@@ -30,10 +31,12 @@ import {
     resolveRowHeight,
 } from "react-grid-layout-next";
 import useWidth from "./useWidth.js";
-import { equals } from "uint8arrays";
+import { concat, equals } from "uint8arrays";
 import "./Canvas.css";
 import { Frame } from "./Frame.js";
-import { ToolbarVertical } from "./ToolbarVertical.js";
+import { Create } from "./Create.js";
+import { delay } from "@peerbit/time";
+import { sha256Sync } from "@peerbit/crypto";
 
 const ReactGridLayout = /* WidthProvider */ RGL;
 
@@ -60,17 +63,26 @@ const getLayouts = (rects: Element[]) => {
 
 let updateRectsTimeout: ReturnType<typeof setTimeout> = undefined;
 
-export const Room = (properties: { room: RoomDB }) => {
+export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
     const { peer } = usePeer();
-    const [rects, setRects] = useState<Element[]>([]);
     const [editMode, setEditMode] = useState(false);
-    const pendingRef = useRef<Element[]>([]);
-    const rectsRef = useRef<Element[]>(rects);
+    /*     const pendingRef = useRef<Element[]>([]); */
+
+    /*     const rectsRef = useRef<Element[]>(rects); */
     const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
         new Map()
     );
 
     const [layouts, setLayouts] = useState<Record<string, RGLayout>>({});
+
+    const rects = useLocal(properties?.canvas.elements, {
+        onChanges(all) {
+            setLayouts(getLayouts(all));
+        },
+    });
+
+    const [pendingRects, setPendingRects] = useState<Element[]>([]);
+
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
     const { name, setName } = useNames();
     const [focused, setFocused] = useState<number>();
@@ -96,16 +108,26 @@ export const Room = (properties: { room: RoomDB }) => {
     forceUpdate()
 }, [properties.editMode]) */
 
+    /* useEffect(() => {
+        clearTimeout(updateRectsTimeout);
+        updateRectsTimeout = setTimeout(() => {
+            console.log("UPDATE LAYOUTS", rects,)
+            setLayouts(getLayouts(rects));
+
+        }, 500);
+    }, rects) */
+
     const { width: gridLayoutWidth, ref: gridLayoutRef } = useWidth(0); // we choose 0 so that the initial layout will be optimized for 0 width (xxs)
     const addRect = async (
         content: ElementContent,
         options: {
+            id?: Uint8Array;
             pending: boolean;
         } = { pending: false }
     ) => {
         // await setName(name); // Reinitialize names, so that all keypairs get associated with the name
 
-        let maxY = rectsRef.current
+        let maxY = rects /* rectsRef.current */
             .map((x) => x.location)
             .flat()
             .filter((x) => x.breakpoint === latestBreakpoint.current)
@@ -113,9 +135,14 @@ export const Room = (properties: { room: RoomDB }) => {
                 (prev, current, ix) => Math.max(current.y + current.h, prev),
                 -1
             );
-        console.log("CALCUCATE MAX Y", maxY, rectsRef.current.length);
+        /*    console.log(
+               "CALCUCATE MAX Y",
+               maxY,
+               rects /// rectsRef.current.length
+           ); */
         let element = new Element({
             publicKey: peer.identity.publicKey,
+            id: options.id,
             location: [
                 new Layout({
                     breakpoint: latestBreakpoint.current,
@@ -130,97 +157,144 @@ export const Room = (properties: { room: RoomDB }) => {
         });
 
         if (options.pending) {
-            /* if (
-                pendingRef.current &&
-                pendingRef.current.find((x) => equals(x.id, element.id))
+            if (
+                /*  pendingRef.current &&
+                 pendingRef.current.find((x) => equals(x.id, element.id)) */
+
+                pendingRects &&
+                pendingRects.find((x) => equals(x.id, element.id))
             ) {
-                throw new Error("Already have an pending element");
+                // throw new Error("Already have an pending element");
+                return;
             }
-            if (pendingRef.current.length > 0) {
+            /*  if (pendingRef.current.length > 0) {
                 throw new Error("Unpexted dangling rect");
             } */
-            pendingRef.current.push(element);
-            console.log("PUSH PENDING", pendingRef.current.length);
+            pendingRects.push(element);
+            // console.log("PUSH PENDING", pendingRef.current.length);
         } else {
-            properties.room.elements.put(element);
+            properties.canvas.elements.put(element);
         }
     };
 
     const savePending = async () => {
-        if (!pendingRef.current) {
+        /*  if (!pendingRef.current) {
+             throw new Error("Missing pending element");
+         }
+ 
+         await Promise.all(
+             pendingRef.current.map((x) => properties.canvas.elements.put(x))
+         );
+         forceUpdate();
+         pendingRef.current = [];
+         return pendingRef.current; */
+
+        if (!pendingRects) {
             throw new Error("Missing pending element");
         }
 
         await Promise.all(
-            pendingRef.current.map((x) => properties.room.elements.put(x))
+            pendingRects.map((x) => properties.canvas.elements.put(x))
         );
         forceUpdate();
-        pendingRef.current = [];
-        return pendingRef.current;
+        setPendingRects([]);
+        return pendingRects;
     };
 
     const updateRects = async (newRects?: Element[], timeout = 500) => {
+        if (true) {
+            return;
+        }
+
         if (!newRects) {
-            if (!properties.room.elements.index.index) {
-                console.error(properties.room.elements.index.closed);
+            if (!properties.canvas.elements.index.index) {
+                console.error(properties.canvas.elements.index.closed);
                 throw new Error(
                     "Room is not open, because index does not exit"
                 );
-                return;
             }
+            await delay(3000);
             newRects = (
-                await properties.room.elements.index.search(new SearchRequest())
+                await properties.canvas.elements.index.search(
+                    new SearchRequest()
+                )
             ).filter((x) => !!x);
-            if (pendingRef.current) {
-                for (const pending of pendingRef.current) {
-                    if (!newRects.find((x) => equals(x.id, pending.id))) {
-                        console.log(
-                            "COULD NOT FIND ",
-                            pending.id,
-                            "FROM",
-                            newRects
-                        );
-                        newRects.push(pending);
-                    }
-                }
-            }
+            /* console.log(
+                "RECTS FROM REQUEST",
+                properties.canvas.address,
+                newRects.length,
+                pendingRef.current?.length
+            ); */
+            /*   if (pendingRef.current) {
+                  for (const pending of pendingRef.current) {
+                      if (!newRects.find((x) => equals(x.id, pending.id))) {
+  
+                          newRects.push(pending);
+                      } else {
+                          console.log("ALREADY HAVE RECT", pending);
+                      }
+                  }
+              } */
         }
-        clearTimeout(updateRectsTimeout);
-
-        /*         rectsRef.current = newRects;
+        //clearTimeout(updateRectsTimeout);
+        /* rectsRef.current = newRects; */
+        /*         
                 setRects(newRects);
                 setLayouts(getLayouts(newRects)); */
-
+        console.log("SET RECTS BEFRE TIMEOUT", newRects);
+        if (true as any) {
+            return;
+        }
         updateRectsTimeout = setTimeout(() => {
-            rectsRef.current = newRects;
-            setRects(newRects);
+            /*     rectsRef.current = newRects; */
+            console.log("SET RECTS", newRects);
+            /*  setRects([...newRects]); */
             setLayouts(getLayouts(newRects));
         }, timeout);
     };
 
     const reset = () => {
-        pendingRef.current = [];
-        setRects([]);
-        rectsRef.current = [];
+        setPendingRects([]);
+        /* pendingRef.current = []; */
+        /*    setRects([]); */
+        /*   rectsRef.current = []; */
         resizeSizes.current = new Map();
     };
 
     const insertDefault = () => {
-        return addRect(new IFrameContent({ src: TEXT_APP, resizer: false }), {
-            pending: true,
-        }).then(() => {
+        // make determinsitic so we dont insert many defaults
+        const defaultId = sha256Sync(
+            concat([
+                properties.canvas.id,
+                peer.identity.publicKey.bytes,
+                new Uint8Array([0]),
+            ])
+        );
+        return addRect(
+            new StaticContent({
+                content: new StaticMarkdownText({ text: "" }),
+            }),
+            {
+                id: defaultId,
+                pending: true,
+            }
+        ).then(() => {
             updateRects();
         });
     };
 
     const removePending = (ix: number) => {
-        const spliced = pendingRef.current.splice(ix, 1);
-        if (spliced.length > 0) {
-            rectsRef.current.splice(
-                rectsRef.current.findIndex((x) => x === spliced[0]),
-                1
-            );
-        }
+        /*   const spliced = pendingRef.current.splice(ix, 1);
+          if (spliced.length > 0) {
+               rectsRef.current.splice(
+                  rectsRef.current.findIndex((x) => x === spliced[0]),
+                  1
+              ); 
+          } */
+
+        setPendingRects((prev) => {
+            return [...prev.filter((x, i) => i != ix)];
+        });
     };
 
     const onIframe = useCallback(
@@ -231,9 +305,10 @@ export const Room = (properties: { room: RoomDB }) => {
                 rect.content.resizer
             );
             if (rect.content.resizer) {
-                const resize = iFrameResize.iframeResize(
+                const resize = iFrameResizer(
                     {
-                        heightCalculationMethod: "taggedElement",
+                        /*  heightCalculationMethod: "taggedElement", */
+                        license: "GPLv3",
                         tolerance: 5,
                         log: false,
                         onResized: (e: { width: number; height: number }) => {
@@ -253,49 +328,51 @@ export const Room = (properties: { room: RoomDB }) => {
                                 if (i != null) {
                                     let change = false;
 
-                                    rectsRef.current[i].location?.forEach(
-                                        (l, lx) => {
-                                            let c = cols[l.breakpoint];
+                                    /* rectsRef.current */ rects[
+                                        i
+                                    ].location?.forEach((l, lx) => {
+                                        let c = cols[l.breakpoint];
 
-                                            const positionParams = {
-                                                cols: c,
-                                                containerPadding,
-                                                containerWidth: gridLayoutWidth,
-                                                margin,
-                                                maxRows,
-                                                rowHeight,
-                                            };
+                                        const positionParams = {
+                                            cols: c,
+                                            containerPadding,
+                                            containerWidth: gridLayoutWidth,
+                                            margin,
+                                            maxRows,
+                                            rowHeight,
+                                        };
 
-                                            const { /*  w, */ h } = calcWH(
-                                                positionParams,
-                                                rzw,
-                                                rzh + rectBorderWidth * 2,
-                                                l.x,
-                                                l.y
-                                            );
+                                        const { /*  w, */ h } = calcWH(
+                                            positionParams,
+                                            rzw,
+                                            rzh + rectBorderWidth * 2,
+                                            l.x,
+                                            l.y
+                                        );
 
-                                            console.log(
-                                                "new w,h",
-                                                h,
-                                                lx,
-                                                rzh + rectBorderWidth * 2
-                                            );
+                                        console.log(
+                                            "new w,h",
+                                            h,
+                                            lx,
+                                            rzh + rectBorderWidth * 2
+                                        );
 
-                                            if (/* w !== l.w || */ h !== l.h) {
-                                                // l.w = w;
+                                        if (/* w !== l.w || */ h !== l.h) {
+                                            // l.w = w;
 
-                                                l.h = h;
-                                                change = true;
-                                            }
+                                            l.h = h;
+                                            change = true;
                                         }
-                                    );
+                                    });
                                     if (change) {
                                         console.log(
                                             "SET RECTS RESIZE DIFF",
-                                            i,
-                                            rectsRef.current
+                                            i
+                                            /* rectsRef.current */
                                         );
-                                        updateRects(rectsRef.current);
+                                        updateRects(
+                                            rects /* rectsRef.current */
+                                        );
                                         forceUpdate();
                                     }
                                 }
@@ -338,27 +415,26 @@ export const Room = (properties: { room: RoomDB }) => {
     }, []);
 
     useEffect(() => {
-        console.log("RESET?");
-        if (!peer || !properties.room) {
+        if (!peer || !properties.canvas) {
             return;
         }
         reset();
 
-        if (properties.room.closed) {
-            throw new Error("Expecting room to be open");
+        if (properties.canvas.closed) {
+            throw new Error("Expecting canvas to be open");
         }
 
-        const room = properties.room;
-        const node = room.key;
+        const room = properties.canvas;
+        const node = room.publicKey;
 
         let isOwner = peer.identity.publicKey.equals(node);
 
         setIsOwner(isOwner);
         room.elements.events.addEventListener("change", async (change) => {
-            console.log(
+            /* console.log(
                 "SET RECT AFTER CHANGE!",
                 change.detail.added.map((x) => x.location)
-            );
+            ); */
             updateRects(undefined, 0);
         });
 
@@ -366,32 +442,113 @@ export const Room = (properties: { room: RoomDB }) => {
              return room;
          } */
 
-        updateRects().then(() => {
-            if (isOwner) {
-                //addRect();
-                // const { key: keypair2 } = await getFreeKeypair('canvas')
-                // canvas.elements.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) }))
-            } else {
-                setTimeout(async () => {
-                    console.log(
-                        (
-                            await room.elements.index.search(
-                                new SearchRequest({ query: [] }),
-                                { remote: { replicate: true } }
-                            )
-                        ).length
-                    );
-                }, 2000);
-            }
-        });
+        /*   updateRects().then(() => {
+              if (isOwner) {
+                  //addRect();
+                  // const { key: keypair2 } = await getFreeKeypair('canvas')
+                  // canvas.elements.put(new Rect({ keypair: keypair2, position: new Position({ x: 0, y: 0, z: 0 }), size: new Size({ height: 100, width: 100 }), src: STREAMING_APP + "/" + getStreamPath(keypair2.publicKey) }))
+              } else {
+                  setTimeout(async () => {
+                      console.log({
+                          remote: (
+                              await room.elements.index.search(
+                                  new SearchRequest({ query: [] }),
+                                  { remote: { replicate: true } }
+                              )
+                          ).length,
+                          local: (
+                              await room.elements.index.search(
+                                  new SearchRequest({ query: [] }),
+                                  { local: true, remote: false }
+                              )
+                          ).length,
+                      });
+                  }, 2000);
+              }
+          }); */
+
+        if (properties.draft) {
+            insertDefault();
+        }
     }, [
         peer?.identity.publicKey.hashcode(),
-        properties?.room.closed || properties?.room?.address,
+        properties?.canvas.closed || properties?.canvas?.address,
     ]);
 
+    let renderRects = (rects: Element<ElementContent>[]) => {
+        return rects.map((x, ix) => {
+            return (
+                <div key={ix}>
+                    <Frame
+                        hideHeader={properties.draft}
+                        active={active.has(ix)}
+                        setActive={(v) => {
+                            if (v) {
+                                setActive(
+                                    (previousState) =>
+                                        new Set(previousState.add(ix))
+                                );
+                            } else {
+                                setActive(
+                                    (prev) =>
+                                        new Set(
+                                            [...prev].filter((x) => x !== ix)
+                                        )
+                                );
+                            }
+                        }}
+                        delete={() => {
+                            const pendingIndex = pendingRects.indexOf(x);
+                            if (pendingIndex != -1) {
+                                removePending(ix);
+                                if (pendingRects.length === 0) {
+                                    // insertDefault()
+                                    updateRects();
+                                } else {
+                                    updateRects();
+                                }
+                            } else {
+                                properties.canvas.elements
+                                    .del(x.id)
+                                    .then(() => {
+                                        updateRects();
+                                    });
+                            }
+                        }}
+                        editMode={editMode}
+                        element={x}
+                        index={ix}
+                        replace={async (url) => {
+                            let pendingElement = pendingRects.find((pending) =>
+                                equals(pending.id, x.id)
+                            );
+                            let fromPending = !!pendingElement;
+                            let element =
+                                pendingElement ||
+                                (await properties.canvas.elements.index.get(
+                                    x.id
+                                ));
+                            (element.content as IFrameContent).src = url;
+                            console.log("UPDATED ELEMENT", element);
+                            if (!fromPending) {
+                                await properties.canvas.elements.put(element);
+                            } else {
+                                forceUpdate(); // because pendingrefs is a ref so we need to do change detection manually
+                            }
+                        }}
+                        onLoad={(event) =>
+                            onIframe(event, x as Element<IFrameContent>, ix)
+                        }
+                        pending={!!pendingRects.find((p) => equals(p.id, x.id))}
+                    ></Frame>
+                </div>
+            );
+        });
+    };
+
     return (
-        <div className="w-[100%] h-full">
-            <div className="overflow-y-scroll h-[100%]">
+        <div className="w-[100%] h-full min-h-10 ">
+            <div className="overflow-auto h-[100%]">
                 {/*    <div className="sticky top-0">
                     <Header
                         title={
@@ -534,10 +691,14 @@ width: "100%", //`calc(100% - 275px)`,
 
                                 Promise.all(
                                     [...toUpdate.values()].map((rect) => {
-                                        if (pendingRef.current.includes(rect)) {
+                                        if (
+                                            /* pendingRef.current */ pendingRects.includes(
+                                                rect
+                                            )
+                                        ) {
                                             return;
                                         }
-                                        return properties.room.elements.put(
+                                        return properties.canvas.elements.put(
                                             rect
                                         );
                                     })
@@ -553,105 +714,8 @@ width: "100%", //`calc(100% - 275px)`,
                                     });
                             }}
                         >
-                            {rects.map((x, ix) => {
-                                return (
-                                    <div key={ix}>
-                                        <Frame
-                                            active={active.has(ix)}
-                                            setActive={(v) => {
-                                                if (v) {
-                                                    setActive(
-                                                        (previousState) =>
-                                                            new Set(
-                                                                previousState.add(
-                                                                    ix
-                                                                )
-                                                            )
-                                                    );
-                                                } else {
-                                                    setActive(
-                                                        (prev) =>
-                                                            new Set(
-                                                                [
-                                                                    ...prev,
-                                                                ].filter(
-                                                                    (x) =>
-                                                                        x !== ix
-                                                                )
-                                                            )
-                                                    );
-                                                }
-                                            }}
-                                            delete={() => {
-                                                const pendingIndex =
-                                                    pendingRef.current.indexOf(
-                                                        x
-                                                    );
-                                                if (pendingIndex != -1) {
-                                                    removePending(ix);
-                                                    if (
-                                                        pendingRef.current
-                                                            .length === 0
-                                                    ) {
-                                                        // insertDefault()
-                                                        updateRects();
-                                                    } else {
-                                                        updateRects();
-                                                    }
-                                                } else {
-                                                    properties.room.elements
-                                                        .del(x.id)
-                                                        .then(() => {
-                                                            updateRects();
-                                                        });
-                                                }
-                                            }}
-                                            editMode={editMode}
-                                            element={x}
-                                            index={ix}
-                                            replace={async (url) => {
-                                                let pendingElement =
-                                                    pendingRef.current.find(
-                                                        (pending) =>
-                                                            equals(
-                                                                pending.id,
-                                                                x.id
-                                                            )
-                                                    );
-                                                let fromPending =
-                                                    !!pendingElement;
-                                                let element =
-                                                    pendingElement ||
-                                                    (await properties.room.elements.index.get(
-                                                        x.id
-                                                    ));
-                                                (
-                                                    element.content as IFrameContent
-                                                ).src = url;
-                                                console.log(
-                                                    "UPDATED ELEMENT",
-                                                    element
-                                                );
-                                                if (!fromPending) {
-                                                    await properties.room.elements.put(
-                                                        element
-                                                    );
-                                                } else {
-                                                    forceUpdate(); // because pendingrefs is a ref so we need to do change detection manually
-                                                }
-                                            }}
-                                            onLoad={(event) =>
-                                                onIframe(event, x, ix)
-                                            }
-                                            pending={
-                                                !!pendingRef.current.find((p) =>
-                                                    equals(p.id, x.id)
-                                                )
-                                            }
-                                        ></Frame>
-                                    </div>
-                                );
-                            })}
+                            {renderRects(rects)}
+                            {renderRects(pendingRects)}
                         </ReactGridLayout>
 
                         {/*  {isOwner && (
@@ -707,22 +771,24 @@ width: "100%", //`calc(100% - 275px)`,
             </Grid> */}
                 </div>
             </div>
-            {!inIframe() && (
-                <div className="absolute right-5 bottom-5">
-                    <ToolbarVertical
-                        onSave={() => {
-                            savePending();
-                        }}
-                        onNew={() => {
-                            insertDefault();
-                        }}
-                        unsavedCount={pendingRef.current.length}
-                        onEditModeChange={(edit) => {
-                            setEditMode(edit);
-                        }}
-                    />
-                </div>
-            )}
+            <div className="ml-auto">
+                {!inIframe() && properties.draft && (
+                    <div>
+                        <Create
+                            onSave={() => {
+                                savePending();
+                            }}
+                            onNew={() => {
+                                insertDefault();
+                            }}
+                            unsavedCount={pendingRects.length}
+                            onEditModeChange={(edit) => {
+                                setEditMode(edit);
+                            }}
+                        />
+                    </div>
+                )}
+            </div>
         </div>
     );
 };

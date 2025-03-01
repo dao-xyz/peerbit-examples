@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { useRooms } from "../useRooms";
-import { Room } from "@dao-xyz/social";
+import { useSpaces } from "../useSpaces";
 import { Spinner } from "../utils/Spinner";
 export const CreateRoom = () => {
-    const { create } = useRooms();
+    const { create } = useSpaces();
     const [isLoading, setIsLoading] = useState(false);
     return (
         <>

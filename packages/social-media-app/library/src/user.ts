@@ -9,6 +9,11 @@ import {
 } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
+export class InvalidAppError extends Error {
+    constructor() {
+        super("Invalid app");
+    }
+}
 
 @variant(0)
 export class Visit {
@@ -85,7 +90,13 @@ export class BrowsingHistory extends Program {
     }
 
     async insert(app: SimpleWebManifest): Promise<void> {
-        new URL(app.url); // will fail if invalid url
+        if (!app.url.startsWith("native:")) {
+            try {
+                new URL(app.url); // will fail if invalid url
+            } catch (error) {
+                throw new InvalidAppError();
+            }
+        }
         await this.visits.put(new Visit({ app }), {
             encryption: {
                 keypair: await X25519Keypair.create(),

@@ -1,4 +1,4 @@
-import { field, variant, fixedArray, vec } from "@dao-xyz/borsh";
+import { field, variant } from "@dao-xyz/borsh";
 import {
     Documents,
     SearchRequest,

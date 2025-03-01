@@ -5,10 +5,10 @@ import {
     StringMatch,
     StringMatchMethod,
 } from "@peerbit/document";
-import { PublicSignKey, randomBytes } from "@peerbit/crypto";
+import { PublicSignKey, randomBytes, sha256Sync } from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
-import { sha256Sync } from "@peerbit/crypto";
-import { concat } from "uint8arrays";
+import { AbstractStaticContent } from "./static/content";
+import { StaticMarkdownText } from "./static";
 
 @variant(0)
 export class Layout {
@@ -48,11 +48,13 @@ export class Layout {
 }
 
 export abstract class ElementContent {
-    abstract toIndex(): Record<string, any>;
+    abstract toIndex():
+        | Promise<{ type: string; content: string }>
+        | { type: string; content: string };
 }
 
 @variant(0)
-export class Element<T extends ElementContent = any> {
+export class Element<T extends ElementContent = ElementContent> {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
@@ -86,52 +88,72 @@ class IndexableElement {
     publicKey: Uint8Array;
 
     @field({ type: "string" })
+    type: string;
+
+    @field({ type: "string" })
     content: string;
 
     constructor(properties: {
         id: Uint8Array;
-        publicKey: Uint8Array;
+        publicKey: PublicSignKey;
+        type: string;
         content: string;
     }) {
         this.id = properties.id;
-        this.publicKey = properties.publicKey;
+        this.publicKey = properties.publicKey.bytes;
+        this.content = properties.content;
+        this.type = properties.type;
+    }
+}
+
+class IndexableCanvas {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: Uint8Array })
+    publicKey: Uint8Array;
+
+    @field({ type: "string" })
+    content: string;
+
+    constructor(properties: {
+        id: Uint8Array;
+        publicKey: PublicSignKey;
+        content: string;
+    }) {
+        this.id = properties.id;
+        this.publicKey = properties.publicKey.bytes;
         this.content = properties.content;
     }
 }
 
-@variant("room")
-export class Room extends Program {
+@variant("canvas")
+export class Canvas extends Program {
     @field({ type: Documents })
-    elements: Documents<Element, IndexableElement>;
+    elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
 
-    @field({ type: option(PublicSignKey) })
-    key?: PublicSignKey;
+    @field({ type: Documents })
+    replies: Documents<Canvas, IndexableCanvas>; // Elements are either data points or sub-canvases (comments)
 
-    @field({ type: "string" })
-    name: string;
+    @field({ type: PublicSignKey })
+    publicKey: PublicSignKey;
 
     @field({ type: option(fixedArray("u8", 32)) })
     parentId?: Uint8Array;
 
     constructor(
         properties: ({ parentId: Uint8Array } | { seed: Uint8Array }) & {
-            rootTrust: PublicSignKey;
-            name?: string;
+            publicKey: PublicSignKey;
         }
     ) {
         super();
-        this.key = properties.rootTrust;
-        this.name = properties.name ?? "";
+        this.publicKey = properties.publicKey;
         this.parentId = properties["parentId"];
-        const elementsId = sha256Sync(
-            concat([
-                new TextEncoder().encode("room"),
-                new TextEncoder().encode(this.name),
-                this.key?.bytes || [],
-                properties["parentId"] || properties["seed"],
-            ])
-        );
+        let elementsId = (properties as { seed: Uint8Array }).seed
+            ? sha256Sync((properties as { seed: Uint8Array }).seed)
+            : randomBytes(32);
         this.elements = new Documents({ id: elementsId });
+        this.replies = new Documents({ id: sha256Sync(elementsId) });
     }
 
     get id(): Uint8Array {
@@ -151,111 +173,146 @@ export class Room extends Program {
              }
          })
      */
-        return this.elements.open({
+        await this.elements.open({
             type: Element,
+            replicate: { factor: 1 },
             canPerform: async (operation) => {
                 /**
                  * Only allow updates if we created it
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
                  */
                 return (
-                    !this.key ||
+                    !this.publicKey ||
                     operation.entry.signatures.find(
                         (x) =>
-                            x.publicKey.equals(this.key!) ||
+                            x.publicKey.equals(this.publicKey!) ||
                             x.publicKey.equals(this.node.identity.publicKey)
                     ) != null
                 );
             },
             index: {
                 type: IndexableElement,
-                transform: async (obj) => {
+                transform: async (arg, _context) => {
+                    const indexable = await arg.content.toIndex();
                     return new IndexableElement({
-                        id: obj.id,
-                        publicKey: obj.publicKey.bytes,
-                        content: obj.content.toIndex(),
+                        id: arg.id,
+                        publicKey: arg.publicKey,
+                        type: indexable.type,
+                        content: indexable.content,
+                    });
+                },
+            },
+        });
+
+        await this.replies.open({
+            type: Canvas,
+            replicate: { factor: 1 },
+            canOpen: () => false,
+            canPerform: async (operation) => {
+                /**
+                 * Only allow updates if we created it
+                 *  or from myself (this allows us to modifying someone elsecanvas locally)
+                 */
+                return (
+                    !this.publicKey ||
+                    operation.entry.signatures.find(
+                        (x) =>
+                            x.publicKey.equals(this.publicKey!) ||
+                            x.publicKey.equals(this.node.identity.publicKey)
+                    ) != null
+                );
+            },
+            index: {
+                type: IndexableCanvas,
+                transform: async (arg, _context) => {
+                    const indexable = await arg.createTitle();
+                    return new IndexableCanvas({
+                        id: arg.id,
+                        publicKey: arg.publicKey,
+                        content: indexable,
                     });
                 },
             },
         });
     }
 
-    async getCreateRoomByPath(path: string[]): Promise<Room[]> {
+    async getCreateRoomByPath(path: string[]): Promise<Canvas[]> {
         const results = await this.findRoomsByPath(path);
-        let rooms = results.rooms;
+        let rooms = results.canvases;
 
         if (path.length !== results.path.length) {
-            if (results.rooms?.length > 1) {
+            if (results.canvases?.length > 1) {
                 throw new Error("More than 1 room to choose from");
             }
-            let room = results.rooms[0] || this;
+            let currentCanvas = results.canvases[0] || this;
 
-            if (room.closed) {
-                room = await this.node.open(room, { existing: "reuse" });
+            if (currentCanvas.closed) {
+                currentCanvas = await this.node.open(currentCanvas, {
+                    existing: "reuse",
+                });
             }
 
             for (let i = results.path.length; i < path.length; i++) {
-                const newRoom = new Room({
+                const canvas = new Canvas({
                     parentId: this.id,
-                    rootTrust: this.node.identity.publicKey,
-                    name: path[i],
+                    publicKey: this.node.identity.publicKey,
                 });
 
-                await room.elements.put(
-                    new Element<RoomContent>({
+                let nextCanvas = await this.node.open(canvas, {
+                    existing: "reuse",
+                });
+                const name = path[i];
+                // TODO Dont put if already exists
+                await nextCanvas.elements.put(
+                    new Element({
+                        content: new StaticContent({
+                            content: new StaticMarkdownText({ text: name }),
+                        }),
                         location: [],
                         publicKey: this.node.identity.publicKey,
-                        content: new RoomContent({ room: newRoom }),
                     })
                 );
-                room = await this.node.open(newRoom, { existing: "reuse" });
+                await currentCanvas.replies.put(nextCanvas);
+                currentCanvas = nextCanvas;
             }
-            rooms = [room];
+            rooms = [currentCanvas];
         }
         return rooms;
     }
 
     async findRoomsByPath(
         path: string[]
-    ): Promise<{ path: string[]; rooms: Room[] }> {
-        let rooms: Room[] = [this];
+    ): Promise<{ path: string[]; canvases: Canvas[] }> {
+        let canvases: Canvas[] = [this];
         const visitedPath: string[] = [];
         for (const name of path) {
-            const newRooms: Room[] = [];
-            for (let parent of rooms) {
+            const newRooms: Canvas[] = [];
+            for (let parent of canvases) {
                 if (parent.closed) {
-                    console.log("OPEN PARENT", parent.name);
+                    console.log("OPEN PARENT", parent);
                     parent = await this.node.open(parent, {
                         existing: "reuse",
                     });
                 }
 
-                newRooms.push(
-                    ...(await parent.findRoomsByName(name)).map(
-                        (x) => x.content.room
-                    )
-                );
+                newRooms.push(...(await parent.findRoomsByName(name)));
             }
             if (newRooms.length > 0) {
                 visitedPath.push(name);
-                rooms = newRooms;
+                canvases = newRooms;
             } else {
                 break;
             }
         }
-        return { path: visitedPath, rooms };
+        return { path: visitedPath, canvases };
     }
 
-    async findRoomsByName(name: string): Promise<Element<RoomContent>[]> {
-        const results = await this.elements.index.search(
+    async findRoomsByName(name: string): Promise<Canvas[]> {
+        const results = await this.replies.index.search(
             new SearchRequest({
                 query: [
                     new StringMatch({
-                        key: ["content", "type"],
-                        value: "room",
-                    }),
-                    new StringMatch({
-                        key: ["content", "name"],
+                        key: ["content"],
                         value: name,
                         caseInsensitive: true,
                         method: StringMatchMethod.exact,
@@ -263,7 +320,21 @@ export class Room extends Program {
                 ],
             })
         );
-        return results as Element<RoomContent>[];
+        return results as Canvas[];
+    }
+
+    async createTitle(): Promise<string> {
+        if (this.elements.index.closed) {
+            throw new Error("Can not create title because database is closed");
+        }
+        const elements = await this.elements.index.index.iterate().all();
+        let concat = "";
+        for (const element of elements) {
+            if (element.value.type !== "canvas") {
+                concat += element.value.content;
+            }
+        }
+        return concat;
     }
 }
 
@@ -281,80 +352,56 @@ export class IFrameContent extends ElementContent {
         this.resizer = properties.resizer;
     }
 
-    toIndex(): Record<string, any> {
+    toIndex() {
         return {
             type: "app",
-            src: this.src,
+            content: this.src,
         };
     }
 }
 
 @variant(1)
-export class RoomContent extends ElementContent {
-    @field({ type: Room })
-    room: Room;
+export class StaticContent extends ElementContent {
+    @field({ type: AbstractStaticContent })
+    content: AbstractStaticContent; // https://a.cool.thing.com/abc123
 
-    constructor(properties: { room: Room }) {
+    constructor(properties: { content: AbstractStaticContent }) {
         super();
-        this.room = properties.room;
+        this.content = properties.content;
     }
 
-    toIndex(): Record<string, any> {
+    toIndex() {
         return {
-            type: "room",
-            name: this.room.name,
+            type: "static",
+            content: this.content.toString(),
         };
     }
 }
 
 /* 
-type Args = { replicate?: ReplicationOptions };
 
-@variant("spaces")
-export class Spaces extends Program<Args> {
-    @field({ type: fixedArray("u8", 32) })
-    id: Uint8Array;
+@variant(2)
+export class SubCanvas extends ElementContent {
 
-    @field({ type: Documents<Rect> })
-    canvases: Documents<Canvas>;
+    @field({ type: Canvas })
+    canvas: Canvas;
 
-    constructor() {
+    constructor(properties: { canvas: Canvas }) {
         super();
-        this.id = randomBytes(32);
-        this.canvases = new Documents();
+        this.canvas = properties.canvas;
     }
 
-    open(args?: Args): Promise<void> {
-        return this.canvases.open({
-            type: Canvas,
-            canPerform: async (operation, { entry }) => {
-                // Only allow modifications from author
-                const payload = await entry.getPayloadValue();
-                if (payload instanceof PutOperation) {
-                    const from = (payload as PutOperation<Canvas>).getValue(
-                        this.canvases.index.valueEncoding
-                    ).key;
-                    return (
-                        entry.signatures.find((x) =>
-                            x.publicKey.equals(from)
-                        ) != null
-                    );
-                } else if (payload instanceof DeleteOperation) {
-                    const canvas = await this.canvases.index.get(payload.key);
-                    const from = canvas.key;
-                    if (
-                        entry.signatures.find((x) =>
-                            x.publicKey.equals(from)
-                        ) != null
-                    ) {
-                        return true;
-                    }
-                }
-                return false;
-            },
-            canOpen: () => Promise.resolve(false), // don't open things that appear in the db
-            role: args?.role,
-        });
+
+
+
+
+
+    async toIndex() {
+        // fetch a few elements and build a stringify version of the canvas
+
+        return {
+            type: "canvas",
+            content: await this.canvas.createTitle()
+        };
     }
-}
- */
+} */
