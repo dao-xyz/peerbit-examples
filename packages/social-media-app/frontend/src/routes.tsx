@@ -18,7 +18,7 @@ export const getAdressFromKey = (key: string) =>
 
 export const getNameFromPath = (name: string) => decodeURIComponent(name);
 
-export const getRoomByPath = (path: string[]) => "/space/" + path.join("/");
+export const getCanvasByPath = (path: string[]) => "/s/" + path.join("/");
 
 export const USER_BY_KEY_NAME = "/k/:key";
 export const NEW_SPACE = "/new";

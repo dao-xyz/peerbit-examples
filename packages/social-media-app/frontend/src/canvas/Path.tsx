@@ -3,8 +3,8 @@ import { useLocation, useNavigate } from "react-router-dom";
 import Tags from "@yaireo/tagify/dist/react.tagify";
 import "./path.css";
 import Tagify from "@yaireo/tagify";
-import { getRoomByPath } from "../routes";
-import { getRoomPathFromURL } from "../useSpaces";
+import { getCanvasByPath } from "../routes";
+import { getCanvasPathFromURL } from "../useSpaces";
 import { MdSearch } from "react-icons/md";
 
 // Tagify settings object
@@ -44,7 +44,7 @@ export const Path = () => {
             return;
         }
 
-        const path = getRoomPathFromURL();
+        const path = getCanvasPathFromURL();
         const newPath = tagifyRef.current.value.map((x) => x.value);
 
         let eq = newPath.length === path.length;
@@ -57,12 +57,7 @@ export const Path = () => {
             }
         }
         if (!eq) {
-            console.log(
-                "NAVIGATE TO NEW PATH",
-                newPath,
-                getRoomByPath(newPath)
-            );
-            navigate(getRoomByPath(newPath), {});
+            navigate(getCanvasByPath(newPath), {});
         }
     };
 
@@ -88,14 +83,14 @@ export const Path = () => {
     }, []);
 
     useEffect(() => {
-        console.log("UPDATE TAGS FROM URL .----  ", getRoomPathFromURL());
-        setTags(getRoomPathFromURL());
+        console.log("UPDATE TAGS FROM URL .----  ", getCanvasPathFromURL());
+        setTags(getCanvasPathFromURL());
     }, [location]);
 
     useEffect(() => {
         if (tagifyRef.current) {
             tagifyRef.current.removeAllTags({ withoutChangeEvent: true });
-            tagifyRef.current.addTags(getRoomPathFromURL(), true);
+            tagifyRef.current.addTags(getCanvasPathFromURL(), true);
             tagifyInitializedAtPath.current = window.location.hash;
             tagifyRef.current.DOM.input.focus();
             forceUpdate();

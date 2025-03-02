@@ -74,8 +74,8 @@ const curatedApps: CuratedApp[] = [
         manifest: new SimpleWebManifest({
             url: "native:text",
             title: "Text",
-            metaDescription: "A simple text editor",
-            icon: "/chat-icon.svg",
+            metaDescription: "Text",
+            icon: "/apps/text.svg",
         }),
     },
     {
@@ -86,9 +86,11 @@ const curatedApps: CuratedApp[] = [
         manifest: new SimpleWebManifest({
             url: "native:image",
             title: "Image",
-            metaDescription: "A simple text editor",
+            metaDescription: "Image",
+            icon: "/apps/image.svg",
         }),
     },
+
     {
         type: "web",
         match: "https://kick.com",
@@ -170,7 +172,11 @@ const resolveCuratedUrl = (app: CuratedWebApp, url: string) => {
 export const AppContext = React.createContext<IApps>({} as any);
 export const useApps = () => useContext(AppContext);
 export const AppProvider = ({ children }: { children: JSX.Element }) => {
-    const [apps, setApps] = useState<SimpleWebManifest[]>([]);
+    const [apps, setApps] = useState<SimpleWebManifest[]>(
+        [...curatedApps]
+            .filter((x) => x.type === "native")
+            .map((x) => x.manifest)
+    );
     const [_x, forceUpdate] = useReducer((x) => x + 1, 0);
     const { peer } = usePeer();
     const appServiceRef = useRef<AppPreview>();
@@ -186,27 +192,27 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
         }
 
         const _x = AppPreview; // without this lines AppPreview import might not be included when bundling
-        peer.open<AppPreview>(
-            "zb2rhXREnAbm5Twtm2ahJM7QKT6FoQGNksWv5jp7o5W6BQ7au"
-        ).then((appPreview) => {
-            appServiceRef.current = appPreview;
-            Promise.allSettled(
-                [STREAMING_APP, CHAT_APP, TEXT_APP].map((address) =>
-                    appPreview.resolve(address)
-                )
-            ).then((result) => {
-                setApps(
-                    result
-                        .filter((x) => x.status === "fulfilled" && x.value)
-                        .map(
-                            (x) =>
-                                (x as PromiseFulfilledResult<SimpleWebManifest>)
-                                    .value
-                        )
-                );
-                forceUpdate();
-            });
-        });
+        /*  peer.open<AppPreview>(
+             "zb2rhXREnAbm5Twtm2ahJM7QKT6FoQGNksWv5jp7o5W6BQ7au"
+         ).then((appPreview) => {
+             appServiceRef.current = appPreview;
+             Promise.allSettled(
+                 [STREAMING_APP, CHAT_APP, TEXT_APP].map((address) =>
+                     appPreview.resolve(address)
+                 )
+             ).then((result) => {
+                 setApps(
+                     result
+                         .filter((x) => x.status === "fulfilled" && x.value)
+                         .map(
+                             (x) =>
+                                 (x as PromiseFulfilledResult<SimpleWebManifest>)
+                                     .value
+                         )
+                 );
+                 forceUpdate();
+             });
+         }); */
     }, [peer?.identity.publicKey.hashcode()]);
     const memo = React.useMemo<IApps>(
         () => ({

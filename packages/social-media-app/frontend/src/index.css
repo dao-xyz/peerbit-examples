@@ -2,9 +2,10 @@
 
 body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    /* font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
         'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-        sans-serif;
+        sans-serif; */
+    font-family: math;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
@@ -131,6 +132,10 @@ code {
 
 
 @layer components {
+    .comic-font {
+        font-family: 'Comic Neue', cursive;
+    }
+
     .icon {
         @apply text-neutral-950;
         @apply dark:text-neutral-50;

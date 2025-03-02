@@ -24,7 +24,7 @@ interface IRoomContext {
     create: () => Promise<Canvas[]>;
 }
 
-export const getRoomPathFromURL = (): string[] => {
+export const getCanvasPathFromURL = (): string[] => {
     if (!window.location.hash) {
         return [];
     }
@@ -121,7 +121,7 @@ export const SpaceProvider = ({ children }: { children: JSX.Element }) => {
                 setRooms(rooms);
             }
         };
-        const newRoomPath = getRoomPathFromURL();
+        const newRoomPath = getCanvasPathFromURL();
         setRoomPath(newRoomPath);
         document.title = newRoomPath.join(" / ") || "Giga";
         if (reset) {
@@ -204,7 +204,7 @@ export const SpaceProvider = ({ children }: { children: JSX.Element }) => {
                                 y: 0,
                                 z: 0,
                                 w: 20,
-                                h: 1000,
+                                h: 500,
                             }),
                         ],
                         id: new Uint8Array(32),
