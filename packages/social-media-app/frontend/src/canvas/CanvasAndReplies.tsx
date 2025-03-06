@@ -122,8 +122,15 @@ export const CanvasAndReplies = () => {
                 <CanvasWithReplies key={0} canvas={lastCanvas} />
             </div>
             {/* spacer div */}
-            <div className="mt-4 flex flex-col gap-4 sticky bottom-0 w-full left-0 p-4">
-                {pendingCanvas.program !== undefined ? "EXIST" : "MISSING"}
+            <div className="mt-4 flex flex-col sticky bottom-0 w-full left-0">
+                <div className="flex px-4 gap-4">
+                    {[...Array(4).keys()].map((_, index) => (
+                        <div
+                            key={index}
+                            className="bg-neutral-400 rounded-md w-20 h-20"
+                        ></div>
+                    ))}
+                </div>
                 <Canvas
                     canvas={pendingCanvas.program}
                     draft={true}

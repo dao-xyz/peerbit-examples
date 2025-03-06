@@ -276,7 +276,7 @@ export const Canvas = (
                 properties.height ? "" : "min-h-10"
             } flex flex-row items-center space-x-4 ${
                 !inIframe() && properties.draft
-                    ? "bg-neutral-50 dark:bg-neutral-950"
+                    ? "bg-neutral-50 dark:bg-neutral-950 p-4"
                     : ""
             }`}
             /*  style={{

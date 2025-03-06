@@ -67,9 +67,16 @@ export const CanvasModifyToolbar = (properties: {
             <div className="btn-elevated btn-icon btn-icon-md btn-toggle ">
                 <FaCameraRetro />
             </div>
-            <div className="btn-elevated btn-icon btn-icon-md btn-toggle ">
+            <label className="btn-elevated btn-icon btn-icon-md btn-toggle">
+                <input
+                    type="file"
+                    accept="image/*, video/*"
+                    multiple
+                    style={{ display: "none" }}
+                    id="image-upload"
+                />
                 <FaPhotoVideo />
-            </div>
+            </label>
             <div className="w-[40px] h-[40px]">
                 <AppSelect onSelected={(app) => properties.onNew(app)} />
             </div>
