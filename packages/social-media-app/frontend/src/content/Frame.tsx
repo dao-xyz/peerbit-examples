@@ -102,7 +102,7 @@ export const Frame = (properties: {
             key={properties.index}
             className={`flex flex-row  w-full h-full max-w-full ${
                 !properties.thumbnail
-                    ? "bg-neutral-100 dark:bg-neutral-900"
+                    ? "" /* TODO bg? "bg-neutral-100 dark:bg-neutral-900" */
                     : ""
             } group `} /* ${properties.pending ? "border-solid border-2 border-primary-400" : ""} outline-auto outline-neutral-900 dark:outline-neutral-300  */
         >

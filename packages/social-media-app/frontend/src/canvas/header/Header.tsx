@@ -2,32 +2,32 @@ import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { useState } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
 
-export const Header = (properties: {
+export const Header = (props: {
     publicKey: PublicSignKey;
     direction?: "row" | "col";
 }) => {
-    const [backgroundColor, setBackgroundColor] =
-        useState<string>("transparent");
+    const [bgColor, setBgColor] = useState("transparent");
 
-    // shpw profile image, name, and timestamp
     return (
         <div
-            className={`flex flex-row items-center gap-4 ${
-                properties.direction === "col" ? "flex-col" : ""
-            }`}
-            style={{
-                backgroundColor,
-            }}
+            className={`flex items-center gap-4 ${
+                props.direction === "col" ? "flex-col" : "flex-row"
+            } 
+      bg-[linear-gradient(333deg,rgba(255,255,255,0.6)_34%,var(--bgcolor)_79%)]
+      dark:bg-[linear-gradient(333deg,rgba(31,41,55,0.6)_34%,var(--bgcolor)_79%)]`}
+            style={
+                {
+                    "--bgcolor": bgColor
+                        .replace("rgb", "rgba")
+                        .replace(")", ",0.2)"),
+                } as React.CSSProperties
+            }
         >
             <ProfilePhotoGenerated
                 size={32}
-                publicKey={properties.publicKey}
+                publicKey={props.publicKey}
                 onColorGenerated={(generatedColor) =>
-                    setBackgroundColor(
-                        generatedColor
-                            .replace("rgb", "rgba")
-                            .replace(")", ",0.2)")
-                    )
+                    setBgColor(generatedColor)
                 }
             />
         </div>
