@@ -94,7 +94,7 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
 
             {/* Replies list in a scrollable container */}
             {sortedReplies.length > 0 ? (
-                <div className="flex-grow overflow-auto">
+                <div className="flex flex-col gap-4">
                     {sortedReplies.map((reply) => (
                         <div key={reply.id.toString()}>
                             <CanvasPreview canvas={reply} />

@@ -8,7 +8,8 @@ import {
     Transition,
 } from "@headlessui/react";
 import { useApps } from "../content/useApps";
-import { AiOutlineQuestionCircle, AiOutlinePlusCircle } from "react-icons/ai";
+import { FaPlus } from "react-icons/fa6";
+import { AiOutlineQuestionCircle } from "react-icons/ai";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { InvalidAppError } from "@dao-xyz/social";
 
@@ -73,7 +74,7 @@ export const AppSelect = (properties: {
                                      alt="App Icon"
                                      className="w-[21px] h-[21px] p-[2px]"
                                  /> */
-                                <AiOutlinePlusCircle className="w-[25px] h-[25px]" />
+                                <FaPlus className="w-[25px] h-[25px]" />
                             ) : (
                                 <AiOutlineQuestionCircle className="w-[25px] h-[25px]" />
                             )}
@@ -107,11 +108,10 @@ export const AppSelect = (properties: {
                                         {({ selected, active }) => (
                                             <div className="flex flex-col">
                                                 <span
-                                                    className={`truncate ${
-                                                        selected
+                                                    className={`truncate ${selected
                                                             ? "font-medium"
                                                             : "font-normal"
-                                                    }`}
+                                                        }`}
                                                 >
                                                     {app.title}
                                                 </span>
@@ -127,14 +127,11 @@ export const AppSelect = (properties: {
                                 {query.length > 0 && (
                                     <ComboboxOption
                                         className={({ active, selected }) =>
-                                            `cursor-default select-none relative py-2 pl-10 pr-4 ${
-                                                active
-                                                    ? "bg-primary-400 dark:bg-primary-600"
-                                                    : "text-gray-900"
-                                            } ${
-                                                selected &&
-                                                "bg-primary-600 dark:bg-primary-200"
-                                            }`
+                                            `cursor-default select-none relative py-2 pl-10 pr-4 ${active
+                                                ? "bg-primary-400 dark:bg-primary-600"
+                                                : "text-gray-900"
+                                            } ${selected &&
+                                            "bg-primary-600 dark:bg-primary-200"}`
                                         }
                                         value={unknownApp(query)}
                                     >
