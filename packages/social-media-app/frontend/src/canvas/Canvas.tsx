@@ -6,7 +6,7 @@ import React, {
     useReducer,
     RefObject,
 } from "react";
-import { inIframe, useLocal, usePeer } from "@peerbit/react";
+import { inIframe, useLocal, usePeer, useProgram } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Element,
@@ -15,6 +15,7 @@ import {
     ElementContent,
     StaticContent,
     StaticMarkdownText,
+    AbstractStaticContent,
 } from "@dao-xyz/social";
 import iFrameResizer from "@iframe-resizer/parent";
 import { SearchRequest } from "@peerbit/document";
@@ -31,33 +32,50 @@ import {
 import useWidth from "./useWidth.js";
 import { concat, equals } from "uint8arrays";
 import "./Canvas.css";
-import { Frame } from "./Frame.js";
-import { Create } from "./Create.js";
-import { delay } from "@peerbit/time";
+import { Frame } from "../content/Frame.js";
+import { CanvasModifyToolbar } from "./ModifyToolbar.js";
 import { sha256Sync } from "@peerbit/crypto";
+import { BsSend } from "react-icons/bs";
+import { SimpleWebManifest } from "@dao-xyz/app-service";
+import { useApps } from "../content/useApps.js";
 
 const ReactGridLayout = RGL;
-const cols = { md: 10, xxs: 10 };
-const rowHeight = (w: number) => w / 100;
+// For scaled grid, we use one column.
+const cols = { md: 1, xxs: 1 };
+const rowHeight = 1; // 1 unit per row.
 const margin: [number, number] = [0, 0];
 const containerPadding: [number, number] = [0, 0];
 const maxRows = Infinity;
 const rectBorderWidth = 10;
 
-const getLayouts = (rectGroups: Element[][]) => {
+type SizeProps = {
+    width?: number;
+    height?: number;
+    scaled?: boolean; // when true, use CSS transform scaling to fit without overflow
+};
+
+const getLayouts = (
+    rectGroups: Element[][],
+    layoutOverrides: Map<number, Layout>
+) => {
     let breakpointsToLayouts: Record<string, RGLayout> = {};
     let ix = 0;
     for (const rects of rectGroups) {
-        for (const rect of rects.values()) {
+        for (const rect of rects) {
             for (const layout of rect.location) {
                 let arr = breakpointsToLayouts[layout.breakpoint];
                 if (!arr) {
                     arr = [];
                     breakpointsToLayouts[layout.breakpoint] = arr;
                 }
-                arr.push({ ...layout, i: String(ix) });
+                let tempOverride = layoutOverrides.get(ix);
+                arr.push({
+                    ...layout,
+                    ...(tempOverride ? tempOverride : {}),
+                    i: String(ix),
+                });
+                ix++;
             }
-            ix++;
         }
     }
     return breakpointsToLayouts;
@@ -65,18 +83,30 @@ const getLayouts = (rectGroups: Element[][]) => {
 
 let updateRectsTimeout: ReturnType<typeof setTimeout> = undefined;
 
-export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
+export const Canvas = (
+    properties: { canvas: CanvasDB } & SizeProps &
+        ({ draft: true; onSave: () => void } | { draft?: false })
+) => {
+    const asThumbnail = !!properties.scaled;
     const { peer } = usePeer();
-    const [editMode, setEditMode] = useState(false);
+    const { program: canvas } = useProgram(properties.canvas, {
+        existing: "reuse",
+        id: properties.canvas.idString,
+        keepOpenOnUnmount: true,
+    });
+    const { getNativeApp } = useApps();
+    const [editMode, setEditMode] = useState(properties.draft);
     const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
         new Map()
     );
     const [layouts, setLayouts] = useState<Record<string, RGLayout>>({});
-    const rects = useLocal(properties?.canvas.elements);
+    const rects = useLocal(canvas?.elements);
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
+    const pendingCounter = useRef(0);
+    const layoutOverrides = useRef(new Map<number, Layout>());
 
     useEffect(() => {
-        setLayouts(getLayouts([rects, pendingRects]));
+        setLayouts(getLayouts([rects, pendingRects], layoutOverrides.current));
     }, [rects, pendingRects]);
 
     const [isOwner, setIsOwner] = useState<boolean | undefined>(undefined);
@@ -87,11 +117,39 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
     const dragging = useRef(false);
     const latestBreakpoint = useRef<"xxs" | "md">("md");
 
-    const { width: gridLayoutWidth, ref: gridLayoutRef } = useWidth(0);
+    // Get the measured natural width and a ref for the grid layout container.
+    const { width: measuredWidth, ref: gridLayoutRef } = useWidth(0);
+    // Use a state to capture the natural height of the grid layout container.
+    const [naturalHeight, setNaturalHeight] = useState(300);
+    useEffect(() => {
+        if (!gridLayoutRef.current) return;
+        const observer = new ResizeObserver((entries) => {
+            for (let entry of entries) {
+                setNaturalHeight(entry.contentRect.height);
+            }
+        });
+        observer.observe(gridLayoutRef.current);
+        return () => observer.disconnect();
+    }, [gridLayoutRef]);
 
-    // Updated shrinkToFit: It only updates the element's layout if it changes.
-    // For pending elements, it updates the local pendingRects state.
-    const shrinkToFit = (
+    const naturalWidth = measuredWidth || 800;
+    const containerWidth =
+        typeof properties.width === "number" ? properties.width : naturalWidth;
+    const containerHeight =
+        typeof properties.height === "number"
+            ? properties.height
+            : naturalHeight;
+
+    // Calculate the scale factor so the natural dimensions fit within the container.
+    const scaleFactor = Math.min(
+        containerWidth / naturalWidth,
+        containerHeight / naturalHeight
+    );
+
+    // We pass naturalWidth to the grid layout when scaled.
+    const gridLayoutWidth = naturalWidth;
+
+    const fitToSize = async (
         index: number,
         dims: { width: number; height: number }
     ) => {
@@ -110,7 +168,7 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
         const positionParams: PositionParams = {
             cols: c,
             containerPadding,
-            containerWidth: gridLayoutWidth,
+            containerWidth: naturalWidth,
             margin,
             maxRows,
             rowHeight,
@@ -124,19 +182,15 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
         );
         if (h !== layout.h || w !== layout.w) {
             layout.h = h;
-            // Optionally update layout.w if needed.
             if (index < rects.length) {
-                // For stored elements, update in the canvas.
-                properties.canvas.elements.put(element);
+                layoutOverrides.current.set(index, layout);
             } else {
-                // For pending elements, update local state.
                 setPendingRects((prev) => {
                     const newPending = [...prev];
                     newPending[index - rects.length] = element;
                     return newPending;
                 });
             }
-            // Let the useEffect (on rects or pendingRects change) update layouts.
         }
     };
 
@@ -144,7 +198,9 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
         content: ElementContent,
         options: { id?: Uint8Array; pending: boolean } = { pending: false }
     ) => {
-        let maxY = rects
+        const allCurrentRects = await canvas.elements.index.search({});
+        const allPending = pendingRects;
+        let maxY = [...allCurrentRects, ...allPending]
             .map((x) => x.location)
             .flat()
             .filter((x) => x.breakpoint === latestBreakpoint.current)
@@ -161,55 +217,67 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
                     x: 0,
                     y: maxY != null ? maxY + 1 : 0,
                     z: 0,
-                    w: 20,
-                    h: 500,
+                    w: 1,
+                    h: 1,
                 }),
             ],
             content,
         });
-
         if (options.pending) {
-            if (
-                pendingRects &&
-                pendingRects.find((x) => equals(x.id, element.id))
-            ) {
-                console.log("Already have an pending element");
-                return;
-            }
-            setPendingRects((prev) => [...prev, element]);
+            setPendingRects((prev) => {
+                const prevElement = prev.find((x) => equals(x.id, element.id));
+                if (prevElement) {
+                    if (
+                        prevElement.content instanceof StaticContent &&
+                        prevElement.content.content.isEmpty
+                    ) {
+                        prevElement.content = element.content;
+                        return [...prev];
+                    }
+                    console.log("Already have a pending element");
+                    return prev;
+                }
+                return [...prev, element];
+            });
         } else {
-            properties.canvas.elements.put(element);
+            canvas.elements.put(element);
         }
     };
 
     const savePending = async () => {
-        if (!pendingRects) {
-            throw new Error("Missing pending element");
-        }
-        await Promise.all(
-            pendingRects.map((x) => properties.canvas.elements.put(x))
+        if (!pendingRects) return;
+        const pendingToSave = pendingRects.filter(
+            (x) =>
+                x.content instanceof StaticContent === false ||
+                x.content.content.isEmpty === false
         );
+        if (pendingToSave.length === 0) return;
         setPendingRects([]);
-        return pendingRects;
+        pendingCounter.current += pendingToSave.length;
+        await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
+        if (properties.draft) {
+            properties.onSave();
+        }
+        return pendingToSave;
     };
 
     const updateRects = async (newRects?: Element[], timeout = 500) => {
         if (!newRects) {
-            if (!properties.canvas.elements.index.index) {
-                console.error(properties.canvas.elements.index.closed);
+            if (!canvas.elements.index.index) {
+                console.error(canvas.elements.index.closed);
                 throw new Error(
                     "Room is not open, because index does not exist"
                 );
             }
-            await delay(3000);
+            await new Promise((resolve) => setTimeout(resolve, 3000));
             newRects = (
-                await properties.canvas.elements.index.search(
-                    new SearchRequest()
-                )
+                await canvas.elements.index.search(new SearchRequest())
             ).filter((x) => !!x);
         }
         updateRectsTimeout = setTimeout(() => {
-            setLayouts(getLayouts([newRects, pendingRects]));
+            setLayouts(
+                getLayouts([newRects, pendingRects], layoutOverrides.current)
+            );
         }, timeout);
     };
 
@@ -218,25 +286,46 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
         resizeSizes.current = new Map();
     };
 
-    const insertDefault = () => {
+    const insertDefault = (options?: {
+        app?: SimpleWebManifest;
+        increment?: boolean;
+    }) => {
+        if (options?.increment) {
+            const last = pendingRects[pendingRects.length - 1];
+            if (
+                last &&
+                last.content instanceof StaticContent &&
+                last.content.content.isEmpty
+            ) {
+                // Do not increment
+            } else {
+                pendingCounter.current++;
+            }
+        }
         const defaultId = sha256Sync(
             concat([
-                properties.canvas.id,
+                canvas.id,
                 peer.identity.publicKey.bytes,
-                new Uint8Array([0]),
+                new Uint8Array([pendingCounter.current]),
             ])
         );
+        let appToAdd: AbstractStaticContent;
+        if (options?.app) {
+            const native = getNativeApp(options.app.url);
+            if (!native) {
+                throw new Error("Missing native app");
+            }
+            const defaultValue = native.default();
+            appToAdd = defaultValue;
+        } else {
+            appToAdd = new StaticMarkdownText({ text: "" });
+        }
         return addRect(
             new StaticContent({
-                content: new StaticMarkdownText({ text: "Some text" }),
+                content: appToAdd,
             }),
-            {
-                id: defaultId,
-                pending: true,
-            }
-        ).then(() => {
-            updateRects();
-        });
+            { id: defaultId, pending: true }
+        );
     };
 
     const removePending = (ix: number) => {
@@ -325,33 +414,32 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
     }, []);
 
     useEffect(() => {
-        if (!peer || !properties.canvas) return;
+        if (!peer || !canvas) return;
         reset();
-        if (properties.canvas.closed) {
+        if (canvas?.closed) {
             throw new Error("Expecting canvas to be open");
         }
         const room = properties.canvas;
         let isOwner = peer.identity.publicKey.equals(room.publicKey);
         setIsOwner(isOwner);
-        room.elements.events.addEventListener("change", async () => {
-            updateRects(undefined, 0);
-        });
         if (properties.draft) {
             insertDefault();
         }
     }, [
         peer?.identity.publicKey.hashcode(),
-        properties?.canvas.closed,
-        properties?.canvas?.address,
+        !canvas || canvas?.closed ? undefined : canvas.address,
     ]);
 
-    let renderRects = (rects: Element<ElementContent>[], offset: number) => {
-        return rects.map((x, _ix) => {
+    let renderRects = (
+        rectsToRender: Element<ElementContent>[],
+        offset: number
+    ) => {
+        return rectsToRender.map((x, _ix) => {
             const ix = offset + _ix;
             return (
                 <div key={ix}>
                     <Frame
-                        hideHeader={properties.draft}
+                        thumbnail={asThumbnail}
                         active={active.has(ix)}
                         setActive={(v) => {
                             if (v) {
@@ -369,16 +457,14 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
                             const pendingIndex = pendingRects.indexOf(x);
                             if (pendingIndex !== -1) {
                                 removePending(ix);
-                                updateRects();
                             } else {
-                                properties.canvas.elements
-                                    .del(x.id)
-                                    .then(() => {
-                                        updateRects();
-                                    });
+                                canvas?.elements.del(x.id);
                             }
                         }}
                         editMode={editMode}
+                        showCanvasControls={
+                            editMode && pendingRects.length + rects.length > 1
+                        }
                         element={x}
                         index={ix}
                         replace={async (url) => {
@@ -388,20 +474,35 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
                             let fromPending = !!pendingElement;
                             let element =
                                 pendingElement ||
-                                (await properties.canvas.elements.index.get(
-                                    x.id
-                                ));
+                                (await canvas.elements.index.get(x.id));
                             (element.content as IFrameContent).src = url;
                             if (!fromPending) {
-                                await properties.canvas.elements.put(element);
+                                await canvas.elements.put(element);
                             }
                         }}
                         onLoad={(event) =>
                             onIframe(event, x as Element<IFrameContent>, ix)
                         }
                         onStaticResize={(dims, idx) => {
-                            // When static content is resized, update the layout via shrinkToFit.
-                            shrinkToFit(idx, dims);
+                            fitToSize(idx, dims);
+                        }}
+                        onContentChange={(newContent, idx) => {
+                            if (idx < rects.length) {
+                                const element = rects[idx];
+                                element.content = new StaticContent({
+                                    content: newContent,
+                                });
+                                canvas.elements.put(element);
+                            } else {
+                                setPendingRects((prev) => {
+                                    const newPending = [...prev];
+                                    newPending[idx - rects.length].content =
+                                        new StaticContent({
+                                            content: newContent,
+                                        });
+                                    return newPending;
+                                });
+                            }
                         }}
                         pending={!!pendingRects.find((p) => equals(p.id, x.id))}
                     />
@@ -411,35 +512,70 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
     };
 
     return (
-        <div className="w-full h-full min-h-10 flex flex-row">
-            <div className="flex flex-row justify-center mt-auto">
-                {!inIframe() && properties.draft && (
-                    <div className="max-w-[600px] w-full">
-                        <Create
-                            onSave={savePending}
-                            onNew={insertDefault}
-                            unsavedCount={pendingRects.length}
-                            onEditModeChange={setEditMode}
-                            direction="col"
-                        />
-                    </div>
-                )}
-            </div>
-            <div className="overflow-auto h-full h-min-10 w-full mt-auto">
+        <div
+            className={`w-full h-full ${
+                properties.height ? "" : "min-h-10"
+            } flex flex-row items-center space-x-4`}
+            /*  style={{
+                 width: '100%',
+                 height: '100%',
+             }} */
+            style={
+                properties.scaled
+                    ? {
+                          width: containerWidth,
+                          height: containerHeight,
+                          overflow: "hidden",
+                      }
+                    : {}
+            }
+        >
+            {/* Left toolbar */}
+            {!inIframe() && properties.draft && (
+                <div className="max-w-[600px]">
+                    <CanvasModifyToolbar
+                        onNew={(app) => insertDefault({ app, increment: true })}
+                        unsavedCount={pendingRects.length}
+                        onEditModeChange={setEditMode}
+                        direction="col"
+                    />
+                </div>
+            )}
+
+            {/* Center grid layout */}
+            <div
+                className={`flex-grow w-full ${
+                    properties.scaled ? "overflow-hidden" : "overflow-auto"
+                } ${
+                    rects.length + pendingRects.length > 1
+                        ? "min-h-[300px]"
+                        : ""
+                }`}
+                onClick={() => setFocused(undefined)}
+            >
                 <div
-                    className="flex flex-row w-full"
-                    onClick={() => setFocused(undefined)}
+                    style={
+                        properties.scaled
+                            ? {
+                                  transform: `scale(${scaleFactor})`,
+                                  transformOrigin: "center",
+                                  /*  width: naturalWidth,
+                                 height: naturalHeight, */
+                              }
+                            : {}
+                    }
                 >
                     <div ref={gridLayoutRef} className="w-full">
                         <ReactGridLayout
                             autoSize={true}
-                            width={gridLayoutWidth}
+                            width={
+                                properties.scaled ? naturalWidth : measuredWidth
+                            }
                             className="layout max-h-[450px]"
                             cols={cols}
                             rowHeight={rowHeight}
                             margin={margin}
                             containerPadding={containerPadding}
-                            allowOverlap
                             breakpoints={{ md: 768, xxs: 0 }}
                             onResizeStart={(e) => {
                                 setFocused(Number(e.item.i));
@@ -460,7 +596,7 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
                             onBreakpointChange={(b, c) => {
                                 clearTimeout(updateRectsTimeout);
                             }}
-                            isResizable={editMode}
+                            isResizable={false} // TODO
                             resizeHandles={[
                                 "s",
                                 "w",
@@ -542,9 +678,7 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
                                 Promise.all(
                                     [...toUpdate.values()].map((rect) => {
                                         if (pendingRects.includes(rect)) return;
-                                        return properties.canvas.elements.put(
-                                            rect
-                                        );
+                                        return canvas.elements.put(rect);
                                     })
                                 ).catch((e) => {
                                     console.error("Failed to update layout", e);
@@ -557,6 +691,21 @@ export const Canvas = (properties: { canvas: CanvasDB; draft?: boolean }) => {
                     </div>
                 </div>
             </div>
+
+            {/* Right send button */}
+            {properties.draft && (
+                <div className="flex-shrink-0">
+                    <button
+                        onClick={() => {
+                            savePending();
+                        }}
+                        className="btn-elevated btn-icon btn-icon-md btn-toggle"
+                        aria-label="Send"
+                    >
+                        <BsSend size={24} />
+                    </button>
+                </div>
+            )}
         </div>
     );
 };

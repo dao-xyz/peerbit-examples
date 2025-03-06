@@ -7,12 +7,10 @@ import {
     ComboboxOptions,
     Transition,
 } from "@headlessui/react";
-import { IoIosApps } from "react-icons/io";
-import { useApps } from "../useApps";
+import { useApps } from "../content/useApps";
 import { AiOutlineQuestionCircle } from "react-icons/ai";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { InvalidAppError } from "@dao-xyz/social";
-import { PiCaretUpDownBold } from "react-icons/pi";
 
 const unknownApp = (url: string) => new SimpleWebManifest({ url });
 const isNative = (app: SimpleWebManifest) => app.url.startsWith("native:");
@@ -21,11 +19,13 @@ export const AppSelect = (properties: {
     onSelected: (app: SimpleWebManifest) => any;
 }) => {
     const { apps, search: appSearch, history: appHistory } = useApps();
+    const nativeApps = apps.filter((x) => x.isNative);
+    const nonNativeApps = apps.filter((x) => !x.isNative);
+
     const [selected, setSelected] = useState<SimpleWebManifest>(
         apps[0] || unknownApp("")
     );
     const [query, setQuery] = useState("");
-    const comboBoxRef = useRef<HTMLElement>();
     const [loadingApp, setLoadingApp] = useState(false);
     const filteredAppsRef = useRef<SimpleWebManifest[]>([]);
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
@@ -51,7 +51,6 @@ export const AppSelect = (properties: {
 
     return (
         <Combobox
-            ref={comboBoxRef}
             value={selected}
             onChange={(v) => {
                 setSelected(v);
@@ -65,168 +64,152 @@ export const AppSelect = (properties: {
             }}
         >
             {({ open }) => (
-                <div className="w-full relative">
-                    {/* Icon container */}
-                    <Transition
-                        as="div"
-                        show={!loadingApp}
-                        enter="transform transition duration-[800ms]"
-                        enterFrom="opacity-0 rotate-0 scale-50"
-                        enterTo="opacity-100 rotate-0 scale-100"
-                        leave="transform duration-200 transition ease-in-out"
-                        leaveFrom="opacity-100 rotate-0 scale-100"
-                        leaveTo="opacity-0 scale-95"
-                        className="absolute top-[5px] left-[10px] 0"
-                    >
-                        <ComboboxButton className="flex flex-row items-center justify-start">
-                            {/* <PiCaretUpDownBold size="20px" className="mr-1" /> */}
-                            <div className="bg-white rounded dark:shadow-primary-20">
-                                {selected?.icon ? (
-                                    <img
-                                        src={selected.icon}
-                                        alt="App Icon"
-                                        className="w-[21px] h-[21px] p-[2px]"
-                                    />
-                                ) : (
-                                    <AiOutlineQuestionCircle className="w-[25px] h-[25px]" />
-                                )}
-                            </div>
-                        </ComboboxButton>
-                    </Transition>
-                    <ComboboxInput
-                        autoComplete="off"
-                        disabled={!open}
-                        // When open, expand to full width; otherwise, limit to 200px with ellipsis.
-                        className={`border-none focus:outline-none py-2 pl-[40px] ${
-                            open ? "pr-10" : ""
-                        } text-sm leading-5 transition-all duration-200 ${
-                            open ? "w-full" : "w-[0px] truncate"
-                        }`}
-                        displayValue={(app?: SimpleWebManifest) => {
-                            if (app) {
-                                return !app.url || isNative(app)
-                                    ? app.title
-                                    : app.url;
-                            }
-                            return "";
-                        }}
-                        onFocus={(event) => {
-                            if (!query) {
-                                setLoadingApp(true);
-                                filter("", event.target).finally(() => {
-                                    setLoadingApp(false);
-                                });
-                            }
-                        }}
-                        onChange={(event) => {
-                            const value = event.target.value;
-                            setQuery(value);
-                            if (value) {
-                                setLoadingApp(true);
-                                setSelected(unknownApp(value));
-                                filter(value, event.target).finally(() => {
-                                    setLoadingApp(false);
-                                });
-                            }
-                        }}
-                    />
+                <div className="relative inline-block">
+                    <ComboboxButton className="flex items-center justify-center btn btn-elevated btn-icon">
+                        <div className="bg-white rounded dark:shadow-primary-20">
+                            {selected?.icon ? (
+                                <img
+                                    src={selected.icon}
+                                    alt="App Icon"
+                                    className="w-[21px] h-[21px] p-[2px]"
+                                />
+                            ) : (
+                                <AiOutlineQuestionCircle className="w-[25px] h-[25px]" />
+                            )}
+                        </div>
+                    </ComboboxButton>
 
                     <Transition
                         show={open}
                         as={Fragment}
-                        leave="transition ease-in duration-100"
-                        leaveFrom="opacity-100"
-                        leaveTo="opacity-0"
+                        enter="transition duration-200 ease-out"
+                        enterFrom="opacity-0 scale-95"
+                        enterTo="opacity-100 scale-100"
+                        leave="transition duration-150 ease-in"
+                        leaveFrom="opacity-100 scale-100"
+                        leaveTo="opacity-0 scale-95"
                     >
-                        <ComboboxOptions
-                            static
-                            anchor="top"
-                            className="w-[var(--input-width)] absolute py-1 mt-1 overflow-auto text-base bg-neutral-50 dark:bg-neutral-900 rounded-md shadow-lg max-h-60 ring-1 ring-black ring-opacity-5 focus:outline-none sm:text-sm"
-                        >
-                            {filteredAppsRef.current.map((app, ix) => (
-                                <ComboboxOption
-                                    key={ix}
-                                    className={({ active, selected }) =>
-                                        `cursor-default select-none relative py-2 pl-10 pr-4 ${optionStyle(
-                                            active,
-                                            selected
-                                        )}`
-                                    }
-                                    value={app}
-                                >
-                                    {({ selected, active }) => (
-                                        <div className="flex flex-col">
-                                            <span
-                                                className={`truncate ${
-                                                    selected
-                                                        ? "font-medium"
-                                                        : "font-normal"
-                                                }`}
-                                            >
-                                                {app.title}
-                                            </span>
-                                            <span className="truncate font-mono text-xs">
-                                                {isNative(app)
-                                                    ? app.title
-                                                    : app.url}
-                                            </span>
-                                        </div>
-                                    )}
-                                </ComboboxOption>
-                            ))}
-                            {query.length > 0 && (
-                                <ComboboxOption
-                                    className={({ active, selected }) =>
-                                        `cursor-default select-none relative py-2 pl-10 pr-4 ${
-                                            active
-                                                ? "bg-primary-400 dark:bg-primary-600"
-                                                : "text-gray-900"
-                                        } ${
-                                            selected &&
-                                            "bg-primary-600 dark:bg-primary-200"
-                                        }`
-                                    }
-                                    value={unknownApp(query)}
-                                >
-                                    {query}
-                                </ComboboxOption>
-                            )}
-                            {/* Horizontal list of native app icon buttons */}
-                            <div className="border-t mt-1 pt-1 pl-2 flex gap-2">
-                                {apps
-                                    .filter((x) => x.isNative)
-                                    .map((app) => (
-                                        <button
-                                            key={app.url}
-                                            type="button"
-                                            onClick={() => {
-                                                setSelected(app);
-                                                properties.onSelected(app);
-                                                appHistory
-                                                    .insert(app)
-                                                    .catch((e) => {
-                                                        if (
-                                                            !(
-                                                                e instanceof
-                                                                InvalidAppError
-                                                            )
-                                                        )
-                                                            throw e;
-                                                    });
-                                            }}
-                                            className="p-2 rounded hover:bg-primary-200"
-                                        >
-                                            <div className="flex flex-row items-center gap-1">
-                                                <img
-                                                    className="w-5 h-5"
-                                                    src={app.icon}
-                                                    alt="Native App Icon"
-                                                />
+                        {/* Positioning changed: bottom-full positions the popup above the button */}
+                        <div className="absolute z-50 bottom-full left-0 mb-1 bg-neutral-50 dark:bg-neutral-900 rounded-md shadow-lg  ring-1 ring-black ring-opacity-5 focus:outline-none ">
+                            <ComboboxOptions className="mt-1 w-[200px]  max-h-60 ">
+                                {filteredAppsRef.current.map((app, ix) => (
+                                    <ComboboxOption
+                                        key={ix}
+                                        className={({ active, selected }) =>
+                                            `cursor-default select-none relative py-2 pl-10 pr-4 ${optionStyle(
+                                                active,
+                                                selected
+                                            )}`
+                                        }
+                                        value={app}
+                                    >
+                                        {({ selected, active }) => (
+                                            <div className="flex flex-col">
+                                                <span
+                                                    className={`truncate ${
+                                                        selected
+                                                            ? "font-medium"
+                                                            : "font-normal"
+                                                    }`}
+                                                >
+                                                    {app.title}
+                                                </span>
+                                                <span className="truncate font-mono text-xs">
+                                                    {isNative(app)
+                                                        ? app.title
+                                                        : app.url}
+                                                </span>
                                             </div>
-                                        </button>
-                                    ))}
-                            </div>
-                        </ComboboxOptions>
+                                        )}
+                                    </ComboboxOption>
+                                ))}
+                                {query.length > 0 && (
+                                    <ComboboxOption
+                                        className={({ active, selected }) =>
+                                            `cursor-default select-none relative py-2 pl-10 pr-4 ${
+                                                active
+                                                    ? "bg-primary-400 dark:bg-primary-600"
+                                                    : "text-gray-900"
+                                            } ${
+                                                selected &&
+                                                "bg-primary-600 dark:bg-primary-200"
+                                            }`
+                                        }
+                                        value={unknownApp(query)}
+                                    >
+                                        {query}
+                                    </ComboboxOption>
+                                )}
+                                {nativeApps.length > 0 && (
+                                    <div className="m-1 flex gap-2 pt-1">
+                                        {nativeApps.map((app) => (
+                                            <button
+                                                key={app.url}
+                                                type="button"
+                                                onClick={() => {
+                                                    setSelected(app);
+                                                    properties.onSelected(app);
+                                                    appHistory
+                                                        .insert(app)
+                                                        .catch((e) => {
+                                                            if (
+                                                                !(
+                                                                    e instanceof
+                                                                    InvalidAppError
+                                                                )
+                                                            )
+                                                                throw e;
+                                                        });
+                                                }}
+                                                className="p-2 bg-white rounded hover:bg-primary-200"
+                                            >
+                                                <div className="flex flex-row items-center gap-1">
+                                                    <img
+                                                        className="w-5 h-5"
+                                                        src={app.icon}
+                                                        alt="Native App Icon"
+                                                    />
+                                                </div>
+                                            </button>
+                                        ))}
+                                    </div>
+                                )}
+                            </ComboboxOptions>
+                            <ComboboxInput
+                                placeholder="Search for apps"
+                                autoComplete="off"
+                                className="border border-gray-300 rounded p-2 pr-10 text-sm leading-5 w-[200px]"
+                                displayValue={(app?: SimpleWebManifest) => {
+                                    if (app) {
+                                        return !app.url || isNative(app)
+                                            ? app.title
+                                            : app.url;
+                                    }
+                                    return "";
+                                }}
+                                onFocus={(event) => {
+                                    if (!query) {
+                                        setLoadingApp(true);
+                                        filter("", event.target).finally(() => {
+                                            setLoadingApp(false);
+                                        });
+                                    }
+                                }}
+                                onChange={(event) => {
+                                    const value = event.target.value;
+                                    setQuery(value);
+                                    if (value) {
+                                        setLoadingApp(true);
+                                        setSelected(unknownApp(value));
+                                        filter(value, event.target).finally(
+                                            () => {
+                                                setLoadingApp(false);
+                                            }
+                                        );
+                                    }
+                                }}
+                            />
+                        </div>
                     </Transition>
                 </div>
             )}

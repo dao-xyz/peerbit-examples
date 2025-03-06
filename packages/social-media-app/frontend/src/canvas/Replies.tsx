@@ -1,32 +1,57 @@
-import React, { useState } from "react";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import React, { useEffect, useMemo, useState } from "react";
+import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
 import { useLocal, usePeer, useProgram } from "@peerbit/react";
-import { CanvasPreview } from "./CanvasPreview";
+import { CanvasPreview } from "./Preview";
 
 // Radix UI Dropdown components
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Canvas } from "./Canvas";
 
-export const Replies = (properties: { canvas: CanvasDB }) => {
+export const Replies = (properties: { canvas?: CanvasDB }) => {
     const [sortCriteria, setSortCriteria] = useState("New");
-    const replies = useLocal(properties.canvas.replies);
+    const replies = useLocal(properties.canvas?.replies);
 
     // Optionally sort replies based on the selected criteria.
     const sortedReplies = [...replies].sort((a, b) => {
-        // Replace with sorting logic if needed.
         return 0;
     });
 
     const peer = usePeer();
 
-    const pendingCanvas = useProgram(
-        new CanvasDB({
-            publicKey: peer.peer.identity.publicKey,
-            parentId: properties.canvas.id,
-        })
-    );
+    const [pendingCanvasState, setPendingCanvasState] = useState<
+        CanvasDB | undefined
+    >(undefined);
 
+    useEffect(() => {
+        setPendingCanvasState(
+            new CanvasDB({
+                publicKey: peer.peer.identity.publicKey,
+                parent: new CanvasValueReference({
+                    canvas: properties.canvas,
+                }),
+            })
+        );
+    }, [properties?.canvas?.idString]);
+
+    const pendingCanvas = useProgram(pendingCanvasState, {
+        id: pendingCanvasState?.idString, // we do set the id here so the useProgram hooke will change on pendingCavnasState changes
+        keepOpenOnUnmount: true,
+    });
+
+    const onSavePending = () => {
+        setPendingCanvasState((prev) => {
+            // add "comment"
+            properties.canvas.replies.put(prev);
+
+            // and initialize a new canvas for the next comment
+
+            return new CanvasDB({
+                publicKey: peer.peer.identity.publicKey,
+                parent: new CanvasValueReference({ canvas: properties.canvas }),
+            });
+        });
+    };
     return (
         <div className="flex flex-col h-full">
             {/* Toolbar with Radix dropdown */}
@@ -68,18 +93,28 @@ export const Replies = (properties: { canvas: CanvasDB }) => {
             </div>
 
             {/* Replies list in a scrollable container */}
-            <div className="flex-grow overflow-auto">
-                {sortedReplies.map((reply) => (
-                    <div key={reply.id.toString()}>
-                        <CanvasPreview canvas={reply} />
-                    </div>
-                ))}
-            </div>
-
+            {sortedReplies.length > 0 ? (
+                <div className="flex-grow overflow-auto">
+                    {sortedReplies.map((reply) => (
+                        <div key={reply.id.toString()}>
+                            <CanvasPreview canvas={reply} />
+                        </div>
+                    ))}
+                </div>
+            ) : (
+                <div className="flex-grow flex items-center justify-center">
+                    No replies yet
+                </div>
+            )}
             {/* New response outlet */}
+            <hr className="faded" />
             {pendingCanvas.program?.closed === false && (
                 <div className="mt-4">
-                    <Canvas canvas={pendingCanvas.program} draft={true} />
+                    <Canvas
+                        canvas={pendingCanvas.program}
+                        draft={true}
+                        onSave={onSavePending}
+                    />
                 </div>
             )}
         </div>

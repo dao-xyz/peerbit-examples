@@ -5,7 +5,12 @@ import {
     StringMatch,
     StringMatchMethod,
 } from "@peerbit/document";
-import { PublicSignKey, randomBytes, sha256Sync } from "@peerbit/crypto";
+import {
+    PublicSignKey,
+    randomBytes,
+    sha256Base64Sync,
+    sha256Sync,
+} from "@peerbit/crypto";
 import { Program } from "@peerbit/program";
 import { AbstractStaticContent } from "./static/content";
 import { StaticMarkdownText } from "./static";
@@ -80,7 +85,7 @@ export class Element<T extends ElementContent = ElementContent> {
     }
 }
 
-class IndexableElement {
+export class IndexableElement {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
@@ -127,28 +132,35 @@ class IndexableCanvas {
     }
 }
 
+abstract class CanvasReference {
+    abstract load(): Promise<Canvas> | Canvas;
+}
+
 @variant("canvas")
 export class Canvas extends Program {
     @field({ type: Documents })
     elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
 
     @field({ type: Documents })
-    replies: Documents<Canvas, IndexableCanvas>; // Elements are either data points or sub-canvases (comments)
+    replies: Documents<Canvas, IndexableCanvas>; // Replies are subcanvases
 
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
-    @field({ type: option(fixedArray("u8", 32)) })
-    parentId?: Uint8Array;
+    @field({ type: option(CanvasReference) })
+    parent?: CanvasReference;
 
     constructor(
-        properties: ({ parentId: Uint8Array } | { seed: Uint8Array }) & {
+        properties: (
+            | { parent: CanvasValueReference }
+            | { seed: Uint8Array }
+        ) & {
             publicKey: PublicSignKey;
         }
     ) {
         super();
         this.publicKey = properties.publicKey;
-        this.parentId = properties["parentId"];
+        this.parent = properties["parent"];
         let elementsId = (properties as { seed: Uint8Array }).seed
             ? sha256Sync((properties as { seed: Uint8Array }).seed)
             : randomBytes(32);
@@ -158,6 +170,12 @@ export class Canvas extends Program {
 
     get id(): Uint8Array {
         return this.elements.log.log.id;
+    }
+
+    private _idString: string;
+
+    get idString() {
+        return this._idString || (this._idString = sha256Base64Sync(this.id));
     }
 
     async open(): Promise<void> {
@@ -236,8 +254,20 @@ export class Canvas extends Program {
         });
     }
 
+    async getCanvasPath() {
+        let current: Canvas = this;
+        let path: Canvas[] = [current];
+
+        while (current.parent) {
+            const next = await current.parent.load();
+            path.push(next);
+            current = next;
+        }
+        return path.reverse();
+    }
+
     async getCreateRoomByPath(path: string[]): Promise<Canvas[]> {
-        const results = await this.findRoomsByPath(path);
+        const results = await this.findCanvasesByPath(path);
         let rooms = results.canvases;
 
         if (path.length !== results.path.length) {
@@ -254,7 +284,7 @@ export class Canvas extends Program {
 
             for (let i = results.path.length; i < path.length; i++) {
                 const canvas = new Canvas({
-                    parentId: this.id,
+                    parent: new CanvasValueReference({ canvas: currentCanvas }),
                     publicKey: this.node.identity.publicKey,
                 });
 
@@ -280,7 +310,7 @@ export class Canvas extends Program {
         return rooms;
     }
 
-    async findRoomsByPath(
+    async findCanvasesByPath(
         path: string[]
     ): Promise<{ path: string[]; canvases: Canvas[] }> {
         let canvases: Canvas[] = [this];
@@ -295,7 +325,7 @@ export class Canvas extends Program {
                     });
                 }
 
-                newRooms.push(...(await parent.findRoomsByName(name)));
+                newRooms.push(...(await parent.findCanvasesByName(name)));
             }
             if (newRooms.length > 0) {
                 visitedPath.push(name);
@@ -307,7 +337,7 @@ export class Canvas extends Program {
         return { path: visitedPath, canvases };
     }
 
-    async findRoomsByName(name: string): Promise<Canvas[]> {
+    async findCanvasesByName(name: string): Promise<Canvas[]> {
         const results = await this.replies.index.search(
             new SearchRequest({
                 query: [
@@ -331,10 +361,28 @@ export class Canvas extends Program {
         let concat = "";
         for (const element of elements) {
             if (element.value.type !== "canvas") {
+                if (concat.length > 0) {
+                    concat += "\n";
+                }
                 concat += element.value.content;
             }
         }
         return concat;
+    }
+}
+
+@variant(0)
+export class CanvasValueReference extends CanvasReference {
+    @field({ type: Canvas })
+    canvas: Canvas;
+
+    constructor(properties: { canvas: Canvas }) {
+        super();
+        this.canvas = properties.canvas;
+    }
+
+    async load() {
+        return this.canvas;
     }
 }
 

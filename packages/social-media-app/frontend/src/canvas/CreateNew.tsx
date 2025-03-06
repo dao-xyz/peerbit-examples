@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useSpaces } from "../useSpaces";
+import { useCanvases } from "./useCanvas";
 import { Spinner } from "../utils/Spinner";
-export const CreateRoom = () => {
-    const { create } = useSpaces();
+export const CreateNew = () => {
+    const { create } = useCanvases();
     const [isLoading, setIsLoading] = useState(false);
     return (
         <>

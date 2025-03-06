@@ -27,6 +27,7 @@ interface IApps {
     history: BrowsingHistory;
     resolve: (url: string) => Promise<SimpleWebManifest | undefined>;
     search: (urlOrName: string) => Promise<SimpleWebManifest[]>;
+    getNativeApp: (url: string) => CuratedNativeApp | undefined;
 }
 
 const STREAMING_APP = ["development", "staging"].includes(import.meta.env.MODE)
@@ -59,18 +60,18 @@ interface CuratedNativeApp {
     type: "native";
     match: string | string[];
     title: string;
-    content: Constructor<AbstractStaticContent>;
+    default: () => AbstractStaticContent;
     manifest: SimpleWebManifest;
 }
 
 type CuratedApp = CuratedNativeApp | CuratedWebApp;
 
-const curatedApps: CuratedApp[] = [
+const nativeApps: CuratedNativeApp[] = [
     {
         type: "native",
         match: "text",
         title: "Text",
-        content: StaticMarkdownText,
+        default: () => new StaticMarkdownText({ text: "" }),
         manifest: new SimpleWebManifest({
             url: "native:text",
             title: "Text",
@@ -82,7 +83,7 @@ const curatedApps: CuratedApp[] = [
         type: "native",
         match: "Image",
         title: "Image",
-        content: StaticImage,
+        default: () => new StaticImage({} as any), // TODO type safe
         manifest: new SimpleWebManifest({
             url: "native:image",
             title: "Image",
@@ -90,7 +91,10 @@ const curatedApps: CuratedApp[] = [
             icon: "/apps/image.svg",
         }),
     },
+];
 
+const curatedApps: CuratedApp[] = [
+    ...nativeApps,
     {
         type: "web",
         match: "https://kick.com",
@@ -144,7 +148,6 @@ const getCurated = (rawInput: string, maybeUrl?: string) => {
         for (const match of Array.isArray(app.match)
             ? app.match
             : [app.match]) {
-            console.log("MATCH ?" + rawInput, match);
             if (match.startsWith(rawInput)) {
                 return app;
             }
@@ -218,6 +221,8 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
         () => ({
             apps,
             history: historyDB,
+            getNativeApp: (url) =>
+                nativeApps.find((x) => x.manifest.url === url),
             search: async (urlOrName) => {
                 let result: Map<string, SimpleWebManifest> = new Map();
 

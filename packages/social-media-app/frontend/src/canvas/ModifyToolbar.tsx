@@ -1,15 +1,14 @@
 import { MdSave } from "react-icons/md";
 import { TbBorderCorners } from "react-icons/tb";
 import * as Toggle from "@radix-ui/react-toggle";
-import { BsSend } from "react-icons/bs";
 import { MdAdd } from "react-icons/md";
 import { AppSelect } from "./AppSelect";
+import { SimpleWebManifest } from "@dao-xyz/app-service";
 
-export const Create = (properties: {
+export const CanvasModifyToolbar = (properties: {
     canvas?: boolean;
-    onSave: () => void;
     unsavedCount: number;
-    onNew: () => void;
+    onNew: (app?: SimpleWebManifest) => void;
     onEditModeChange: (edit: boolean) => void;
     direction?: "row" | "col";
 }) => {
@@ -26,7 +25,7 @@ export const Create = (properties: {
                     >
                         <TbBorderCorners />
                     </Toggle.Root>
-                    <button
+                    {/*  <button
                         onClick={() => {
                             console.log("SAVE?");
                             properties.onSave();
@@ -40,7 +39,7 @@ export const Create = (properties: {
                                 {properties.unsavedCount}
                             </div>
                         )}
-                    </button>
+                    </button> */}
                 </>
             );
         }
@@ -63,21 +62,9 @@ export const Create = (properties: {
             >
                 <MdAdd />
             </button>
-            <div className="btn btn-elevated p-[2px]">
-                <AppSelect onSelected={() => {}} />
+            <div>
+                <AppSelect onSelected={(app) => properties.onNew(app)} />
             </div>
-
-            {/* 
-            <button
-                onClick={() => {
-                    console.log("NEW");
-                    properties.onNew();
-                }}
-                className=" btn-elevated btn-icon btn-icon-md btn-toggle h-max"
-                aria-label="Toggle italic"
-            >
-                <BsSend />
-            </button> */}
         </div>
     );
 };

@@ -1,32 +1,40 @@
 import { usePeer } from "@peerbit/react";
-import { useSpaces } from "../useSpaces.js";
+import { useCanvases } from "./useCanvas.js";
 import { useState, useEffect } from "react";
-import { Canvas as CanvasView } from "./Canvas.js";
+import { Canvas as Canvas } from "./Canvas.js";
+import { Canvas as CanvasDB } from "@dao-xyz/social";
+
 import { Replies as RepliesView } from "./Replies.js";
-import { CreateRoom } from "./CreateSpace.js";
+import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
 import { AiOutlineComment } from "react-icons/ai";
+import { Header } from "./header//Header.js";
 
-const CanvasRepliesItem = ({ canvas }) => {
-    const [showReplies, setShowReplies] = useState(false);
+const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
+    const isRoot = props.canvas?.parent == null;
+    const [showReplies, setShowReplies] = useState(isRoot);
+    const { peer } = usePeer();
 
     return (
         <div className="p-5 flex flex-col">
+            <Header publicKey={peer.identity.publicKey} />
             <div className="rounded-md">
-                <CanvasView canvas={canvas} />
+                <Canvas canvas={props.canvas} />
             </div>
-            <button
-                className="btn btn-elevated btn-icon mt-2 flex items-center"
-                onClick={() => setShowReplies(!showReplies)}
-            >
-                <AiOutlineComment size={20} />
-                <span className="ml-2">
-                    {showReplies ? "Hide Comments" : "Show Comments"}
-                </span>
-            </button>
+            {/*  {!isRoot && (
+                <button
+                    className="btn btn-elevated btn-icon mt-2 flex items-center"
+                    onClick={() => setShowReplies(!showReplies)}
+                >
+                    <AiOutlineComment size={20} />
+                    <span className="ml-2">
+                        {showReplies ? "Hide Comments" : "Show Comments"}
+                    </span>
+                </button>
+            )} */}
             {showReplies && (
-                <div className="mt-[3px] border border-gray-300 p-2 rounded-md">
-                    <RepliesView canvas={canvas} />
+                <div className="mt-[3px] p-2 rounded-md">
+                    <RepliesView canvas={props.canvas} />
                 </div>
             )}
         </div>
@@ -35,7 +43,7 @@ const CanvasRepliesItem = ({ canvas }) => {
 
 export const CanvasAndReplies = () => {
     const { peer } = usePeer();
-    const { root, canvases, loading } = useSpaces();
+    const { root, path: canvases, loading } = useCanvases();
 
     useEffect(() => {
         if (!peer || !root) {
@@ -44,7 +52,7 @@ export const CanvasAndReplies = () => {
         // Additional logic if needed
     }, [peer?.identity.publicKey.hashcode(), root]);
 
-    // When there are no canvases, ensure the container fills the screen
+    // When there is not a currently selected canvas, ensure the container fills the screen
     if (canvases.length === 0) {
         return (
             <div className="h-full flex flex-col justify-center">
@@ -59,7 +67,7 @@ export const CanvasAndReplies = () => {
                             Space not found
                         </div>
                     )}
-                    <CreateRoom />
+                    <CreateNew />
                 </div>
             </div>
         );
@@ -68,9 +76,10 @@ export const CanvasAndReplies = () => {
     return (
         <div className="min-h-screen flex flex-col">
             <div className="flex-grow">
-                {canvases.map((canvas, ix) => (
-                    <CanvasRepliesItem key={ix} canvas={canvas} />
-                ))}
+                <CanvasWithReplies
+                    key={0}
+                    canvas={canvases[canvases.length - 1]}
+                />
             </div>
             {/* This filler pushes the content to fill the screen if there is whitespace */}
         </div>

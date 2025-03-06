@@ -22,7 +22,7 @@ export const useProgram = <
         Program<any, ProgramEvents>
 >(
     addressOrOpen?: P | string,
-    options?: OpenOptions<P>
+    options?: OpenOptions<P> & { id?: string; keepOpenOnUnmount?: boolean }
 ) => {
     const { peer } = usePeer();
     let [program, setProgram] = useState<P | undefined>();
@@ -50,9 +50,13 @@ export const useProgram = <
                     };
                     p.events.addEventListener("join", changeListener);
                     p.events.addEventListener("leave", changeListener);
-                    p.getReady().then((set) => {
-                        setPeerCounter(set.size);
-                    });
+                    p.getReady()
+                        .then((set) => {
+                            setPeerCounter(set.size);
+                        })
+                        .catch((e) => {
+                            console.log("Error getReady()", e);
+                        });
                     setProgram(p);
                     forceUpdate();
 
@@ -70,8 +74,8 @@ export const useProgram = <
             // TODO don't close on reopen the same db?
             if (programLoadingRef.current) {
                 closingRef.current =
-                    programLoadingRef.current.then((p) =>
-                        p.close().then(() => {
+                    programLoadingRef.current.then((p) => {
+                        const unsubscribe = () => {
                             p.events.removeEventListener(
                                 "join",
                                 changeListener
@@ -85,15 +89,20 @@ export const useProgram = <
                                 setProgram(undefined);
                                 programLoadingRef.current = undefined;
                             }
-                        })
-                    ) || Promise.resolve();
+                        };
+                        if (options?.keepOpenOnUnmount) {
+                            return unsubscribe();
+                        }
+                        return p.close().then(unsubscribe);
+                    }) || Promise.resolve();
             }
         };
     }, [
         peer?.identity.publicKey.hashcode(),
+        options?.id,
         typeof addressOrOpen === "string"
             ? addressOrOpen
-            : addressOrUndefined(addressOrOpen),
+            : addressOrUndefined(),
     ]);
     return {
         program,

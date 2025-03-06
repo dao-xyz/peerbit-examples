@@ -24,17 +24,21 @@ describe("content", () => {
             const abc = await root.getCreateRoomByPath(["a", "b", "c"]);
             expect(abc).to.have.length(1);
             expect(await abc[0].createTitle()).to.eq("c");
+            expect((await abc[0].getCanvasPath()).length).to.eq(4);
+            expect((await abc[0].getCanvasPath())[3]).to.eq(abc[0]);
 
             const abd = await root.getCreateRoomByPath(["a", "b", "d"]);
             expect(abd).to.have.length(1);
             expect(await abd[0].createTitle()).to.eq("d");
+            expect((await abd[0].getCanvasPath()).length).to.eq(4);
+            expect((await abd[0].getCanvasPath())[3]).to.eq(abd[0]);
 
             const childrenFromRoot = await root.replies.index.index
                 .iterate()
                 .all();
             expect(childrenFromRoot).to.have.length(1); // both paths start at "a"
 
-            const ab = await root.findRoomsByPath(["a", "b"]);
+            const ab = await root.findCanvasesByPath(["a", "b"]);
             expect(
                 await Promise.all(ab.canvases.map((x) => x.createTitle()))
             ).to.deep.eq(["b"]);
