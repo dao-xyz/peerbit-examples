@@ -6,7 +6,6 @@ import { CanvasPreview } from "./Preview";
 // Radix UI Dropdown components
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
-import { Canvas } from "./Canvas";
 
 export const Replies = (properties: { canvas?: CanvasDB }) => {
     const [sortCriteria, setSortCriteria] = useState("New");

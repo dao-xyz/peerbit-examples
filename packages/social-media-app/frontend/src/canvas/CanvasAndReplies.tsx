@@ -2,6 +2,7 @@ import { usePeer, useProgram } from "@peerbit/react";
 import { useCanvases } from "./useCanvas.js";
 import { useState, useEffect } from "react";
 import { Canvas as Canvas } from "./Canvas.js";
+import { CanvasWrapper } from "./CanvasWrapper.js";
 import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
 
 import { Replies as RepliesView } from "./Replies.js";
@@ -19,7 +20,9 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
         <div className="p-5 flex flex-col">
             <Header publicKey={peer.identity.publicKey} />
             <div className="rounded-md">
-                <Canvas canvas={props.canvas} />
+                <CanvasWrapper canvas={props.canvas}>
+                    <Canvas />
+                </CanvasWrapper>
             </div>
             {/*  {!isRoot && (
                 <button
@@ -131,11 +134,9 @@ export const CanvasAndReplies = () => {
                         ></div>
                     ))}
                 </div>
-                <Canvas
-                    canvas={pendingCanvas.program}
-                    draft={true}
-                    onSave={onSavePending}
-                />
+                <CanvasWrapper canvas={pendingCanvas.program} draft={true}>
+                    <Canvas draft={true} onSave={onSavePending} />
+                </CanvasWrapper>
             </div>
 
             {/* This filler pushes the content to fill the screen if there is whitespace */}

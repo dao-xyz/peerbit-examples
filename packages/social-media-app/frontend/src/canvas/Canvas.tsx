@@ -1,5 +1,4 @@
-import { useState, useEffect, useRef, useReducer } from "react";
-import { inIframe, useLocal, usePeer, useProgram } from "@peerbit/react";
+import { inIframe } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Element,
@@ -10,17 +9,12 @@ import {
     StaticMarkdownText,
     AbstractStaticContent,
 } from "@dao-xyz/social";
-import { SearchRequest } from "@peerbit/document";
-import { useNames } from "../names/useNames.js";
-import { concat, equals } from "uint8arrays";
+import { equals } from "uint8arrays";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { CanvasModifyToolbar } from "./ModifyToolbar.js";
-import { sha256Sync } from "@peerbit/crypto";
 import { BsSend } from "react-icons/bs";
-import { SimpleWebManifest } from "@dao-xyz/app-service";
-import { useApps } from "../content/useApps.js";
-import { Spinner } from "../utils/Spinner.js";
+import { useCanvas } from "./CanvasWrapper";
 
 type SizeProps = {
     width?: number;
@@ -29,169 +23,22 @@ type SizeProps = {
 };
 
 export const Canvas = (
-    properties: { canvas: CanvasDB } & SizeProps &
+    properties: SizeProps &
         ({ draft: true; onSave: () => void } | { draft?: false })
 ) => {
     const asThumbnail = !!properties.scaled;
-    const { peer } = usePeer();
-    const { program: canvas } = useProgram(properties.canvas, {
-        existing: "reuse",
-        id: properties.canvas?.idString,
-        keepOpenOnUnmount: true,
-    });
-    const { getNativeApp } = useApps();
-    const [editMode, setEditMode] = useState(properties.draft);
-    const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
-        new Map()
-    );
-    const rects = useLocal(canvas?.elements);
-    const [pendingRects, setPendingRects] = useState<Element[]>([]);
-    const pendingCounter = useRef(0);
-    const [active, setActive] = useState<Set<number>>(new Set());
-    const [_, forceUpdate] = useReducer((x) => x + 1, 0);
-    const latestBreakpoint = useRef<"xxs" | "md">("md");
-
-    const addRect = async (
-        content: ElementContent,
-        options: { id?: Uint8Array; pending: boolean } = { pending: false }
-    ) => {
-        const allCurrentRects = await canvas.elements.index.search({});
-        const allPending = pendingRects;
-        const maxY = [...allCurrentRects, ...allPending]
-            .map((x) => x.location)
-            .flat()
-            .filter((x) => x.breakpoint === latestBreakpoint.current)
-            .reduce(
-                (prev, current) => Math.max(current.y + current.h, prev),
-                -1
-            );
-        const element = new Element({
-            publicKey: peer.identity.publicKey,
-            id: options.id,
-            location: [
-                new Layout({
-                    breakpoint: latestBreakpoint.current,
-                    x: 0,
-                    y: maxY != null ? maxY + 1 : 0,
-                    z: 0,
-                    w: 1,
-                    h: 1,
-                }),
-            ],
-            content,
-        });
-        if (options.pending) {
-            setPendingRects((prev) => {
-                const prevElement = prev.find((x) => equals(x.id, element.id));
-                if (prevElement) {
-                    if (
-                        prevElement.content instanceof StaticContent &&
-                        prevElement.content.content.isEmpty
-                    ) {
-                        prevElement.content = element.content;
-                        return [...prev];
-                    }
-                    console.log("Already have a pending element");
-                    return prev;
-                }
-                return [...prev, element];
-            });
-        } else {
-            canvas.elements.put(element);
-        }
-    };
-
-    const savePending = async () => {
-        if (!pendingRects) return;
-        const pendingToSave = pendingRects.filter(
-            (x) =>
-                x.content instanceof StaticContent === false ||
-                x.content.content.isEmpty === false
-        );
-        if (pendingToSave.length === 0) return;
-        setPendingRects([]);
-        pendingCounter.current += pendingToSave.length;
-        await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
-        if (properties.draft) {
-            properties.onSave();
-        }
-        return pendingToSave;
-    };
-
-    const reset = () => {
-        setPendingRects([]);
-        resizeSizes.current = new Map();
-    };
-
-    const insertDefault = (options?: {
-        app?: SimpleWebManifest;
-        increment?: boolean;
-    }) => {
-        if (options?.increment) {
-            const last = pendingRects[pendingRects.length - 1];
-            if (
-                last &&
-                last.content instanceof StaticContent &&
-                last.content.content.isEmpty
-            ) {
-                // Do not increment
-            } else {
-                pendingCounter.current++;
-            }
-        }
-        const defaultId = sha256Sync(
-            concat([
-                canvas.id,
-                peer.identity.publicKey.bytes,
-                new Uint8Array([pendingCounter.current]),
-            ])
-        );
-        let appToAdd: AbstractStaticContent;
-        if (options?.app) {
-            const native = getNativeApp(options.app.url);
-            if (!native) {
-                throw new Error("Missing native app");
-            }
-            const defaultValue = native.default();
-            appToAdd = defaultValue;
-        } else {
-            appToAdd = new StaticMarkdownText({ text: "" });
-        }
-        return addRect(
-            new StaticContent({
-                content: appToAdd,
-            }),
-            { id: defaultId, pending: true }
-        );
-    };
-
-    const removePending = (ix: number) => {
-        setPendingRects((prev) => prev.filter((_, i) => i !== ix));
-    };
-
-    useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            setActive(new Set());
-        };
-        document.addEventListener("mousedown", handleClickOutside);
-        return () => {
-            document.removeEventListener("mousedown", handleClickOutside);
-        };
-    }, []);
-
-    useEffect(() => {
-        if (!peer || !canvas) return;
-        reset();
-        if (canvas?.closed) {
-            throw new Error("Expecting canvas to be open");
-        }
-        if (properties.draft) {
-            insertDefault();
-        }
-    }, [
-        peer?.identity.publicKey.hashcode(),
-        !canvas || canvas?.closed ? undefined : canvas.address,
-    ]);
+    const {
+        editMode,
+        setEditMode,
+        active,
+        setActive,
+        pendingRects,
+        rects,
+        insertDefault,
+        removePending,
+        savePending,
+        canvas,
+    } = useCanvas();
 
     const renderRects = (
         rectsToRender: Element<ElementContent>[],
@@ -206,13 +53,10 @@ export const Canvas = (
                         active={active.has(ix)}
                         setActive={(v) => {
                             if (v) {
-                                setActive((prev) => new Set(prev.add(ix)));
+                                setActive(new Set(active.add(ix)));
                             } else {
                                 setActive(
-                                    (prev) =>
-                                        new Set(
-                                            [...prev].filter((x) => x !== ix)
-                                        )
+                                    new Set([...active].filter((x) => x !== ix))
                                 );
                             }
                         }}
@@ -243,8 +87,8 @@ export const Canvas = (
                                 await canvas.elements.put(element);
                             }
                         }}
-                        onLoad={(event) => {}}
-                        onStaticResize={(dims, idx) => {}}
+                        onLoad={() => {}}
+                        onStaticResize={() => {}}
                         onContentChange={(newContent, idx) => {
                             if (idx < rects.length) {
                                 const element = rects[idx];
@@ -253,14 +97,12 @@ export const Canvas = (
                                 });
                                 canvas.elements.put(element);
                             } else {
-                                setPendingRects((prev) => {
-                                    const newPending = [...prev];
-                                    newPending[idx - rects.length].content =
-                                        new StaticContent({
-                                            content: newContent,
-                                        });
-                                    return newPending;
-                                });
+                                const newPending = [...pendingRects];
+                                newPending[idx - rects.length].content =
+                                    new StaticContent({
+                                        content: newContent,
+                                    });
+                                return newPending;
                             }
                         }}
                         pending={!!pendingRects.find((p) => equals(p.id, x.id))}
@@ -279,10 +121,6 @@ export const Canvas = (
                     ? "bg-neutral-50 dark:bg-neutral-950 p-4"
                     : ""
             }`}
-            /*  style={{
-                 width: '100%',
-                 height: '100%',
-             }} */
         >
             {/* Left toolbar */}
             {!inIframe() && properties.draft && (
@@ -320,6 +158,9 @@ export const Canvas = (
                     <button
                         onClick={() => {
                             savePending();
+                            if (properties.onSave) {
+                                properties.onSave();
+                            }
                         }}
                         className="btn-elevated btn-icon btn-icon-md btn-toggle"
                         aria-label="Send"

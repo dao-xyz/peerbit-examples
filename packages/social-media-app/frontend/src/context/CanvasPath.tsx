@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import TagInput from "./TagInput"; // import the controlled TagInput above
 import { useCanvases } from "../canvas/useCanvas";
@@ -6,6 +6,7 @@ import { getCanvasPath } from "../routes";
 import { IoIosArrowBack } from "react-icons/io";
 import { Canvas } from "../canvas/Canvas";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { CanvasWrapper } from "../canvas/CanvasWrapper";
 
 export const CanvasPath = () => {
     const navigate = useNavigate();
@@ -48,7 +49,9 @@ export const CanvasPath = () => {
     };
 
     const renderCanvas = (canvas: CanvasDB, ix) => (
-        <Canvas key={ix} scaled width={60} height={35} canvas={canvas} />
+        <CanvasWrapper canvas={canvas}>
+            <Canvas key={ix} scaled width={60} height={35} />
+        </CanvasWrapper>
     );
 
     return (

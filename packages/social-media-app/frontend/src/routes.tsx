@@ -1,5 +1,4 @@
 import { Routes, Route } from "react-router";
-import { Canvas } from "./canvas/Canvas";
 import { Home } from "./Home";
 import { PublicSignKey } from "@peerbit/crypto";
 import { base64url } from "multiformats/bases/base64";

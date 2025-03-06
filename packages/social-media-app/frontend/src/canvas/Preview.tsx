@@ -5,6 +5,7 @@ import { useNavigate } from "react-router-dom";
 import { getCanvasPath } from "../routes";
 import { usePeer, useProgram } from "@peerbit/react";
 import { Canvas } from "./Canvas";
+import { CanvasWrapper } from "./CanvasWrapper";
 
 export const CanvasPreview = (properties: { canvas: CanvasDB }) => {
     /* const [name, setName] = useState<string | null>(null); */
@@ -34,7 +35,9 @@ export const CanvasPreview = (properties: { canvas: CanvasDB }) => {
                 ) : (
                     <div>Failed to create preview</div>
                 )} */}
-                <Canvas canvas={properties.canvas} />
+                <CanvasWrapper canvas={properties.canvas}>
+                    <Canvas />
+                </CanvasWrapper>
             </div>
         </button>
     );
