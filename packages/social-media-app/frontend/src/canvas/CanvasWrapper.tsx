@@ -18,6 +18,7 @@ import { sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { createContext, useContext } from "react";
+import { useApps } from "../content/useApps.js";
 
 /**
  * Type definition for canvas context values and methods
@@ -76,6 +77,7 @@ export const CanvasWrapper = ({
         id: canvasDB?.idString,
         keepOpenOnUnmount: true,
     });
+    const { getNativeApp } = useApps();
 
     // State management
     const [editMode, setEditMode] = useState(draft);
@@ -156,7 +158,7 @@ export const CanvasWrapper = ({
         setPendingRects([]);
         pendingCounter.current += pendingToSave.length;
         await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
-        if (draft && onSave) {
+        if (draft) {
             onSave();
         }
         return pendingToSave;
@@ -189,7 +191,6 @@ export const CanvasWrapper = ({
                 pendingCounter.current++;
             }
         }
-
         const defaultId = sha256Sync(
             concat([
                 canvas.id,
@@ -197,11 +198,17 @@ export const CanvasWrapper = ({
                 new Uint8Array([pendingCounter.current]),
             ])
         );
-
-        const appToAdd: AbstractStaticContent = new StaticMarkdownText({
-            text: "",
-        });
-
+        let appToAdd: AbstractStaticContent;
+        if (options?.app) {
+            const native = getNativeApp(options.app.url);
+            if (!native) {
+                throw new Error("Missing native app");
+            }
+            const defaultValue = native.default();
+            appToAdd = defaultValue;
+        } else {
+            appToAdd = new StaticMarkdownText({ text: "" });
+        }
         return addRect(
             new StaticContent({
                 content: appToAdd,
