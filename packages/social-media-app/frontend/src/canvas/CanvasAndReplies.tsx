@@ -50,7 +50,6 @@ export const CanvasAndReplies = () => {
     useEffect(() => {
         setLastCanvas(canvases[canvases.length - 1]);
     }, [canvases]);
-
     useEffect(() => {
         if (!peer || !root) {
             return;
@@ -63,7 +62,7 @@ export const CanvasAndReplies = () => {
     >(undefined);
 
     useEffect(() => {
-        if (peer)
+        if (peer && lastCanvas)
             setPendingCanvasState(
                 new CanvasDB({
                     publicKey: peer.identity.publicKey,
@@ -77,6 +76,7 @@ export const CanvasAndReplies = () => {
     const pendingCanvas = useProgram(pendingCanvasState, {
         id: pendingCanvasState?.idString, // we do set the id here so the useProgram hooke will change on pendingCavnasState changes
         keepOpenOnUnmount: true,
+        existing: "reuse",
     });
 
     const onSavePending = () => {
@@ -123,6 +123,7 @@ export const CanvasAndReplies = () => {
             </div>
             {/* spacer div */}
             <div className="mt-4 flex flex-col gap-4 sticky bottom-0 w-full left-0 p-4">
+                {pendingCanvas.program !== undefined ? "EXIST" : "MISSING"}
                 <Canvas
                     canvas={pendingCanvas.program}
                     draft={true}
