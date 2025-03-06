@@ -112,15 +112,18 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
                 </div>
             )}
             {/* New response outlet */}
-            <hr className="faded" />
             {pendingCanvas.program?.closed === false && (
-                <div className="mt-4 fixed bottom-0 w-full left-0 pl-2 pr-4 pb-2">
-                    <Canvas
-                        canvas={pendingCanvas.program}
-                        draft={true}
-                        onSave={onSavePending}
-                    />
-                </div>
+                <>
+                    {/* spacer div */}
+                    <div className="h-16 w-full"></div>
+                    <div className="mt-4 bg-neutral-50 dark:bg-neutral-950 fixed bottom-0 w-full left-0 pl-2 pr-4 pb-2">
+                        <Canvas
+                            canvas={pendingCanvas.program}
+                            draft={true}
+                            onSave={onSavePending}
+                        />
+                    </div>
+                </>
             )}
         </div>
     );

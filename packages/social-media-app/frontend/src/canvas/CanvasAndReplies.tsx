@@ -74,7 +74,7 @@ export const CanvasAndReplies = () => {
     }
 
     return (
-        <div className="min-h-screen flex flex-col">
+        <div className="flex flex-col">
             <div className="flex-grow">
                 <CanvasWithReplies
                     key={0}
