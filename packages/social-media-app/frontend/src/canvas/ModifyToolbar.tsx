@@ -1,7 +1,9 @@
 import { MdSave } from "react-icons/md";
 import { TbBorderCorners } from "react-icons/tb";
 import * as Toggle from "@radix-ui/react-toggle";
-import { MdAdd } from "react-icons/md";
+import { FaCameraRetro } from "react-icons/fa";
+import { FaPhotoVideo } from "react-icons/fa";
+
 import { AppSelect } from "./AppSelect";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 
@@ -52,7 +54,7 @@ export const CanvasModifyToolbar = (properties: {
             }`}
         >
             {canvasControls()}
-            <button
+            {/*   <button
                 onClick={() => {
                     console.log("NEW");
                     properties.onNew();
@@ -61,8 +63,14 @@ export const CanvasModifyToolbar = (properties: {
                 aria-label="Toggle italic"
             >
                 <MdAdd />
-            </button>
-            <div>
+            </button> */}
+            <div className="btn-elevated btn-icon btn-icon-md btn-toggle ">
+                <FaCameraRetro />
+            </div>
+            <div className="btn-elevated btn-icon btn-icon-md btn-toggle ">
+                <FaPhotoVideo />
+            </div>
+            <div className="w-[40px] h-[40px]">
                 <AppSelect onSelected={(app) => properties.onNew(app)} />
             </div>
         </div>

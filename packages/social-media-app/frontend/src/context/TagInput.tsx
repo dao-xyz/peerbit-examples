@@ -74,7 +74,7 @@ const TagInput = ({ tags, onTagsChange, renderTag }) => {
                 ref={inputRef}
                 type="text"
                 className="flex-1 min-w-[100px] outline-none p-1 text-sm"
-                placeholder="Type and press Enter..."
+                placeholder="Go somewhere..."
                 value={inputValue}
                 onChange={(e) => setInputValue(e.target.value)}
                 onKeyDown={handleKeyDown}

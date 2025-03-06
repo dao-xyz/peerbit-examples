@@ -537,7 +537,7 @@ export const Canvas = (
                         onNew={(app) => insertDefault({ app, increment: true })}
                         unsavedCount={pendingRects.length}
                         onEditModeChange={setEditMode}
-                        direction="col"
+                        direction="row"
                     />
                 </div>
             )}
@@ -560,7 +560,7 @@ export const Canvas = (
                                   transform: `scale(${scaleFactor})`,
                                   transformOrigin: "center",
                                   /*  width: naturalWidth,
-                                 height: naturalHeight, */
+                               height: naturalHeight, */
                               }
                             : {}
                     }

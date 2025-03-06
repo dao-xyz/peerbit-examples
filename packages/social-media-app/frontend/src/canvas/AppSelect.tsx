@@ -8,7 +8,7 @@ import {
     Transition,
 } from "@headlessui/react";
 import { useApps } from "../content/useApps";
-import { AiOutlineQuestionCircle } from "react-icons/ai";
+import { AiOutlineQuestionCircle, AiOutlinePlusCircle } from "react-icons/ai";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { InvalidAppError } from "@dao-xyz/social";
 
@@ -68,11 +68,12 @@ export const AppSelect = (properties: {
                     <ComboboxButton className="flex items-center justify-center btn btn-elevated btn-icon">
                         <div className="bg-white rounded dark:shadow-primary-20">
                             {selected?.icon ? (
-                                <img
-                                    src={selected.icon}
-                                    alt="App Icon"
-                                    className="w-[21px] h-[21px] p-[2px]"
-                                />
+                                /*  <img
+                                     src={selected.icon}
+                                     alt="App Icon"
+                                     className="w-[21px] h-[21px] p-[2px]"
+                                 /> */
+                                <AiOutlinePlusCircle className="w-[25px] h-[25px]" />
                             ) : (
                                 <AiOutlineQuestionCircle className="w-[25px] h-[25px]" />
                             )}
