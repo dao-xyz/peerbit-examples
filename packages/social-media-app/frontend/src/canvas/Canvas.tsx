@@ -38,7 +38,6 @@ export const Canvas = (
         id: properties.canvas.idString,
         keepOpenOnUnmount: true,
     });
-    console.log(canvas);
     const { getNativeApp } = useApps();
     const [editMode, setEditMode] = useState(properties.draft);
     const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
