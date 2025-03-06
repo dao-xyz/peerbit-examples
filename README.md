@@ -1,4 +1,3 @@
-
 <br>
 <p align="center">
     <img width="350" src="./library.jpeg"  alt="Libraryn">
@@ -10,9 +9,7 @@
         </strong>
 </h1>
 
-
-
-## Examples 
+## Examples
 
 ### [Chat room](./packages/one-chat-room/)
 [<img src="./packages/one-chat-room/demo.gif" width="600" />](./packages/one-chat-room/)
@@ -43,42 +40,44 @@
 ### [Collaborative machine learning](./packages/collaborative-learning/)
 [<img src="./packages/collaborative-learning/demo.gif" width="600" />](./packages/collaborative-learning/)
 
+## Requirements
 
+1. Node.js >= 22 (You can switch to Node 22 using `nvm use 22`)
 
 ## How to run the examples
 
-1. 
+1.
 ```sh
 yarn
 yarn lerna bootstrap
 yarn build
 ```
 
-2. 
-Go into an example. If it is a frontend app, you can run it locally (if you have a node running (see below)) with 
+2.
+Go into an example. If it is a frontend app, you can run it locally (if you have a node running (see below)) with
 
-```sh 
+```sh
 yarn start
 ```
 
-and remotely on a test relay 
+and remotely on a test relay
 
 ```sh
-yarn start-remote 
+yarn start-remote
 ```
 
 ## How to setup a local relay node
 (This is just a basic libp2p-js node)
 
-1. 
+1.
 Install Node >= 16
 
-2. 
+2.
 Install CLI
 ```sh
 npm install -g @peerbit/server
 ```
-3. 
+3.
 ```sh
 peerbit start
 ```
