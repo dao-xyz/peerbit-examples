@@ -20,6 +20,7 @@ import { sha256Sync } from "@peerbit/crypto";
 import { BsSend } from "react-icons/bs";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { useApps } from "../content/useApps.js";
+import { Spinner } from "../utils/Spinner.js";
 
 type SizeProps = {
     width?: number;
@@ -35,7 +36,7 @@ export const Canvas = (
     const { peer } = usePeer();
     const { program: canvas } = useProgram(properties.canvas, {
         existing: "reuse",
-        id: properties.canvas.idString,
+        id: properties.canvas?.idString,
         keepOpenOnUnmount: true,
     });
     const { getNativeApp } = useApps();
@@ -273,7 +274,11 @@ export const Canvas = (
         <div
             className={`w-full h-full ${
                 properties.height ? "" : "min-h-10"
-            } flex flex-row items-center space-x-4`}
+            } flex flex-row items-center space-x-4 ${
+                !inIframe() && properties.draft
+                    ? "bg-neutral-50 dark:bg-neutral-950"
+                    : ""
+            }`}
             /*  style={{
                  width: '100%',
                  height: '100%',

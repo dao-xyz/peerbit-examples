@@ -49,7 +49,7 @@ export const CanvasModifyToolbar = (properties: {
     };
     return (
         <div
-            className={`flex flex-row items-center p-2 gap-2 w-full  ${
+            className={`flex flex-row items-center gap-2 w-full  ${
                 properties.direction === "col" ? "flex-col" : "flex-row"
             }`}
         >

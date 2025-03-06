@@ -19,39 +19,6 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
 
     const peer = usePeer();
 
-    const [pendingCanvasState, setPendingCanvasState] = useState<
-        CanvasDB | undefined
-    >(undefined);
-
-    useEffect(() => {
-        setPendingCanvasState(
-            new CanvasDB({
-                publicKey: peer.peer.identity.publicKey,
-                parent: new CanvasValueReference({
-                    canvas: properties.canvas,
-                }),
-            })
-        );
-    }, [properties?.canvas?.idString]);
-
-    const pendingCanvas = useProgram(pendingCanvasState, {
-        id: pendingCanvasState?.idString, // we do set the id here so the useProgram hooke will change on pendingCavnasState changes
-        keepOpenOnUnmount: true,
-    });
-
-    const onSavePending = () => {
-        setPendingCanvasState((prev) => {
-            // add "comment"
-            properties.canvas.replies.put(prev);
-
-            // and initialize a new canvas for the next comment
-
-            return new CanvasDB({
-                publicKey: peer.peer.identity.publicKey,
-                parent: new CanvasValueReference({ canvas: properties.canvas }),
-            });
-        });
-    };
     return (
         <div className="flex flex-col h-full">
             {/* Toolbar with Radix dropdown */}
@@ -110,20 +77,6 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
                 <div className="flex-grow flex items-center justify-center">
                     No replies yet
                 </div>
-            )}
-            {/* New response outlet */}
-            {pendingCanvas.program?.closed === false && (
-                <>
-                    {/* spacer div */}
-                    <div className="h-16 w-full"></div>
-                    <div className="mt-4 bg-neutral-50 dark:bg-neutral-950 fixed bottom-0 w-full left-0 pl-2 pr-4 pb-2">
-                        <Canvas
-                            canvas={pendingCanvas.program}
-                            draft={true}
-                            onSave={onSavePending}
-                        />
-                    </div>
-                </>
             )}
         </div>
     );

@@ -8,7 +8,7 @@ import { BaseRoutes } from "./routes";
 import { AppProvider } from "./content/useApps";
 /* import { logger, enable } from "@libp2p/logger";
 enable("libp2p:*"); */
-/* 
+/*
  "&::-webkit-scrollbar, & *::-webkit-scrollbar": {
     backgroundColor: "#2b2b2b",
 },
@@ -69,13 +69,13 @@ const setTheme = () => {
     } else {
         document.documentElement.classList.remove("dark");
     }
-    /* 
+    /*
       // Whenever the user explicitly chooses light mode
       localStorage.theme = 'light'
-  
+
       // Whenever the user explicitly chooses dark mode
       localStorage.theme = 'dark'
-  
+
       // Whenever the user explicitly chooses to respect the OS preference
       localStorage.removeItem('theme') */
 
@@ -113,7 +113,7 @@ export const App = () => {
                                     /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
                                     /*  */
                                     /*   */
-                                    className="content-container"
+                                    className="content-container flex-1"
                                 >
                                     <BaseRoutes />
                                 </div>

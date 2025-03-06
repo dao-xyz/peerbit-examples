@@ -1,8 +1,8 @@
-import { usePeer } from "@peerbit/react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { useCanvases } from "./useCanvas.js";
 import { useState, useEffect } from "react";
 import { Canvas as Canvas } from "./Canvas.js";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
 
 import { Replies as RepliesView } from "./Replies.js";
 import { CreateNew } from "./CreateNew.js";
@@ -45,12 +45,55 @@ export const CanvasAndReplies = () => {
     const { peer } = usePeer();
     const { root, path: canvases, loading } = useCanvases();
 
+    const [lastCanvas, setLastCanvas] = useState<CanvasDB>(undefined);
+
+    useEffect(() => {
+        setLastCanvas(canvases[canvases.length - 1]);
+    }, [canvases]);
+
     useEffect(() => {
         if (!peer || !root) {
             return;
         }
         // Additional logic if needed
     }, [peer?.identity.publicKey.hashcode(), root]);
+
+    const [pendingCanvasState, setPendingCanvasState] = useState<
+        CanvasDB | undefined
+    >(undefined);
+
+    useEffect(() => {
+        if (peer)
+            setPendingCanvasState(
+                new CanvasDB({
+                    publicKey: peer.identity.publicKey,
+                    parent: new CanvasValueReference({
+                        canvas: lastCanvas,
+                    }),
+                })
+            );
+    }, [lastCanvas?.idString, peer?.identity.publicKey.hashcode()]);
+
+    const pendingCanvas = useProgram(pendingCanvasState, {
+        id: pendingCanvasState?.idString, // we do set the id here so the useProgram hooke will change on pendingCavnasState changes
+        keepOpenOnUnmount: true,
+    });
+
+    const onSavePending = () => {
+        setPendingCanvasState((prev) => {
+            // add "comment"
+            lastCanvas.replies.put(prev);
+
+            // and initialize a new canvas for the next comment
+
+            return new CanvasDB({
+                publicKey: peer.identity.publicKey,
+                parent: new CanvasValueReference({
+                    canvas: lastCanvas,
+                }),
+            });
+        });
+    };
 
     // When there is not a currently selected canvas, ensure the container fills the screen
     if (canvases.length === 0) {
@@ -74,13 +117,19 @@ export const CanvasAndReplies = () => {
     }
 
     return (
-        <div className="flex flex-col">
+        <div className="flex flex-col h-full">
             <div className="flex-grow">
-                <CanvasWithReplies
-                    key={0}
-                    canvas={canvases[canvases.length - 1]}
+                <CanvasWithReplies key={0} canvas={lastCanvas} />
+            </div>
+            {/* spacer div */}
+            <div className="mt-4 flex flex-col gap-4 sticky bottom-0 w-full left-0 p-4">
+                <Canvas
+                    canvas={pendingCanvas.program}
+                    draft={true}
+                    onSave={onSavePending}
                 />
             </div>
+
             {/* This filler pushes the content to fill the screen if there is whitespace */}
         </div>
     );
