@@ -98,6 +98,11 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
                     {sortedReplies.map((reply) => (
                         <div key={reply.id.toString()}>
                             <CanvasPreview canvas={reply} />
+                            <div className="flex w-full mt-1">
+                                <span className="mr-auto text-sm underline">
+                                    {`Replies (0)`}
+                                </span>
+                            </div>
                         </div>
                     ))}
                 </div>

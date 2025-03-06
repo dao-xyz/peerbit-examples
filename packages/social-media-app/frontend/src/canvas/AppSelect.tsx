@@ -108,10 +108,11 @@ export const AppSelect = (properties: {
                                         {({ selected, active }) => (
                                             <div className="flex flex-col">
                                                 <span
-                                                    className={`truncate ${selected
+                                                    className={`truncate ${
+                                                        selected
                                                             ? "font-medium"
                                                             : "font-normal"
-                                                        }`}
+                                                    }`}
                                                 >
                                                     {app.title}
                                                 </span>
@@ -127,11 +128,14 @@ export const AppSelect = (properties: {
                                 {query.length > 0 && (
                                     <ComboboxOption
                                         className={({ active, selected }) =>
-                                            `cursor-default select-none relative py-2 pl-10 pr-4 ${active
-                                                ? "bg-primary-400 dark:bg-primary-600"
-                                                : "text-gray-900"
-                                            } ${selected &&
-                                            "bg-primary-600 dark:bg-primary-200"}`
+                                            `cursor-default select-none relative py-2 pl-10 pr-4 ${
+                                                active
+                                                    ? "bg-primary-400 dark:bg-primary-600"
+                                                    : "text-gray-900"
+                                            } ${
+                                                selected &&
+                                                "bg-primary-600 dark:bg-primary-200"
+                                            }`
                                         }
                                         value={unknownApp(query)}
                                     >
