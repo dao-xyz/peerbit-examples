@@ -27,6 +27,7 @@ interface IApps {
     history: BrowsingHistory;
     resolve: (url: string) => Promise<SimpleWebManifest | undefined>;
     search: (urlOrName: string) => Promise<SimpleWebManifest[]>;
+    getNativeApp: (url: string) => CuratedNativeApp | undefined;
 }
 
 const STREAMING_APP = ["development", "staging"].includes(import.meta.env.MODE)
@@ -59,36 +60,41 @@ interface CuratedNativeApp {
     type: "native";
     match: string | string[];
     title: string;
-    content: Constructor<AbstractStaticContent>;
+    default: () => AbstractStaticContent;
     manifest: SimpleWebManifest;
 }
 
 type CuratedApp = CuratedNativeApp | CuratedWebApp;
 
-const curatedApps: CuratedApp[] = [
+const nativeApps: CuratedNativeApp[] = [
     {
         type: "native",
         match: "text",
         title: "Text",
-        content: StaticMarkdownText,
+        default: () => new StaticMarkdownText({ text: "" }),
         manifest: new SimpleWebManifest({
             url: "native:text",
             title: "Text",
-            metaDescription: "A simple text editor",
-            icon: "/chat-icon.svg",
+            metaDescription: "Text",
+            icon: "/apps/text.svg",
         }),
     },
     {
         type: "native",
         match: "Image",
         title: "Image",
-        content: StaticImage,
+        default: () => new StaticImage({} as any), // TODO type safe
         manifest: new SimpleWebManifest({
             url: "native:image",
             title: "Image",
-            metaDescription: "A simple text editor",
+            metaDescription: "Image",
+            icon: "/apps/image.svg",
         }),
     },
+];
+
+const curatedApps: CuratedApp[] = [
+    ...nativeApps,
     {
         type: "web",
         match: "https://kick.com",
@@ -142,7 +148,6 @@ const getCurated = (rawInput: string, maybeUrl?: string) => {
         for (const match of Array.isArray(app.match)
             ? app.match
             : [app.match]) {
-            console.log("MATCH ?" + rawInput, match);
             if (match.startsWith(rawInput)) {
                 return app;
             }
@@ -170,7 +175,11 @@ const resolveCuratedUrl = (app: CuratedWebApp, url: string) => {
 export const AppContext = React.createContext<IApps>({} as any);
 export const useApps = () => useContext(AppContext);
 export const AppProvider = ({ children }: { children: JSX.Element }) => {
-    const [apps, setApps] = useState<SimpleWebManifest[]>([]);
+    const [apps, setApps] = useState<SimpleWebManifest[]>(
+        [...curatedApps]
+            .filter((x) => x.type === "native")
+            .map((x) => x.manifest)
+    );
     const [_x, forceUpdate] = useReducer((x) => x + 1, 0);
     const { peer } = usePeer();
     const appServiceRef = useRef<AppPreview>();
@@ -186,32 +195,34 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
         }
 
         const _x = AppPreview; // without this lines AppPreview import might not be included when bundling
-        peer.open<AppPreview>(
-            "zb2rhXREnAbm5Twtm2ahJM7QKT6FoQGNksWv5jp7o5W6BQ7au"
-        ).then((appPreview) => {
-            appServiceRef.current = appPreview;
-            Promise.allSettled(
-                [STREAMING_APP, CHAT_APP, TEXT_APP].map((address) =>
-                    appPreview.resolve(address)
-                )
-            ).then((result) => {
-                setApps(
-                    result
-                        .filter((x) => x.status === "fulfilled" && x.value)
-                        .map(
-                            (x) =>
-                                (x as PromiseFulfilledResult<SimpleWebManifest>)
-                                    .value
-                        )
-                );
-                forceUpdate();
-            });
-        });
+        /*  peer.open<AppPreview>(
+             "zb2rhXREnAbm5Twtm2ahJM7QKT6FoQGNksWv5jp7o5W6BQ7au"
+         ).then((appPreview) => {
+             appServiceRef.current = appPreview;
+             Promise.allSettled(
+                 [STREAMING_APP, CHAT_APP, TEXT_APP].map((address) =>
+                     appPreview.resolve(address)
+                 )
+             ).then((result) => {
+                 setApps(
+                     result
+                         .filter((x) => x.status === "fulfilled" && x.value)
+                         .map(
+                             (x) =>
+                                 (x as PromiseFulfilledResult<SimpleWebManifest>)
+                                     .value
+                         )
+                 );
+                 forceUpdate();
+             });
+         }); */
     }, [peer?.identity.publicKey.hashcode()]);
     const memo = React.useMemo<IApps>(
         () => ({
             apps,
             history: historyDB,
+            getNativeApp: (url) =>
+                nativeApps.find((x) => x.manifest.url === url),
             search: async (urlOrName) => {
                 let result: Map<string, SimpleWebManifest> = new Map();
 

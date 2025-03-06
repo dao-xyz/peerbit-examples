@@ -1,16 +1,16 @@
-import { MdAppRegistration, MdSave } from "react-icons/md";
-import { AiOutlineAppstoreAdd } from "react-icons/ai";
+import { MdSave } from "react-icons/md";
 import { TbBorderCorners } from "react-icons/tb";
 import * as Toggle from "@radix-ui/react-toggle";
-import { BsSend } from "react-icons/bs";
 import { MdAdd } from "react-icons/md";
+import { AppSelect } from "./AppSelect";
+import { SimpleWebManifest } from "@dao-xyz/app-service";
 
-export const Create = (properties: {
+export const CanvasModifyToolbar = (properties: {
     canvas?: boolean;
-    onSave: () => void;
     unsavedCount: number;
-    onNew: () => void;
+    onNew: (app?: SimpleWebManifest) => void;
     onEditModeChange: (edit: boolean) => void;
+    direction?: "row" | "col";
 }) => {
     const canvasControls = () => {
         if (properties.canvas) {
@@ -25,7 +25,7 @@ export const Create = (properties: {
                     >
                         <TbBorderCorners />
                     </Toggle.Root>
-                    <button
+                    {/*  <button
                         onClick={() => {
                             console.log("SAVE?");
                             properties.onSave();
@@ -39,14 +39,18 @@ export const Create = (properties: {
                                 {properties.unsavedCount}
                             </div>
                         )}
-                    </button>
+                    </button> */}
                 </>
             );
         }
         return <></>;
     };
     return (
-        <div className="flex flex-row p-2 gap-2">
+        <div
+            className={`flex flex-row items-center p-2 gap-2 w-full  ${
+                properties.direction === "col" ? "flex-col" : "flex-row"
+            }`}
+        >
             {canvasControls()}
             <button
                 onClick={() => {
@@ -58,17 +62,9 @@ export const Create = (properties: {
             >
                 <MdAdd />
             </button>
-
-            <button
-                onClick={() => {
-                    console.log("NEW");
-                    properties.onNew();
-                }}
-                className=" btn-elevated btn-icon btn-icon-md btn-toggle h-max"
-                aria-label="Toggle italic"
-            >
-                <BsSend />
-            </button>
+            <div>
+                <AppSelect onSelected={(app) => properties.onNew(app)} />
+            </div>
         </div>
     );
 };

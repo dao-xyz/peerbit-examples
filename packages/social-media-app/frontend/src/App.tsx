@@ -2,11 +2,10 @@ import { releaseKey } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
 import { NameProvider } from "./names/useNames";
 import { getRootKeypair } from "./keys";
-import { SpaceProvider } from "./useSpaces";
 import { HashRouter } from "react-router-dom";
 import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
-import { AppProvider } from "./useApps";
+import { AppProvider } from "./content/useApps";
 /* import { logger, enable } from "@libp2p/logger";
 enable("libp2p:*"); */
 /* 
@@ -84,6 +83,7 @@ const setTheme = () => {
 };
 
 import { inIframe } from "@peerbit/react";
+import { CanvasProvider } from "./canvas/useCanvas";
 
 export const App = () => {
     setTheme();
@@ -106,7 +106,7 @@ export const App = () => {
             <NameProvider>
                 <HashRouter basename="/">
                     <AppProvider>
-                        <SpaceProvider>
+                        <CanvasProvider>
                             <>
                                 {!inIframe() && <Header></Header>}
                                 <div
@@ -118,7 +118,7 @@ export const App = () => {
                                     <BaseRoutes />
                                 </div>
                             </>
-                        </SpaceProvider>
+                        </CanvasProvider>
                     </AppProvider>
                 </HashRouter>
             </NameProvider>

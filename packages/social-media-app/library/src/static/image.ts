@@ -42,5 +42,9 @@ export class StaticImage extends AbstractStaticContent {
     toString(): string {
         return this.caption;
     }
+
+    get isEmpty() {
+        return this.base64.length === 0;
+    }
 }
 

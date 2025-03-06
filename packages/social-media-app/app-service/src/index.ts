@@ -13,6 +13,8 @@ export class RequestURL {
     }
 }
 
+export const NATIVE_PREFIX = "native:";
+const isNative = (url: string) => url.startsWith(NATIVE_PREFIX);
 @variant(0)
 export class SimpleWebManifest {
     @field({ type: option("string") })
@@ -42,6 +44,10 @@ export class SimpleWebManifest {
         this.url = properties.url;
         this.metaTitle = properties.metaTitle;
         this.metaDescription = properties.metaDescription;
+    }
+
+    get isNative() {
+        return isNative(this.url);
     }
 }
 

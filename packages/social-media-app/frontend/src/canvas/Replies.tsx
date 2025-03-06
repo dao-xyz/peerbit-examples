@@ -1,52 +1,65 @@
-import React, { useRef, useState } from "react";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import React, { useEffect, useMemo, useState } from "react";
+import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
 import { useLocal, usePeer, useProgram } from "@peerbit/react";
-import { CanvasPreview } from "./RoomPreview";
+import { CanvasPreview } from "./Preview";
 
 // Radix UI Dropdown components
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Canvas } from "./Canvas";
 
-export const Replies = (properties: { canvas: CanvasDB }) => {
+export const Replies = (properties: { canvas?: CanvasDB }) => {
     const [sortCriteria, setSortCriteria] = useState("New");
-    const replies = useLocal(properties.canvas.replies);
+    const replies = useLocal(properties.canvas?.replies);
 
     // Optionally sort replies based on the selected criteria.
-    // Adjust this logic according to your actual data shape.
     const sortedReplies = [...replies].sort((a, b) => {
-        /* if (sortCriteria === "Best") {
-            // Assuming each reply has a "score" property.
-            return (b.score || 0) - (a.score || 0);
-        } else if (sortCriteria === "New") {
-            // Assuming each reply has a "createdAt" property.
-            return new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime();
-        } else if (sortCriteria === "Old") {
-            return new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime();
-        } */
         return 0;
     });
 
     const peer = usePeer();
 
-    const pendingCanvas = useProgram(
-        new CanvasDB({
-            publicKey: peer.peer.identity.publicKey,
-            parentId: properties.canvas.id,
-        })
-    );
+    const [pendingCanvasState, setPendingCanvasState] = useState<
+        CanvasDB | undefined
+    >(undefined);
 
+    useEffect(() => {
+        setPendingCanvasState(
+            new CanvasDB({
+                publicKey: peer.peer.identity.publicKey,
+                parent: new CanvasValueReference({
+                    canvas: properties.canvas,
+                }),
+            })
+        );
+    }, [properties?.canvas?.idString]);
+
+    const pendingCanvas = useProgram(pendingCanvasState, {
+        id: pendingCanvasState?.idString, // we do set the id here so the useProgram hooke will change on pendingCavnasState changes
+        keepOpenOnUnmount: true,
+    });
+
+    const onSavePending = () => {
+        setPendingCanvasState((prev) => {
+            // add "comment"
+            properties.canvas.replies.put(prev);
+
+            // and initialize a new canvas for the next comment
+
+            return new CanvasDB({
+                publicKey: peer.peer.identity.publicKey,
+                parent: new CanvasValueReference({ canvas: properties.canvas }),
+            });
+        });
+    };
     return (
-        <>
+        <div className="flex flex-col h-full">
             {/* Toolbar with Radix dropdown */}
-            <div
-                className="p-2 flex flex-row items-center gap-4"
-                style={{ marginBottom: "1rem" }}
-            >
+            <div className="flex flex-row items-center gap-4 mb-4">
                 <DropdownMenu.Root>
-                    <DropdownMenu.Trigger className="btn btn-elevated flex flex-row  justify-center items-center">
-                        <span>Sort by: {sortCriteria}</span>{" "}
-                        <ChevronDownIcon style={{ marginLeft: "0.5rem" }} />
+                    <DropdownMenu.Trigger className="btn  flex flex-row justify-center items-center">
+                        <span>Sort by: {sortCriteria}</span>
+                        <ChevronDownIcon className="ml-2" />
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Content
                         sideOffset={5}
@@ -68,7 +81,6 @@ export const Replies = (properties: { canvas: CanvasDB }) => {
                         >
                             Old
                         </DropdownMenu.Item>
-
                         <DropdownMenu.Item
                             disabled
                             className="menu-item"
@@ -80,18 +92,31 @@ export const Replies = (properties: { canvas: CanvasDB }) => {
                 </DropdownMenu.Root>
             </div>
 
-            {/* Render sorted replies */}
-            {sortedReplies.map((reply) => (
-                <div key={reply.id.toString()}>
-                    <CanvasPreview canvas={reply} />
+            {/* Replies list in a scrollable container */}
+            {sortedReplies.length > 0 ? (
+                <div className="flex-grow overflow-auto">
+                    {sortedReplies.map((reply) => (
+                        <div key={reply.id.toString()}>
+                            <CanvasPreview canvas={reply} />
+                        </div>
+                    ))}
                 </div>
-            ))}
-
-            {/* Show the outlet for a new response  */}
-
-            {pendingCanvas.program?.closed === false && (
-                <Canvas canvas={pendingCanvas.program} draft={true} />
+            ) : (
+                <div className="flex-grow flex items-center justify-center">
+                    No replies yet
+                </div>
             )}
-        </>
+            {/* New response outlet */}
+            <hr className="faded" />
+            {pendingCanvas.program?.closed === false && (
+                <div className="mt-4">
+                    <Canvas
+                        canvas={pendingCanvas.program}
+                        draft={true}
+                        onSave={onSavePending}
+                    />
+                </div>
+            )}
+        </div>
     );
 };

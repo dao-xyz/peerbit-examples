@@ -12,6 +12,10 @@ export class StaticMarkdownText extends AbstractStaticContent {
     }
 
 
+    get isEmpty() {
+        return this.text.length === 0;
+    }
+
     /**
      * Returns the raw markdown string.
      */

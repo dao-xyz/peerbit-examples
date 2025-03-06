@@ -1,12 +1,48 @@
-import { ClosedError, Documents, SearchRequest } from "@peerbit/document";
+import {
+    ClosedError,
+    Documents,
+    Query,
+    SearchRequest,
+    Sort,
+} from "@peerbit/document";
 import { useEffect, useState } from "react";
-export const useLocal = <T extends Record<string, any>>(
-    db?: Documents<T, any>,
+
+type ValueTypeFromRequest<
+    Resolve extends boolean | undefined,
+    T,
+    I
+> = Resolve extends false ? I : T;
+
+export const useLocal = <
+    T extends Record<string, any>,
+    I extends Record<string, any>,
+    R extends boolean | undefined = true,
+    RT = R extends false ? I : T
+>(
+    db?: Documents<T, I>,
     options?: {
-        onChanges?: (all: T[]) => void;
+        query?: {
+            query?:
+                | Query[]
+                | Query
+                | Record<
+                      string,
+                      | string
+                      | number
+                      | bigint
+                      | Uint8Array
+                      | boolean
+                      | null
+                      | undefined
+                  >;
+            sort?: Sort[] | Sort;
+            fetch?: number;
+        };
+        resolve?: R;
+        onChanges?: (all: RT[]) => void;
     }
 ) => {
-    const [all, setAll] = useState<T[]>([]);
+    const [all, setAll] = useState<RT[]>([]);
     useEffect(() => {
         if (!db || db.closed) {
             return;
@@ -14,10 +50,14 @@ export const useLocal = <T extends Record<string, any>>(
 
         const changeListener = async () => {
             try {
-                const all = await db.index.search(new SearchRequest(), {
-                    local: true,
-                    remote: false,
-                });
+                const all: RT[] = (await db.index.search(
+                    new SearchRequest(options?.query),
+                    {
+                        local: true,
+                        remote: false,
+                        resolve: options?.resolve as any,
+                    }
+                )) as any; // TODO types
                 setAll((_prev) => {
                     options?.onChanges?.(all);
                     return all;
@@ -35,6 +75,6 @@ export const useLocal = <T extends Record<string, any>>(
         db.events.addEventListener("change", changeListener);
 
         return () => db.events.addEventListener("change", changeListener);
-    }, [db?.address, db?.closed]);
+    }, [db?.closed ? undefined : db?.address]);
     return all;
 };

@@ -1,10 +1,9 @@
-@import "@yaireo/tagify/dist/tagify.css";
-
 body {
     margin: 0;
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    /* font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
         'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-        sans-serif;
+        sans-serif; */
+    font-family: math;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
@@ -124,6 +123,12 @@ code {
         /* Vertical spacing to separate sections */
     }
 
+    hr.faded {
+        border: 0;
+        height: 1px;
+        background-image: linear-gradient(to right, rgba(0, 0, 0, 0), rgba(0, 0, 0, 0.75), rgba(0, 0, 0, 0));
+    }
+
 
 
 
@@ -131,6 +136,10 @@ code {
 
 
 @layer components {
+    .comic-font {
+        font-family: 'Comic Neue', cursive;
+    }
+
     .icon {
         @apply text-neutral-950;
         @apply dark:text-neutral-50;
@@ -266,44 +275,7 @@ code {
 }
 
 
-.tagify {
-    /*    flex-wrap: nowrap;
-    overflow: auto; */
-    border-radius: 1rem;
-    display: flex;
-    align-items: center;
-
-    --tag-bg: transparent;
-    --tag-border-radius: 0.75rem;
-    --tag-hover: theme('colors.primary.200');
-    --tags-focus-border-color: theme('colors.primary.400');
-    --placeholder-color: theme('colors.neutral.400');
-    /*     --tags-border-color: transparent; */
-}
-
-/* .tags-input > * 
-{
-    width: calc(100vw - 150px);
-} */
-.tagify__tag {
-    @apply border-neutral-200 dark:border-neutral-400 border-solid border-[2px] rounded-xl;
-}
-
-.tagify__tag__removeBtn {
-    @apply dark:text-white
-}
-
 
 .react-grid-placeholder {
     @apply bg-secondary-400 !important
 }
-
-.tagify__tag-text, .tagify__input {
-    white-space: nowrap !important;
-}
-
-
-/* .tagify__input
-{
-    @apply before:opacity-100 !important
-} */
