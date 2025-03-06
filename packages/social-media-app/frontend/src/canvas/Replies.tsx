@@ -114,7 +114,7 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
             {/* New response outlet */}
             <hr className="faded" />
             {pendingCanvas.program?.closed === false && (
-                <div className="mt-4">
+                <div className="mt-4 fixed bottom-0 w-full left-0 pl-2 pr-4 pb-2">
                     <Canvas
                         canvas={pendingCanvas.program}
                         draft={true}

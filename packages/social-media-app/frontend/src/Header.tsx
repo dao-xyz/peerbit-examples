@@ -52,7 +52,7 @@ export const Header = forwardRef((props: any, ref) => {
     return (
         <div
             ref={ref as any}
-            className="flex flex-row w-full p-2 gap-2  items-center max-h-[50px]"
+            className="sticky top-0 flex flex-row w-full p-2 gap-2 bg-neutral-50 dark:bg-neutral-950 z-20 items-center max-h-[50px]"
         >
             {/* <span className="icon leading-[10px] ml-2 mr-2 text-neutral-500 dark:text-neutral-400 font-[monospace]">
                 DAO
