@@ -130,6 +130,15 @@ code {
     }
 
 
+    /* scrollbar color */
+    ::-webkit-scrollbar {
+        background: var(--mono-shade3)
+    }
+
+    ::-webkit-scrollbar-thumb {
+        background: #888;
+    }
+
 
 
 }

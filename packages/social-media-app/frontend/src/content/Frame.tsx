@@ -108,7 +108,7 @@ export const Frame = (properties: {
         >
             <div
                 id={"frame-" + properties.index}
-                className="w-full h-full flex flex-row items-center"
+                className="w-full h-full flex flex-row"
             >
                 {renderContent()}
             </div>

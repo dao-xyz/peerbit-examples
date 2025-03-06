@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useState } from "react";
+import React, { useRef, useEffect, useState, useCallback } from "react";
 import Markdown from "marked-react";
 import { StaticMarkdownText } from "@dao-xyz/social";
 
@@ -23,11 +23,11 @@ export const MarkdownContent = ({
 
     // Local state for the markdown text.
     const [text, setText] = useState(content.text);
-    // If content.text is empty, start in editing mode.
+    // Start editing automatically if there's no text.
     const [isEditing, setIsEditing] = useState(content.text.length === 0);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
 
-    // Observe container size and call onResize
+    // Observe container's size changes.
     useEffect(() => {
         if (!containerRef.current) return;
         const observer = new ResizeObserver((entries) => {
@@ -51,28 +51,41 @@ export const MarkdownContent = ({
         return () => observer.disconnect();
     }, [onResize, threshold]);
 
-    // Auto-resize the textarea to fit its content.
-    const autoResize = () => {
+    // Auto-resize the textarea and emit its scrollHeight as the new height.
+    const autoResize = useCallback(() => {
         if (textareaRef.current) {
             textareaRef.current.style.height = "auto";
-            textareaRef.current.style.height = `${textareaRef.current.scrollHeight}px`;
+            const newHeight = textareaRef.current.scrollHeight;
+            textareaRef.current.style.height = `${newHeight}px`;
+            const newWidth = containerRef.current
+                ? containerRef.current.clientWidth
+                : 0;
+            onResize({ width: newWidth, height: newHeight });
         }
-    };
+    }, [onResize]);
 
+    // Whenever text changes in editing mode, trigger autoResize.
     useEffect(() => {
-        if (isEditing && textareaRef.current) {
-            textareaRef.current.focus();
-            const length = textareaRef.current.value.length;
-            textareaRef.current.setSelectionRange(length, length);
+        if (isEditing) {
             autoResize();
         }
-    }, [isEditing]);
+    }, [text, isEditing, autoResize]);
 
     const padding = !thumbnail ? "px-4 py-2" : "p-1";
+
+    // When the user clicks the container (and we're editable), start editing.
+    const handleStartEditing = () => {
+        setIsEditing(true);
+        // Focus the textarea after a short delay.
+        setTimeout(() => {
+            textareaRef.current?.focus();
+        }, 0);
+    };
 
     // Handle key presses in the textarea.
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === "Enter" && !e.shiftKey) {
+            // If there's no newline (i.e. single row), send/save the text.
             if (!text.includes("\n")) {
                 e.preventDefault();
                 onChange && onChange(new StaticMarkdownText({ text }));
@@ -92,22 +105,18 @@ export const MarkdownContent = ({
         if (text.length > 0) setIsEditing(false);
     };
 
-    const handleStartEditing = () => {
-        setIsEditing(true);
-    };
-
-    // Use content.text if not editable; otherwise use the locally maintained text.
+    // Use local text if editable, otherwise use content.text.
     const markdownContent = editable ? text : content.text;
 
     return (
         <div
             ref={containerRef}
-            className={`overflow-auto ${padding} w-full text-left ${
+            className={`${padding} w-full text-left ${
                 editable ? "cursor-text" : ""
             }`}
             onClick={editable && !isEditing ? handleStartEditing : undefined}
         >
-            {editable && isEditing && (
+            {editable && isEditing ? (
                 <textarea
                     ref={textareaRef}
                     value={text}
@@ -120,15 +129,11 @@ export const MarkdownContent = ({
                     placeholder="Type here..."
                     style={{ overflow: "hidden" }}
                 />
+            ) : (
+                <div>
+                    <Markdown gfm>{markdownContent}</Markdown>
+                </div>
             )}
-            <div style={{ display: editable && isEditing ? "none" : "block" }}>
-                <Markdown
-                    gfm
-                    // Hide markdown output when editing.
-                >
-                    {markdownContent}
-                </Markdown>
-            </div>
         </div>
     );
 };

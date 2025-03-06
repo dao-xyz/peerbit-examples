@@ -180,7 +180,23 @@ export const Canvas = (
             layout.x,
             layout.y
         );
-        if (h !== layout.h || w !== layout.w) {
+        let minDiffDelta = 5;
+        console.log("MAYHBE SIZE DIFF?", {
+            w,
+            h,
+            prevW: layout.w,
+            prevH: layout.h,
+        });
+        if (
+            Math.abs(w - layout.w) > minDiffDelta ||
+            Math.abs(h - layout.h) > minDiffDelta
+        ) {
+            console.log("New size", {
+                w,
+                h,
+                prevW: layout.w,
+                prevH: layout.h,
+            });
             layout.h = h;
             if (index < rects.length) {
                 layoutOverrides.current.set(index, layout);
@@ -560,7 +576,7 @@ export const Canvas = (
                                   transform: `scale(${scaleFactor})`,
                                   transformOrigin: "center",
                                   /*  width: naturalWidth,
-                               height: naturalHeight, */
+                             height: naturalHeight, */
                               }
                             : {}
                     }
