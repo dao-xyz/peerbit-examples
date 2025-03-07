@@ -2,7 +2,7 @@ import { usePeer, useProgram } from "@peerbit/react";
 import { useCanvases } from "./useCanvas.js";
 import { useState, useEffect } from "react";
 import { Canvas as Canvas } from "./Canvas.js";
-import { CanvasWrapper } from "./CanvasWrapper.js";
+import { CanvasWrapper, useCanvas } from "./CanvasWrapper.js";
 import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
 
 import { Replies as RepliesView } from "./Replies.js";
@@ -10,9 +10,28 @@ import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
 import { AiOutlineComment } from "react-icons/ai";
 import { Header } from "./header//Header.js";
-import { FaPhotoVideo } from "react-icons/fa";
+
 import { FaPlus } from "react-icons/fa6";
-import { PendingAppsChatBar } from "./PendingApps.js";
+import { BsSend } from "react-icons/bs";
+import { CanvasModifyToolbar } from "./ModifyToolbar.js";
+
+const SaveButton = ({ onSavePending }: { onSavePending: () => void }) => {
+    const { savePending } = useCanvas();
+    return (
+        <div className="flex-shrink-0">
+            <button
+                onClick={() => {
+                    savePending();
+                    onSavePending();
+                }}
+                className="btn-elevated btn-icon btn-icon-md btn-toggle"
+                aria-label="Send"
+            >
+                <BsSend size={24} />
+            </button>
+        </div>
+    );
+};
 
 const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
     const isRoot = props.canvas?.parent == null;
@@ -24,7 +43,7 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
             <Header publicKey={peer.identity.publicKey} />
             <div className="rounded-md">
                 <CanvasWrapper canvas={props.canvas}>
-                    <Canvas />
+                    <Canvas draft={false} />
                 </CanvasWrapper>
             </div>
             {/*  {!isRoot && (
@@ -124,25 +143,36 @@ export const CanvasAndReplies = () => {
 
     return (
         <div className="flex flex-col h-full">
+            <div className="flex-grow">
+                <CanvasWithReplies key={0} canvas={lastCanvas} />
+            </div>
+            {/* spacer div */}
+
             <CanvasWrapper canvas={pendingCanvas.program} draft={true}>
-                <div className="flex-grow">
-                    <CanvasWithReplies key={0} canvas={lastCanvas} />
-                </div>
-                {/* spacer div */}
                 <div className="mt-4 flex flex-col sticky bottom-0 w-full left-0">
-                    <PendingAppsChatBar>
-                        <label className="btn-elevated btn-icon btn-icon-md btn-toggle w-20 flex items-center justify-center">
+                    <Canvas appearance="chat-view-images">
+                        <label className="btn-elevated btn-icon btn-icon-md btn-toggle w-20 h-20 flex items-center justify-center bg-white">
                             <input
                                 type="file"
-                                accept="image/*, video/*"
+                                accept="image/*"
                                 multiple
                                 style={{ display: "none" }}
                                 id="image-upload"
                             />
                             <FaPlus />
                         </label>
-                    </PendingAppsChatBar>
-                    <Canvas draft={true} onSave={onSavePending} />
+                    </Canvas>
+                    <div className="flex bg-neutral-50 dark:bg-neutral-950 p-4">
+                        <div className="max-w-[600px]">
+                            <CanvasModifyToolbar direction="row" />
+                        </div>
+                        <Canvas
+                            draft={true}
+                            onSave={onSavePending}
+                            appearance="chat-view-text"
+                        />
+                        <SaveButton onSavePending={onSavePending} />
+                    </div>
                 </div>
             </CanvasWrapper>
             {/* This filler pushes the content to fill the screen if there is whitespace */}

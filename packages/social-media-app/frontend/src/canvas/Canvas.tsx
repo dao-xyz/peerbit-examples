@@ -1,20 +1,15 @@
-import { inIframe } from "@peerbit/react";
 import {
-    Canvas as CanvasDB,
     Element,
-    Layout,
     IFrameContent,
     ElementContent,
     StaticContent,
     StaticMarkdownText,
-    AbstractStaticContent,
 } from "@dao-xyz/social";
 import { equals } from "uint8arrays";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
-import { CanvasModifyToolbar } from "./ModifyToolbar.js";
-import { BsSend } from "react-icons/bs";
 import { useCanvas } from "./CanvasWrapper";
+import { ReactNode } from "react";
 
 type SizeProps = {
     width?: number;
@@ -23,31 +18,33 @@ type SizeProps = {
 };
 
 export const Canvas = (
-    properties: SizeProps &
-        ({ draft: true; onSave: () => void } | { draft?: false })
+    properties: SizeProps & {
+        appearance?: "chat-view-images" | "chat-view-text";
+        children?: ReactNode;
+    } & ({ draft: true; onSave: () => void } | { draft?: false })
 ) => {
     const asThumbnail = !!properties.scaled;
     const {
         editMode,
-        setEditMode,
         active,
         setActive,
         pendingRects,
         rects,
-        insertDefault,
         removePending,
-        savePending,
         canvas,
     } = useCanvas();
 
-    const renderRects = (
-        rectsToRender: Element<ElementContent>[],
-        offset: number
-    ) => {
-        return rectsToRender.map((x, _ix) => {
-            const ix = offset + _ix;
+    const renderRects = (rectsToRender: Element<ElementContent>[]) => {
+        return rectsToRender.map((x, key) => {
             return (
-                <div key={ix}>
+                <div
+                    key={key}
+                    className={
+                        properties.appearance === "chat-view-images"
+                            ? "bg-neutral-400 dark:bg-neutral-600 rounded-md w-20 h-20 max-w-20 max-h-20 border-[1px] border-neutral-800 overflow-hidden"
+                            : ""
+                    }
+                >
                     <Frame
                         thumbnail={asThumbnail}
                         active={active.has(x.id)}
@@ -68,12 +65,17 @@ export const Canvas = (
                             // We don't always want to delete.
                             canvas?.elements.del(x.id);
                         }}
-                        editMode={editMode}
+                        editMode={
+                            properties.appearance === "chat-view-images"
+                                ? false
+                                : editMode
+                        }
                         showCanvasControls={
-                            editMode && pendingRects.length + rects.length > 1
+                            properties.appearance === "chat-view-images" &&
+                            editMode &&
+                            pendingRects.length + rects.length > 1
                         }
                         element={x}
-                        index={ix}
                         replace={async (url) => {
                             const pendingElement = pendingRects.find(
                                 (pending) => equals(pending.id, x.id)
@@ -88,7 +90,6 @@ export const Canvas = (
                             }
                         }}
                         onLoad={() => {}}
-                        onStaticResize={() => {}}
                         onContentChange={(newContent, id) => {
                             const changedElement = rects.find(
                                 (rect) => rect.id === id
@@ -111,69 +112,44 @@ export const Canvas = (
                             }
                         }}
                         pending={!!pendingRects.find((p) => equals(p.id, x.id))}
+                        coverParent={
+                            properties.appearance === "chat-view-images"
+                        }
                     />
                 </div>
             );
         });
     };
 
+    // Exclude the first rect if it is a text content form rendering in chat-view-images appearance mode
+    const filteredRects =
+        properties.appearance === "chat-view-images"
+            ? [...rects, ...pendingRects].filter(
+                  (rect, i) =>
+                      i > 0 ||
+                      !(
+                          rect.content instanceof StaticContent &&
+                          rect.content.content instanceof StaticMarkdownText
+                      )
+              )
+            : properties.appearance === "chat-view-text"
+            ? [...rects, ...pendingRects].filter((_, i) => i === 0)
+            : [...rects, ...pendingRects];
+
     return (
         <div
-            className={`w-full h-full ${
-                properties.height ? "" : "min-h-10"
-            } flex flex-row items-center space-x-4 ${
-                !inIframe() && properties.draft
-                    ? "bg-neutral-50 dark:bg-neutral-950 p-4"
-                    : ""
-            }`}
+            className={
+                properties.appearance === "chat-view-images"
+                    ? "flex gap-4 p-4"
+                    : `flex-grow w-full ${
+                          properties.scaled
+                              ? "overflow-hidden"
+                              : "overflow-auto"
+                      }`
+            }
         >
-            {/* Left toolbar */}
-            {!inIframe() && properties.draft && (
-                <div className="max-w-[600px]">
-                    <CanvasModifyToolbar
-                        onNew={(app) => insertDefault({ app, increment: true })}
-                        unsavedCount={pendingRects.length}
-                        onEditModeChange={setEditMode}
-                        direction="row"
-                    />
-                </div>
-            )}
-
-            {/* Center grid layout */}
-            <div
-                className={`flex-grow w-full ${
-                    properties.scaled ? "overflow-hidden" : "overflow-auto"
-                } ${
-                    rects.length + pendingRects.length > 1
-                        ? "min-h-[300px]"
-                        : ""
-                }`}
-            >
-                <div>
-                    <div className="w-full">
-                        {renderRects(rects, 0)}
-                        {renderRects(pendingRects, rects.length)}
-                    </div>
-                </div>
-            </div>
-
-            {/* Right send button */}
-            {properties.draft && (
-                <div className="flex-shrink-0">
-                    <button
-                        onClick={() => {
-                            savePending();
-                            if (properties.onSave) {
-                                properties.onSave();
-                            }
-                        }}
-                        className="btn-elevated btn-icon btn-icon-md btn-toggle"
-                        aria-label="Send"
-                    >
-                        <BsSend size={24} />
-                    </button>
-                </div>
-            )}
+            {renderRects(filteredRects)}
+            {properties.children}
         </div>
     );
 };

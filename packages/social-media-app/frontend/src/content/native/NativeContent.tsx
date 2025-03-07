@@ -12,6 +12,7 @@ export type EditableStaticContentProps = {
     editable?: boolean;
     onChange?: (newContent: StaticContent["content"]) => void;
     thumbnail?: boolean;
+    coverParent?: boolean;
 };
 
 export const EditableStaticContent = ({
@@ -20,6 +21,7 @@ export const EditableStaticContent = ({
     editable = false,
     onChange,
     thumbnail,
+    coverParent,
 }: EditableStaticContentProps) => {
     if (staticContent instanceof StaticMarkdownText) {
         return (
@@ -40,6 +42,7 @@ export const EditableStaticContent = ({
                 editable={editable}
                 onChange={onChange}
                 thumbnail={thumbnail}
+                coverParent={coverParent}
             />
         );
     }

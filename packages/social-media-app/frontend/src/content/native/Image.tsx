@@ -7,6 +7,7 @@ export type ImageContentProps = {
     editable?: boolean;
     onChange?: (newContent: StaticImage) => void;
     thumbnail?: boolean;
+    coverParent?: boolean;
 };
 
 export const ImageContent = ({
@@ -14,6 +15,7 @@ export const ImageContent = ({
     onResize,
     editable = false,
     onChange,
+    coverParent,
 }: ImageContentProps) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
@@ -24,7 +26,7 @@ export const ImageContent = ({
     useEffect(() => {
         if (!containerRef.current) return;
         const observer = new ResizeObserver((entries) => {
-            for (let entry of entries) {
+            for (const entry of entries) {
                 const { width, height } = entry.contentRect;
                 const newDims = { width, height };
                 if (
@@ -97,7 +99,9 @@ export const ImageContent = ({
             onDragOver={editable ? handleDragOver : undefined}
             onDragLeave={editable ? handleDragLeave : undefined}
             onDrop={editable ? handleDrop : undefined}
-            className={`relative min-h-[100px] min-w-max h-full ${
+            className={`relative min-h-[100px] w-full h-full ${
+                coverParent ? "object-cover" : "min-w-max"
+            } ${
                 editable
                     ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150 bg-gray-50 dark:bg-gray-800"
                     : ""

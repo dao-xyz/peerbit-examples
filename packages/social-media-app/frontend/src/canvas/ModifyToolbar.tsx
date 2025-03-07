@@ -6,21 +6,34 @@ import { FaPhotoVideo } from "react-icons/fa";
 
 import { AppSelect } from "./AppSelect";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
+import { useCanvas } from "./CanvasWrapper";
 
 export const CanvasModifyToolbar = (properties: {
     canvas?: boolean;
-    unsavedCount: number;
-    onNew: (app?: SimpleWebManifest) => void;
-    onEditModeChange: (edit: boolean) => void;
     direction?: "row" | "col";
 }) => {
+    const {
+        editMode,
+        setEditMode,
+        active,
+        setActive,
+        pendingRects,
+        rects,
+        insertDefault,
+        removePending,
+        savePending,
+        canvas,
+    } = useCanvas();
+    const onNew = (app: SimpleWebManifest) =>
+        insertDefault({ app, increment: true });
+    const unsavedCount = pendingRects.length;
     const canvasControls = () => {
         if (properties.canvas) {
             return (
                 <>
                     <Toggle.Root
                         onPressedChange={(e) => {
-                            properties.onEditModeChange(e);
+                            setEditMode(e);
                         }}
                         className="ml-auto btn-icon btn-icon-md  btn-toggle h-max"
                         aria-label="Toggle italic"
@@ -36,9 +49,9 @@ export const CanvasModifyToolbar = (properties: {
                         aria-label="Toggle italic"
                     >
                         <MdSave />
-                        {properties.unsavedCount > 0 && (
+                        {unsavedCount > 0 && (
                             <div className="absolute outline outline-2 h-5 w-5 top-[-4px] right-[-8px] bg-primary-400/50 outline-primary-400 dark:bg-primary-400/50 dark:outline-primary-200   text-sm rounded-full">
-                                {properties.unsavedCount}
+                                {unsavedCount}
                             </div>
                         )}
                     </button> */}
@@ -78,7 +91,7 @@ export const CanvasModifyToolbar = (properties: {
                 <FaPhotoVideo />
             </label>
             <div className="w-[40px] h-[40px]">
-                <AppSelect onSelected={(app) => properties.onNew(app)} />
+                <AppSelect onSelected={(app) => onNew(app)} />
             </div>
         </div>
     );

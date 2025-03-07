@@ -13,7 +13,6 @@ import { EditableStaticContent } from "./native/NativeContent";
 export const Frame = (properties: {
     pending: boolean;
     element: Element;
-    index: number;
     active: boolean;
     setActive: (value: boolean) => void;
     editMode: boolean;
@@ -21,10 +20,6 @@ export const Frame = (properties: {
     thumbnail?: boolean;
     replace: (url: string) => void;
     onLoad: (event: React.SyntheticEvent<HTMLElement, Event>) => void;
-    onStaticResize?: (
-        dims: { width: number; height: number },
-        index: number
-    ) => void;
     /**
      * Called when static content is edited.
      * The new static content is provided along with the element index.
@@ -33,7 +28,9 @@ export const Frame = (properties: {
         newContent: StaticContent["content"],
         id: Uint8Array
     ) => void;
+    key?: number;
     delete(): void;
+    coverParent?: boolean;
 }) => {
     const navigate = useNavigate();
 
@@ -47,7 +44,7 @@ export const Frame = (properties: {
         }
     };
 
-    const renderContent = () => {
+    const renderContent = ({ coverParent }: { coverParent?: boolean }) => {
         // For iframes, continue to use the iframe as before.
         if (properties.element.content instanceof IFrameContent) {
             return (
@@ -71,16 +68,7 @@ export const Frame = (properties: {
                     staticContent={staticContent}
                     editable={properties.editMode}
                     thumbnail={properties.thumbnail}
-                    onResize={(dims) => {
-                        // Notify parent about size changes.
-                        if (properties.onStaticResize) {
-                            properties.onStaticResize(dims, properties.index);
-                        }
-                        // Optionally trigger onLoad logic.
-                        properties.onLoad?.(
-                            {} as React.SyntheticEvent<HTMLElement, Event>
-                        );
-                    }}
+                    onResize={() => {}}
                     onChange={(newContent) => {
                         if (properties.onContentChange) {
                             properties.onContentChange(
@@ -89,6 +77,7 @@ export const Frame = (properties: {
                             );
                         }
                     }}
+                    coverParent={coverParent}
                 />
             );
         }
@@ -99,18 +88,15 @@ export const Frame = (properties: {
     const showCanvasControls = properties.showCanvasControls;
     return (
         <div
-            key={properties.index}
+            key={properties.key}
             className={`flex flex-row  w-full h-full max-w-full ${
                 !properties.thumbnail
                     ? "" /* TODO bg? "bg-neutral-100 dark:bg-neutral-900" */
                     : ""
-            } group `} /* ${properties.pending ? "border-solid border-2 border-primary-400" : ""} outline-auto outline-neutral-900 dark:outline-neutral-300  */
+            } group`} /* ${properties.pending ? "border-solid border-2 border-primary-400" : ""} outline-auto outline-neutral-900 dark:outline-neutral-300  */
         >
-            <div
-                id={"frame-" + properties.index}
-                className="w-full h-full flex flex-row"
-            >
-                {renderContent()}
+            <div className="w-full h-full flex flex-row overflow-hidden">
+                {renderContent({ coverParent: properties.coverParent })}
             </div>
 
             {!properties.active && (
@@ -124,7 +110,6 @@ export const Frame = (properties: {
                     <div className="flex flex-col  h-full">
                         {showCanvasControls && (
                             <div
-                                id={"header-" + properties.index}
                                 className="w-full justify-end  flex flex-col " // hidden group-hover:flex
                             >
                                 {/*  <div className="m-1 w-full">
