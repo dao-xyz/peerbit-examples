@@ -60,7 +60,7 @@ export const Header = forwardRef((props: any, ref) => {
                 XYZ
             </span> */}
             {/* <img src={Logo} width="20px" /> */}
-            <img className="mr-auto ml-2" src={Logo} width="35px" />
+            <img className="mr-auto ml-2 dark:invert" src={Logo} width="35px" />
             <div className="mr-auto max-w-xl flex-1 max-h-[40px] overflow-visible">
                 <CanvasPath />
             </div>

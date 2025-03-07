@@ -121,14 +121,19 @@ class IndexableCanvas {
     @field({ type: "string" })
     content: string;
 
+    @field({ type: "u64" })
+    replies: bigint;
+
     constructor(properties: {
         id: Uint8Array;
         publicKey: PublicSignKey;
         content: string;
+        replies: bigint;
     }) {
         this.id = properties.id;
         this.publicKey = properties.publicKey.bytes;
         this.content = properties.content;
+        this.replies = properties.replies;
     }
 }
 
@@ -248,6 +253,9 @@ export class Canvas extends Program {
                         id: arg.id,
                         publicKey: arg.publicKey,
                         content: indexable,
+                        replies: arg.replies.index.closed
+                            ? 0n
+                            : BigInt(await arg.replies.index.getSize()),
                     });
                 },
             },
