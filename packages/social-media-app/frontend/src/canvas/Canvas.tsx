@@ -50,23 +50,23 @@ export const Canvas = (
                 <div key={ix}>
                     <Frame
                         thumbnail={asThumbnail}
-                        active={active.has(ix)}
+                        active={active.has(x.id)}
                         setActive={(v) => {
                             if (v) {
-                                setActive(new Set(active.add(ix)));
+                                setActive(new Set(active.add(x.id)));
                             } else {
                                 setActive(
-                                    new Set([...active].filter((x) => x !== ix))
+                                    new Set(
+                                        [...active].filter((el) => el !== x.id)
+                                    )
                                 );
                             }
                         }}
                         delete={() => {
-                            const pendingIndex = pendingRects.indexOf(x);
-                            if (pendingIndex !== -1) {
-                                removePending(ix);
-                            } else {
-                                canvas?.elements.del(x.id);
-                            }
+                            removePending(x.id);
+                            // TODO: make this logic smarter in the future.
+                            // We don't always want to delete.
+                            canvas?.elements.del(x.id);
                         }}
                         editMode={editMode}
                         showCanvasControls={
@@ -89,16 +89,21 @@ export const Canvas = (
                         }}
                         onLoad={() => {}}
                         onStaticResize={() => {}}
-                        onContentChange={(newContent, idx) => {
-                            if (idx < rects.length) {
-                                const element = rects[idx];
-                                element.content = new StaticContent({
+                        onContentChange={(newContent, id) => {
+                            const changedElement = rects.find(
+                                (rect) => rect.id === id
+                            );
+                            // if contained in rects
+                            if (changedElement) {
+                                changedElement.content = new StaticContent({
                                     content: newContent,
                                 });
-                                canvas.elements.put(element);
-                            } else {
+                                canvas.elements.put(changedElement);
+                            }
+                            // if outside of rects -> pending!
+                            else {
                                 const newPending = [...pendingRects];
-                                newPending[idx - rects.length].content =
+                                newPending.find((el) => el.id === id).content =
                                     new StaticContent({
                                         content: newContent,
                                     });

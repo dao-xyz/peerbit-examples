@@ -31,7 +31,7 @@ export const Frame = (properties: {
      */
     onContentChange?: (
         newContent: StaticContent["content"],
-        index: number
+        id: Uint8Array
     ) => void;
     delete(): void;
 }) => {
@@ -85,7 +85,7 @@ export const Frame = (properties: {
                         if (properties.onContentChange) {
                             properties.onContentChange(
                                 newContent,
-                                properties.index
+                                properties.element.id
                             );
                         }
                     }}

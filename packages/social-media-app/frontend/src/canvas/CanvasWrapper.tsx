@@ -26,15 +26,15 @@ import { useApps } from "../content/useApps.js";
 interface CanvasContextType {
     editMode: boolean; // Whether canvas is in edit mode
     setEditMode: (value: boolean) => void;
-    active: Set<number>; // Set of active element indices
-    setActive: (value: Set<number>) => void;
+    active: Set<Uint8Array>; // Set of active element indices
+    setActive: (value: Set<Uint8Array>) => void;
     pendingRects: Element[]; // Elements pending save
     rects: Element[]; // Saved elements
     insertDefault: (options?: {
         app?: SimpleWebManifest;
         increment?: boolean;
     }) => void; // Insert default element
-    removePending: (ix: number) => void; // Remove pending element
+    removePending: (id: Uint8Array) => void; // Remove pending element
     savePending: () => Promise<Element[] | undefined>; // Save pending elements
     canvas: CanvasDB; // Canvas database instance
 }
@@ -87,7 +87,7 @@ export const CanvasWrapper = ({
     const rects = useLocal(canvas?.elements);
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
     const pendingCounter = useRef(0);
-    const [active, setActive] = useState<Set<number>>(new Set());
+    const [active, setActive] = useState<Set<Uint8Array>>(new Set());
     const latestBreakpoint = useRef<"xxs" | "md">("md");
 
     /**
@@ -220,8 +220,8 @@ export const CanvasWrapper = ({
     /**
      * Removes a pending element
      */
-    const removePending = (ix: number) => {
-        setPendingRects((prev) => prev.filter((_, i) => i !== ix));
+    const removePending = (id: Uint8Array) => {
+        setPendingRects((prev) => prev.filter((el) => !equals(id, el.id)));
     };
 
     // Clear active elements when clicking outside

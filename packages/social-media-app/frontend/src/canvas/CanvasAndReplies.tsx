@@ -10,6 +10,9 @@ import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
 import { AiOutlineComment } from "react-icons/ai";
 import { Header } from "./header//Header.js";
+import { FaPhotoVideo } from "react-icons/fa";
+import { FaPlus } from "react-icons/fa6";
+import { PendingAppsChatBar } from "./PendingApps.js";
 
 const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
     const isRoot = props.canvas?.parent == null;
@@ -121,24 +124,27 @@ export const CanvasAndReplies = () => {
 
     return (
         <div className="flex flex-col h-full">
-            <div className="flex-grow">
-                <CanvasWithReplies key={0} canvas={lastCanvas} />
-            </div>
-            {/* spacer div */}
-            <div className="mt-4 flex flex-col sticky bottom-0 w-full left-0">
-                <div className="flex px-4 gap-4">
-                    {[...Array(4).keys()].map((_, index) => (
-                        <div
-                            key={index}
-                            className="bg-neutral-400 rounded-md w-20 h-20"
-                        ></div>
-                    ))}
+            <CanvasWrapper canvas={pendingCanvas.program} draft={true}>
+                <div className="flex-grow">
+                    <CanvasWithReplies key={0} canvas={lastCanvas} />
                 </div>
-                <CanvasWrapper canvas={pendingCanvas.program} draft={true}>
+                {/* spacer div */}
+                <div className="mt-4 flex flex-col sticky bottom-0 w-full left-0">
+                    <PendingAppsChatBar>
+                        <label className="btn-elevated btn-icon btn-icon-md btn-toggle w-20 flex items-center justify-center">
+                            <input
+                                type="file"
+                                accept="image/*, video/*"
+                                multiple
+                                style={{ display: "none" }}
+                                id="image-upload"
+                            />
+                            <FaPlus />
+                        </label>
+                    </PendingAppsChatBar>
                     <Canvas draft={true} onSave={onSavePending} />
-                </CanvasWrapper>
-            </div>
-
+                </div>
+            </CanvasWrapper>
             {/* This filler pushes the content to fill the screen if there is whitespace */}
         </div>
     );
