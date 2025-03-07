@@ -41,7 +41,7 @@ export const Canvas = (
                     key={key}
                     className={
                         properties.appearance === "chat-view-images"
-                            ? "bg-neutral-400 dark:bg-neutral-600 rounded-md w-20 h-20 max-w-20 max-h-20 border-[1px] border-neutral-800 overflow-hidden"
+                            ? "bg-white rounded-md w-20 h-20 max-w-20 max-h-20 border-[1px] border-neutral-800 overflow-hidden"
                             : ""
                     }
                 >
@@ -71,7 +71,7 @@ export const Canvas = (
                                 : editMode
                         }
                         showCanvasControls={
-                            properties.appearance === "chat-view-images" &&
+                            properties.appearance !== "chat-view-images" &&
                             editMode &&
                             pendingRects.length + rects.length > 1
                         }
@@ -133,7 +133,11 @@ export const Canvas = (
                       )
               )
             : properties.appearance === "chat-view-text"
-            ? [...rects, ...pendingRects].filter((_, i) => i === 0)
+            ? [...rects, ...pendingRects].filter(
+                  (rect) =>
+                      rect.content instanceof StaticContent &&
+                      rect.content.content instanceof StaticMarkdownText
+              )
             : [...rects, ...pendingRects];
 
     return (
@@ -149,7 +153,7 @@ export const Canvas = (
             }
         >
             {renderRects(filteredRects)}
-            {properties.children}
+            {filteredRects.length > 0 ? properties.children : null}
         </div>
     );
 };
