@@ -23,7 +23,7 @@ export const CanvasPreview = (properties: { canvas: CanvasDB }) => {
 
     return (
         <button
-            className="btn w-full flex flex-row p-0 border  border-solid max-h-[40vh]"
+            className="btn w-full flex flex-row p-0 border  border-solid max-h-[40vh] overflow-hidden"
             onClick={async () => {
                 navigate(getCanvasPath(properties.canvas), {});
             }}
