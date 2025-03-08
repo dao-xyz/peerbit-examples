@@ -18,18 +18,18 @@ export const useLocal = <
     options?: {
         query?: {
             query?:
-            | Query[]
-            | Query
-            | Record<
-                string,
-                | string
-                | number
-                | bigint
-                | Uint8Array
-                | boolean
-                | null
-                | undefined
-            >;
+                | Query[]
+                | Query
+                | Record<
+                      string,
+                      | string
+                      | number
+                      | bigint
+                      | Uint8Array
+                      | boolean
+                      | null
+                      | undefined
+                  >;
             sort?: Sort[] | Sort;
             fetch?: number;
         };
@@ -58,14 +58,14 @@ export const useLocal = <
         // Define the search function.
         const l = async () => {
             try {
-                const results: WithContext<RT>[] = await db.index.search(
+                const results: WithContext<RT>[] = (await db.index.search(
                     new SearchRequest(options?.query),
                     {
                         local: true,
                         remote: false,
                         resolve: options?.resolve as any,
                     }
-                ) as any; // TODO fix types
+                )) as any; // TODO fix types
                 // Update the state and call onChanges if provided.
                 setAll(() => {
                     options?.onChanges?.(results);
