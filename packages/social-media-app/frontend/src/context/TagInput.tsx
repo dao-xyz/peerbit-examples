@@ -62,11 +62,11 @@ const TagInput = ({ tags, onTagsChange, renderTag }) => {
             className="flex items-center gap-1 px-2 py-1 border border-gray-300 rounded h-full cursor-text"
             onClick={() => inputRef.current.focus()}
         >
-            <div className="h-full flex max-w-[50%] overflow-x-scroll overflow-y-hidden no-scrollbar">
+            <div className="h-full flex items-center max-w-[50%] overflow-x-scroll overflow-y-hidden no-scrollbar">
                 {tags.map((tag, index) => (
                     <React.Fragment key={index}>
                         {index > 0 ? (
-                            <span className=" text-gray-400 ml-1 mr-1">/</span>
+                            <span className="text-gray-400 ml-1 mr-1">/</span>
                         ) : null}
                         <>{renderTagContent(tag, index)}</>
                     </React.Fragment>

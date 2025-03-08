@@ -1,7 +1,22 @@
+/**
+ * @fileoverview React component for displaying and editing images with drag-and-drop functionality.
+ */
+
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { StaticImage } from "@dao-xyz/social";
 import { readFileAsImage } from "./utils";
 
+/**
+ * Props interface for the ImageContent component
+ * ImageContentProps
+ * content - The image data to display
+ * onResize - Callback when image dimensions change
+ * [editable] - Whether the image can be edited/replaced
+ * [onChange] - Callback when image content changes
+ * [thumbnail] - Display as thumbnail
+ * [coverParent] - Cover parent container
+ * [fit] - How image should fit container. If not given, scales to parent on width and height
+ */
 export type ImageContentProps = {
     content: StaticImage;
     onResize: (dims: { width: number; height: number }) => void;
@@ -9,21 +24,31 @@ export type ImageContentProps = {
     onChange?: (newContent: StaticImage) => void;
     thumbnail?: boolean;
     coverParent?: boolean;
+    fit?: "cover" | "contain";
 };
 
+/**
+ * Component for displaying and editing image content
+ * Supports drag-and-drop uploads and dimension monitoring
+ */
 export const ImageContent = ({
     content,
     onResize,
     editable = false,
     onChange,
     coverParent,
+    fit,
 }: ImageContentProps) => {
+    // References for container element and dimension tracking
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
     const threshold = 1;
     const [isDragOver, setIsDragOver] = useState(false);
 
-    // ResizeObserver to trigger onResize callback
+    /**
+     * ResizeObserver setup to monitor container dimensions
+     * Triggers onResize callback when dimensions change beyond threshold
+     */
     useEffect(() => {
         if (!containerRef.current) return;
         const observer = new ResizeObserver((entries) => {
@@ -47,15 +72,22 @@ export const ImageContent = ({
         return () => observer.disconnect();
     }, [onResize, threshold]);
 
-    // Common file handling logic.
+    /**
+     * Handles processing of uploaded image files
+     */
     const handleFile = useCallback(readFileAsImage(onChange), [onChange]);
 
+    /**
+     * Handles file input change events
+     */
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files && e.target.files[0];
         handleFile(file);
     };
 
-    // Drag and drop handlers
+    /**
+     * Drag and drop event handlers
+     */
     const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
         setIsDragOver(true);
@@ -80,7 +112,11 @@ export const ImageContent = ({
             onDragLeave={editable ? handleDragLeave : undefined}
             onDrop={editable ? handleDrop : undefined}
             className={`relative w-full h-full ${
-                coverParent ? "object-cover" : "min-w-max"
+                {
+                    cover: "object-cover",
+                    contain: "object-contain",
+                    default: "",
+                }[fit ?? "default"]
             } ${
                 editable
                     ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150 bg-gray-50 dark:bg-gray-800"
@@ -94,7 +130,13 @@ export const ImageContent = ({
             <img
                 src={`data:${content.mimeType};base64,${content.base64}`}
                 alt={content.alt}
-                className="object-contain w-full h-full"
+                className={`w-full h-full ${
+                    {
+                        cover: "object-cover",
+                        contain: "object-contain",
+                        default: "",
+                    }[fit ?? "default"]
+                }`}
                 style={{ maxHeight: "400px" }}
             />
             {editable && (

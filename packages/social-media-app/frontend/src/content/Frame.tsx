@@ -31,6 +31,7 @@ export const Frame = (properties: {
     key?: number;
     delete(): void;
     coverParent?: boolean;
+    fit?: "cover" | "contain";
 }) => {
     const navigate = useNavigate();
 
@@ -78,6 +79,7 @@ export const Frame = (properties: {
                         }
                     }}
                     coverParent={coverParent}
+                    fit={properties.fit}
                 />
             );
         }
