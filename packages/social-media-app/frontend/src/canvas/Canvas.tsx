@@ -9,7 +9,7 @@ import { equals } from "uint8arrays";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
-import { ReactNode } from "react";
+import { ReactNode, useCallback, useMemo } from "react";
 
 type SizeProps = {
     width?: number;
@@ -33,6 +33,32 @@ export const Canvas = (
         removePending,
         canvas,
     } = useCanvas();
+
+    // Inside your Canvas component:
+    const filteredTextRectsCount = useMemo(() => {
+        const filtered = [...rects, ...pendingRects].filter(
+            (rect, i) =>
+                rect.content instanceof StaticContent &&
+                rect.content.content instanceof StaticMarkdownText
+        );
+        return filtered.length;
+    }, [rects, pendingRects]);
+
+    // rects and pendingRects purpose filtered for properties.appearance
+    const filteredRects = useMemo(() => {
+        return [...rects, ...pendingRects].filter((rect, i) =>
+            properties.appearance === "chat-view-images"
+                ? i > 0 ||
+                  !(
+                      rect.content instanceof StaticContent &&
+                      rect.content.content instanceof StaticMarkdownText
+                  )
+                : properties.appearance === "chat-view-text"
+                ? rect.content instanceof StaticContent &&
+                  rect.content.content instanceof StaticMarkdownText
+                : true
+        );
+    }, [rects, pendingRects, properties.appearance]);
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((x, key) => {
@@ -73,7 +99,7 @@ export const Canvas = (
                         showCanvasControls={
                             properties.appearance !== "chat-view-images" &&
                             editMode &&
-                            pendingRects.length + rects.length > 1
+                            filteredRects.length > 1
                         }
                         element={x}
                         replace={async (url) => {
@@ -122,23 +148,6 @@ export const Canvas = (
     };
 
     // Exclude the first rect if it is a text content form rendering in chat-view-images appearance mode
-    const filteredRects =
-        properties.appearance === "chat-view-images"
-            ? [...rects, ...pendingRects].filter(
-                  (rect, i) =>
-                      i > 0 ||
-                      !(
-                          rect.content instanceof StaticContent &&
-                          rect.content.content instanceof StaticMarkdownText
-                      )
-              )
-            : properties.appearance === "chat-view-text"
-            ? [...rects, ...pendingRects].filter(
-                  (rect) =>
-                      rect.content instanceof StaticContent &&
-                      rect.content.content instanceof StaticMarkdownText
-              )
-            : [...rects, ...pendingRects];
 
     return (
         <div

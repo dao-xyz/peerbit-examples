@@ -13,18 +13,7 @@ export const CanvasModifyToolbar = (properties: {
     canvas?: boolean;
     direction?: "row" | "col";
 }) => {
-    const {
-        editMode,
-        setEditMode,
-        active,
-        setActive,
-        pendingRects,
-        rects,
-        insertDefault,
-        removePending,
-        savePending,
-        canvas,
-    } = useCanvas();
+    const { setEditMode, pendingRects, insertDefault } = useCanvas();
     const onNew = (app: SimpleWebManifest) =>
         insertDefault({ app, increment: true });
     const unsavedCount = pendingRects.length;
@@ -78,26 +67,7 @@ export const CanvasModifyToolbar = (properties: {
             >
                 <MdAdd />
             </button> */}
-            <div className="btn-elevated btn-icon btn-icon-md btn-toggle ">
-                <input
-                    type="file"
-                    accept="image/*, video/*"
-                    multiple
-                    style={{ display: "none" }}
-                    id="image-upload"
-                />
-                <ImageUploadTrigger />
-            </div>
-            <label className="btn-elevated btn-icon btn-icon-md btn-toggle">
-                <input
-                    type="file"
-                    accept="image/*, video/*"
-                    multiple
-                    style={{ display: "none" }}
-                    id="image-upload"
-                />
-                <ImageUploadTrigger />
-            </label>
+            <ImageUploadTrigger />
             <div className="w-[40px] h-[40px]">
                 <AppSelect onSelected={(app) => onNew(app)} />
             </div>
