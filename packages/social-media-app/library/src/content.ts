@@ -11,7 +11,7 @@ import {
     sha256Base64Sync,
     sha256Sync,
 } from "@peerbit/crypto";
-import { Program } from "@peerbit/program";
+import { Program, ProgramClient } from "@peerbit/program";
 import { AbstractStaticContent } from "./static/content";
 import { StaticMarkdownText } from "./static";
 
@@ -138,7 +138,7 @@ class IndexableCanvas {
 }
 
 abstract class CanvasReference {
-    abstract load(): Promise<Canvas> | Canvas;
+    abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
 }
 
 @variant("canvas")
@@ -157,7 +157,7 @@ export class Canvas extends Program {
 
     constructor(
         properties: (
-            | { parent: CanvasValueReference }
+            | { parent: CanvasAddressReference }
             | { seed: Uint8Array }
         ) & {
             publicKey: PublicSignKey;
@@ -267,7 +267,7 @@ export class Canvas extends Program {
         let path: Canvas[] = [current];
 
         while (current.parent) {
-            const next = await current.parent.load();
+            const next = await current.parent.load(this.node);
             path.push(next);
             current = next;
         }
@@ -292,7 +292,9 @@ export class Canvas extends Program {
 
             for (let i = results.path.length; i < path.length; i++) {
                 const canvas = new Canvas({
-                    parent: new CanvasValueReference({ canvas: currentCanvas }),
+                    parent: new CanvasAddressReference({
+                        canvas: currentCanvas,
+                    }),
                     publicKey: this.node.identity.publicKey,
                 });
 
@@ -380,19 +382,58 @@ export class Canvas extends Program {
 }
 
 @variant(0)
-export class CanvasValueReference extends CanvasReference {
-    @field({ type: Canvas })
-    canvas: Canvas;
+export class CanvasAddressReference extends CanvasReference {
+    @field({ type: "string" })
+    canvas: string;
 
-    constructor(properties: { canvas: Canvas }) {
+    private _reference: Canvas | null;
+    constructor(properties: { canvas: Canvas | string }) {
         super();
-        this.canvas = properties.canvas;
+        this.canvas =
+            typeof properties.canvas === "string"
+                ? properties.canvas
+                : properties.canvas.address;
+        this._reference =
+            typeof properties.canvas === "string" ? null : properties.canvas;
     }
 
-    async load() {
-        return this.canvas;
+    // TODO add args
+    async load(node: ProgramClient) {
+        return (
+            this._reference ||
+            (this._reference = await node.open<Canvas>(this.canvas, {
+                existing: "reuse",
+            }))
+        );
     }
 }
+
+/*
+ WE CAN NOT USE BELOW YET BECAUSE WE CAN NOT HAVE CIRCULAR DEPENDENCIE
+ client.open( canvas, { resuse: true } ) 
+ does not correctly respect cirdcular references
+ */
+
+/*
+@variant(1)
+export class CanvasValueReference extends CanvasReference {
+   @field({ type: Canvas })
+   canvas: Canvas;
+
+   constructor(properties: { canvas: Canvas }) {
+
+       super();
+       this.canvas = properties.canvas;
+
+   }
+
+   // TODO add args
+   async load(_node: ProgramClient) {
+       return this.canvas
+   }
+}
+
+*/
 
 @variant(0)
 export class IFrameContent extends ElementContent {
@@ -433,31 +474,3 @@ export class StaticContent extends ElementContent {
         };
     }
 }
-
-/* 
-
-@variant(2)
-export class SubCanvas extends ElementContent {
-
-    @field({ type: Canvas })
-    canvas: Canvas;
-
-    constructor(properties: { canvas: Canvas }) {
-        super();
-        this.canvas = properties.canvas;
-    }
-
-
-
-
-
-
-    async toIndex() {
-        // fetch a few elements and build a stringify version of the canvas
-
-        return {
-            type: "canvas",
-            content: await this.canvas.createTitle()
-        };
-    }
-} */

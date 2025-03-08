@@ -150,47 +150,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         ]
     );
 
-    /* const updateRooms = (reset = true) => {
-        let startLocation = window.location.hash;
-        const maybeSetRooms = (rooms: Canvas[]) => {
-            if (startLocation === window.location.hash) {
-                setCanvases(rooms);
-            }
-        };
-        const newRoomPath = getCanvasPathFromURL();
-        setCanvasPath(newRoomPath);
-        document.title = newRoomPath.join(" / ") || "Giga";
-        if (reset) {
-            maybeSetRooms([]);
-            setIsLoading(true);
-        }
-
-        root.findCanvasesByPath(newRoomPath)
-            .then((result) => {
-                if (result.path.length === newRoomPath.length) {
-                    return Promise.all(
-                        result.canvases.map((room) =>
-                            peer.open(room, { existing: "reuse" })
-                        )
-                    ).then((openRooms) => {
-                        maybeSetRooms(openRooms);
-                        return openRooms;
-                    });
-                } else {
-                    maybeSetRooms([]);
-                }
-            })
-            .catch((e) => {
-                console.error(e);
-            })
-            .finally(() => {
-                setIsLoading(false);
-                forceUpdate();
-            });
-    };
- */
-
-    const updateRooms = async (reset = true) => {
+    const updateCanvasPath = async (reset = true) => {
         let startLocation = window.location.hash;
         const maybeSetCanvases = (rooms: Canvas[]) => {
             if (startLocation === window.location.hash) {
@@ -240,20 +200,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             forceUpdate();
             return;
         }
-        updateRooms(false);
-        /* 
-                // TODO remove when https://github.com/dao-xyz/peerbit/issues/151 is solved
-                const listener = () => {
-                    updateRooms(false);
-                };
-                setTimeout(() => {
-                    updateRooms(false);
-                }, 3000);
-        
-                root.elements.events.addEventListener("change", listener);
-                return () => {
-                    root.elements.events.removeEventListener("change", listener);
-                }; */
+        updateCanvasPath(false);
     }, [root?.address, rlocation]);
 
     useEffect(() => {

@@ -1,6 +1,6 @@
-import React, { useEffect, useMemo, useState } from "react";
-import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
-import { useLocal, usePeer, useProgram } from "@peerbit/react";
+import { useEffect, useState } from "react";
+import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { useLocal } from "@peerbit/react";
 import { CanvasPreview } from "./Preview";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import { SearchRequest } from "@peerbit/document-interface";

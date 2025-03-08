@@ -3,7 +3,7 @@ import { useCanvases } from "./useCanvas.js";
 import { useState, useEffect } from "react";
 import { Canvas as Canvas } from "./Canvas.js";
 import { CanvasWrapper, useCanvas } from "./CanvasWrapper.js";
-import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
+import { Canvas as CanvasDB, CanvasAddressReference } from "@dao-xyz/social";
 import { Replies as RepliesView } from "./Replies.js";
 import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
@@ -78,7 +78,7 @@ export const CanvasAndReplies = () => {
             setPendingCanvasState(
                 new CanvasDB({
                     publicKey: peer.identity.publicKey,
-                    parent: new CanvasValueReference({ canvas: lastCanvas }), // simplified reference
+                    parent: new CanvasAddressReference({ canvas: lastCanvas }), // simplified reference
                 })
             );
     }, [lastCanvas?.idString, peer?.identity.publicKey.hashcode()]);
@@ -96,7 +96,7 @@ export const CanvasAndReplies = () => {
             // and initialize a new canvas for the next comment
             return new CanvasDB({
                 publicKey: peer.identity.publicKey,
-                parent: new CanvasValueReference({ canvas: lastCanvas }), // simplified reference
+                parent: new CanvasAddressReference({ canvas: lastCanvas }), // simplified reference
             });
         });
     };
