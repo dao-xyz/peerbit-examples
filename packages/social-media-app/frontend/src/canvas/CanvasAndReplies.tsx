@@ -39,7 +39,7 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
     return (
         <div className="p-5 flex flex-col">
             <Header publicKey={peer.identity.publicKey} />
-            <div className="rounded-md">
+            <div className="rounded-md flex">
                 <CanvasWrapper canvas={props.canvas}>
                     <Canvas draft={false} />
                 </CanvasWrapper>
@@ -123,7 +123,7 @@ export const CanvasAndReplies = () => {
 
     return (
         <div className="flex flex-col h-full">
-            <div className="flex-grow">
+            <div className="flex-grow max-w-[680px] w-full mx-auto">
                 <CanvasWithReplies key={0} canvas={lastCanvas} />
             </div>
             <CanvasWrapper

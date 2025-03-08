@@ -23,22 +23,23 @@ export const CanvasPreview = (properties: { canvas: CanvasDB }) => {
 
     return (
         <button
-            className="btn w-full flex flex-row p-0 border  border-solid"
+            className="btn w-full flex flex-row p-0 border  border-solid max-h-[40vh]"
             onClick={async () => {
                 navigate(getCanvasPath(properties.canvas), {});
             }}
         >
             <Header publicKey={properties.canvas.publicKey} direction="col" />
-            <div className="w-full flex">
-                {/*  {name != null ? (
-                    <div className="truncate whitespace-pre-line">{name}</div>
-                ) : (
-                    <div>Failed to create preview</div>
-                )} */}
-                <CanvasWrapper canvas={properties.canvas}>
-                    <Canvas />
-                </CanvasWrapper>
-            </div>
+            <CanvasWrapper canvas={properties.canvas}>
+                <div className="w-full flex flex-col items-center relative overflow-hidden">
+                    {/* Real image preview */}
+                    <Canvas fitHeight />
+                    <div className="absolute inset-0 -z-10">
+                        <div className="relative blur-xl w-full h-full">
+                            <Canvas fitHeight fitWidth />
+                        </div>
+                    </div>
+                </div>
+            </CanvasWrapper>
         </button>
     );
 };
