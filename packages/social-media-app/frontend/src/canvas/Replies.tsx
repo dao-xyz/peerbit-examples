@@ -21,9 +21,9 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
                 sort: new Sort({
                     key: ["__context", "created"],
                     direction:
-                        sortCriteria === "new"
-                            ? SortDirection.DESC
-                            : SortDirection.ASC,
+                        sortCriteria === "new" // make the newest elements come last (CHAT MODE)
+                            ? SortDirection.ASC
+                            : SortDirection.DESC,
                 }),
             }),
         });
