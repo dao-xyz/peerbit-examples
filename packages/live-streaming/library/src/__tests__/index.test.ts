@@ -17,6 +17,7 @@ import { Ed25519Keypair } from "@peerbit/crypto";
 import { MAX_U32, ReplicationRangeIndexable } from "@peerbit/shared-log";
 import pDefer, { DeferredPromise } from "p-defer";
 import path from "path";
+import { WithContext } from "@peerbit/document";
 
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
 
@@ -2316,9 +2317,8 @@ describe("MediaStream", () => {
                                     const next = iterator.next.bind(iterator);
                                     iterator.next = async (args) => {
                                         if (args === bufferSize) {
-                                            let chunks: Chunk[] = await next(
-                                                args
-                                            );
+                                            let chunks: WithContext<Chunk>[] =
+                                                await next(args);
                                             for (const chunk of chunks) {
                                                 let time =
                                                     track.startTime +
