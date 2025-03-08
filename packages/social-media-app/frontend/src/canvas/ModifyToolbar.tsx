@@ -79,6 +79,13 @@ export const CanvasModifyToolbar = (properties: {
                 <MdAdd />
             </button> */}
             <div className="btn-elevated btn-icon btn-icon-md btn-toggle ">
+                <input
+                    type="file"
+                    accept="image/*, video/*"
+                    multiple
+                    style={{ display: "none" }}
+                    id="image-upload"
+                />
                 <ImageUploadTrigger />
             </div>
             <label className="btn-elevated btn-icon btn-icon-md btn-toggle">
