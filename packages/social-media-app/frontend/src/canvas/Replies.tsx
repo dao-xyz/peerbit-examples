@@ -8,6 +8,7 @@ import { SearchRequest } from "@peerbit/document-interface";
 // Radix UI Dropdown components
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
+import RelativeTimestamp from "./header/RelativeTimestamp";
 type SortCriteria = "new" | "old";
 export const Replies = (properties: { canvas?: CanvasDB }) => {
     const [sortCriteria, setSortCriteria] = useState<SortCriteria>("new");
@@ -80,6 +81,17 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
                                 <span className="mr-auto text-sm underline">
                                     {`Replies (0)`}
                                 </span>
+                                <RelativeTimestamp
+                                    timestamp={
+                                        new Date(
+                                            Number(
+                                                reply.__context.created /
+                                                    BigInt(1000000)
+                                            )
+                                        )
+                                    }
+                                    className="ml-auto text-sm"
+                                />
                             </div>
                         </div>
                     ))}

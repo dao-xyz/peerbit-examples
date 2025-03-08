@@ -12,7 +12,7 @@ export const useLocal = <
     T extends Record<string, any>,
     I extends Record<string, any>,
     R extends boolean | undefined = true,
-    RT = R extends false ? I : T
+    RT = R extends false ? WithContext<I> : WithContext<T>
 >(
     db?: Documents<T, I>,
     options?: {
