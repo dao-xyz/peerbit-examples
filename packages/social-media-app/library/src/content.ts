@@ -141,6 +141,33 @@ abstract class CanvasReference {
     abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
 }
 
+@variant(0)
+export class CanvasAddressReference extends CanvasReference {
+    @field({ type: "string" })
+    canvas: string;
+
+    private _reference: Canvas | null;
+    constructor(properties: { canvas: Canvas | string }) {
+        super();
+        this.canvas =
+            typeof properties.canvas === "string"
+                ? properties.canvas
+                : properties.canvas.address;
+        this._reference =
+            typeof properties.canvas === "string" ? null : properties.canvas;
+    }
+
+    // TODO add args
+    async load(node: ProgramClient) {
+        return (
+            this._reference ||
+            (this._reference = await node.open<Canvas>(this.canvas, {
+                existing: "reuse",
+            }))
+        );
+    }
+}
+
 @variant("canvas")
 export class Canvas extends Program {
     @field({ type: Documents })
@@ -166,7 +193,7 @@ export class Canvas extends Program {
         super();
         this.publicKey = properties.publicKey;
         this.parent = properties["parent"];
-        let elementsId = (properties as { seed: Uint8Array }).seed
+        const elementsId = (properties as { seed: Uint8Array }).seed
             ? sha256Sync((properties as { seed: Uint8Array }).seed)
             : randomBytes(32);
         this.elements = new Documents({ id: elementsId });
@@ -263,13 +290,12 @@ export class Canvas extends Program {
     }
 
     async getCanvasPath() {
-        let current: Canvas = this;
-        let path: Canvas[] = [current];
-
-        while (current.parent) {
-            const next = await current.parent.load(this.node);
+        const path: Canvas[] = [this];
+        let currentParent = path[path.length - 1].parent;
+        while (currentParent) {
+            const next = await currentParent.load(this.node);
             path.push(next);
-            current = next;
+            currentParent = path[path.length - 1].parent;
         }
         return path.reverse();
     }
@@ -298,7 +324,7 @@ export class Canvas extends Program {
                     publicKey: this.node.identity.publicKey,
                 });
 
-                let nextCanvas = await this.node.open(canvas, {
+                const nextCanvas = await this.node.open(canvas, {
                     existing: "reuse",
                 });
                 const name = path[i];
@@ -381,36 +407,9 @@ export class Canvas extends Program {
     }
 }
 
-@variant(0)
-export class CanvasAddressReference extends CanvasReference {
-    @field({ type: "string" })
-    canvas: string;
-
-    private _reference: Canvas | null;
-    constructor(properties: { canvas: Canvas | string }) {
-        super();
-        this.canvas =
-            typeof properties.canvas === "string"
-                ? properties.canvas
-                : properties.canvas.address;
-        this._reference =
-            typeof properties.canvas === "string" ? null : properties.canvas;
-    }
-
-    // TODO add args
-    async load(node: ProgramClient) {
-        return (
-            this._reference ||
-            (this._reference = await node.open<Canvas>(this.canvas, {
-                existing: "reuse",
-            }))
-        );
-    }
-}
-
 /*
  WE CAN NOT USE BELOW YET BECAUSE WE CAN NOT HAVE CIRCULAR DEPENDENCIE
- client.open( canvas, { resuse: true } ) 
+ client.open( canvas, { resuse: true } )
  does not correctly respect cirdcular references
  */
 
