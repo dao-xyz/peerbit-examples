@@ -4,16 +4,14 @@ import { useState, useEffect } from "react";
 import { Canvas as Canvas } from "./Canvas.js";
 import { CanvasWrapper, useCanvas } from "./CanvasWrapper.js";
 import { Canvas as CanvasDB, CanvasValueReference } from "@dao-xyz/social";
-
 import { Replies as RepliesView } from "./Replies.js";
 import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
-import { AiOutlineComment } from "react-icons/ai";
-import { Header } from "./header//Header.js";
-
-import { FaPlus } from "react-icons/fa6";
+import { Header } from "./header/Header.js";
 import { BsSend } from "react-icons/bs";
 import { CanvasModifyToolbar } from "./ModifyToolbar.js";
+import { ImageUploadTrigger } from "../content/native/image/ImageUploadToCanvas.js";
+import { FaPlus } from "react-icons/fa";
 
 const SaveButton = ({ onSavePending }: { onSavePending: () => void }) => {
     const { savePending } = useCanvas();
@@ -46,17 +44,6 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
                     <Canvas draft={false} />
                 </CanvasWrapper>
             </div>
-            {/*  {!isRoot && (
-                <button
-                    className="btn btn-elevated btn-icon mt-2 flex items-center"
-                    onClick={() => setShowReplies(!showReplies)}
-                >
-                    <AiOutlineComment size={20} />
-                    <span className="ml-2">
-                        {showReplies ? "Hide Comments" : "Show Comments"}
-                    </span>
-                </button>
-            )} */}
             {showReplies && (
                 <div className="mt-[3px] p-2 rounded-md">
                     <RepliesView canvas={props.canvas} />
@@ -69,12 +56,12 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
 export const CanvasAndReplies = () => {
     const { peer } = usePeer();
     const { root, path: canvases, loading } = useCanvases();
-
     const [lastCanvas, setLastCanvas] = useState<CanvasDB>(undefined);
 
     useEffect(() => {
         setLastCanvas(canvases[canvases.length - 1]);
     }, [canvases]);
+
     useEffect(() => {
         if (!peer || !root) {
             return;
@@ -91,15 +78,13 @@ export const CanvasAndReplies = () => {
             setPendingCanvasState(
                 new CanvasDB({
                     publicKey: peer.identity.publicKey,
-                    parent: new CanvasValueReference({
-                        canvas: lastCanvas,
-                    }),
+                    parent: new CanvasValueReference({ canvas: lastCanvas }), // simplified reference
                 })
             );
     }, [lastCanvas?.idString, peer?.identity.publicKey.hashcode()]);
 
     const pendingCanvas = useProgram(pendingCanvasState, {
-        id: pendingCanvasState?.idString, // we do set the id here so the useProgram hooke will change on pendingCavnasState changes
+        id: pendingCanvasState?.idString,
         keepOpenOnUnmount: true,
         existing: "reuse",
     });
@@ -108,19 +93,14 @@ export const CanvasAndReplies = () => {
         setPendingCanvasState((prev) => {
             // add "comment"
             lastCanvas.replies.put(prev);
-
             // and initialize a new canvas for the next comment
-
             return new CanvasDB({
                 publicKey: peer.identity.publicKey,
-                parent: new CanvasValueReference({
-                    canvas: lastCanvas,
-                }),
+                parent: new CanvasValueReference({ canvas: lastCanvas }), // simplified reference
             });
         });
     };
 
-    // When there is not a currently selected canvas, ensure the container fills the screen
     if (canvases.length === 0) {
         return (
             <div className="h-full flex flex-col justify-center">
@@ -146,21 +126,16 @@ export const CanvasAndReplies = () => {
             <div className="flex-grow">
                 <CanvasWithReplies key={0} canvas={lastCanvas} />
             </div>
-            {/* spacer div */}
-
-            <CanvasWrapper canvas={pendingCanvas.program} draft={true}>
+            <CanvasWrapper
+                canvas={pendingCanvas.program}
+                draft={true}
+                multiCanvas
+            >
                 <div className="mt-4 flex flex-col sticky bottom-0 w-full left-0">
                     <Canvas appearance="chat-view-images">
-                        <label className="btn-elevated btn-icon btn-icon-md btn-toggle w-20 h-20 flex items-center justify-center bg-white">
-                            <input
-                                type="file"
-                                accept="image/*"
-                                multiple
-                                style={{ display: "none" }}
-                                id="image-upload"
-                            />
+                        <ImageUploadTrigger className="btn-elevated btn-icon btn-icon-md btn-toggle w-20 h-20 flex items-center justify-center bg-white">
                             <FaPlus />
-                        </label>
+                        </ImageUploadTrigger>
                     </Canvas>
                     <div className="flex bg-neutral-50 dark:bg-neutral-950 p-4">
                         <div className="max-w-[600px]">
@@ -175,7 +150,6 @@ export const CanvasAndReplies = () => {
                     </div>
                 </div>
             </CanvasWrapper>
-            {/* This filler pushes the content to fill the screen if there is whitespace */}
         </div>
     );
 };

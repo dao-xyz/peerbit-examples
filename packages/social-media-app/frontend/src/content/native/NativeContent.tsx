@@ -4,7 +4,7 @@ import {
     StaticImage,
 } from "@dao-xyz/social";
 import { MarkdownContent } from "./Markdown";
-import { ImageContent } from "./Image";
+import { ImageContent } from "./image/Image";
 
 export type EditableStaticContentProps = {
     staticContent: StaticContent["content"];

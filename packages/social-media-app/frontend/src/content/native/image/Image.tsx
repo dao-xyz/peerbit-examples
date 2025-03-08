@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { StaticImage } from "@dao-xyz/social";
+import { readFileAsImage } from "./utils";
 
 export type ImageContentProps = {
     content: StaticImage;
@@ -47,28 +48,7 @@ export const ImageContent = ({
     }, [onResize, threshold]);
 
     // Common file handling logic.
-    const handleFile = useCallback(
-        (file: File) => {
-            if (!file || !onChange) return;
-            const reader = new FileReader();
-            reader.onload = () => {
-                const result = reader.result;
-                if (typeof result === "string") {
-                    onChange(
-                        new StaticImage({
-                            base64: result.split(",")[1],
-                            mimeType: file.type,
-                            alt: file.name,
-                            width: 300, // adjust as needed
-                            height: 200,
-                        })
-                    );
-                }
-            };
-            reader.readAsDataURL(file);
-        },
-        [onChange]
-    );
+    const handleFile = useCallback(readFileAsImage(onChange), [onChange]);
 
     const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files && e.target.files[0];

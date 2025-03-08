@@ -21,6 +21,7 @@ import {
     StringMatchMethod,
 } from "@peerbit/document";
 import { Constructor } from "@dao-xyz/borsh";
+import { ImageUploadTrigger } from "./native/image/ImageUploadToCanvas";
 
 interface IApps {
     apps: SimpleWebManifest[];
@@ -60,12 +61,18 @@ interface CuratedNativeApp {
     type: "native";
     match: string | string[];
     title: string;
+    trigger?: React.ComponentType<{
+        className?: string;
+        children?: React.ReactNode;
+    }>;
     default: () => AbstractStaticContent;
     manifest: SimpleWebManifest;
 }
 
 type CuratedApp = CuratedNativeApp | CuratedWebApp;
 
+export const NATIVE_TEXT_APP_URL = "native:text";
+export const NATIVE_IMAGE_APP_URL = "native:image";
 const nativeApps: CuratedNativeApp[] = [
     {
         type: "native",
@@ -73,7 +80,7 @@ const nativeApps: CuratedNativeApp[] = [
         title: "Text",
         default: () => new StaticMarkdownText({ text: "" }),
         manifest: new SimpleWebManifest({
-            url: "native:text",
+            url: NATIVE_TEXT_APP_URL,
             title: "Text",
             metaDescription: "Text",
             icon: "/apps/text.svg",
@@ -83,9 +90,10 @@ const nativeApps: CuratedNativeApp[] = [
         type: "native",
         match: "Image",
         title: "Image",
+        trigger: ImageUploadTrigger,
         default: () => new StaticImage({} as any), // TODO type safe
         manifest: new SimpleWebManifest({
-            url: "native:image",
+            url: NATIVE_IMAGE_APP_URL,
             title: "Image",
             metaDescription: "Image",
             icon: "/apps/image.svg",

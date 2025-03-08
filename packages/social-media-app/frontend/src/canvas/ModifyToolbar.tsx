@@ -7,6 +7,7 @@ import { FaPhotoVideo } from "react-icons/fa";
 import { AppSelect } from "./AppSelect";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { useCanvas } from "./CanvasWrapper";
+import { ImageUploadTrigger } from "../content/native/image/ImageUploadToCanvas";
 
 export const CanvasModifyToolbar = (properties: {
     canvas?: boolean;
@@ -78,7 +79,7 @@ export const CanvasModifyToolbar = (properties: {
                 <MdAdd />
             </button> */}
             <div className="btn-elevated btn-icon btn-icon-md btn-toggle ">
-                <FaCameraRetro />
+                <ImageUploadTrigger />
             </div>
             <label className="btn-elevated btn-icon btn-icon-md btn-toggle">
                 <input
@@ -88,7 +89,7 @@ export const CanvasModifyToolbar = (properties: {
                     style={{ display: "none" }}
                     id="image-upload"
                 />
-                <FaPhotoVideo />
+                <ImageUploadTrigger />
             </label>
             <div className="w-[40px] h-[40px]">
                 <AppSelect onSelected={(app) => onNew(app)} />

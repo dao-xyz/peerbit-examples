@@ -1,9 +1,5 @@
-/**
- * Canvas context and wrapper component for managing canvas state and operations
- */
-
-import { useState, useEffect, useRef, useReducer } from "react";
-import { inIframe, useLocal, usePeer, useProgram } from "@peerbit/react";
+import { useState, useEffect, useRef, useContext, createContext } from "react";
+import { usePeer, useProgram, useLocal } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Element,
@@ -13,40 +9,36 @@ import {
     StaticContent,
     StaticMarkdownText,
     AbstractStaticContent,
+    StaticImage,
 } from "@dao-xyz/social";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
-import { createContext, useContext } from "react";
 import { useApps } from "../content/useApps.js";
+import { readFileAsImage } from "../content/native/image/utils.js";
 
-/**
- * Type definition for canvas context values and methods
- */
 interface CanvasContextType {
-    editMode: boolean; // Whether canvas is in edit mode
+    editMode: boolean;
     setEditMode: (value: boolean) => void;
-    active: Set<Uint8Array>; // Set of active element indices
+    active: Set<Uint8Array>;
     setActive: (value: Set<Uint8Array>) => void;
-    pendingRects: Element[]; // Elements pending save
-    rects: Element[]; // Saved elements
+    pendingRects: Element[];
+    rects: Element[];
     insertDefault: (options?: {
         app?: SimpleWebManifest;
         increment?: boolean;
-    }) => void; // Insert default element
-    removePending: (id: Uint8Array) => void; // Remove pending element
-    savePending: () => Promise<Element[] | undefined>; // Save pending elements
-    canvas: CanvasDB; // Canvas database instance
+    }) => void;
+    removePending: (id: Uint8Array) => void;
+    savePending: () => Promise<Element[] | undefined>;
+    canvas: CanvasDB;
+    // New: Function to insert an image into the canvas
+    insertImage: (file: File, options?: { pending?: boolean }) => Promise<void>;
 }
 
-// Create context for canvas state
 export const CanvasContext = createContext<CanvasContextType | undefined>(
     undefined
 );
 
-/**
- * Hook to access canvas context
- */
 export const useCanvas = () => {
     const context = useContext(CanvasContext);
     if (!context) {
@@ -60,16 +52,15 @@ interface CanvasWrapperProps {
     canvas: CanvasDB;
     draft?: boolean;
     onSave?: () => void;
+    multiCanvas?: boolean;
 }
 
-/**
- * Wrapper component that provides canvas context and state management
- */
 export const CanvasWrapper = ({
     children,
     canvas: canvasDB,
     draft,
     onSave,
+    multiCanvas,
 }: CanvasWrapperProps) => {
     const { peer } = usePeer();
     const { program: canvas } = useProgram(canvasDB, {
@@ -79,10 +70,9 @@ export const CanvasWrapper = ({
     });
     const { getNativeApp } = useApps();
 
-    // State management
-    const [editMode, setEditMode] = useState(draft);
-    const resizeSizes = useRef<Map<number, { width: number; height: number }>>(
-        new Map()
+    const [editMode, setEditMode] = useState(!!draft);
+    const resizeSizes = useRef(
+        new Map<number, { width: number; height: number }>()
     );
     const rects = useLocal(canvas?.elements);
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
@@ -90,12 +80,9 @@ export const CanvasWrapper = ({
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
     const latestBreakpoint = useRef<"xxs" | "md">("md");
 
-    /**
-     * Adds a new rectangle element to the canvas
-     */
     const addRect = async (
         content: ElementContent,
-        options: { id?: Uint8Array; pending: boolean } = { pending: false }
+        options: { id?: Uint8Array; pending?: boolean } = { pending: false }
     ) => {
         const allCurrentRects = await canvas.elements.index.search({});
         const allPending = pendingRects;
@@ -144,37 +131,18 @@ export const CanvasWrapper = ({
         }
     };
 
-    /**
-     * Saves pending elements to the canvas
-     */
-    const savePending = async () => {
-        if (!pendingRects) return;
-        const pendingToSave = pendingRects.filter(
-            (x) =>
-                x.content instanceof StaticContent === false ||
-                x.content.content.isEmpty === false
-        );
-        if (pendingToSave.length === 0) return;
-        setPendingRects([]);
-        pendingCounter.current += pendingToSave.length;
-        await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
-        if (draft) {
-            onSave();
-        }
-        return pendingToSave;
+    // New function: Inserts an image element into the canvas
+    const insertImage = async (file: File, options?: { pending?: boolean }) => {
+        // Create an object URL for immediate preview.
+        const onChange = (staticImage: StaticImage) => {
+            return addRect(
+                new StaticContent({ content: staticImage }),
+                options
+            );
+        };
+        readFileAsImage(onChange)(file);
     };
 
-    /**
-     * Resets canvas state
-     */
-    const reset = () => {
-        setPendingRects([]);
-        resizeSizes.current = new Map();
-    };
-
-    /**
-     * Inserts a default element into the canvas, that is a StaticContent (text) element
-     */
     const insertDefault = (options?: {
         app?: SimpleWebManifest;
         increment?: boolean;
@@ -182,11 +150,15 @@ export const CanvasWrapper = ({
         if (options?.increment) {
             const last = pendingRects[pendingRects.length - 1];
             if (
+                // if we are describing multiple canvases, dont try to replace some empty content
+                // because one element might dissapear from one Canvas and appear in another
+                !multiCanvas &&
+                // check if the "last" element is empty
                 last &&
                 last.content instanceof StaticContent &&
                 last.content.content.isEmpty
             ) {
-                // Do not increment
+                // Do not increment, instead replace it
             } else {
                 pendingCounter.current++;
             }
@@ -217,14 +189,32 @@ export const CanvasWrapper = ({
         );
     };
 
-    /**
-     * Removes a pending element
-     */
     const removePending = (id: Uint8Array) => {
         setPendingRects((prev) => prev.filter((el) => !equals(id, el.id)));
     };
 
-    // Clear active elements when clicking outside
+    const savePending = async () => {
+        if (!pendingRects) return;
+        const pendingToSave = pendingRects.filter(
+            (x) =>
+                x.content instanceof StaticContent === false ||
+                x.content.content.isEmpty === false
+        );
+        if (pendingToSave.length === 0) return;
+        setPendingRects([]);
+        pendingCounter.current += pendingToSave.length;
+        await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
+        if (draft && onSave) {
+            onSave();
+        }
+        return pendingToSave;
+    };
+
+    const reset = () => {
+        setPendingRects([]);
+        resizeSizes.current = new Map();
+    };
+
     useEffect(() => {
         const handleClickOutside = (event: MouseEvent) => {
             setActive(new Set());
@@ -235,7 +225,6 @@ export const CanvasWrapper = ({
         };
     }, []);
 
-    // Initialize canvas state
     useEffect(() => {
         if (!peer || !canvas) return;
         reset();
@@ -261,6 +250,7 @@ export const CanvasWrapper = ({
         removePending,
         savePending,
         canvas,
+        insertImage, // <--- expose the new function
     };
 
     return (

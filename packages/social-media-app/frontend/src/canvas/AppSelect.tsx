@@ -12,6 +12,7 @@ import { FaPlus } from "react-icons/fa6";
 import { AiOutlineQuestionCircle } from "react-icons/ai";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { InvalidAppError } from "@dao-xyz/social";
+import { FaCamera, FaImage } from "react-icons/fa";
 
 const unknownApp = (url: string) => new SimpleWebManifest({ url });
 const isNative = (app: SimpleWebManifest) => app.url.startsWith("native:");
@@ -19,9 +20,15 @@ const isNative = (app: SimpleWebManifest) => app.url.startsWith("native:");
 export const AppSelect = (properties: {
     onSelected: (app: SimpleWebManifest) => any;
 }) => {
-    const { apps, search: appSearch, history: appHistory } = useApps();
-    const nativeApps = apps.filter((x) => x.isNative);
-    const nonNativeApps = apps.filter((x) => !x.isNative);
+    const {
+        apps,
+        search: appSearch,
+        history: appHistory,
+        getNativeApp,
+    } = useApps();
+    const nativeApps = apps
+        .filter((x) => x.isNative)
+        .map((x) => getNativeApp(x.url));
 
     const [selected, setSelected] = useState<SimpleWebManifest>(
         apps[0] || unknownApp("")
@@ -144,36 +151,56 @@ export const AppSelect = (properties: {
                                 )}
                                 {nativeApps.length > 0 && (
                                     <div className="m-1 flex gap-2 pt-1">
-                                        {nativeApps.map((app) => (
-                                            <button
-                                                key={app.url}
-                                                type="button"
-                                                onClick={() => {
-                                                    setSelected(app);
-                                                    properties.onSelected(app);
-                                                    appHistory
-                                                        .insert(app)
-                                                        .catch((e) => {
-                                                            if (
-                                                                !(
-                                                                    e instanceof
-                                                                    InvalidAppError
+                                        {nativeApps.map((curatedApp) => {
+                                            const app = curatedApp.manifest;
+
+                                            if (curatedApp.trigger) {
+                                                return (
+                                                    <curatedApp.trigger
+                                                        key={app.url}
+                                                        className="btn p-2 bg-white rounded hover:bg-primary-200"
+                                                    >
+                                                        <FaCamera
+                                                            className="invert"
+                                                            size={20}
+                                                        />
+                                                    </curatedApp.trigger>
+                                                );
+                                            }
+
+                                            return (
+                                                <button
+                                                    key={app.url}
+                                                    type="button"
+                                                    onClick={() => {
+                                                        setSelected(app);
+                                                        properties.onSelected(
+                                                            app
+                                                        );
+                                                        appHistory
+                                                            .insert(app)
+                                                            .catch((e) => {
+                                                                if (
+                                                                    !(
+                                                                        e instanceof
+                                                                        InvalidAppError
+                                                                    )
                                                                 )
-                                                            )
-                                                                throw e;
-                                                        });
-                                                }}
-                                                className="p-2 bg-white rounded hover:bg-primary-200"
-                                            >
-                                                <div className="flex flex-row items-center gap-1">
-                                                    <img
-                                                        className="w-5 h-5"
-                                                        src={app.icon}
-                                                        alt="Native App Icon"
-                                                    />
-                                                </div>
-                                            </button>
-                                        ))}
+                                                                    throw e;
+                                                            });
+                                                    }}
+                                                    className="p-2 bg-white rounded hover:bg-primary-200"
+                                                >
+                                                    <div className="flex flex-row items-center gap-1">
+                                                        <img
+                                                            className="w-5 h-5"
+                                                            src={app.icon}
+                                                            alt="Native App Icon"
+                                                        />
+                                                    </div>
+                                                </button>
+                                            );
+                                        })}
                                     </div>
                                 )}
                             </ComboboxOptions>
