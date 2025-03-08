@@ -36,16 +36,6 @@ export const Canvas = (
         canvas,
     } = useCanvas();
 
-    // Inside your Canvas component:
-    const filteredTextRectsCount = useMemo(() => {
-        const filtered = [...rects, ...pendingRects].filter(
-            (rect, i) =>
-                rect.content instanceof StaticContent &&
-                rect.content.content instanceof StaticMarkdownText
-        );
-        return filtered.length;
-    }, [rects, pendingRects]);
-
     // rects and pendingRects purpose filtered for properties.appearance
     const filteredRects = useMemo(() => {
         return [...rects, ...pendingRects].filter((rect, i) =>
@@ -145,6 +135,11 @@ export const Canvas = (
                         coverParent={
                             properties.appearance === "chat-view-images"
                         }
+                        fit={
+                            properties.appearance === "chat-view-images"
+                                ? "cover"
+                                : undefined
+                        }
                     />
                 </div>
             );
@@ -160,7 +155,7 @@ export const Canvas = (
                     ? "flex gap-4 p-4"
                     : ""
             } ${properties.fitHeight ? "h-full" : ""} ${
-                properties.fitWidth ? "w-full" : "min-w-fit"
+                properties.fitWidth ? "w-full" : ""
             }`}
         >
             {renderRects(filteredRects)}
