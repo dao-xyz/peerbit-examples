@@ -142,6 +142,7 @@ export const CanvasAndReplies = () => {
                             <CanvasModifyToolbar direction="row" />
                         </div>
                         <Canvas
+                            fitWidth
                             draft={true}
                             onSave={onSavePending}
                             appearance="chat-view-text"

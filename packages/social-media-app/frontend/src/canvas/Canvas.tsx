@@ -15,6 +15,8 @@ type SizeProps = {
     width?: number;
     height?: number;
     scaled?: boolean; // when true, use CSS transform scaling to fit without overflow
+    fitHeight?: boolean;
+    fitWidth?: boolean;
 };
 
 export const Canvas = (
@@ -65,11 +67,13 @@ export const Canvas = (
             return (
                 <div
                     key={key}
-                    className={
+                    className={`${
                         properties.appearance === "chat-view-images"
                             ? "bg-white rounded-md w-20 h-20 max-w-20 max-h-20 border-[1px] border-neutral-800 overflow-hidden"
                             : ""
-                    }
+                    } ${properties.fitHeight ? "h-full" : ""} ${
+                        properties.fitWidth ? "w-full" : ""
+                    }`}
                 >
                     <Frame
                         thumbnail={asThumbnail}
@@ -151,15 +155,13 @@ export const Canvas = (
 
     return (
         <div
-            className={
+            className={`${
                 properties.appearance === "chat-view-images"
                     ? "flex gap-4 p-4"
-                    : `flex-grow w-full ${
-                          properties.scaled
-                              ? "overflow-hidden"
-                              : "overflow-auto"
-                      }`
-            }
+                    : ""
+            } ${properties.fitHeight ? "h-full" : ""} ${
+                properties.fitWidth ? "w-full" : "min-w-fit"
+            }`}
         >
             {renderRects(filteredRects)}
             {filteredRects.length > 0 ? properties.children : null}

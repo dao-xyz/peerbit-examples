@@ -79,7 +79,7 @@ export const ImageContent = ({
             onDragOver={editable ? handleDragOver : undefined}
             onDragLeave={editable ? handleDragLeave : undefined}
             onDrop={editable ? handleDrop : undefined}
-            className={`relative min-h-[100px] w-full h-full ${
+            className={`relative w-full h-full ${
                 coverParent ? "object-cover" : "min-w-max"
             } ${
                 editable
@@ -94,7 +94,7 @@ export const ImageContent = ({
             <img
                 src={`data:${content.mimeType};base64,${content.base64}`}
                 alt={content.alt}
-                className="object-contain w-full "
+                className="object-contain w-full h-full"
                 style={{ maxHeight: "400px" }}
             />
             {editable && (

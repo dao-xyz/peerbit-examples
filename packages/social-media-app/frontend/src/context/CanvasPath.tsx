@@ -50,15 +50,15 @@ export const CanvasPath = () => {
 
     const renderCanvas = (canvas: CanvasDB, ix) => (
         <CanvasWrapper canvas={canvas}>
-            <Canvas key={ix} scaled width={60} height={35} />
+            <Canvas fitHeight key={ix} scaled width={60} height={35} />
         </CanvasWrapper>
     );
 
     return (
-        <div className="flex flex-row gap-2">
+        <div className="flex flex-row gap-2 h-full overflow-hidden">
             {path.length > 1 && (
                 <button
-                    className="mr-auto btn btn-icon flex flex-row items-center gap-1"
+                    className="mr-auto btn btn-icon flex flex-row items-center gap-1 h-full"
                     onClick={() => {
                         navigate(getCanvasPath(path[path.length - 2]), {});
                     }}
@@ -67,7 +67,7 @@ export const CanvasPath = () => {
                 </button>
             )}
             {focus ? (
-                <div className="w-full">
+                <div className="w-full h-full">
                     <TagInput
                         tags={tags}
                         onTagsChange={handleTagsChange}
@@ -76,7 +76,7 @@ export const CanvasPath = () => {
                 </div>
             ) : (
                 <button
-                    className="btn w-full leading-normal px-2 flex flex-row cursor-pointer"
+                    className="btn w-full leading-normal px-2 flex flex-row cursor-pointer overflow-hidden h-full"
                     onClick={() => setFocus(true)}
                 >
                     {path.length > 1 ? (
