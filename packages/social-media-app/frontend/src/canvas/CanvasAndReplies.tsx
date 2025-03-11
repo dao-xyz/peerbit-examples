@@ -12,24 +12,7 @@ import { BsSend } from "react-icons/bs";
 import { CanvasModifyToolbar } from "./ModifyToolbar.js";
 import { ImageUploadTrigger } from "../content/native/image/ImageUploadToCanvas.js";
 import { FaPlus } from "react-icons/fa";
-
-const SaveButton = ({ onSavePending }: { onSavePending: () => void }) => {
-    const { savePending } = useCanvas();
-    return (
-        <div className="flex-shrink-0">
-            <button
-                onClick={() => {
-                    savePending();
-                    onSavePending();
-                }}
-                className="btn-elevated btn-icon btn-icon-md btn-toggle"
-                aria-label="Send"
-            >
-                <BsSend size={24} />
-            </button>
-        </div>
-    );
-};
+import { SaveButton } from "./SaveCanvasButton.js";
 
 const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
     const isRoot = props.canvas?.parent == null;
@@ -60,7 +43,7 @@ export const CanvasAndReplies = () => {
 
     useEffect(() => {
         setLastCanvas(canvases[canvases.length - 1]);
-    }, [canvases]);
+    }, [root?.closed || !root ? undefined : root.address, canvases]);
 
     useEffect(() => {
         if (!peer || !root) {

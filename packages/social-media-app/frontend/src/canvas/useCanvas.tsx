@@ -26,29 +26,15 @@ interface ICanvasContext {
     loading: boolean;
 
     // create all canvases required for current path
-    create: () => Promise<Canvas[]>;
+    createCanvasAtPath: () => Promise<Canvas[]>;
+    setRoot: (root: Canvas) => void;
 }
 
-/* export const getCanvasPathFromURL = (): string[] => {
-    if (!window.location.hash) {
-        return [];
-    }
-    const pathname = window.location.hash.split("#")[1];
-    console.log("PATHNAME", pathname);
-    const path = pathname.split("/").map((x) => decodeURIComponent(x));
-    path.splice(0, 2); // remove '' and 'root path'
-    if (path[0] === "") {
-        path.splice(0, 1);
-    }
-    return path;
-};
- */
 export const getCanvasAdressFromUrl = (): string | undefined => {
     if (!window.location.hash) {
         return undefined;
     }
     const pathname = window.location.hash.split("#")[1];
-    console.log("PATHNAME", pathname);
     const path = pathname.split("/").map((x) => decodeURIComponent(x));
     path.splice(0, 2); // remove '' and 'root path'
     if (path[0] === "") {
@@ -105,19 +91,25 @@ Join us and be a part of the future. Your social experience is about to changeâ€
 
 export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const { peer, loading: loadingPeer } = usePeer();
-    const [root, setRoot] = useState<Canvas>(undefined);
+    const [root, _setRoot] = useState<Canvas>(undefined);
     const [canvases, setCanvases] = useState<Canvas[]>([]);
     const loading = useRef<Promise<void>>();
     const [isLoading, setIsLoading] = useState(false);
     const [update, forceUpdate] = useReducer((x) => x + 1, 0);
     const rlocation = useLocation();
 
+    const setRoot = (canvas: Canvas) => {
+        setCanvases([]);
+        _setRoot(canvas);
+    };
+
     const memo = React.useMemo<ICanvasContext>(
         () => ({
             root,
+            setRoot,
             path: canvases,
             loading: isLoading || loadingPeer,
-            create: async () => {
+            createCanvasAtPath: async () => {
                 setIsLoading(true);
                 if (!root) {
                     throw new Error("Root not found");
@@ -171,19 +163,6 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         }
         getCanvasesPathFromURL(peer, root)
             .then((result) => {
-                console.log("RESULT", result);
-                /* if (result.path.length === newRoomPath.length) {
-                    return Promise.all(
-                        result.canvases.map((room) =>
-                            peer.open(room, { existing: "reuse" })
-                        )
-                    ).then((openRooms) => {
-                        maybeSetRooms(openRooms);
-                        return openRooms;
-                    });
-                } else {
-                    maybeSetRooms([]);
-                } */
                 maybeSetCanvases(result);
             })
             .catch((e) => {

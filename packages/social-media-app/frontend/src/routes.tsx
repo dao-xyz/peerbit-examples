@@ -4,6 +4,7 @@ import { PublicSignKey } from "@peerbit/crypto";
 import { base64url } from "multiformats/bases/base64";
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { CreateRoot } from "./canvas/CreateRoot";
 
 const textDecoder = new TextDecoder();
 export const getStreamPath = (node: PublicSignKey) =>
@@ -27,6 +28,7 @@ export function BaseRoutes() {
     return (
         <Routes>
             {/* <Route path={USER_BY_KEY_NAME} element={<Canvas />} /> */}
+            <Route path="/new-root" element={<CreateRoot />} />
             <Route path="/path/*" element={<Home />} />
             <Route path="/*" element={<Home />} />
         </Routes>

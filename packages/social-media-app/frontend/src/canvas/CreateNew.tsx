@@ -2,7 +2,7 @@ import { useState } from "react";
 import { useCanvases } from "./useCanvas";
 import { Spinner } from "../utils/Spinner";
 export const CreateNew = () => {
-    const { create } = useCanvases();
+    const { createCanvasAtPath: create } = useCanvases();
     const [isLoading, setIsLoading] = useState(false);
     return (
         <>
