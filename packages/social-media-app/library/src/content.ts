@@ -4,6 +4,7 @@ import {
     SearchRequest,
     StringMatch,
     StringMatchMethod,
+    toId,
 } from "@peerbit/document";
 import {
     PublicSignKey,
@@ -205,6 +206,7 @@ export class Canvas extends Program {
     }
 
     private _idString: string;
+    private _repliesChangeListener: () => void;
 
     get idString() {
         return this._idString || (this._idString = sha256Base64Sync(this.id));
@@ -225,7 +227,7 @@ export class Canvas extends Program {
      */
         await this.elements.open({
             type: Element,
-            replicate: { factor: 1 },
+            replicate: { factor: 1 }, // TODO choose better
             canPerform: async (operation) => {
                 /**
                  * Only allow updates if we created it
@@ -256,7 +258,7 @@ export class Canvas extends Program {
 
         await this.replies.open({
             type: Canvas,
-            replicate: { factor: 1 },
+            replicate: { factor: 1 }, // TODO choose better
             canOpen: () => false,
             canPerform: async (operation) => {
                 /**
@@ -276,19 +278,66 @@ export class Canvas extends Program {
                 type: IndexableCanvas,
                 transform: async (arg, _context) => {
                     const indexable = await arg.createTitle();
+                    if (arg.closed) {
+                        await this.node.open(arg, { existing: "reuse" });
+                    }
+                    const replies = await arg.countReplies();
                     return new IndexableCanvas({
                         id: arg.id,
                         publicKey: arg.publicKey,
                         content: indexable,
-                        replies: arg.replies.index.closed
-                            ? 0n
-                            : BigInt(await arg.replies.index.getSize()),
+                        replies,
                     });
                 },
             },
         });
+        this._repliesChangeListener = async () => {
+            // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
+
+            const parent = await this.parent?.load(this.node);
+            if (parent) {
+                let indexedParent = await parent.replies.index.get(this.id, {
+                    resolve: false,
+                });
+                await parent.replies.index.putWithContext(
+                    this,
+                    toId(this.id),
+                    indexedParent.__context
+                );
+            }
+        };
+        this.replies.events.addEventListener(
+            "change",
+            this._repliesChangeListener
+        );
+        await this.countReplies();
     }
 
+    close(from?: Program): Promise<boolean> {
+        this._repliesChangeListener &&
+            this.replies.events.removeEventListener(
+                "change",
+                this._repliesChangeListener
+            );
+
+        return super.close(from);
+    }
+    private _repliesCount: bigint | null = null;
+    get repliesCount(): bigint {
+        return this._repliesCount || 0n;
+    }
+
+    async countReplies() {
+        try {
+            const replies = this.replies.index.closed
+                ? 0n
+                : BigInt(await this.replies.count({ approximate: true }));
+            return (this._repliesCount = replies);
+        } catch (error) {
+            // TODO handle errors that arrise from the database being closed
+            return 0n;
+        }
+    }
     async getCanvasPath() {
         const path: Canvas[] = [this];
         let currentParent = path[path.length - 1].parent;
@@ -355,7 +404,6 @@ export class Canvas extends Program {
             const newRooms: Canvas[] = [];
             for (let parent of canvases) {
                 if (parent.closed) {
-                    console.log("OPEN PARENT", parent);
                     parent = await this.node.open(parent, {
                         existing: "reuse",
                     });

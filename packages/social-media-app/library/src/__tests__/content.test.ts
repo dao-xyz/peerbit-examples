@@ -1,6 +1,6 @@
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas } from "../content.js";
-import { SearchRequest } from "@peerbit/document";
+import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
 
 describe("content", () => {
@@ -51,6 +51,30 @@ describe("content", () => {
                 elementsInB.map((x) => x.createTitle())
             );
             expect(titlesFromB.sort()).to.deep.eq(["c", "d"]);
+        });
+
+        it("can sort by replies", async () => {
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: session.peers[0].identity.publicKey,
+                    seed: new Uint8Array(),
+                })
+            );
+            await root.getCreateRoomByPath(["b", "b"]);
+            await root.getCreateRoomByPath(["a", "b"]);
+            await root.getCreateRoomByPath(["c"]);
+            await root.getCreateRoomByPath(["a", "c"]);
+
+            const sortedByReplies = await root.replies.index.search({
+                sort: new Sort({
+                    key: "replies",
+                    direction: SortDirection.DESC,
+                }),
+            });
+
+            expect(
+                await Promise.all(sortedByReplies.map((x) => x.createTitle()))
+            ).to.deep.eq(["a", "b", "c"]);
         });
 
         /*  it("determinstic with seed", async () => {
