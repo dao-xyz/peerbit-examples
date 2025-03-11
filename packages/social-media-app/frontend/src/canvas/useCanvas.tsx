@@ -21,6 +21,9 @@ interface ICanvasContext {
     // root canvas
     root?: Canvas;
 
+    // leaf canvas
+    leaf?: Canvas;
+
     // the current path
     path: Canvas[];
     loading: boolean;
@@ -92,6 +95,8 @@ Join us and be a part of the future. Your social experience is about to changeâ€
 export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const { peer, loading: loadingPeer } = usePeer();
     const [root, _setRoot] = useState<Canvas>(undefined);
+    const [leaf, setLeaf] = useState<Canvas>(undefined);
+
     const [canvases, setCanvases] = useState<Canvas[]>([]);
     const loading = useRef<Promise<void>>();
     const [isLoading, setIsLoading] = useState(false);
@@ -103,9 +108,14 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         _setRoot(canvas);
     };
 
+    useEffect(() => {
+        setLeaf(canvases[canvases.length - 1]);
+    }, [root?.closed || !root ? undefined : root.address, canvases]);
+
     const memo = React.useMemo<ICanvasContext>(
         () => ({
             root,
+            leaf,
             setRoot,
             path: canvases,
             loading: isLoading || loadingPeer,
@@ -138,6 +148,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             update,
             rlocation,
             isLoading,
+            leaf,
             loadingPeer,
         ]
     );

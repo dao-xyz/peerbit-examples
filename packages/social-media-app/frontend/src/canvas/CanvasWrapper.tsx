@@ -134,13 +134,9 @@ export const CanvasWrapper = ({
     // New function: Inserts an image element into the canvas
     const insertImage = async (file: File, options?: { pending?: boolean }) => {
         // Create an object URL for immediate preview.
-        const onChange = (staticImage: StaticImage) => {
-            return addRect(
-                new StaticContent({ content: staticImage }),
-                options
-            );
-        };
-        readFileAsImage(onChange)(file);
+
+        const image = await readFileAsImage(file);
+        addRect(new StaticContent({ content: image }), options);
     };
 
     const insertDefault = (options?: {

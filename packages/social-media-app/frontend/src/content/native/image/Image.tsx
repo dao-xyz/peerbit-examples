@@ -73,16 +73,12 @@ export const ImageContent = ({
     }, [onResize, threshold]);
 
     /**
-     * Handles processing of uploaded image files
-     */
-    const handleFile = useCallback(readFileAsImage(onChange), [onChange]);
-
-    /**
      * Handles file input change events
      */
-    const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files && e.target.files[0];
-        handleFile(file);
+        const image = await readFileAsImage(file);
+        onChange && onChange(image);
     };
 
     /**
@@ -98,11 +94,12 @@ export const ImageContent = ({
         setIsDragOver(false);
     };
 
-    const handleDrop = (e: React.DragEvent<HTMLDivElement>) => {
+    const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
         setIsDragOver(false);
         const file = e.dataTransfer.files && e.dataTransfer.files[0];
-        handleFile(file);
+        const image = await readFileAsImage(file);
+        onChange && onChange(image);
     };
 
     return (
