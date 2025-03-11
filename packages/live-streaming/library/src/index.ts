@@ -60,6 +60,7 @@ import {
     DocumentsChange,
     CustomDocumentDomain,
     createDocumentDomain,
+    WithContext,
 } from "@peerbit/document";
 import {
     id,
@@ -1021,7 +1022,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
             any,
             any
         >
-    ): Promise<Track<AudioStreamDB | WebcodecsStreamDB>[]> {
+    ): Promise<WithContext<Track<AudioStreamDB | WebcodecsStreamDB>>[]> {
         const tracks = await this.tracks.index.search(
             new SearchRequest({
                 query: [
