@@ -112,7 +112,7 @@ export class IndexableElement {
     }
 }
 
-class IndexableCanvas {
+export class IndexableCanvas {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
@@ -135,6 +135,20 @@ class IndexableCanvas {
         this.publicKey = properties.publicKey.bytes;
         this.content = properties.content;
         this.replies = properties.replies;
+    }
+
+    static async from(canvas: Canvas, node: ProgramClient) {
+        const indexable = await canvas.createTitle();
+        if (canvas.closed) {
+            await node.open(canvas, { existing: "reuse" });
+        }
+        const replies = await canvas.countReplies();
+        return new IndexableCanvas({
+            id: canvas.id,
+            publicKey: canvas.publicKey,
+            content: indexable,
+            replies,
+        });
     }
 }
 
@@ -277,17 +291,7 @@ export class Canvas extends Program {
             index: {
                 type: IndexableCanvas,
                 transform: async (arg, _context) => {
-                    const indexable = await arg.createTitle();
-                    if (arg.closed) {
-                        await this.node.open(arg, { existing: "reuse" });
-                    }
-                    const replies = await arg.countReplies();
-                    return new IndexableCanvas({
-                        id: arg.id,
-                        publicKey: arg.publicKey,
-                        content: indexable,
-                        replies,
-                    });
+                    return IndexableCanvas.from(arg, this.node);
                 },
             },
         });
