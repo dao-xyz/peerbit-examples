@@ -7,7 +7,7 @@ import { Documents } from "@peerbit/document";
 import { ByteMatchQuery } from "@peerbit/indexer-interface";
 
 @variant(0)
-class Profile {
+export class Profile {
     @field({ type: Uint8Array })
     id: Uint8Array;
 
@@ -33,7 +33,7 @@ class Profile {
     }
 }
 @variant(0)
-class ProfileIndexed {
+export class ProfileIndexed {
     @field({ type: Uint8Array })
     id: Uint8Array;
 

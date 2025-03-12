@@ -59,19 +59,17 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
 
     return (
         <div>
-            <button
-                className="btn w-full flex flex-row p-0 border  border-solid max-h-[40vh] overflow-hidden"
-                onClick={async () => {
-                    navigate(getCanvasPath(properties.canvas), {});
-                }}
-            >
-                <Header
-                    publicKey={properties.canvas.publicKey}
-                    direction="col"
-                />
-
-                <CanvasPreview canvas={properties.canvas} />
-            </button>
+            <div className=" w-full flex flex-row p-0 border  border-solid max-h-[40vh] overflow-hidden">
+                <Header canvas={properties.canvas} direction="col" />
+                <button
+                    className="btn  w-full flex flex-row"
+                    onClick={async () => {
+                        navigate(getCanvasPath(properties.canvas), {});
+                    }}
+                >
+                    <CanvasPreview canvas={properties.canvas} />
+                </button>
+            </div>
 
             <div className="flex w-full mt-1">
                 <span className="mr-auto text-sm underline">

@@ -48,14 +48,18 @@ code {
 }*/
 
 @layer utilities {
+
     /* Hide scrollbar for Chrome, Safari and Opera */
     .no-scrollbar::-webkit-scrollbar {
         display: none;
     }
+
     /* Hide scrollbar for IE, Edge and Firefox */
     .no-scrollbar {
-        -ms-overflow-style: none; /* IE and Edge */
-        scrollbar-width: none; /* Firefox */
+        -ms-overflow-style: none;
+        /* IE and Edge */
+        scrollbar-width: none;
+        /* Firefox */
     }
 }
 
@@ -137,12 +141,10 @@ code {
     hr.faded {
         border: 0;
         height: 1px;
-        background-image: linear-gradient(
-            to right,
-            rgba(0, 0, 0, 0),
-            rgba(0, 0, 0, 0.75),
-            rgba(0, 0, 0, 0)
-        );
+        background-image: linear-gradient(to right,
+                rgba(0, 0, 0, 0),
+                rgba(0, 0, 0, 0.75),
+                rgba(0, 0, 0, 0));
     }
 
     /* scrollbar color */
@@ -227,19 +229,19 @@ code {
         transform: translateY(4px) !important;
     }
 
-    .btn-icon-sx > * {
+    .btn-icon-sx>* {
         @apply w-4 h-4;
     }
 
-    .btn-icon-md > * {
+    .btn-icon-md>* {
         @apply w-6 h-6;
     }
 
-    .btn-icon-lg > * {
+    .btn-icon-lg>* {
         @apply w-6 h-6;
     }
 
-    .btn-icon-lg > * {
+    .btn-icon-lg>* {
         @apply w-8 h-8;
     }
 
@@ -282,8 +284,4 @@ code {
     .outline-auto {
         outline: auto;
     }
-}
-
-.react-grid-placeholder {
-    @apply bg-secondary-400 !important;
 }

@@ -21,7 +21,7 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
 
     return (
         <div className="p-5 flex flex-col">
-            <Header publicKey={peer.identity.publicKey} />
+            <Header canvas={props.canvas} />
             <div className="rounded-md flex">
                 <CanvasWrapper canvas={props.canvas}>
                     <Canvas draft={false} />

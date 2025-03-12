@@ -84,6 +84,7 @@ const setTheme = () => {
 
 import { inIframe } from "@peerbit/react";
 import { CanvasProvider } from "./canvas/useCanvas";
+import { ProfileProvider } from "./profile/useProfiles";
 
 export const App = () => {
     setTheme();
@@ -107,17 +108,19 @@ export const App = () => {
                 <HashRouter basename="/">
                     <AppProvider>
                         <CanvasProvider>
-                            <>
-                                {!inIframe() && <Header></Header>}
-                                <div
-                                    /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
-                                    /*  */
-                                    /*   */
-                                    className="content-container flex-1"
-                                >
-                                    <BaseRoutes />
-                                </div>
-                            </>
+                            <ProfileProvider>
+                                <>
+                                    {!inIframe() && <Header></Header>}
+                                    <div
+                                        /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
+                                        /*  */
+                                        /*   */
+                                        className="content-container flex-1"
+                                    >
+                                        <BaseRoutes />
+                                    </div>
+                                </>
+                            </ProfileProvider>
                         </CanvasProvider>
                     </AppProvider>
                 </HashRouter>
