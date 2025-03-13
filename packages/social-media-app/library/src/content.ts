@@ -138,10 +138,11 @@ export class IndexableCanvas {
     }
 
     static async from(canvas: Canvas, node: ProgramClient) {
-        const indexable = await canvas.createTitle();
         if (canvas.closed) {
             await node.open(canvas, { existing: "reuse" });
         }
+        const indexable = await canvas.createTitle();
+
         const replies = await canvas.countReplies();
         return new IndexableCanvas({
             id: canvas.id,

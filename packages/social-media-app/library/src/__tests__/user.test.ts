@@ -1,5 +1,5 @@
 import { TestSession } from "@peerbit/test-utils";
-import { BrowsingHistory } from "../user.js";
+import { BrowsingHistory } from "../activity.js";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { expect } from "chai";
 

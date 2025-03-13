@@ -11,9 +11,9 @@ type SortCriteria = "new" | "old" | "best";
 
 export const Replies = (properties: { canvas?: CanvasDB }) => {
     const [sortCriteria, setSortCriteria] = useState<SortCriteria>("new");
-    const [query, setQuery] = useState<{ query: SearchRequest } | undefined>(
-        undefined
-    );
+    const [query, setQuery] = useState<
+        { query: SearchRequest; id: string } | undefined
+    >(undefined);
 
     useEffect(() => {
         if (sortCriteria === "best") {
@@ -32,6 +32,7 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
                         }),
                     ],
                 }),
+                id: sortCriteria,
             });
         } else {
             setQuery({
@@ -44,6 +45,7 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
                                 : SortDirection.DESC,
                     }),
                 }),
+                id: sortCriteria,
             });
         }
     }, [sortCriteria]);

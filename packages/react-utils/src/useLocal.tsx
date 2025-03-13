@@ -1,12 +1,68 @@
-import {
-    ClosedError,
-    Documents,
-    Query,
-    SearchRequest,
-    Sort,
-    WithContext,
-} from "@peerbit/document";
+import { ClosedError, Documents, WithContext } from "@peerbit/document";
 import { useEffect, useRef, useState } from "react";
+import * as indexerTypes from "@peerbit/indexer-interface";
+
+type QueryLike = {
+    query?: indexerTypes.Query[] | indexerTypes.QueryLike;
+    sort?: indexerTypes.Sort[] | indexerTypes.Sort | indexerTypes.SortLike;
+};
+type QueryOptons = {
+    query: QueryLike;
+    id: string;
+};
+function debounceLeadingTrailing<T extends (this: any, ...args: any[]) => void>(
+    func: T,
+    delay: number
+): ((this: ThisParameterType<T>, ...args: Parameters<T>) => void) & {
+    cancel: () => void;
+} {
+    let timeoutId: ReturnType<typeof setTimeout> | null = null;
+    let lastArgs: Parameters<T> | null = null;
+    let lastThis: any;
+    let pendingTrailing = false;
+
+    const debounced = function (
+        this: ThisParameterType<T>,
+        ...args: Parameters<T>
+    ) {
+        if (!timeoutId) {
+            // Leading call: no timer means this is the first call in this period.
+            func.apply(this, args);
+        } else {
+            // Subsequent calls during the delay mark that a trailing call is needed.
+            pendingTrailing = true;
+        }
+        // Always update with the most recent context and arguments.
+        lastArgs = args;
+        lastThis = this;
+
+        // Reset the timer.
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+        }
+        timeoutId = setTimeout(() => {
+            timeoutId = null;
+            // If there were any calls during the delay, call the function on the trailing edge.
+            if (pendingTrailing && lastArgs) {
+                func.apply(lastThis, lastArgs);
+            }
+            // Reset the trailing flag after the trailing call.
+            pendingTrailing = false;
+        }, delay);
+    } as ((this: ThisParameterType<T>, ...args: Parameters<T>) => void) & {
+        cancel: () => void;
+    };
+
+    debounced.cancel = () => {
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = null;
+        }
+        pendingTrailing = false;
+    };
+
+    return debounced;
+}
 
 export const useLocal = <
     T extends Record<string, any>,
@@ -16,38 +72,16 @@ export const useLocal = <
 >(
     db?: Documents<T, I>,
     options?: {
-        query?: {
-            query?:
-                | Query[]
-                | Query
-                | Record<
-                      string,
-                      | string
-                      | number
-                      | bigint
-                      | Uint8Array
-                      | boolean
-                      | null
-                      | undefined
-                  >;
-            sort?: Sort[] | Sort;
-            fetch?: number;
-        };
         resolve?: R;
         onChanges?: (all: RT[]) => void;
-    }
+        debounce?: number;
+    } & QueryOptons
 ) => {
     // Local state to store results.
     const [all, setAll] = useState<RT[]>([]);
 
     // useRef to store the current search function.
     const changeListener = useRef<(() => void) | undefined>(undefined);
-
-    // Effect that reacts when the query in options changes.
-    useEffect(() => {
-        // Trigger the search function if it exists.
-        changeListener.current?.();
-    }, [options?.query]);
 
     // Effect that sets up the search function and listens for DB changes.
     useEffect(() => {
@@ -56,10 +90,10 @@ export const useLocal = <
         }
 
         // Define the search function.
-        const l = async () => {
+        const _l = async (args?: any) => {
             try {
                 const results: WithContext<RT>[] = (await db.index.search(
-                    new SearchRequest(options?.query),
+                    options?.query ?? {},
                     {
                         local: true,
                         remote: false,
@@ -79,6 +113,7 @@ export const useLocal = <
                 throw error;
             }
         };
+        const l = debounceLeadingTrailing(_l, options?.debounce ?? 1e3);
 
         // Update the ref with the latest search function.
         changeListener.current = l;
@@ -92,11 +127,12 @@ export const useLocal = <
         // Cleanup the event listener on unmount or when dependencies change.
         return () => {
             db.events.removeEventListener("change", l);
+            l.cancel();
         };
     }, [
         // Ensure the search function is updated when these dependencies change.
         db?.closed ? undefined : db?.address,
-        options?.query,
+        options?.id,
         options?.resolve,
         options?.onChanges,
     ]);

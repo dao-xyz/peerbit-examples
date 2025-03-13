@@ -71,7 +71,8 @@ export const Header = (properties: {
                                     <HiDotsHorizontal size={20} />
                                 </button>
                             </DropdownMenu.Trigger>
-                            <DropdownMenu.Content className="bg-white dark:bg-black p-2 rounded shadow-md">
+                            {/* We use the "dropdown-menu-responsive" class to make sure the dropdown menu is rendered in the right direaction */}
+                            <DropdownMenu.Content className="dropdown-menu-responsive bg-white dark:bg-black p-2 rounded shadow-md">
                                 <DropdownMenu.Item
                                     className="menu-item"
                                     onSelect={() => {

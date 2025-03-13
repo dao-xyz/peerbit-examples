@@ -5,6 +5,7 @@ import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 import { Documents } from "@peerbit/document";
 import { ByteMatchQuery } from "@peerbit/indexer-interface";
+import { Identities } from "./identity";
 
 @variant(0)
 export class Profile {
@@ -128,15 +129,40 @@ export class Profiles extends Program {
         await this.profiles.put(profileIndexed);
     }
 
-    async get(publicKey: PublicSignKey) {
-        const profiles = await this.profiles.index.search({
-            query: [
-                new ByteMatchQuery({
-                    key: ["profile", "publicKey"],
-                    value: publicKey.bytes,
-                }),
-            ],
-        });
-        return profiles[0];
+    async get(publicKey: PublicSignKey, identities?: Identities) {
+        const profileFromKey = async (_publicKey: PublicSignKey) => {
+            const profiles = await this.profiles.index.search({
+                query: [
+                    new ByteMatchQuery({
+                        key: ["profile", "publicKey"],
+                        value: _publicKey.bytes,
+                    }),
+                ],
+            });
+            return profiles[0];
+        };
+        const found = await profileFromKey(publicKey);
+        if (found) {
+            return found;
+        }
+
+        if (identities) {
+            // if not found, try to find from linked accounts
+            const linked = await identities.connections.index.search({
+                query: identities.getLinkedDevicesQuery(publicKey),
+            });
+
+            if (linked.length === 0) {
+                return undefined;
+            }
+
+            for (const link of linked) {
+                const otherDevice = link.getOtherDevice(publicKey);
+                const profile = await profileFromKey(otherDevice!.publicKey);
+                if (profile) {
+                    return profile;
+                }
+            }
+        }
     }
 }

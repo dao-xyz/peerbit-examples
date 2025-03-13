@@ -7,6 +7,7 @@ import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { useNavigate } from "react-router-dom";
 import { getCanvasPath, MISSING_PROFILE } from "../routes";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
+import { useIdentities } from "../identity/useIdentities";
 
 // Extend the props type so any additional button props are allowed
 export const ProfileButton = forwardRef<
@@ -14,16 +15,18 @@ export const ProfileButton = forwardRef<
     {
         publicKey: PublicSignKey;
         direction?: "row" | "col";
-        setBgColor: (color: string) => void;
+        setBgColor?: (color: string) => void;
         onClick?: () => void;
     } & React.ButtonHTMLAttributes<HTMLButtonElement>
 >(({ publicKey, direction, setBgColor, onClick, ...rest }, ref) => {
     const { profiles } = useProfiles();
     const [profile, setProfile] = useState<ProfileData | undefined>();
+    const { identities } = useIdentities();
+
     const navigate = useNavigate();
     useEffect(() => {
         if (profiles?.closed || !profiles) return;
-        profiles.get(publicKey).then((profile) => {
+        profiles.get(publicKey, identities).then((profile) => {
             setProfile(profile);
         });
     }, [

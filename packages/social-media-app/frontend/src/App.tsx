@@ -1,6 +1,5 @@
 import { releaseKey } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
-import { NameProvider } from "./names/useNames";
 import { getRootKeypair } from "./keys";
 import { HashRouter } from "react-router-dom";
 import { Header } from "./Header";
@@ -85,6 +84,7 @@ const setTheme = () => {
 import { inIframe } from "@peerbit/react";
 import { CanvasProvider } from "./canvas/useCanvas";
 import { ProfileProvider } from "./profile/useProfiles";
+import { IdentitiesProvider } from "./identity/useIdentities";
 
 export const App = () => {
     setTheme();
@@ -104,8 +104,8 @@ export const App = () => {
             waitForConnnected={true}
             inMemory={false}
         >
-            <NameProvider>
-                <HashRouter basename="/">
+            <HashRouter basename="/">
+                <IdentitiesProvider>
                     <AppProvider>
                         <CanvasProvider>
                             <ProfileProvider>
@@ -123,8 +123,8 @@ export const App = () => {
                             </ProfileProvider>
                         </CanvasProvider>
                     </AppProvider>
-                </HashRouter>
-            </NameProvider>
+                </IdentitiesProvider>
+            </HashRouter>
         </PeerProvider>
     );
 };
