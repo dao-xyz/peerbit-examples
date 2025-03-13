@@ -17,8 +17,9 @@ export const ProfileButton = forwardRef<
         direction?: "row" | "col";
         setBgColor?: (color: string) => void;
         onClick?: () => void;
+        size?: number;
     } & React.ButtonHTMLAttributes<HTMLButtonElement>
->(({ publicKey, direction, setBgColor, onClick, ...rest }, ref) => {
+>(({ size, publicKey, direction, setBgColor, onClick, ...rest }, ref) => {
     const { profiles } = useProfiles();
     const [profile, setProfile] = useState<ProfileData | undefined>();
     const { identities } = useIdentities();
@@ -35,14 +36,16 @@ export const ProfileButton = forwardRef<
     ]);
 
     const content = profile ? (
-        <div className="w-8 h-8">
+        <div
+            className={`w-8 h-8 ${size != null ? `h-[${size}px] w-auto` : ""}`}
+        >
             <CanvasWrapper canvas={profile.profile}>
                 <CanvasPreview variant="tiny" />
             </CanvasWrapper>
         </div>
     ) : (
         <ProfilePhotoGenerated
-            size={32}
+            size={size ?? 32}
             publicKey={publicKey}
             onColorGenerated={setBgColor}
         />

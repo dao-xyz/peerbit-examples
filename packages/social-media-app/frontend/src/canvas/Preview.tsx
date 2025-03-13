@@ -41,14 +41,14 @@ const PreviewFrame = ({
     <Frame
         thumbnail={false}
         active={false}
-        setActive={(v) => { }}
-        delete={() => { }}
+        setActive={(v) => {}}
+        delete={() => {}}
         editMode={false}
         showCanvasControls={false}
         element={element}
-        replace={() => { }}
-        onLoad={() => { }}
-        onContentChange={() => { }}
+        replace={() => {}}
+        onLoad={() => {}}
+        onContentChange={() => {}}
         pending={false}
         coverParent={coverParent}
         fit="cover"

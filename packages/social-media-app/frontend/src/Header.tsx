@@ -32,17 +32,17 @@ export const Header = forwardRef((props: any, ref) => {
     return (
         <div
             ref={ref as any}
-            className="sticky top-0 flex flex-row w-full p-2 gap-2 bg-neutral-50 dark:bg-neutral-950 z-20 items-center max-h-[50px]"
+            className="sticky top-0 flex flex-row w-full  gap-2 bg-neutral-50 dark:bg-neutral-950 z-20 items-center max-h-[50px]"
         >
             <img
                 className="mr-auto ml-2 dark:invert"
                 src={Logo}
-                width="35px"
                 style={{
-                    marginLeft: "-12px",
-                    marginTop: "-20px",
-                    width: "max-content",
-                    height: "40px",
+                    maxWidth: "50px",
+                    height: "auto",
+                    marginLeft: "-3px",
+                    marginTop: "-17px",
+                    width: "auto",
                 }}
             />
             <div className="mr-auto max-w-xl flex-1 h-[40px] overflow-hidden">
@@ -52,7 +52,10 @@ export const Header = forwardRef((props: any, ref) => {
             {peer ? (
                 <DropdownMenu.Root>
                     <DropdownMenu.Trigger asChild>
-                        <ProfileButton publicKey={peer.identity.publicKey} />
+                        <ProfileButton
+                            size={40}
+                            publicKey={peer.identity.publicKey}
+                        />
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Content
                         className="bg-white dark:bg-neutral-950 p-2 rounded shadow-md"
