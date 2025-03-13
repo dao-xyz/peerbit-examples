@@ -154,13 +154,11 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                 )}
 
                 {text && (
-                    <div className="px-2.5">
-                        <PreviewFrame
-                            element={text}
-                            coverParent={false}
-                            previewLines={3}
-                        />
-                    </div>
+                    <PreviewFrame
+                        element={text}
+                        coverParent={false}
+                        previewLines={3}
+                    />
                 )}
             </div>
         );

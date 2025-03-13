@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as Canvas } from "./Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "./Preview";
 import { WithContext } from "@peerbit/document";
@@ -30,7 +31,7 @@ const ReplyButton = ({
 }: React.PropsWithChildren<React.ButtonHTMLAttributes<HTMLButtonElement>>) => {
     return (
         <button
-            className="border border-black rounded-md px-1.5 py-1 bg-white"
+            className="border border-black rounded-md px-1.5 py-1 bg-white dark:border-white dark:bg-black"
             {...rest}
         >
             {children}
@@ -40,6 +41,7 @@ const ReplyButton = ({
 
 export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
     const [replyCount, setReplyCount] = useState(0);
+    const [showMore, setShowMore] = useState(false);
     const { peer } = usePeer();
     const navigate = useNavigate();
 
@@ -84,11 +86,19 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
                 className="w-full flex flex-row p-0 overflow-hidden"
             >
                 <CanvasWrapper canvas={properties.canvas}>
-                    <CanvasPreview variant="post" />
+                    {showMore ? (
+                        <Canvas draft={false} />
+                    ) : (
+                        <CanvasPreview variant="post" />
+                    )}
                 </CanvasWrapper>
             </button>
             <div className="flex gap-2.5 px-2.5 mt-4">
-                <ReplyButton>Show more</ReplyButton>
+                <ReplyButton
+                    onClick={() => setShowMore((showMore) => !showMore)}
+                >
+                    {showMore ? "Show less" : "Show more"}
+                </ReplyButton>
                 <ReplyButton
                     onClick={async () =>
                         navigate(getCanvasPath(properties.canvas), {})

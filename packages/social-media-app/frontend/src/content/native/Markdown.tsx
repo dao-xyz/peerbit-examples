@@ -113,7 +113,7 @@ export const MarkdownContent = ({
     return (
         <div
             ref={containerRef}
-            className={`${padding} w-full text-left ${
+            className={`px-2.5 w-full text-left ${
                 editable ? "cursor-text" : ""
             }`}
             onClick={editable && !isEditing ? handleStartEditing : undefined}
