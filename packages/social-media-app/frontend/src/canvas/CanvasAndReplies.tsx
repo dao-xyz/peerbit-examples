@@ -21,7 +21,10 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
 
     return (
         <div className="flex flex-col">
-            <Header canvas={props.canvas} />
+            <div className="px-2.5">
+                <Header canvas={props.canvas} />
+            </div>
+
             <div className="rounded-md flex">
                 <CanvasWrapper canvas={props.canvas}>
                     <Canvas draft={false} />
@@ -101,7 +104,7 @@ export const CanvasAndReplies = () => {
     }
 
     return (
-        <div className="flex flex-col h-full">
+        <div className="pt-10 flex flex-col h-full">
             <div className="flex-grow max-w-[680px] w-full mx-auto">
                 <CanvasWithReplies key={0} canvas={lastCanvas} />
             </div>
@@ -116,7 +119,7 @@ export const CanvasAndReplies = () => {
                             <FaPlus />
                         </ImageUploadTrigger>
                     </Canvas>
-                    <div className="flex bg-neutral-50 dark:bg-neutral-950 p-4">
+                    <div className="flex items-center gap-4 bg-neutral-50 dark:bg-neutral-950 p-4">
                         <div className="max-w-[600px]">
                             <CanvasModifyToolbar direction="row" />
                         </div>
