@@ -7,6 +7,7 @@ import RelativeTimestamp from "./header/RelativeTimestamp";
 import { useNavigate } from "react-router-dom";
 import { getCanvasPath } from "../routes";
 import { Header } from "./header/Header";
+import { CanvasContext, CanvasWrapper } from "./CanvasWrapper";
 
 // Debounce helper that triggers on the leading edge and then ignores calls for the next delay ms.
 function debounceLeading(func: (...args: any[]) => void, delay: number) {
@@ -59,15 +60,20 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
 
     return (
         <div>
-            <div className=" w-full flex flex-row p-0 border  border-solid max-h-[40vh] overflow-hidden">
-                <Header canvas={properties.canvas} direction="col" />
+            <div className="px-2.5 mb-2.5">
+                <Header canvas={properties.canvas} direction="row" />
+            </div>
+
+            <div className="w-full flex flex-row p-0 max-h-[40vh] overflow-hidden">
                 <button
-                    className="btn  w-full flex flex-row"
+                    className="btn p-0 w-full flex flex-row"
                     onClick={async () => {
                         navigate(getCanvasPath(properties.canvas), {});
                     }}
                 >
-                    <CanvasPreview canvas={properties.canvas} />
+                    <CanvasWrapper canvas={properties.canvas}>
+                        <CanvasPreview variant="post" />
+                    </CanvasWrapper>
                 </button>
             </div>
 
@@ -75,17 +81,6 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
                 <span className="mr-auto text-sm underline">
                     {`Replies (${replyCount})`}
                 </span>
-                <RelativeTimestamp
-                    timestamp={
-                        new Date(
-                            Number(
-                                properties.canvas.__context.created /
-                                    BigInt(1000000)
-                            )
-                        )
-                    }
-                    className="ml-auto text-sm"
-                />
             </div>
         </div>
     );

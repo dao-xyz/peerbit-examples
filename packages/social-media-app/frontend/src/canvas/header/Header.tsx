@@ -1,16 +1,17 @@
 import { useState } from "react";
-import { PublicSignKey } from "@peerbit/crypto";
 import { ProfileButton } from "../../profile/ProfileButton";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
 import { usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
 import { Canvas } from "@dao-xyz/social";
+import RelativeTimestamp from "./RelativeTimestamp";
+import { WithContext } from "@peerbit/document";
 
 // Assume peer is imported or available from context
 
 export const Header = (properties: {
-    canvas?: Canvas;
+    canvas?: Canvas | WithContext<Canvas>;
     direction?: "row" | "col";
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
@@ -26,11 +27,9 @@ export const Header = (properties: {
         <>
             {properties.canvas && (
                 <div
-                    className={`flex items-center gap-4 ${
+                    className={`flex items-center gap-6 ${
                         properties.direction === "col" ? "flex-col" : "flex-row"
-                    } 
-      bg-[linear-gradient(333deg,rgba(255,255,255,0.6)_34%,var(--bgcolor)_79%)]
-      dark:bg-[linear-gradient(333deg,rgba(31,41,55,0.6)_34%,var(--bgcolor)_79%)]`}
+                    }`}
                     style={
                         {
                             "--bgcolor": bgColor
@@ -43,6 +42,20 @@ export const Header = (properties: {
                         publicKey={properties.canvas.publicKey}
                         setBgColor={setBgColor}
                     />
+                    {"__context" in properties.canvas && (
+                        <RelativeTimestamp
+                            timestamp={
+                                new Date(
+                                    Number(
+                                        properties.canvas.__context.created /
+                                            BigInt(1000000)
+                                    )
+                                )
+                            }
+                            className="text-sm"
+                        />
+                    )}
+
                     {/* Additional management menu for the post if the user is the author */}
                     {isOwner && (
                         <DropdownMenu.Root>

@@ -6,6 +6,7 @@ import { CanvasPreview } from "../canvas/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { useNavigate } from "react-router-dom";
 import { getCanvasPath, MISSING_PROFILE } from "../routes";
+import { CanvasWrapper } from "../canvas/CanvasWrapper";
 
 // Extend the props type so any additional button props are allowed
 export const ProfileButton = forwardRef<
@@ -31,8 +32,10 @@ export const ProfileButton = forwardRef<
     ]);
 
     const content = profile ? (
-        <div className="w-[40px] h-[40px]">
-            <CanvasPreview canvas={profile.profile} />
+        <div className="w-8 h-8">
+            <CanvasWrapper canvas={profile.profile}>
+                <CanvasPreview variant="tiny" />
+            </CanvasWrapper>
         </div>
     ) : (
         <ProfilePhotoGenerated
