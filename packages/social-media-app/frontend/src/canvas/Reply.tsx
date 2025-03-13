@@ -64,7 +64,7 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
                 <Header canvas={properties.canvas} direction="row" />
             </div>
 
-            <div className="w-full flex flex-row p-0 max-h-[40vh] overflow-hidden">
+            <div className="w-full flex flex-row p-0 overflow-hidden">
                 <button
                     className="btn p-0 w-full flex flex-row"
                     onClick={async () => {

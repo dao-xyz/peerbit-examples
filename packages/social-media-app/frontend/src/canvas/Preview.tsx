@@ -29,6 +29,32 @@ const rectIsStaticImage = (rect: Element<ElementContent>): boolean => {
     );
 };
 
+const PreviewFrame = ({
+    element,
+    coverParent,
+    previewLines,
+}: {
+    element: Element<ElementContent>;
+    coverParent: boolean;
+    previewLines?: number;
+}) => (
+    <Frame
+        thumbnail={false}
+        active={false}
+        setActive={(v) => {}}
+        delete={() => {}}
+        editMode={false}
+        showCanvasControls={false}
+        element={element}
+        replace={() => {}}
+        onLoad={() => {}}
+        onContentChange={() => {}}
+        pending={false}
+        coverParent={coverParent}
+        fit="cover"
+    />
+);
+
 interface SeparatedRects {
     text: Element<ElementContent>[];
     other: Element<ElementContent>[];
@@ -93,30 +119,44 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
     if (!variantRects) return null;
     if (variant === "tiny") {
         return (
-            <Frame
-                thumbnail={false}
-                active={false}
-                setActive={(v) => {}}
-                delete={() => {}}
-                editMode={false}
-                showCanvasControls={false}
+            <PreviewFrame
                 element={variantRects as RectsForVariant<"tiny">}
-                replace={() => {}}
-                onLoad={() => {}}
-                onContentChange={() => {}}
-                pending={false}
                 coverParent={true}
-                fit="cover"
             />
         );
     }
-    if (variant === "post")
+    if (variant === "post") {
+        const [firstApp, ...secondaryApps] = (
+            variantRects as RectsForVariant<"post">
+        ).other;
+        const text = (variantRects as RectsForVariant<"post">).text;
         return (
-            <CanvasWrapper canvas={canvas}>
-                <div className="w-full flex flex-col items-center relative overflow-hidden">
-                    {/* Real image preview */}
-                    <Canvas fitHeight />
+            <div className="w-full flex flex-col gap-4">
+                {firstApp && (
+                    <div className="w-full max-h-[40vh] rounded-md overflow-hidden">
+                        <PreviewFrame element={firstApp} coverParent={true} />
+                    </div>
+                )}
+                <div className="flex overflow-x-scroll no-scrollbar">
+                    {secondaryApps.map((app, i) => (
+                        <div
+                            className="aspect-[1] w-12 rounded-md overflow-hidden"
+                            key={i}
+                        >
+                            <PreviewFrame element={app} coverParent={true} />
+                        </div>
+                    ))}
                 </div>
-            </CanvasWrapper>
+                {text && (
+                    <div>
+                        <PreviewFrame
+                            element={text}
+                            coverParent={false}
+                            previewLines={3}
+                        />
+                    </div>
+                )}
+            </div>
         );
+    }
 };

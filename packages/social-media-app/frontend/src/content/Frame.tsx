@@ -32,6 +32,7 @@ export const Frame = (properties: {
     delete(): void;
     coverParent?: boolean;
     fit?: "cover" | "contain";
+    previewLines?: number;
 }) => {
     const navigate = useNavigate();
 
@@ -45,7 +46,14 @@ export const Frame = (properties: {
         }
     };
 
-    const renderContent = ({ coverParent }: { coverParent?: boolean }) => {
+    const renderContent = ({
+        coverParent,
+        previewLines,
+    }: {
+        coverParent?: boolean;
+
+        previewLines?: number;
+    }) => {
         // For iframes, continue to use the iframe as before.
         if (properties.element.content instanceof IFrameContent) {
             return (
@@ -80,6 +88,7 @@ export const Frame = (properties: {
                     }}
                     coverParent={coverParent}
                     fit={properties.fit}
+                    previewLines={previewLines}
                 />
             );
         }
