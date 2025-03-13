@@ -10,6 +10,7 @@ import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
 import { ReactNode, useCallback, useMemo } from "react";
+import { rectIsStaticMarkdownText } from "./utils/rect";
 
 type SizeProps = {
     width?: number;
@@ -23,6 +24,7 @@ export const Canvas = (
     properties: SizeProps & {
         appearance?: "chat-view-images" | "chat-view-text";
         children?: ReactNode;
+        bgBlur?: boolean;
     } & ({ draft: true; onSave: () => void } | { draft?: false })
 ) => {
     const asThumbnail = !!properties.scaled;
@@ -53,7 +55,7 @@ export const Canvas = (
     }, [rects, pendingRects, properties.appearance]);
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
-        return rectsToRender.map((x, key) => {
+        return rectsToRender.map((rect, key) => {
             return (
                 <div
                     key={key}
@@ -65,82 +67,131 @@ export const Canvas = (
                         properties.fitWidth ? "w-full" : ""
                     }`}
                 >
-                    <Frame
-                        thumbnail={asThumbnail}
-                        active={active.has(x.id)}
-                        setActive={(v) => {
-                            if (v) {
-                                setActive(new Set(active.add(x.id)));
-                            } else {
-                                setActive(
-                                    new Set(
-                                        [...active].filter((el) => el !== x.id)
-                                    )
+                    <div
+                        className={`relative flex flex-col overflow-hidden rounded-md ${
+                            rectIsStaticMarkdownText(rect)
+                                ? ""
+                                : "max-h-[400px]"
+                        }`}
+                    >
+                        <Frame
+                            thumbnail={asThumbnail}
+                            active={active.has(rect.id)}
+                            setActive={(v) => {
+                                if (v) {
+                                    setActive(new Set(active.add(rect.id)));
+                                } else {
+                                    setActive(
+                                        new Set(
+                                            [...active].filter(
+                                                (el) => el !== rect.id
+                                            )
+                                        )
+                                    );
+                                }
+                            }}
+                            delete={() => {
+                                removePending(rect.id);
+                                // TODO: make this logic smarter in the future.
+                                // We don't always want to delete.
+                                canvas?.elements.del(rect.id);
+                            }}
+                            editMode={
+                                properties.appearance === "chat-view-images"
+                                    ? false
+                                    : editMode
+                            }
+                            showCanvasControls={
+                                properties.appearance !== "chat-view-images" &&
+                                editMode &&
+                                filteredRects.length > 1
+                            }
+                            element={rect}
+                            replace={async (url) => {
+                                const pendingElement = pendingRects.find(
+                                    (pending) => equals(pending.id, rect.id)
                                 );
-                            }
-                        }}
-                        delete={() => {
-                            removePending(x.id);
-                            // TODO: make this logic smarter in the future.
-                            // We don't always want to delete.
-                            canvas?.elements.del(x.id);
-                        }}
-                        editMode={
-                            properties.appearance === "chat-view-images"
-                                ? false
-                                : editMode
-                        }
-                        showCanvasControls={
-                            properties.appearance !== "chat-view-images" &&
-                            editMode &&
-                            filteredRects.length > 1
-                        }
-                        element={x}
-                        replace={async (url) => {
-                            const pendingElement = pendingRects.find(
-                                (pending) => equals(pending.id, x.id)
-                            );
-                            const fromPending = !!pendingElement;
-                            const element =
-                                pendingElement ||
-                                (await canvas.elements.index.get(x.id));
-                            (element.content as IFrameContent).src = url;
-                            if (!fromPending) {
-                                await canvas.elements.put(element);
-                            }
-                        }}
-                        onLoad={() => {}}
-                        onContentChange={(newContent, id) => {
-                            const changedElement = rects.find(
-                                (rect) => rect.id === id
-                            );
-                            // if contained in rects
-                            if (changedElement) {
-                                changedElement.content = new StaticContent({
-                                    content: newContent,
-                                });
-                                canvas.elements.put(changedElement);
-                            }
-                            // if outside of rects -> pending!
-                            else {
-                                const newPending = [...pendingRects];
-                                newPending.find((el) => el.id === id).content =
-                                    new StaticContent({
+                                const fromPending = !!pendingElement;
+                                const element =
+                                    pendingElement ||
+                                    (await canvas.elements.index.get(rect.id));
+                                (element.content as IFrameContent).src = url;
+                                if (!fromPending) {
+                                    await canvas.elements.put(element);
+                                }
+                            }}
+                            onLoad={() => {}}
+                            onContentChange={(newContent, id) => {
+                                const changedElement = rects.find(
+                                    (rect) => rect.id === id
+                                );
+                                // if contained in rects
+                                if (changedElement) {
+                                    changedElement.content = new StaticContent({
                                         content: newContent,
                                     });
-                                return newPending;
+                                    canvas.elements.put(changedElement);
+                                }
+                                // if outside of rects -> pending!
+                                else {
+                                    const newPending = [...pendingRects];
+                                    newPending.find(
+                                        (el) => el.id === id
+                                    ).content = new StaticContent({
+                                        content: newContent,
+                                    });
+                                    return newPending;
+                                }
+                            }}
+                            pending={
+                                !!pendingRects.find((p) =>
+                                    equals(p.id, rect.id)
+                                )
                             }
-                        }}
-                        pending={!!pendingRects.find((p) => equals(p.id, x.id))}
-                        coverParent={
-                            properties.appearance === "chat-view-images"
-                        }
-                        fit={
-                            properties.appearance === "chat-view-images"
-                                ? "cover"
-                                : undefined
-                        }
-                    />
+                            coverParent={
+                                properties.appearance === "chat-view-images"
+                            }
+                            fit={
+                                properties.appearance === "chat-view-images"
+                                    ? "cover"
+                                    : properties.appearance === "chat-view-text"
+                                    ? undefined
+                                    : "contain"
+                            }
+                        />
+                        <svg
+                            xmlns="https://www.w3.org/2000/svg"
+                            className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
+                            version="1.1"
+                        >
+                            <filter id="gaussianBlur4">
+                                <feGaussianBlur
+                                    stdDeviation="40"
+                                    result="blur"
+                                />
+                            </filter>
+                        </svg>
+                        {!rectIsStaticMarkdownText(rect) &&
+                            properties.bgBlur && (
+                                <div className="absolute opacity-30 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2  [filter:url('#gaussianBlur4')]">
+                                    <Frame
+                                        thumbnail={false}
+                                        active={false}
+                                        setActive={() => {}}
+                                        delete={() => {}}
+                                        editMode={false}
+                                        showCanvasControls={false}
+                                        element={rect}
+                                        replace={async () => {}}
+                                        onLoad={() => {}}
+                                        onContentChange={() => {}}
+                                        pending={false}
+                                        coverParent={true}
+                                        fit="cover"
+                                    />
+                                </div>
+                            )}
+                    </div>
                 </div>
             );
         });
@@ -150,10 +201,10 @@ export const Canvas = (
 
     return (
         <div
-            className={`${
+            className={`flex ${
                 properties.appearance === "chat-view-images"
-                    ? "flex gap-4 p-4"
-                    : ""
+                    ? "gap-4 p-4"
+                    : "flex-col gap-4"
             } ${properties.fitHeight ? "h-full" : ""} ${
                 properties.fitWidth ? "w-full" : ""
             }`}

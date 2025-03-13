@@ -87,7 +87,7 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
             >
                 <CanvasWrapper canvas={properties.canvas}>
                     {showMore ? (
-                        <Canvas draft={false} />
+                        <Canvas bgBlur fitWidth draft={false} />
                     ) : (
                         <CanvasPreview variant="post" />
                     )}

@@ -20,16 +20,14 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
     const { peer } = usePeer();
 
     return (
-        <div className="flex flex-col">
+        <div className="flex flex-col gap-2.5">
             <div className="px-2.5">
                 <Header canvas={props.canvas} />
             </div>
 
-            <div className="rounded-md flex">
-                <CanvasWrapper canvas={props.canvas}>
-                    <Canvas draft={false} />
-                </CanvasWrapper>
-            </div>
+            <CanvasWrapper canvas={props.canvas}>
+                <Canvas bgBlur fitWidth draft={false} />
+            </CanvasWrapper>
             {showReplies && <RepliesView canvas={props.canvas} />}
         </div>
     );
@@ -113,7 +111,7 @@ export const CanvasAndReplies = () => {
                 draft={true}
                 multiCanvas
             >
-                <div className="mt-4 flex flex-col sticky bottom-0 w-full left-0">
+                <div className="mt-4 flex flex-col sticky z-20 bottom-0 w-full left-0">
                     <Canvas appearance="chat-view-images">
                         <ImageUploadTrigger className="btn-elevated btn-icon btn-icon-md btn-toggle w-20 h-20 flex items-center justify-center bg-white">
                             <FaPlus />

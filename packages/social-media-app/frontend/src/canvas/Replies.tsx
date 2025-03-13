@@ -53,8 +53,8 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
     const sortedReplies = useLocal(properties.canvas?.replies, query);
 
     return (
-        <div className="flex flex-col mt-10 px-2.5">
-            <div className="sticky top-9 z-10 bg-neutral-50 dark:bg-neutral-950 flex flex-row items-center justify-between border-t-[1px] py-1">
+        <div className="flex flex-col mt-10">
+            <div className="sticky top-9 z-10 bg-neutral-50 dark:bg-neutral-950 flex flex-row items-center justify-between border-t-[1px] py-1 px-2.5">
                 <span className="font-semibold">Replies:</span>
                 <DropdownMenu.Root>
                     <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center">
@@ -92,7 +92,7 @@ export const Replies = (properties: { canvas?: CanvasDB }) => {
             </div>
 
             {sortedReplies.length > 0 ? (
-                <div className="flex flex-col gap-4">
+                <div className="flex flex-col gap-4 mt-5">
                     {sortedReplies.map((reply) => (
                         <Reply key={reply.idString} canvas={reply} />
                     ))}

@@ -109,12 +109,6 @@ export const ImageContent = ({
             onDragLeave={editable ? handleDragLeave : undefined}
             onDrop={editable ? handleDrop : undefined}
             className={`relative w-full h-full ${
-                {
-                    cover: "object-cover",
-                    contain: "object-contain",
-                    default: "",
-                }[fit ?? "default"]
-            } ${
                 editable
                     ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150 bg-gray-50 dark:bg-gray-800"
                     : ""
@@ -134,7 +128,6 @@ export const ImageContent = ({
                         default: "",
                     }[fit ?? "default"]
                 }`}
-                style={{ maxHeight: "400px" }}
             />
             {editable && (
                 <>

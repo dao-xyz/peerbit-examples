@@ -9,6 +9,7 @@ import {
 } from "react-icons/md";
 import { useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
+import { rectIsStaticMarkdownText } from "../canvas/utils/rect";
 
 export const Frame = (properties: {
     pending: boolean;
@@ -100,13 +101,13 @@ export const Frame = (properties: {
     return (
         <div
             key={properties.key}
-            className={`flex flex-row  w-full h-full max-w-full ${
+            className={`flex flex-row w-full max-h-full max-w-full overflow-hidden ${
                 !properties.thumbnail
                     ? "" /* TODO bg? "bg-neutral-100 dark:bg-neutral-900" */
                     : ""
             } group`} /* ${properties.pending ? "border-solid border-2 border-primary-400" : ""} outline-auto outline-neutral-900 dark:outline-neutral-300  */
         >
-            <div className="w-full h-full flex flex-row overflow-hidden">
+            <div className={`w-full max-h-full overflow-hidden`}>
                 {renderContent({
                     coverParent: properties.coverParent,
                     previewLines: properties.previewLines,
