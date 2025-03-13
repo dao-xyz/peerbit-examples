@@ -88,8 +88,6 @@ Discover a new era of social media where decentralization meets innovation. giga
 ## Get Started Today!
 
 Join us and be a part of the future. Your social experience is about to change—step into a world where you lead the conversation and drive the innovation.
-
----
 `;
 
 export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
