@@ -3,10 +3,10 @@ import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "./Preview";
 import { WithContext } from "@peerbit/document";
-import RelativeTimestamp from "./header/RelativeTimestamp";
 import { useNavigate } from "react-router-dom";
 import { getCanvasPath } from "../routes";
 import { Header } from "./header/Header";
+import { CanvasWrapper } from "./CanvasWrapper";
 
 // Debounce helper that triggers on the leading edge and then ignores calls for the next delay ms.
 function debounceLeading(func: (...args: any[]) => void, delay: number) {
@@ -23,6 +23,20 @@ function debounceLeading(func: (...args: any[]) => void, delay: number) {
         }, delay);
     };
 }
+
+const ReplyButton = ({
+    children,
+    ...rest
+}: React.PropsWithChildren<React.ButtonHTMLAttributes<HTMLButtonElement>>) => {
+    return (
+        <button
+            className="border border-black rounded-md px-1.5 py-1 bg-white"
+            {...rest}
+        >
+            {children}
+        </button>
+    );
+};
 
 export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
     const [replyCount, setReplyCount] = useState(0);
@@ -58,34 +72,28 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
     }, [properties.canvas, properties.canvas.closed]);
 
     return (
-        <div>
-            <div className=" w-full flex flex-row p-0 border  border-solid max-h-[40vh] overflow-hidden">
-                <Header canvas={properties.canvas} direction="col" />
-                <button
-                    className="btn  w-full flex flex-row"
-                    onClick={async () => {
-                        navigate(getCanvasPath(properties.canvas), {});
-                    }}
-                >
-                    <CanvasPreview canvas={properties.canvas} />
-                </button>
+        <div className="py-4">
+            <div className="px-2.5 mb-2.5">
+                <Header canvas={properties.canvas} direction="row" />
             </div>
 
-            <div className="flex w-full mt-1">
-                <span className="mr-auto text-sm underline">
-                    {`Replies (${replyCount})`}
-                </span>
-                <RelativeTimestamp
-                    timestamp={
-                        new Date(
-                            Number(
-                                properties.canvas.__context.created /
-                                    BigInt(1000000)
-                            )
-                        )
+            <button
+                onClick={async () => {
+                    navigate(getCanvasPath(properties.canvas), {});
+                }}
+                className="w-full flex flex-row p-0 overflow-hidden"
+            >
+                <CanvasWrapper canvas={properties.canvas}>
+                    <CanvasPreview variant="post" />
+                </CanvasWrapper>
+            </button>
+            <div className="flex gap-2.5 px-2.5 mt-4">
+                <ReplyButton>Show more</ReplyButton>
+                <ReplyButton
+                    onClick={async () =>
+                        navigate(getCanvasPath(properties.canvas), {})
                     }
-                    className="ml-auto text-sm"
-                />
+                >{`Open | Reply (${replyCount})`}</ReplyButton>
             </div>
         </div>
     );

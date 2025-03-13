@@ -20,18 +20,14 @@ const CanvasWithReplies = (props: { canvas?: CanvasDB }) => {
     const { peer } = usePeer();
 
     return (
-        <div className="p-5 flex flex-col">
+        <div className="flex flex-col">
             <Header canvas={props.canvas} />
             <div className="rounded-md flex">
                 <CanvasWrapper canvas={props.canvas}>
                     <Canvas draft={false} />
                 </CanvasWrapper>
             </div>
-            {showReplies && (
-                <div className="mt-[3px] p-2 rounded-md">
-                    <RepliesView canvas={props.canvas} />
-                </div>
-            )}
+            {showReplies && <RepliesView canvas={props.canvas} />}
         </div>
     );
 };

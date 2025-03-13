@@ -8,6 +8,7 @@ export type MarkdownContentProps = {
     editable?: boolean;
     onChange?: (newContent: StaticMarkdownText) => void;
     thumbnail?: boolean;
+    previewLines?: number;
 };
 
 export const MarkdownContent = ({
@@ -16,6 +17,7 @@ export const MarkdownContent = ({
     editable = false,
     onChange,
     thumbnail,
+    previewLines,
 }: MarkdownContentProps) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
@@ -71,7 +73,7 @@ export const MarkdownContent = ({
         }
     }, [text, isEditing, autoResize]);
 
-    const padding = !thumbnail ? "px-4 py-2" : "p-1";
+    const padding = !thumbnail ? "" : "p-1";
 
     // When the user clicks the container (and we're editable), start editing.
     const handleStartEditing = () => {
