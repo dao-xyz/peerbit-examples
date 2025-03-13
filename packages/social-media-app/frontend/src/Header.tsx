@@ -1,6 +1,5 @@
 import { useState, forwardRef } from "react";
 import { MdOutlineDarkMode, MdOutlineLightMode } from "react-icons/md";
-import Logo from "/giga2.png";
 import { CanvasPath } from "./context/CanvasPath";
 import { ProfileButton } from "./profile/ProfileButton";
 import { usePeer } from "@peerbit/react";
@@ -8,6 +7,7 @@ import { Spinner } from "./utils/Spinner";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useNavigate } from "react-router-dom";
 import { CONNECT_DEVICES } from "./routes";
+import { HeaderLogo } from "./Logo";
 
 export const Header = forwardRef((props: any, ref) => {
     // Read initial theme from localStorage or default to "light"
@@ -34,18 +34,8 @@ export const Header = forwardRef((props: any, ref) => {
             ref={ref as any}
             className="sticky top-0 flex flex-row w-full  gap-2 bg-neutral-50 dark:bg-neutral-950 z-20 items-center max-h-[50px]"
         >
-            <img
-                className="mr-auto ml-2 dark:invert"
-                src={Logo}
-                style={{
-                    maxWidth: "50px",
-                    height: "auto",
-                    marginLeft: "-3px",
-                    marginTop: "-17px",
-                    width: "auto",
-                }}
-            />
-            <div className="mr-auto max-w-xl flex-1 h-[40px] overflow-hidden">
+            <HeaderLogo />
+            <div className="ml-auto mr-auto max-w-xl flex-1 h-[40px] overflow-hidden">
                 <CanvasPath />
             </div>
 
