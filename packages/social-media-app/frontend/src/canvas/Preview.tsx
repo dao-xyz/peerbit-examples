@@ -52,6 +52,7 @@ const PreviewFrame = ({
         pending={false}
         coverParent={coverParent}
         fit="cover"
+        previewLines={previewLines}
     />
 );
 

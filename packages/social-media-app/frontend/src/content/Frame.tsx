@@ -107,7 +107,10 @@ export const Frame = (properties: {
             } group`} /* ${properties.pending ? "border-solid border-2 border-primary-400" : ""} outline-auto outline-neutral-900 dark:outline-neutral-300  */
         >
             <div className="w-full h-full flex flex-row overflow-hidden">
-                {renderContent({ coverParent: properties.coverParent })}
+                {renderContent({
+                    coverParent: properties.coverParent,
+                    previewLines: properties.previewLines,
+                })}
             </div>
 
             {!properties.active && (
