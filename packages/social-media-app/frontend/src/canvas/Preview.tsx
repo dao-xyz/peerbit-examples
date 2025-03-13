@@ -137,18 +137,24 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                         <PreviewFrame element={firstApp} coverParent={true} />
                     </div>
                 )}
-                <div className="flex overflow-x-scroll no-scrollbar">
-                    {secondaryApps.map((app, i) => (
-                        <div
-                            className="aspect-[1] w-12 rounded-md overflow-hidden"
-                            key={i}
-                        >
-                            <PreviewFrame element={app} coverParent={true} />
-                        </div>
-                    ))}
-                </div>
+                {secondaryApps.length > 0 && (
+                    <div className="flex overflow-x-scroll no-scrollbar px-2.5">
+                        {secondaryApps.map((app, i) => (
+                            <div
+                                className="aspect-[1] w-12 rounded-md overflow-hidden"
+                                key={i}
+                            >
+                                <PreviewFrame
+                                    element={app}
+                                    coverParent={true}
+                                />
+                            </div>
+                        ))}
+                    </div>
+                )}
+
                 {text && (
-                    <div>
+                    <div className="px-2.5">
                         <PreviewFrame
                             element={text}
                             coverParent={false}
