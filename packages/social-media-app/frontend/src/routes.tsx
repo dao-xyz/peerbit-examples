@@ -6,6 +6,7 @@ import { serialize } from "@dao-xyz/borsh";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CreateRoot } from "./canvas/CreateRoot";
 import { MissingProfile } from "./profile/MissingProfile";
+import { ConnectDevices } from "./identity/ConnectDevices";
 
 const textDecoder = new TextDecoder();
 export const getStreamPath = (node: PublicSignKey) =>
@@ -29,6 +30,7 @@ export function BaseRoutes() {
     return (
         <Routes>
             {/* <Route path={USER_BY_KEY_NAME} element={<Canvas />} /> */}
+            <Route path={CONNECT_DEVICES} element={<ConnectDevices />} />
             <Route path={MISSING_PROFILE} element={<MissingProfile />} />
             <Route path={NEW_ROOT} element={<CreateRoot />} />
             <Route path="/path/*" element={<Home />} />
@@ -39,6 +41,7 @@ export function BaseRoutes() {
 
 export const MISSING_PROFILE = "/missing-profile";
 export const NEW_ROOT = "/new-root";
+export const CONNECT_DEVICES = "/connect";
 export const STREAMING_APP = ["development", "staging"].includes(
     import.meta.env.MODE
 )

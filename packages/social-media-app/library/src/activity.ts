@@ -1,4 +1,4 @@
-import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
+import { field, variant, fixedArray, option } from "@dao-xyz/borsh";
 import { Documents } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import {
