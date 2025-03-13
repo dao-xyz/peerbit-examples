@@ -21,13 +21,17 @@ const PreviewFrame = ({
     coverParent,
     previewLines,
     bgBlur,
+    maximizeHeight,
 }: {
     element: Element<ElementContent>;
     coverParent: boolean;
     previewLines?: number;
     bgBlur?: boolean;
+    maximizeHeight?: boolean;
 }) => (
-    <div className="relative overflow-hidden h-full">
+    <div
+        className={`relative overflow-hidden ${maximizeHeight ? "h-full" : ""}`}
+    >
         <Frame
             thumbnail={false}
             active={false}
@@ -157,7 +161,8 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                         <PreviewFrame
                             bgBlur
                             element={firstApp}
-                            coverParent={true}
+                            coverParent
+                            maximizeHeight
                         />
                     </div>
                 )}
@@ -168,10 +173,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                                 className="aspect-[1] w-12 rounded-md overflow-hidden"
                                 key={i}
                             >
-                                <PreviewFrame
-                                    element={app}
-                                    coverParent={true}
-                                />
+                                <PreviewFrame element={app} coverParent />
                             </div>
                         ))}
                     </div>
