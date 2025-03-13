@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
-import Markdown from "marked-react";
+import Markdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { StaticMarkdownText } from "@dao-xyz/social";
 
 export type MarkdownContentProps = {
@@ -132,8 +133,23 @@ export const MarkdownContent = ({
                     style={{ overflow: "hidden" }}
                 />
             ) : (
-                <div>
-                    <Markdown gfm>{markdownContent}</Markdown>
+                <div
+                    style={{ ["--preview-lines" as any]: previewLines }}
+                    className={
+                        previewLines ? "line-clamp-[--preview-lines]" : ""
+                    }
+                >
+                    <Markdown
+                        disallowedElements={
+                            previewLines
+                                ? ["h1", "h2", "h3", "h4", "h5", "h6"]
+                                : []
+                        }
+                        unwrapDisallowed
+                        remarkPlugins={[remarkGfm]}
+                    >
+                        {markdownContent}
+                    </Markdown>
                 </div>
             )}
         </div>
