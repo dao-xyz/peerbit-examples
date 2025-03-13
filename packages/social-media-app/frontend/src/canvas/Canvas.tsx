@@ -164,16 +164,16 @@ export const Canvas = (
                             className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
                             version="1.1"
                         >
-                            <filter id="gaussianBlur4">
+                            <filter id="gaussianBlurCanvas">
                                 <feGaussianBlur
-                                    stdDeviation="40"
+                                    stdDeviation="20"
                                     result="blur"
                                 />
                             </filter>
                         </svg>
                         {!rectIsStaticMarkdownText(rect) &&
                             properties.bgBlur && (
-                                <div className="absolute opacity-30 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2  [filter:url('#gaussianBlur4')]">
+                                <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2  [filter:url('#gaussianBlurCanvas')]">
                                     <Frame
                                         thumbnail={false}
                                         active={false}
