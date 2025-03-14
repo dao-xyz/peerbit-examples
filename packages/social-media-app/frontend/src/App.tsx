@@ -102,7 +102,7 @@ export const App = () => {
                 host: true,
             }}
             iframe={{ type: "proxy", targetOrigin: "*" }}
-            waitForConnnected={true}
+            waitForConnnected={false}
             inMemory={false}
         >
             <HashRouter basename="/">
