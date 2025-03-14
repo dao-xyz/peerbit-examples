@@ -85,6 +85,7 @@ import { inIframe } from "@peerbit/react";
 import { CanvasProvider } from "./canvas/useCanvas";
 import { ProfileProvider } from "./profile/useProfiles";
 import { IdentitiesProvider } from "./identity/useIdentities";
+import { ErrorProvider } from "./dialogs/useErrorDialog";
 
 export const App = () => {
     setTheme();
@@ -105,25 +106,27 @@ export const App = () => {
             inMemory={false}
         >
             <HashRouter basename="/">
-                <IdentitiesProvider>
-                    <AppProvider>
-                        <CanvasProvider>
-                            <ProfileProvider>
-                                <>
-                                    {!inIframe() && <Header></Header>}
-                                    <div
-                                        /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
-                                        /*  */
-                                        /*   */
-                                        className="content-container flex-1"
-                                    >
-                                        <BaseRoutes />
-                                    </div>
-                                </>
-                            </ProfileProvider>
-                        </CanvasProvider>
-                    </AppProvider>
-                </IdentitiesProvider>
+                <ErrorProvider>
+                    <IdentitiesProvider>
+                        <AppProvider>
+                            <CanvasProvider>
+                                <ProfileProvider>
+                                    <>
+                                        {!inIframe() && <Header></Header>}
+                                        <div
+                                            /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
+                                            /*  */
+                                            /*   */
+                                            className="content-container flex-1"
+                                        >
+                                            <BaseRoutes />
+                                        </div>
+                                    </>
+                                </ProfileProvider>
+                            </CanvasProvider>
+                        </AppProvider>
+                    </IdentitiesProvider>
+                </ErrorProvider>
             </HashRouter>
         </PeerProvider>
     );

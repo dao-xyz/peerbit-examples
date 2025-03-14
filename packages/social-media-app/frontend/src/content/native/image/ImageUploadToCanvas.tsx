@@ -1,7 +1,6 @@
 import { useCanvas } from "../../../canvas/CanvasWrapper";
 import { FaCamera } from "react-icons/fa";
 
-// New component for uploading images
 export const ImageUploadTrigger = (properties?: {
     children?: JSX.Element;
     className?: string;
@@ -10,11 +9,16 @@ export const ImageUploadTrigger = (properties?: {
     const handleFileChange = async (
         event: React.ChangeEvent<HTMLInputElement>
     ) => {
-        const files = event.target.files;
-        if (files && files.length > 0) {
+        // Convert the FileList into an array immediately.
+        const fileArray = event.target.files
+            ? Array.from(event.target.files)
+            : [];
+        console.log({ fileArray });
+
+        if (fileArray.length > 0) {
             // Optionally, loop to support multiple images
-            for (let i = 0; i < files.length; i++) {
-                await insertImage(files[i], { pending: true });
+            for (const file of fileArray) {
+                await insertImage(file, { pending: true });
             }
             // Clear the input value so the same file can be uploaded again if needed.
             event.target.value = "";
@@ -22,7 +26,7 @@ export const ImageUploadTrigger = (properties?: {
     };
 
     return (
-        <label className={properties.className}>
+        <label className={properties?.className}>
             <input
                 type="file"
                 accept="image/*"
@@ -30,7 +34,7 @@ export const ImageUploadTrigger = (properties?: {
                 style={{ display: "none" }}
                 onChange={handleFileChange}
             />
-            {properties.children || <FaCamera size={25} />}
+            {properties?.children || <FaCamera size={25} />}
         </label>
     );
 };

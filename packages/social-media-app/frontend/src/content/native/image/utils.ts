@@ -5,7 +5,7 @@ export const readFileAsImage = (file: File): Promise<StaticImage> => {
     if (!file) {
         return;
     }
-    const deferred = pDefer();
+    const deferred = pDefer<StaticImage>();
     const reader = new FileReader();
     reader.onload = () => {
         const result = reader.result;
@@ -25,4 +25,5 @@ export const readFileAsImage = (file: File): Promise<StaticImage> => {
         deferred.reject(error);
     };
     reader.readAsDataURL(file);
+    return deferred.promise;
 };

@@ -16,6 +16,7 @@ import { concat, equals } from "uint8arrays";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
+import { useError } from "../dialogs/useErrorDialog.js";
 
 interface CanvasContextType {
     editMode: boolean;
@@ -68,7 +69,9 @@ export const CanvasWrapper = ({
         id: canvasDB?.idString,
         keepOpenOnUnmount: true,
     });
+
     const { getNativeApp } = useApps();
+    const { showError } = useError();
 
     const [editMode, setEditMode] = useState(!!draft);
     const resizeSizes = useRef(
@@ -135,8 +138,12 @@ export const CanvasWrapper = ({
     const insertImage = async (file: File, options?: { pending?: boolean }) => {
         // Create an object URL for immediate preview.
 
-        const image = await readFileAsImage(file);
-        addRect(new StaticContent({ content: image }), options);
+        try {
+            const image = await readFileAsImage(file);
+            await addRect(new StaticContent({ content: image }), options);
+        } catch (error) {
+            showError("Failed to insert image", error);
+        }
     };
 
     const insertDefault = (options?: {
@@ -191,19 +198,23 @@ export const CanvasWrapper = ({
 
     const savePending = async () => {
         if (!pendingRects) return;
-        const pendingToSave = pendingRects.filter(
-            (x) =>
-                x.content instanceof StaticContent === false ||
-                x.content.content.isEmpty === false
-        );
-        if (pendingToSave.length === 0) return;
-        setPendingRects([]);
-        pendingCounter.current += pendingToSave.length;
-        await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
-        if (draft && onSave) {
-            onSave();
+        try {
+            const pendingToSave = pendingRects.filter(
+                (x) =>
+                    x.content instanceof StaticContent === false ||
+                    x.content.content.isEmpty === false
+            );
+            if (pendingToSave.length === 0) return;
+            setPendingRects([]);
+            pendingCounter.current += pendingToSave.length;
+            await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
+            if (draft && onSave) {
+                onSave();
+            }
+            return pendingToSave;
+        } catch (error) {
+            showError("Failed to save", error);
         }
-        return pendingToSave;
     };
 
     const reset = () => {
