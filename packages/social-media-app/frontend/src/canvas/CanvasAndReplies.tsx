@@ -8,10 +8,6 @@ import { Replies } from "./Replies.js";
 import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
 import { Header } from "./header/Header.js";
-import { CanvasModifyToolbar } from "./ModifyToolbar.js";
-import { ImageUploadTrigger } from "../content/native/image/ImageUploadToCanvas.js";
-import { FaPlus } from "react-icons/fa";
-import { SaveButton } from "./SaveCanvasButton.js";
 import { Toolbar } from "./toolbar/Toolbar.js";
 
 export const CanvasAndReplies = () => {
@@ -155,7 +151,10 @@ export const CanvasAndReplies = () => {
                     }}
                 >
                     <div className="max-w-[876px] w-full h-full">
-                        <Header canvas={lastCanvas} className="mb-2" />
+                        {/* dont show header on root post */}
+                        {canvases.length > 1 && (
+                            <Header canvas={lastCanvas} className="mb-2" />
+                        )}
                         <CanvasWrapper canvas={lastCanvas}>
                             <Canvas bgBlur fitWidth draft={false} />
                         </CanvasWrapper>
