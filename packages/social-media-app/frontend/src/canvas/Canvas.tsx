@@ -146,9 +146,6 @@ export const Canvas = (
                                     equals(p.id, rect.id)
                                 )
                             }
-                            coverParent={
-                                properties.appearance === "chat-view-images"
-                            }
                             fit={
                                 properties.appearance === "chat-view-images"
                                     ? "cover"
@@ -184,7 +181,6 @@ export const Canvas = (
                                         onLoad={() => {}}
                                         onContentChange={() => {}}
                                         pending={false}
-                                        coverParent={true}
                                         fit="cover"
                                     />
                                 </div>

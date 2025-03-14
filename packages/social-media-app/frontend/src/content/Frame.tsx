@@ -1,7 +1,6 @@
 import React from "react";
 import { IFrameContent, Element, StaticContent } from "@dao-xyz/social";
 import {
-    MdClear,
     MdOpenWith,
     MdAddReaction,
     MdOpenInBrowser,
@@ -31,9 +30,10 @@ export const Frame = (properties: {
     ) => void;
     key?: number;
     delete(): void;
-    coverParent?: boolean;
     fit?: "cover" | "contain";
     previewLines?: number;
+
+    noPadding?: boolean;
 }) => {
     const navigate = useNavigate();
 
@@ -47,14 +47,7 @@ export const Frame = (properties: {
         }
     };
 
-    const renderContent = ({
-        coverParent,
-        previewLines,
-    }: {
-        coverParent?: boolean;
-
-        previewLines?: number;
-    }) => {
+    const renderContent = ({ previewLines }: { previewLines?: number }) => {
         // For iframes, continue to use the iframe as before.
         if (properties.element.content instanceof IFrameContent) {
             return (
@@ -87,9 +80,9 @@ export const Frame = (properties: {
                             );
                         }
                     }}
-                    coverParent={coverParent}
                     fit={properties.fit}
                     previewLines={previewLines}
+                    noPadding={properties.noPadding}
                 />
             );
         }
@@ -109,7 +102,6 @@ export const Frame = (properties: {
         >
             <div className={`w-full max-h-full overflow-hidden`}>
                 {renderContent({
-                    coverParent: properties.coverParent,
                     previewLines: properties.previewLines,
                 })}
             </div>
