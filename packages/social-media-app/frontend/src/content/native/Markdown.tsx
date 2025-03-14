@@ -137,9 +137,9 @@ export const MarkdownContent = ({
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={
+                    className={`${
                         previewLines ? "line-clamp-[--preview-lines]" : ""
-                    }
+                    } ${previewLines === 1 ? "break-all" : ""}`}
                 >
                     <Markdown
                         disallowedElements={
