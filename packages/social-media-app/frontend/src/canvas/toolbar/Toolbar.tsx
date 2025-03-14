@@ -17,10 +17,7 @@ const ToolbarContent = forwardRef<
 >((props, ref) => {
     // useCanvas is now called inside a child of CanvasWrapper
     // so it is guaranteed to have the context.
-    const { pendingRects, insertDefault } = useCanvas();
-
-    // If you want to track unsaved changes, for example:
-    const unsavedCount = pendingRects.length;
+    const { insertDefault } = useCanvas();
 
     // Insert a new app post
     const handleNew = (app: SimpleWebManifest) =>
@@ -29,7 +26,7 @@ const ToolbarContent = forwardRef<
     return (
         <div
             ref={ref}
-            className="flex flex-col sticky z-20 bottom-0 w-full left-0"
+            className="flex flex-col sticky z-20 bottom-0 w-full left-0 mb-4"
         >
             {/* Top area: single plus button for images */}
             <Canvas appearance="chat-view-images">
@@ -44,8 +41,9 @@ const ToolbarContent = forwardRef<
                 {/* Left side controls */}
                 <div className="flex flex-row items-center gap-2 max-w-[600px]">
                     {/* If you want the debug bug icon to match, add the same classes here */}
-                    <DebugGeneratePostButton />
-
+                    {import.meta.env.MODE === "development" && (
+                        <DebugGeneratePostButton />
+                    )}
                     {/* Example: an AppSelect control */}
                     <AppSelect onSelected={(app) => handleNew(app)} />
                 </div>
