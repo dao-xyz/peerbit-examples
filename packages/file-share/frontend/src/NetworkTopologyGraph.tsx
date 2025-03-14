@@ -1,8 +1,6 @@
 import { Chart as ChartJS } from "chart.js/auto";
-
-import tailwindConfig from "./../tailwind.config.js";
 import { Peerbit } from "peerbit";
-import { useEffect, useReducer, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { usePeer } from "@peerbit/react";
 import { PeerbitProxyHost } from "@peerbit/proxy";
 import ChartDataLabels from "chartjs-plugin-datalabels";
@@ -14,53 +12,73 @@ import {
     EdgeLine,
 } from "chartjs-chart-graph";
 
-// register controller in chart.js and ensure the defaults are set
+// Register controllers and plugins
 ChartJS.register(
     ForceDirectedGraphController,
     TreeChart,
     TreeController,
     DendrogramController,
-    EdgeLine
+    EdgeLine,
+    ChartDataLabels
 );
 
-const styles = {
-    pointBorderColor: tailwindConfig.theme.colors.neutral[50],
-    edgeLineBorderColor: tailwindConfig.theme.colors.neutral[50],
+// Helper to read CSS custom properties defined in your index.css
+const getTailwindColors = () => {
+    const style = getComputedStyle(document.documentElement);
+    return {
+        neutral50:
+            style.getPropertyValue("--tw-neutral-50")?.trim() || "#f9fafb", // fallback if not defined
+        neutral200:
+            style.getPropertyValue("--tw-neutral-200")?.trim() || "#e5e7eb",
+        neutral500:
+            style.getPropertyValue("--tw-neutral-500")?.trim() || "#6b7280",
+        green500: style.getPropertyValue("--tw-green-500")?.trim() || "#22c55e",
+        // Assuming you have defined these custom properties in your CSS
+        primary400:
+            style.getPropertyValue("--color-primary-400")?.trim() || "#cbd5e1", // adjust fallback as needed
+    };
 };
+
 export const NetworkTopologyGraph = () => {
     const { peer } = usePeer();
-    const canvasRef = useRef(null);
-    const chartRef = useRef<ChartJS>(null);
+    const canvasRef = useRef<HTMLCanvasElement | null>(null);
+    const chartRef = useRef<ChartJS | null>(null);
+    const [colors, setColors] = useState(getTailwindColors());
+
+    // Update colors on window resize (or you can hook into theme toggles)
     useEffect(() => {
-        if (!canvasRef.current) {
-            return;
-        }
+        const updateColors = () => setColors(getTailwindColors());
+        window.addEventListener("resize", updateColors);
+        return () => window.removeEventListener("resize", updateColors);
+    }, []);
+
+    // Remove tailwind config; instead, use dynamic colors in our styles object.
+    const styles = {
+        pointBorderColor: colors.neutral50,
+        edgeLineBorderColor: colors.neutral50,
+    };
+
+    useEffect(() => {
+        if (!canvasRef.current) return;
         chartRef.current?.destroy();
         chartRef.current = new ChartJS(canvasRef.current, {
             type: "forceDirectedGraph",
-
             data: { datasets: [] },
             options: {
                 responsive: true,
-                animation: {
-                    duration: 0,
-                },
+                animation: { duration: 0 },
                 plugins: {
-                    legend: {
-                        display: false,
-                    },
+                    legend: { display: false },
                     title: {
                         display: true,
-                        color: tailwindConfig.theme.colors.neutral[50],
+                        color: colors.neutral50,
                         text: "Route map",
                     },
                     subtitle: {
                         display: true,
-                        color: tailwindConfig.theme.colors.neutral[200],
+                        color: colors.neutral200,
                         text: "A dashed line represents a path with unknown hops",
-                        padding: {
-                            bottom: 20,
-                        },
+                        padding: { bottom: 20 },
                     },
                     datalabels: {
                         color: "white",
@@ -70,35 +88,27 @@ export const NetworkTopologyGraph = () => {
                         borderWidth: 1,
                     },
                 },
-
                 scales: {
                     x: {
-                        min: -1.5, // make sure long labels dont overflow
-                        max: 1.5, // make sure long labels dont overflow
+                        min: -1.5, // Ensure long labels don't overflow
+                        max: 1.5,
                     },
                 },
-                /*   tree: {
-                      orientation: 'radial',
-                      mode: 'tree'
-                  } */
             },
         });
-        chartRef.current.data;
         return () => {
-            chartRef.current.destroy();
-            chartRef.current = undefined;
+            chartRef.current?.destroy();
+            chartRef.current = null;
         };
-    }, [canvasRef]);
+    }, [canvasRef, colors]);
 
     useEffect(() => {
-        if (!peer) {
-            return;
-        }
+        if (!peer) return;
         let client = peer;
         if (peer instanceof PeerbitProxyHost) {
             client = peer.hostClient;
         }
-        if (client instanceof Peerbit === false) {
+        if (!(client instanceof Peerbit)) {
             throw new Error(
                 "Network Topology graph can only be used with a non-proxy client"
             );
@@ -143,27 +153,21 @@ export const NetworkTopologyGraph = () => {
                     }
                 }
             }
-            let data = labels.map((x) => {
-                return {
-                    label: x.length > 10 ? x.substring(0, 10) + "..." : x,
-                };
-            });
-            chartRef.current.data.datasets = [
+            let data = labels.map((x) => ({
+                label: x.length > 10 ? x.substring(0, 10) + "..." : x,
+            }));
+            chartRef.current!.data.datasets = [
                 {
-                    ...{
-                        ...styles,
-                        edgeLineBorderDash: (ctx) => dashes[ctx.index],
-                        pointBackgroundColor: (ctx) =>
-                            ctx.index === 0
-                                ? tailwindConfig.theme.colors.green[500]
-                                : tailwindConfig.theme.colors.neutral[500],
-                    },
+                    ...styles,
+                    edgeLineBorderDash: (ctx: any) => dashes[ctx.index], /// TODO does this property exist?
+                    pointBackgroundColor: (ctx: any) =>
+                        ctx.index === 0 ? colors.green500 : colors.neutral500,
                     pointRadius: 10,
                     data,
                     edges,
-                },
+                } as any,
             ];
-            chartRef.current.update();
+            chartRef.current!.update();
         };
         client.services.pubsub.addEventListener("peer:reachable", updateGraph);
         client.services.pubsub.addEventListener(
@@ -186,40 +190,7 @@ export const NetworkTopologyGraph = () => {
                 updateGraph
             );
         };
-    }, [peer?.identity.publicKey.hashcode()]);
+    }, [peer?.identity.publicKey.hashcode(), colors]);
 
     return <canvas ref={canvasRef}></canvas>;
-
-    /* return datasets.datasets.length > 0 ? <Chart type="forceDirectedGraph" options={{
-        responsive: true,
-        animation: {
-            duration: 0
-        },
-        plugins: {
-            legend: {
-                display: false
-            },
-            title: {
-                display: true,
-                color: tailwindConfig.theme.colors.neutral[50],
-                text: 'Route map'
-            },
-            datalabels: {
-                color: 'white',
-                backgroundColor: "black",
-                borderRadius: 9999,
-                borderColor: "white",
-                borderWidth: 1,
-
-            },
-        },
-
-        scales: {
-
-            x: {
-                min: -1.5,  // make sure long labels dont overflow
-                max: 1.5 // make sure long labels dont overflow
-            }
-        }
-    }} data={datasets} /> : <></> */
 };
