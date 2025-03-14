@@ -99,7 +99,7 @@ export const Frame = (properties: {
     return (
         <div
             key={properties.key}
-            className={`flex flex-row w-full max-h-full max-w-full overflow-hidden ${
+            className={`flex flex-row w-full max-h-full h-full max-w-full overflow-hidden ${
                 !properties.thumbnail
                     ? "" /* TODO bg? "bg-neutral-100 dark:bg-neutral-900" */
                     : ""

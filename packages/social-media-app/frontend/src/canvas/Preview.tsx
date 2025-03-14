@@ -32,7 +32,7 @@ const PreviewFrame = ({
     noPadding?: boolean;
 }) => (
     <div
-        className={`relative overflow-hidden ${
+        className={`flex flex-col relative overflow-hidden ${
             "w-full h-full" /* maximizeHeight ? "h-full" : "" */
         }`}
     >
@@ -189,7 +189,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
         return (
             <div className="w-full flex flex-col gap-4">
                 {firstApp && (
-                    <div className="w-full max-h-[40vh] rounded-md overflow-hidden">
+                    <div className="w-full max-h-[40vh] flex flex-col h-full rounded-md overflow-hidden">
                         <PreviewFrame
                             bgBlur
                             element={firstApp}

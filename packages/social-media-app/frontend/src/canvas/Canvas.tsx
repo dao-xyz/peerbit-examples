@@ -71,7 +71,9 @@ export const Canvas = (
                 >
                     <div
                         className={`relative flex flex-col overflow-hidden rounded-md ${
-                            rectIsStaticMarkdownText(rect) ? "" : "max-h-[60vh]"
+                            rectIsStaticMarkdownText(rect)
+                                ? ""
+                                : "max-h-[60vh] h-full"
                         }`}
                     >
                         <Frame
