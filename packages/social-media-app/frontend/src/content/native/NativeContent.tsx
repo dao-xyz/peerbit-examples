@@ -12,9 +12,9 @@ export type EditableStaticContentProps = {
     editable?: boolean;
     onChange?: (newContent: StaticContent["content"]) => void;
     thumbnail?: boolean;
-    coverParent?: boolean;
     fit?: "cover" | "contain";
     previewLines?: number;
+    noPadding?: boolean;
 };
 
 export const EditableStaticContent = ({
@@ -23,9 +23,9 @@ export const EditableStaticContent = ({
     editable = false,
     onChange,
     thumbnail,
-    coverParent,
     fit,
     previewLines,
+    noPadding,
 }: EditableStaticContentProps) => {
     if (staticContent instanceof StaticMarkdownText) {
         return (
@@ -36,6 +36,7 @@ export const EditableStaticContent = ({
                 onChange={onChange}
                 thumbnail={thumbnail}
                 previewLines={previewLines}
+                noPadding={noPadding}
             />
         );
     }
@@ -47,7 +48,6 @@ export const EditableStaticContent = ({
                 editable={editable}
                 onChange={onChange}
                 thumbnail={thumbnail}
-                coverParent={coverParent}
                 fit={fit}
             />
         );

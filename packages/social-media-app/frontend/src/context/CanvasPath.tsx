@@ -7,6 +7,7 @@ import { IoIosArrowBack } from "react-icons/io";
 import { Canvas } from "../canvas/Canvas";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
+import { CanvasPreview } from "../canvas/Preview";
 
 export const CanvasPath = () => {
     const navigate = useNavigate();
@@ -48,9 +49,9 @@ export const CanvasPath = () => {
         }
     };
 
-    const renderCanvas = (canvas: CanvasDB, ix) => (
+    const renderBreadcrumb = (canvas: CanvasDB, ix) => (
         <CanvasWrapper canvas={canvas}>
-            <Canvas fitHeight key={ix} scaled width={60} height={35} />
+            <CanvasPreview variant="breadcrumb" key={ix} />
         </CanvasWrapper>
     );
 
@@ -71,7 +72,7 @@ export const CanvasPath = () => {
                     <TagInput
                         tags={tags}
                         onTagsChange={handleTagsChange}
-                        renderTag={({ tag }, ix) => renderCanvas(tag, ix)}
+                        renderTag={({ tag }, ix) => renderBreadcrumb(tag, ix)}
                     />
                 </div>
             ) : (
@@ -87,7 +88,7 @@ export const CanvasPath = () => {
                                     className="flex flex-row items-center"
                                 >
                                     {ix > 0 && <span className="mx-1">/</span>}
-                                    {renderCanvas(x, ix)}
+                                    {renderBreadcrumb(x, ix)}
                                 </div>
                             );
                         })

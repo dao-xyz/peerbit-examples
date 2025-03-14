@@ -10,6 +10,7 @@ export type MarkdownContentProps = {
     onChange?: (newContent: StaticMarkdownText) => void;
     thumbnail?: boolean;
     previewLines?: number;
+    noPadding?: boolean;
 };
 
 export const MarkdownContent = ({
@@ -19,6 +20,7 @@ export const MarkdownContent = ({
     onChange,
     thumbnail,
     previewLines,
+    noPadding,
 }: MarkdownContentProps) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
@@ -114,7 +116,7 @@ export const MarkdownContent = ({
     return (
         <div
             ref={containerRef}
-            className={`px-2.5 w-full text-left ${
+            className={`${noPadding ? "" : "px-2.5"} w-full text-left ${
                 editable ? "cursor-text" : ""
             }`}
             onClick={editable && !isEditing ? handleStartEditing : undefined}

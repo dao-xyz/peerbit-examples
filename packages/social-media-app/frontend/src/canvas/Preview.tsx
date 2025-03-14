@@ -13,21 +13,23 @@ import { Frame } from "../content/Frame";
 import { rectIsStaticMarkdownText } from "./utils/rect";
 
 interface CanvasPreviewProps {
-    variant: "tiny" | "post";
+    variant: "tiny" | "post" | "breadcrumb";
 }
 
 const PreviewFrame = ({
     element,
-    coverParent,
     previewLines,
     bgBlur,
     maximizeHeight,
+    fit,
+    noPadding,
 }: {
     element: Element<ElementContent>;
-    coverParent: boolean;
     previewLines?: number;
     bgBlur?: boolean;
     maximizeHeight?: boolean;
+    fit?: "cover" | "contain";
+    noPadding?: boolean;
 }) => (
     <div
         className={`relative overflow-hidden ${maximizeHeight ? "h-full" : ""}`}
@@ -44,37 +46,39 @@ const PreviewFrame = ({
             onLoad={() => {}}
             onContentChange={() => {}}
             pending={false}
-            coverParent={coverParent}
-            fit="contain"
+            fit={fit}
             previewLines={previewLines}
+            noPadding={noPadding}
         />
-        <svg
-            xmlns="https://www.w3.org/2000/svg"
-            className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
-            version="1.1"
-        >
-            <filter id="gaussianBlurPreview">
-                <feGaussianBlur stdDeviation="20" result="blur" />
-            </filter>
-        </svg>
         {bgBlur && (
-            <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2  [filter:url('#gaussianBlurPreview')]">
-                <Frame
-                    thumbnail={false}
-                    active={false}
-                    setActive={() => {}}
-                    delete={() => {}}
-                    editMode={false}
-                    showCanvasControls={false}
-                    element={element}
-                    replace={async () => {}}
-                    onLoad={() => {}}
-                    onContentChange={() => {}}
-                    pending={false}
-                    coverParent={true}
-                    fit="cover"
-                />
-            </div>
+            <>
+                <svg
+                    xmlns="https://www.w3.org/2000/svg"
+                    className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
+                    version="1.1"
+                >
+                    <filter id="gaussianBlurPreview">
+                        <feGaussianBlur stdDeviation="20" result="blur" />
+                    </filter>
+                </svg>
+                <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2  [filter:url('#gaussianBlurPreview')]">
+                    <Frame
+                        thumbnail={false}
+                        active={false}
+                        setActive={() => {}}
+                        delete={() => {}}
+                        editMode={false}
+                        showCanvasControls={false}
+                        element={element}
+                        replace={async () => {}}
+                        onLoad={() => {}}
+                        onContentChange={() => {}}
+                        pending={false}
+                        fit="cover"
+                        noPadding={noPadding}
+                    />
+                </div>
+            </>
         )}
     </div>
 );
@@ -102,19 +106,23 @@ const seperateAndSortRects = (rects: Element<ElementContent>[]) => {
     return seperatedRects;
 };
 
-type RectsForVariant<V> = V extends "tiny"
-    ? Element<ElementContent> | undefined
-    : V extends "post"
-    ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
-    : never;
+type RectsForVariant<V extends "tiny" | "post" | "breadcrumb"> =
+    V extends "tiny"
+        ? Element<ElementContent> | undefined
+        : V extends "breadcrumb"
+        ? Element<ElementContent> | undefined
+        : V extends "post"
+        ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
+        : never;
 
-function getRectsForVariant<Variant extends "tiny" | "post">(
+function getRectsForVariant<Variant extends "tiny" | "post" | "breadcrumb">(
     separatedRects: SeparatedRects,
     variant: Variant
 ): RectsForVariant<Variant> {
     // get image, or if not present text, or if not present undefined
     switch (variant) {
         case "tiny":
+        case "breadcrumb":
             return (separatedRects.other[0] ??
                 separatedRects.text[0] ??
                 undefined) as RectsForVariant<Variant>;
@@ -145,8 +153,30 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
         return (
             <PreviewFrame
                 element={variantRects as RectsForVariant<"tiny">}
-                coverParent={true}
+                fit="cover"
             />
+        );
+    }
+    if (variant === "breadcrumb") {
+        return (
+            <div
+                className={`${
+                    rectIsStaticMarkdownText(
+                        variantRects as RectsForVariant<"breadcrumb">
+                    )
+                        ? "max-w-[35%] px-1"
+                        : "w-6"
+                } flex-none h-6 rounded-md overflow-hidden border border-neutral-950 dark:border-neutral-50`}
+            >
+                <PreviewFrame
+                    element={variantRects as RectsForVariant<"breadcrumb">}
+                    fit="cover"
+                    previewLines={1}
+                    noPadding={rectIsStaticMarkdownText(
+                        variantRects as RectsForVariant<"breadcrumb">
+                    )}
+                />
+            </div>
         );
     }
     if (variant === "post") {
@@ -161,7 +191,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                         <PreviewFrame
                             bgBlur
                             element={firstApp}
-                            coverParent
+                            fit="contain"
                             maximizeHeight
                         />
                     </div>
@@ -173,19 +203,13 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                                 className="aspect-[1] w-12 rounded-md overflow-hidden"
                                 key={i}
                             >
-                                <PreviewFrame element={app} coverParent />
+                                <PreviewFrame element={app} fit="cover" />
                             </div>
                         ))}
                     </div>
                 )}
 
-                {text && (
-                    <PreviewFrame
-                        element={text}
-                        coverParent={false}
-                        previewLines={3}
-                    />
-                )}
+                {text && <PreviewFrame element={text} previewLines={3} />}
             </div>
         );
     }

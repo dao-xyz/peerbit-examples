@@ -14,7 +14,6 @@ import { readFileAsImage } from "./utils";
  * [editable] - Whether the image can be edited/replaced
  * [onChange] - Callback when image content changes
  * [thumbnail] - Display as thumbnail
- * [coverParent] - Cover parent container
  * [fit] - How image should fit container. If not given, scales to parent on width and height
  */
 export type ImageContentProps = {
@@ -23,7 +22,6 @@ export type ImageContentProps = {
     editable?: boolean;
     onChange?: (newContent: StaticImage) => void;
     thumbnail?: boolean;
-    coverParent?: boolean;
     fit?: "cover" | "contain";
 };
 
@@ -36,7 +34,6 @@ export const ImageContent = ({
     onResize,
     editable = false,
     onChange,
-    coverParent,
     fit,
 }: ImageContentProps) => {
     // References for container element and dimension tracking
