@@ -5,13 +5,11 @@ import { ComponentType } from "react";
 interface SaveButtonProps {
     icon?: ComponentType<{ size?: number }>;
     className?: string;
-    onSavePending: () => void;
 }
 
 export const SaveButton = ({
     icon: Icon = BsSend,
     className,
-    onSavePending,
 }: SaveButtonProps) => {
     const { savePending } = useCanvas();
     return (
@@ -19,9 +17,8 @@ export const SaveButton = ({
             <button
                 onClick={() => {
                     savePending();
-                    onSavePending();
                 }}
-                className="btn-elevated btn-icon btn-icon-md"
+                className={"btn-icon btn-icon-md " + className}
                 aria-label="Send"
             >
                 <Icon size={24} />

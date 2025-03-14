@@ -139,17 +139,11 @@ export const CreateRoot = () => {
                             canvas={pendingCanvas.program}
                             draft={true}
                             multiCanvas
+                            onSave={savePending}
                         >
                             <div className="flex flex-row gap-4">
-                                <Canvas
-                                    fitWidth
-                                    draft={true}
-                                    onSave={savePending}
-                                />
-                                <SaveButton
-                                    onSavePending={savePending}
-                                    icon={IoArrowForward}
-                                />
+                                <Canvas fitWidth draft={true} />
+                                <SaveButton icon={IoArrowForward} />
                             </div>
                         </CanvasWrapper>
                         {/* Labeled input field for base64 string with Import and Copy buttons */}

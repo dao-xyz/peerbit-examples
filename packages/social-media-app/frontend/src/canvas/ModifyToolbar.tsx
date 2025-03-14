@@ -1,13 +1,10 @@
-import { MdSave } from "react-icons/md";
 import { TbBorderCorners } from "react-icons/tb";
 import * as Toggle from "@radix-ui/react-toggle";
-import { VscDebug } from "react-icons/vsc";
-
-import { AppSelect } from "./AppSelect";
+import { AppSelect } from "./toolbar/AppSelect";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { useCanvas } from "./CanvasWrapper";
 import { ImageUploadTrigger } from "../content/native/image/ImageUploadToCanvas";
-import { DebugGeneratePostButton } from "./DebugGeneratePostButton";
+import { DebugGeneratePostButton } from "./toolbar/DebugGeneratePostButton";
 
 const isLocal = import.meta.env.MODE === "development";
 
@@ -72,9 +69,7 @@ export const CanvasModifyToolbar = (properties: {
             </button> */}
             <ImageUploadTrigger />
             {isLocal && <DebugGeneratePostButton />}
-            <div className="w-[40px] h-[40px]">
-                <AppSelect onSelected={(app) => onNew(app)} />
-            </div>
+            <AppSelect onSelected={(app) => onNew(app)} />
         </div>
     );
 };

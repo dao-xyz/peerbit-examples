@@ -92,14 +92,13 @@ export const useLocal = <
         // Define the search function.
         const _l = async (args?: any) => {
             try {
-                const results: WithContext<RT>[] = (await db.index.search(
-                    options?.query ?? {},
-                    {
-                        local: true,
-                        remote: false,
-                        resolve: options?.resolve as any,
-                    }
-                )) as any; // TODO fix types
+                const iterator = db.index.iterate(options?.query ?? {}, {
+                    local: true,
+                    remote: false,
+                    resolve: options?.resolve as any,
+                });
+                const results: WithContext<RT>[] =
+                    (await iterator.all()) as any; // TODO fix types
                 // Update the state and call onChanges if provided.
                 setAll(() => {
                     options?.onChanges?.(results);

@@ -8,7 +8,7 @@ export const CreateNew = () => {
         <>
             {!isLoading ? (
                 <button
-                    className="btn btn-elevated"
+                    className="btn btn-elevated btn-secondary btn-md"
                     onClick={() => {
                         setIsLoading(true);
                         create().finally(() => {

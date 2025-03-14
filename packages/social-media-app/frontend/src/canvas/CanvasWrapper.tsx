@@ -32,6 +32,7 @@ interface CanvasContextType {
     removePending: (id: Uint8Array) => void;
     savePending: () => Promise<Element[] | undefined>;
     canvas: CanvasDB;
+    onContentChange: (element: Element) => void;
     // New: Function to insert an image into the canvas
     insertImage: (file: File, options?: { pending?: boolean }) => Promise<void>;
 }
@@ -54,6 +55,7 @@ interface CanvasWrapperProps {
     draft?: boolean;
     onSave?: () => void;
     multiCanvas?: boolean;
+    onContentChange?: (element: Element) => void;
 }
 
 export const CanvasWrapper = ({
@@ -62,6 +64,7 @@ export const CanvasWrapper = ({
     draft,
     onSave,
     multiCanvas,
+    onContentChange,
 }: CanvasWrapperProps) => {
     const { peer } = usePeer();
     const { program: canvas } = useProgram(canvasDB, {
@@ -204,6 +207,7 @@ export const CanvasWrapper = ({
                     x.content instanceof StaticContent === false ||
                     x.content.content.isEmpty === false
             );
+
             if (pendingToSave.length === 0) return;
             setPendingRects([]);
             pendingCounter.current += pendingToSave.length;
@@ -257,6 +261,7 @@ export const CanvasWrapper = ({
         removePending,
         savePending,
         canvas,
+        onContentChange,
         insertImage, // <--- expose the new function
     };
 

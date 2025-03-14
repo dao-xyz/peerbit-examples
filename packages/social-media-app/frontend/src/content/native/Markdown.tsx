@@ -2,12 +2,13 @@ import React, { useRef, useEffect, useState, useCallback } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { StaticMarkdownText } from "@dao-xyz/social";
+import { ChangeCallback } from "./types";
 
 export type MarkdownContentProps = {
     content: StaticMarkdownText;
     onResize: (dims: { width: number; height: number }) => void;
     editable?: boolean;
-    onChange?: (newContent: StaticMarkdownText) => void;
+    onChange?: ChangeCallback;
     thumbnail?: boolean;
     previewLines?: number;
     noPadding?: boolean;
@@ -87,13 +88,19 @@ export const MarkdownContent = ({
         }, 0);
     };
 
+    useEffect(handleStartEditing, [textareaRef.current]);
+
     // Handle key presses in the textarea.
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
         if (e.key === "Enter" && !e.shiftKey) {
-            // If there's no newline (i.e. single row), send/save the text.
-            if (!text.includes("\n")) {
+            const currentValue = e.currentTarget.value;
+            // If there's no newline in the current value, send the message.
+            if (!currentValue.includes("\n")) {
                 e.preventDefault();
-                onChange && onChange(new StaticMarkdownText({ text }));
+                onChange &&
+                    onChange(new StaticMarkdownText({ text: currentValue }), {
+                        save: true,
+                    }); // save true becaus we want to save/send the content immediately
                 setIsEditing(false);
             }
         }

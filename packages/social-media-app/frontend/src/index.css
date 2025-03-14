@@ -18,20 +18,47 @@ code {
         monospace;
 }
 
-/* prevent dragging rects with iframe to loose mouse events to the iframe */
-.react-draggable-transparent-selection iframe {
-    pointer-events: none !important;
+@import "tailwindcss";
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+    /* Define your primary color shades using oklch() */
+    --color-primary-50: oklch(0.97 0.014 254.604);
+    --color-primary-100: oklch(0.932 0.032 255.585);
+    --color-primary-200: oklch(0.882 0.059 254.128);
+    --color-primary-300: oklch(0.809 0.105 251.813);
+    --color-primary-400: oklch(0.707 0.165 254.624);
+    --color-primary-500: oklch(0.623 0.214 259.815);
+    --color-primary-600: oklch(0.546 0.245 262.881);
+    --color-primary-700: oklch(0.488 0.243 264.376);
+    --color-primary-800: oklch(0.424 0.199 265.638);
+    --color-primary-900: oklch(0.379 0.146 265.522);
+    --color-primary-950: oklch(0.282 0.091 267.935);
+
+
+
+    /* Define your secondary color shades using oklch() */
+    --color-secondary-50: oklch(0.987 0.026 102.212);
+    --color-secondary-100: oklch(0.973 0.071 103.193);
+    --color-secondary-200: oklch(0.945 0.129 101.54);
+    --color-secondary-300: oklch(0.905 0.182 98.111);
+    --color-secondary-400: oklch(0.852 0.199 91.936);
+    --color-secondary-500: oklch(0.795 0.184 86.047);
+    --color-secondary-600: oklch(0.681 0.162 75.834);
+    --color-secondary-700: oklch(0.554 0.135 66.442);
+    --color-secondary-800: oklch(0.476 0.114 61.907);
+    --color-secondary-900: oklch(0.421 0.095 57.708);
+
 }
 
-/* prevent resizing rects with iframe to loose mouse events to the iframe */
-.resizing.react-resizable iframe {
-    pointer-events: none !important;
-}
 
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 @tailwind variants;
+
+
 
 /*
 @layer base {
@@ -148,80 +175,77 @@ code {
     }
 
     /* scrollbar color */
+    /* Narrow scrollbar track */
     ::-webkit-scrollbar {
+        width: 6px;
+        /* Adjust the width as desired */
         background: var(--mono-shade3);
     }
 
+    /* Scrollbar thumb with semi-transparent default state and smooth transition */
     ::-webkit-scrollbar-thumb {
-        background: #888;
+        background-color: rgba(136, 136, 136, 0.5);
+        /* 50% opacity */
+        transition: background-color 0.3s ease;
+    }
+
+    /* On hover, increase opacity */
+    ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(136, 136, 136, 0.8);
+        /* 80% opacity */
     }
 }
 
 @layer components {
+
+    /* Example fonts */
     .comic-font {
         font-family: "Comic Neue", cursive;
     }
 
+    .ganja-font {
+        font-family: "Gamja Flower", sans-serif;
+    }
+
+    /* Basic icon color */
     .icon {
-        @apply text-neutral-950;
-        @apply dark:text-neutral-50;
+        @apply text-neutral-950 dark:text-neutral-50;
     }
 
+    /* Generic button styling */
     .btn {
-        @apply py-2 px-4 rounded;
-    }
-
-    .btn-icon {
-        @apply text-neutral-800;
-        @apply dark:text-neutral-200;
+        @apply inline-flex items-center justify-center rounded cursor-pointer select-none;
+        @apply text-neutral-800 dark:text-neutral-200;
+        @apply transition-all duration-200;
     }
 
     .btn:hover {
-        @apply bg-primary-200;
-        @apply dark:bg-primary-400;
+        @apply bg-primary-200 dark:bg-primary-400;
     }
 
     .btn:active {
-        @apply bg-primary-400;
-        @apply dark:bg-primary-600;
+        @apply bg-primary-400 dark:bg-primary-600;
     }
 
-    .btn-icon:hover {
-        @apply bg-primary-200;
-        @apply dark:bg-primary-400;
+    /* Narrow focus ring or outline for accessibility */
+    .btn:focus {
+        @apply outline-none ring-2 ring-primary-300 dark:ring-primary-500;
     }
 
-    .btn-icon:active {
-        @apply bg-primary-400 !important;
-        @apply dark:bg-primary-600 !important;
+    .btn-unfocus-immediately {
+        @apply focus:outline-none;
     }
 
-    .btn-icon {
-        @apply py-2 px-2 rounded-md;
-    }
-
-    .btn-toggle {
-        box-shadow: 0 4px #999;
-        outline: none;
-        @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
-    }
-
-    .btn-toggle[data-state="on"] {
-        @apply bg-primary-400;
-        @apply dark:bg-primary-600;
-        box-shadow: 0 1px #666 !important;
-        transform: translateY(4px) !important;
-    }
-
-    .btn-toggle:focus {
-        /*  box-shadow: 0 0 0 2px black; */
-        outline: none;
-    }
-
+    /* Elevated button style */
     .btn-elevated {
-        outline: none;
+        /* btn cpy alias from @apply btn */
+        @apply inline-flex items-center justify-center rounded cursor-pointer select-none;
+        @apply text-neutral-800 dark:text-neutral-200;
+        @apply transition-all duration-200;
+
+
+        @apply border border-solid border-neutral-600 dark:border-neutral-400;
         box-shadow: 0 4px #999;
-        @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
     }
 
     .btn-elevated:active {
@@ -229,62 +253,128 @@ code {
         transform: translateY(4px) !important;
     }
 
+    /* Toggle button style */
+    .btn-toggle {
+        @apply border border-solid border-neutral-600 dark:border-neutral-400;
+        box-shadow: 0 4px #999;
+        outline: none;
+    }
+
+    .btn-toggle[data-state="on"] {
+        @apply bg-primary-400 dark:bg-primary-600;
+        box-shadow: 0 1px #666 !important;
+        transform: translateY(4px) !important;
+    }
+
+    .btn-toggle:focus {
+        outline: none;
+    }
+
+    /* Icon button base class (adds minimal padding, sets text color, etc.) */
+    .btn-icon {
+        /* btn cpy alias from @apply btn */
+        @apply inline-flex items-center justify-center rounded cursor-pointer select-none;
+        @apply text-neutral-800 dark:text-neutral-200;
+        @apply transition-all duration-200;
+
+        @apply py-2 px-2;
+        /* This helps ensure there's some clickable area around the icon */
+    }
+
+    /* ========== Button Container Size Classes ========== */
+    .btn-xs {
+        @apply py-[0.5rem] px-1 text-xs;
+        line-height: 1
+    }
+
+
+    .btn-sm {
+        @apply py-1 px-2 text-sm;
+    }
+
+    .btn-md {
+        @apply py-2 px-4 text-base;
+    }
+
+    .btn-lg {
+        @apply py-3 px-6 text-lg;
+    }
+
+    /* ========== Icon Size Classes ========== */
     .btn-icon-sx>* {
+        @apply w-2 h-2;
+        /* e.g., 8×8 px */
+    }
+
+    .btn-icon-sm>* {
         @apply w-4 h-4;
+        /* e.g., 16×16 px */
     }
 
     .btn-icon-md>* {
         @apply w-6 h-6;
-    }
-
-    .btn-icon-lg>* {
-        @apply w-6 h-6;
+        /* e.g., 24×24 px */
     }
 
     .btn-icon-lg>* {
         @apply w-8 h-8;
+        /* e.g., 32×32 px */
     }
 
-    .content-container {
-        height: calc(100vh - 60px);
+    /* Example of secondary button style */
+    .btn-secondary {
+        /* btn cpy alias from @apply btn */
+        @apply inline-flex items-center justify-center rounded cursor-pointer select-none;
+        @apply text-neutral-800 dark:text-neutral-200;
+        @apply transition-all duration-200;
+
+        @apply py-2 px-4 rounded;
+        @apply text-neutral-700 dark:text-neutral-300;
+        @apply border border-neutral-600 dark:border-neutral-400 border-solid;
+        @apply transition-all duration-200;
+        box-shadow: 0 3px #999;
     }
 
+    .btn-secondary:hover {
+        @apply bg-primary-50 dark:bg-primary-800;
+        @apply border border-primary-200 dark:border-primary-600;
+    }
+
+    .btn-secondary:active {
+        @apply bg-primary-100 dark:bg-primary-700;
+        @apply border border-primary-300 dark:border-primary-700;
+        box-shadow: 0 2px #666;
+        transform: translateY(2px);
+    }
+
+    .btn-secondary:focus {
+        @apply outline-none ring-2 ring-primary-300 dark:ring-primary-500;
+    }
+
+    /* Sample menu item style */
     .menu-item {
-        @apply flex items-center w-full p-2;
-
-        /*  @apply py-2 px-4; */
-        @apply text-neutral-800;
-        @apply dark:text-neutral-200;
-        @apply hover:bg-primary-200;
-        @apply dark:hover:bg-primary-400;
+        @apply flex items-center w-full p-2 text-neutral-800 dark:text-neutral-200;
+        @apply hover:bg-primary-200 dark:hover:bg-primary-400;
         cursor: pointer;
     }
 
     .menu-item:hover {
-        @apply bg-primary-200;
-        @apply dark:bg-primary-400;
+        @apply bg-primary-200 dark:bg-primary-400;
     }
 
     .menu-item:active {
-        @apply bg-primary-400;
-        @apply dark:bg-primary-600;
+        @apply bg-primary-400 dark:bg-primary-600;
     }
 
     .menu-item:focus {
-        @apply bg-primary-200;
-        @apply dark:bg-primary-400;
+        @apply bg-primary-200 dark:bg-primary-400;
     }
 
     .menu-item[data-disabled] {
-        @apply text-neutral-400;
-        @apply dark:text-neutral-600;
-        @apply cursor-not-allowed;
+        @apply text-neutral-400 dark:text-neutral-600 cursor-not-allowed;
     }
 
-    .outline-auto {
-        outline: auto;
-    }
-
+    /* Example for a dropdown menu with animation */
     .dropdown-menu-responsive {
         animation-duration: 0.6s;
         animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
@@ -298,10 +388,7 @@ code {
     .dropdown-menu-responsive[data-side="bottom"] {
         animation-name: slideDown;
     }
-
-
 }
-
 
 @keyframes slideUp {
     from {

@@ -7,12 +7,13 @@ import {
     ComboboxOptions,
     Transition,
 } from "@headlessui/react";
-import { useApps } from "../content/useApps";
+import { useApps } from "../../content/useApps";
 import { FaPlus } from "react-icons/fa6";
 import { AiOutlineQuestionCircle } from "react-icons/ai";
 import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { InvalidAppError } from "@dao-xyz/social";
 import { FaCamera, FaImage } from "react-icons/fa";
+import { BsCamera } from "react-icons/bs";
 
 const unknownApp = (url: string) => new SimpleWebManifest({ url });
 const isNative = (app: SimpleWebManifest) => app.url.startsWith("native:");
@@ -73,19 +74,19 @@ export const AppSelect = (properties: {
         >
             {({ open }) => (
                 <div className="relative inline-block">
-                    <ComboboxButton className="flex items-center justify-center btn btn-elevated btn-icon">
-                        <div className="bg-white rounded dark:shadow-primary-20">
+                    <ComboboxButton className="flex items-center justify-center btn btn-icon btn-icon-sm">
+                        <>
                             {selected?.icon ? (
                                 /*  <img
                                      src={selected.icon}
                                      alt="App Icon"
                                      className="w-[21px] h-[21px] p-[2px]"
                                  /> */
-                                <FaPlus className="w-[25px] h-[25px]" />
+                                <FaPlus />
                             ) : (
-                                <AiOutlineQuestionCircle className="w-[25px] h-[25px]" />
+                                <AiOutlineQuestionCircle />
                             )}
-                        </div>
+                        </>
                     </ComboboxButton>
 
                     <Transition
@@ -158,12 +159,9 @@ export const AppSelect = (properties: {
                                                 return (
                                                     <curatedApp.trigger
                                                         key={app.url}
-                                                        className="btn p-2 bg-white rounded hover:bg-primary-200"
+                                                        className="btn p-2 bg-white text-black rounded hover:bg-primary-200"
                                                     >
-                                                        <FaCamera
-                                                            className="invert"
-                                                            size={20}
-                                                        />
+                                                        <BsCamera size={20} />
                                                     </curatedApp.trigger>
                                                 );
                                             }

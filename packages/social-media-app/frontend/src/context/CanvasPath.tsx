@@ -77,7 +77,7 @@ export const CanvasPath = () => {
                 </div>
             ) : (
                 <button
-                    className="btn w-full leading-normal px-2 flex flex-row cursor-pointer overflow-hidden h-full"
+                    className="btn w-full leading-normal justify-start px-2 flex flex-row cursor-pointer overflow-hidden h-full items-center"
                     onClick={() => setFocus(true)}
                 >
                     {path.length > 1 ? (
@@ -85,7 +85,7 @@ export const CanvasPath = () => {
                             return (
                                 <div
                                     key={ix}
-                                    className="flex flex-row items-center"
+                                    className="flex flex-row items-center max-w-[35%] px-1"
                                 >
                                     {ix > 0 && <span className="mx-1">/</span>}
                                     {renderBreadcrumb(x, ix)}

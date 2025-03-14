@@ -38,7 +38,7 @@ export const ProfileButton = forwardRef<
     const content = profile ? (
         <div
             className={`w-8 h-8 rounded-md overflow-hidden ${
-                size != null ? `h-[${size}px] w-auto` : ""
+                size != null ? `h-[${size}px] max-w-[${size}px]` : ""
             }`}
         >
             <CanvasWrapper canvas={profile.profile}>

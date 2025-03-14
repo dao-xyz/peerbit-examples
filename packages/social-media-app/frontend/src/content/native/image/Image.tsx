@@ -5,6 +5,7 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import { StaticImage } from "@dao-xyz/social";
 import { readFileAsImage } from "./utils";
+import { ChangeCallback } from "../types";
 
 /**
  * Props interface for the ImageContent component
@@ -20,7 +21,7 @@ export type ImageContentProps = {
     content: StaticImage;
     onResize: (dims: { width: number; height: number }) => void;
     editable?: boolean;
-    onChange?: (newContent: StaticImage) => void;
+    onChange?: ChangeCallback;
     thumbnail?: boolean;
     fit?: "cover" | "contain";
 };
@@ -107,11 +108,11 @@ export const ImageContent = ({
             onDrop={editable ? handleDrop : undefined}
             className={`relative w-full h-full ${
                 editable
-                    ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150 bg-gray-50 dark:bg-gray-800"
+                    ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150 bg-neutral-50 dark:bg-neutral-800"
                     : ""
             } ${
                 editable && isDragOver
-                    ? "border-blue-500 bg-blue-50 dark:bg-blue-900"
+                    ? "border-primary-500 bg-primary-50 dark:bg-primary-900"
                     : ""
             }`}
         >
@@ -121,7 +122,7 @@ export const ImageContent = ({
                 className={`w-full h-full ${
                     {
                         cover: "object-cover",
-                        contain: "object-contain",
+                        contain: "object-contain w-auto",
                         default: "",
                     }[fit ?? "default"]
                 }`}
@@ -130,7 +131,7 @@ export const ImageContent = ({
                 <>
                     {/* Overlay message */}
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                        <span className="text-sm text-gray-500 dark:text-gray-300 bg-white dark:bg-gray-900 bg-opacity-75 px-2 py-1 rounded">
+                        <span className="text-sm text-neutral-500 dark:text-neutral-300 bg-white dark:bg-neutral-900 bg-opacity-75 px-2 py-1 rounded">
                             Click to upload or drop an image
                         </span>
                     </div>

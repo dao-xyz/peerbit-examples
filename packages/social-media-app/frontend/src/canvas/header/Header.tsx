@@ -13,6 +13,7 @@ import { WithContext } from "@peerbit/document";
 export const Header = (properties: {
     canvas?: Canvas | WithContext<Canvas>;
     direction?: "row" | "col";
+    className?: string;
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
@@ -29,7 +30,7 @@ export const Header = (properties: {
                 <div
                     className={`flex items-center gap-6 ${
                         properties.direction === "col" ? "flex-col" : "flex-row"
-                    }`}
+                    } ${properties.className ?? ""}`}
                     style={
                         {
                             "--bgcolor": bgColor
@@ -62,7 +63,7 @@ export const Header = (properties: {
                             <DropdownMenu.Trigger asChild>
                                 <button
                                     className={
-                                        "p-1 hover:bg-gray-200 rounded " +
+                                        "btn btn-icon btn-icon-sm " +
                                         (properties.direction === "col"
                                             ? "mt-auto"
                                             : "ml-auto")

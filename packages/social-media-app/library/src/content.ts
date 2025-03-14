@@ -57,6 +57,8 @@ export abstract class ElementContent {
     abstract toIndex():
         | Promise<{ type: string; content: string }>
         | { type: string; content: string };
+
+    abstract get isEmpty(): boolean;
 }
 
 @variant(0)
@@ -507,6 +509,10 @@ export class IFrameContent extends ElementContent {
             content: this.src,
         };
     }
+
+    get isEmpty(): boolean {
+        return false;
+    }
 }
 
 @variant(1)
@@ -524,5 +530,9 @@ export class StaticContent extends ElementContent {
             type: "static",
             content: this.content.toString(),
         };
+    }
+
+    get isEmpty() {
+        return this.content.isEmpty;
     }
 }

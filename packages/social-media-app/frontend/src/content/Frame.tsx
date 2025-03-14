@@ -8,7 +8,6 @@ import {
 } from "react-icons/md";
 import { useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
-import { rectIsStaticMarkdownText } from "../canvas/utils/rect";
 
 export const Frame = (properties: {
     pending: boolean;
@@ -25,8 +24,11 @@ export const Frame = (properties: {
      * The new static content is provided along with the element index.
      */
     onContentChange?: (
-        newContent: StaticContent["content"],
-        id: Uint8Array
+        properties: {
+            content: StaticContent["content"];
+            id: Uint8Array;
+        },
+        options?: { save: boolean }
     ) => void;
     key?: number;
     delete(): void;
@@ -72,11 +74,14 @@ export const Frame = (properties: {
                     editable={properties.editMode}
                     thumbnail={properties.thumbnail}
                     onResize={() => {}}
-                    onChange={(newContent) => {
+                    onChange={(newContent, options) => {
                         if (properties.onContentChange) {
                             properties.onContentChange(
-                                newContent,
-                                properties.element.id
+                                {
+                                    content: newContent,
+                                    id: properties.element.id,
+                                },
+                                options
                             );
                         }
                     }}
@@ -136,7 +141,7 @@ export const Frame = (properties: {
                                 <MdClear className="h-4 w-4" />
                             </button> */}
 
-                                <button className="btn-icon btn-icon-sx drag-handle-element">
+                                <button className="btn-icon btn-icon-sm drag-handle-element">
                                     <MdOpenWith className="h-4 w-4" />
                                 </button>
                             </div>

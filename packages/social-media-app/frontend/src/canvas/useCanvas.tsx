@@ -67,27 +67,13 @@ export const useCanvases = () => useContext(CanvasContext);
 const ROOM_ID_SEED = new TextEncoder().encode("dao | xyz");
 
 const GIGA_ROOT_POST = `
+# Welcome to giga.place 
 
-# Welcome to giga.place
+**A public and private experience**
 
-**The P2P Social Media Super App**
 
-Discover a new era of social media where decentralization meets innovation. giga.place is designed to be the next evolution of Web 2.0—a dynamic, peer-to-peer social browsing experience that puts you in control.
-
----
-
-## Why giga.place?
-
-- **Decentralized & Secure:** Embrace a peer-to-peer network where your data is yours.
-- **Innovative Social Browsing:** Seamlessly explore content, connect with friends, and join communities in real time.
-- **Empowered Community:** Create, share, and interact in an environment designed for the next generation of social media.
-- **Cutting-Edge Technology:** Experience the freedom of a platform built for modern connectivity and creativity.
-
----
-
-## Get Started Today!
-
-Join us and be a part of the future. Your social experience is about to change—step into a world where you lead the conversation and drive the innovation.
+Your space to share, explore, and connect in a totally decentralized, secure world. Dive into a fresh, dynamic feed that's as innovative as you are.
+Ready to redefine social? Your journey starts here.
 `;
 
 export const CanvasProvider = ({ children }: { children: JSX.Element }) => {

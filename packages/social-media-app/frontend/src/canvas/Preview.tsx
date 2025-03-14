@@ -32,7 +32,9 @@ const PreviewFrame = ({
     noPadding?: boolean;
 }) => (
     <div
-        className={`relative overflow-hidden ${maximizeHeight ? "h-full" : ""}`}
+        className={`relative overflow-hidden ${
+            "w-full h-full" /* maximizeHeight ? "h-full" : "" */
+        }`}
     >
         <Frame
             thumbnail={false}
@@ -153,7 +155,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
         return (
             <PreviewFrame
                 element={variantRects as RectsForVariant<"tiny">}
-                fit="cover"
+                fit="contain"
             />
         );
     }
@@ -164,7 +166,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                     rectIsStaticMarkdownText(
                         variantRects as RectsForVariant<"breadcrumb">
                     )
-                        ? "max-w-[35%] px-1"
+                        ? "w-full px-1"
                         : "w-6"
                 } flex-none h-6 rounded-md overflow-hidden border border-neutral-950 dark:border-neutral-50`}
             >

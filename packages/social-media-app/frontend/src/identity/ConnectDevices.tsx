@@ -5,6 +5,7 @@ import { BsCopy } from "react-icons/bs";
 import { useIdentities } from "./useIdentities";
 import { ListDevices } from "./ListDevices";
 import { generateDefaultDeviceName } from "./utils";
+import { TbPlugConnected } from "react-icons/tb";
 
 // Helper to extract the encoded token from a deep-link URL.
 const extractDataFromUrl = (url) => {
@@ -148,7 +149,7 @@ export const ConnectDevices = () => {
                 {!urlHasData && (
                     <>
                         {/* QR Code Connection Section */}
-                        <div className="bg-gray-50 p-4 rounded shadow">
+                        <div className="p-4 rounded shadow">
                             <h3>QR Code Connection</h3>
                             {qrCodeUrl ? (
                                 <>
@@ -157,7 +158,7 @@ export const ConnectDevices = () => {
                                         alt="QR Code"
                                         className="mx-auto mb-4"
                                     />
-                                    <div className="flex items-center space-x-2">
+                                    <div className="flex flex-row items-center space-x-2">
                                         <input
                                             type="text"
                                             readOnly
@@ -168,7 +169,7 @@ export const ConnectDevices = () => {
                                             <Tooltip.Trigger asChild>
                                                 <button
                                                     onClick={handleCopy}
-                                                    className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 focus:outline-none"
+                                                    className="btn-elevated btn-icon"
                                                     aria-label="Copy deep link URL"
                                                 >
                                                     <BsCopy />
@@ -176,7 +177,7 @@ export const ConnectDevices = () => {
                                             </Tooltip.Trigger>
                                             <Tooltip.Portal>
                                                 <Tooltip.Content
-                                                    className="p-2 bg-black text-white rounded"
+                                                    className="p-2   rounded"
                                                     side="top"
                                                 >
                                                     {copied
@@ -195,21 +196,27 @@ export const ConnectDevices = () => {
                         </div>
 
                         {/* Manual Connection Section */}
-                        <div className="bg-gray-50 p-4 rounded shadow">
+                        <div className="p-4 rounded shadow flex flex-col">
                             <h3>Manual Connection</h3>
-                            <input
-                                type="text"
-                                value={manualCode}
-                                onChange={(e) => setManualCode(e.target.value)}
-                                placeholder="Paste connection URL or code here"
-                                className="w-full p-2 border border-gray-300 rounded"
-                            />
-                            <button
-                                onClick={() => handleManualConnect(manualCode)}
-                                className="mt-2 w-full px-4 py-2 bg-green-600 text-white rounded hover:bg-green-700 focus:outline-none"
-                            >
-                                Connect Manually
-                            </button>
+                            <div className="rounded shadow flex flex-row gap-2">
+                                <input
+                                    type="text"
+                                    value={manualCode}
+                                    onChange={(e) =>
+                                        setManualCode(e.target.value)
+                                    }
+                                    placeholder="Paste connection URL or code here"
+                                    className="w-full p-2 border border-gray-300 rounded"
+                                />
+                                <button
+                                    onClick={() =>
+                                        handleManualConnect(manualCode)
+                                    }
+                                    className="ml-auto btn-elevated btn-icon "
+                                >
+                                    <TbPlugConnected />
+                                </button>
+                            </div>
                         </div>
                     </>
                 )}

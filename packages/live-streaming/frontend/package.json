@@ -46,7 +46,8 @@
         "typescript": "^5.6.3",
         "vite": "^6.0.6",
         "@peerbit/vite": "^1",
-        "tailwindcss": "^3.4.13",
+        "tailwindcss": "^4.0.14",
+        "@tailwindcss/postcss": "^4.0.14",
         "postcss": "^8.4.47",
         "autoprefixer": "^10.4.20"
     },

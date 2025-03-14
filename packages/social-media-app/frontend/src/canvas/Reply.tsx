@@ -8,6 +8,7 @@ import { useNavigate } from "react-router-dom";
 import { getCanvasPath } from "../routes";
 import { Header } from "./header/Header";
 import { CanvasWrapper } from "./CanvasWrapper";
+import { LuMessageSquare } from "react-icons/lu";
 
 // Debounce helper that triggers on the leading edge and then ignores calls for the next delay ms.
 function debounceLeading(func: (...args: any[]) => void, delay: number) {
@@ -93,17 +94,21 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
                     )}
                 </CanvasWrapper>
             </button>
-            <div className="flex gap-2.5 px-2.5 mt-4">
+            <div className="flex gap-2.5 mt-4 mx-2">
                 <ReplyButton
+                    className="btn btn-secondary btn-xs  h-full "
                     onClick={() => setShowMore((showMore) => !showMore)}
                 >
                     {showMore ? "Show less" : "Show more"}
                 </ReplyButton>
                 <ReplyButton
+                    className="ml-auto btn btn-secondary  btn-xs h-full"
                     onClick={async () =>
                         navigate(getCanvasPath(properties.canvas), {})
                     }
-                >{`Open | Reply (${replyCount})`}</ReplyButton>
+                >{`Open ${
+                    replyCount > 0 ? `(${replyCount})` : ""
+                }`}</ReplyButton>
             </div>
         </div>
     );

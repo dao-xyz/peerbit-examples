@@ -1,6 +1,6 @@
 import { usePeer } from "@peerbit/react";
 import { VscDebug } from "react-icons/vsc";
-import { useCanvases } from "./useCanvas";
+import { useCanvases } from "../useCanvas";
 import {
     Canvas,
     CanvasAddressReference,
@@ -171,7 +171,7 @@ export const DebugGeneratePostButton = () => {
     return (
         <button
             onClick={insertPostsForDebugging}
-            className="btn btn-elevated r"
+            className="btn btn-elevated btn-icon-md"
         >
             <VscDebug size={25} />
         </button>

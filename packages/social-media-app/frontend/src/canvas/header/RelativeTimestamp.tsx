@@ -46,7 +46,7 @@ const RelativeTimestamp: React.FC<RelativeTimestampProps> = ({
         <Popover.Root>
             <Popover.Trigger asChild>
                 <button
-                    className={`cursor-pointer text-blue-500 hover:underline focus:outline-none ${className}`}
+                    className={`cursor-pointer hover:underline focus:outline-none ${className}`}
                 >
                     {relativeText}
                 </button>

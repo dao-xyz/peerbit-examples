@@ -25,7 +25,7 @@ export const Canvas = (
         appearance?: "chat-view-images" | "chat-view-text";
         children?: ReactNode;
         bgBlur?: boolean;
-    } & ({ draft: true; onSave: () => void } | { draft?: false })
+    } & ({ draft: true } | { draft?: false })
 ) => {
     const asThumbnail = !!properties.scaled;
     const {
@@ -36,6 +36,8 @@ export const Canvas = (
         rects,
         removePending,
         canvas,
+        savePending,
+        onContentChange: onContentChangeContextTrigger,
     } = useCanvas();
 
     // rects and pendingRects purpose filtered for properties.appearance
@@ -119,26 +121,40 @@ export const Canvas = (
                                 }
                             }}
                             onLoad={() => {}}
-                            onContentChange={(newContent, id) => {
+                            onContentChange={(change, options) => {
                                 const changedElement = rects.find(
-                                    (rect) => rect.id === id
+                                    (rect) => rect.id === change.id
                                 );
                                 // if contained in rects
                                 if (changedElement) {
                                     changedElement.content = new StaticContent({
-                                        content: newContent,
+                                        content: change.content,
                                     });
                                     canvas.elements.put(changedElement);
+
+                                    onContentChangeContextTrigger(
+                                        changedElement
+                                    );
                                 }
                                 // if outside of rects -> pending!
                                 else {
                                     const newPending = [...pendingRects];
-                                    newPending.find(
-                                        (el) => el.id === id
-                                    ).content = new StaticContent({
-                                        content: newContent,
-                                    });
-                                    return newPending;
+                                    const existingPending = newPending.find(
+                                        (el) => el.id === change.id
+                                    );
+                                    existingPending.content = new StaticContent(
+                                        {
+                                            content: change.content,
+                                        }
+                                    );
+
+                                    onContentChangeContextTrigger(
+                                        existingPending
+                                    );
+                                }
+
+                                if (options?.save && properties.draft) {
+                                    savePending();
                                 }
                             }}
                             pending={

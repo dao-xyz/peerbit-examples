@@ -1,12 +1,13 @@
 import { defineConfig, loadEnv } from "vite";
 import react from "@vitejs/plugin-react";
 import peerbit from "@peerbit/vite";
+import tailwindcss from "@tailwindcss/vite";
 
 import fs from "fs";
 
 // https://vitejs.dev/config/
 export default defineConfig({
-    plugins: [react(), peerbit()],
+    plugins: [react(), peerbit(), tailwindcss()],
     optimizeDeps: {
         esbuildOptions: {
             target: "esnext",

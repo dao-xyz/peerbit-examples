@@ -5,12 +5,13 @@ import {
 } from "@dao-xyz/social";
 import { MarkdownContent } from "./Markdown";
 import { ImageContent } from "./image/Image";
+import { ChangeCallback } from "./types";
 
 export type EditableStaticContentProps = {
     staticContent: StaticContent["content"];
     onResize: (dims: { width: number; height: number }) => void;
     editable?: boolean;
-    onChange?: (newContent: StaticContent["content"]) => void;
+    onChange?: ChangeCallback;
     thumbnail?: boolean;
     fit?: "cover" | "contain";
     previewLines?: number;
