@@ -26,7 +26,7 @@ const ToolbarContent = forwardRef<
     return (
         <div
             ref={ref}
-            className="flex flex-col sticky z-20 bottom-0 w-full left-0 mb-4"
+            className="flex flex-col sticky z-20 bottom-0 w-full left-0 pb-4"
         >
             {/* Top area: single plus button for images */}
             <Canvas appearance="chat-view-images">

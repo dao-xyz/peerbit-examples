@@ -145,7 +145,7 @@ export const CanvasAndReplies = () => {
                     ref={scrollContainerRef}
                     className=" gap-2.5 overflow-y-auto w-full flex flex-col items-center"
                     style={{
-                        height: `calc(100vh - ${
+                        height: `calc(100svh - ${
                             headerHeight + toolbarHeight
                         }px)`,
                     }}
