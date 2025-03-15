@@ -60,7 +60,7 @@ export const Replies = (props: RepliesProps) => {
 
     return (
         <div className="flex flex-col mt-10">
-            <div className="sticky -top-1 z-10 bg-neutral-50 dark:bg-neutral-950 flex flex-row items-center justify-between border-t-[1px] py-1 px-2.5">
+            <div className="sticky top-0 z-10 bg-neutral-50 dark:bg-neutral-950 flex flex-row items-center justify-between border-t-[1px] py-1 px-2.5">
                 <span className="ganja-font">Replies</span>
                 <DropdownMenu.Root>
                     <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
