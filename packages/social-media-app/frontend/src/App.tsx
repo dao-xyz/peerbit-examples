@@ -117,7 +117,7 @@ export const App = () => {
                                             /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
                                             /*  */
                                             /*   */
-                                            className="content-container flex-1 overflow-hidden"
+                                            className="content-container flex-1"
                                         >
                                             <BaseRoutes />
                                         </div>
