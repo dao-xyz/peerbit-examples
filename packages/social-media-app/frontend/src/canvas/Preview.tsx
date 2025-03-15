@@ -32,8 +32,8 @@ const PreviewFrame = ({
     noPadding?: boolean;
 }) => (
     <div
-        className={`flex flex-col relative overflow-hidden ${
-            "w-full h-full" /* maximizeHeight ? "h-full" : "" */
+        className={`flex flex-col relative overflow-hidden w-full  ${
+            maximizeHeight ? "h-full" : ""
         }`}
     >
         <Frame
@@ -156,6 +156,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
             <PreviewFrame
                 element={variantRects as RectsForVariant<"tiny">}
                 fit="contain"
+                maximizeHeight
             />
         );
     }
@@ -205,7 +206,11 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                                 className="aspect-[1] w-12 rounded-md overflow-hidden"
                                 key={i}
                             >
-                                <PreviewFrame element={app} fit="cover" />
+                                <PreviewFrame
+                                    element={app}
+                                    fit="cover"
+                                    maximizeHeight
+                                />
                             </div>
                         ))}
                     </div>
