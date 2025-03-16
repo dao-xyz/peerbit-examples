@@ -32,7 +32,7 @@ export const Header = forwardRef((props: any, ref) => {
     return (
         <div
             ref={ref as any}
-            className="sticky top-0 flex flex-row w-full  gap-2 bg-neutral-50 dark:bg-neutral-950 z-20 items-center max-h-[50px]"
+            className="flex flex-row w-full  gap-2 bg-neutral-50 dark:bg-neutral-950 z-20 items-center max-h-[50px]"
         >
             <HeaderLogo />
             <div className="ml-auto mr-auto max-w-xl flex-1 h-[40px] overflow-hidden">
