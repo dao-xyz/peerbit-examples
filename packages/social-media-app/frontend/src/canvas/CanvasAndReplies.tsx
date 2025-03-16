@@ -18,12 +18,9 @@ export const CanvasAndReplies = () => {
         "new"
     );
 
-    // States for dynamic element heights
-    const [headerHeight, setHeaderHeight] = useState(40);
-    const [toolbarHeight, setToolbarHeight] = useState(60);
-
     // Refs for header, toolbar, and scroll container
     const toolbarRef = useRef<HTMLDivElement>(null);
+    const bottomScrollMarkerRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -55,57 +52,39 @@ export const CanvasAndReplies = () => {
         existing: "reuse",
     });
 
-    // Use ResizeObserver to update header and toolbar heights dynamically.
-    useEffect(() => {
-        if (typeof ResizeObserver === "undefined") return;
-
-        const toolbarObserver = new ResizeObserver((entries) => {
-            for (let entry of entries) {
-                setToolbarHeight(entry.target.getBoundingClientRect().height);
-            }
-        });
-        if (toolbarRef.current) {
-            toolbarObserver.observe(toolbarRef.current);
-            setToolbarHeight(toolbarRef.current.getBoundingClientRect().height);
-        }
-
-        return () => {
-            toolbarObserver.disconnect();
-        };
-    }, [toolbarRef.current]); // we seem to need this dependency
-
-    console.log({
-        headerHeight,
-        toolbarHeight,
-    });
-
     // onSavePending remains largely the same.
     const onSavePending = () => {
         const scroll = () => {
-            if (scrollContainerRef.current) {
-                const scrollContainer = scrollContainerRef.current;
-                // Calculate effective scroll height (content below header)
-                const effectiveScrollHeight =
-                    scrollContainer.scrollHeight - headerHeight;
-                const effectiveContainerHeight =
-                    scrollContainer.clientHeight - headerHeight;
-                const maxScrollTop =
-                    effectiveScrollHeight - effectiveContainerHeight;
-                if (sortCriteria === "old") {
-                    scrollContainer.scrollTo({ top: 0, behavior: "smooth" });
-                } else if (sortCriteria === "best") {
-                    setSortCriteria("new");
-                    scrollContainer.scrollTo({
-                        top: maxScrollTop,
-                        behavior: "smooth",
-                    });
-                } else {
-                    scrollContainer.scrollTo({
-                        top: maxScrollTop,
-                        behavior: "smooth",
-                    });
+            setTimeout(() => {
+                if (
+                    scrollContainerRef.current &&
+                    bottomScrollMarkerRef.current
+                ) {
+                    console.log("saving");
+                    const scrollContainer = scrollContainerRef.current;
+                    const bottomScrollMarkerContainer =
+                        bottomScrollMarkerRef.current;
+                    if (sortCriteria === "old") {
+                        scrollContainer.scrollTo({
+                            top: 0,
+                            behavior: "smooth",
+                        });
+                    } else if (sortCriteria === "best") {
+                        setSortCriteria("new");
+                        bottomScrollMarkerContainer.scrollIntoView({
+                            block: "end",
+                            inline: "nearest",
+                            behavior: "smooth",
+                        });
+                    } else {
+                        bottomScrollMarkerContainer.scrollIntoView({
+                            block: "end",
+                            inline: "nearest",
+                            behavior: "smooth",
+                        });
+                    }
                 }
-            }
+            }, 100); // 100ms delay
         };
         setPendingCanvasState((prev) => {
             lastCanvas.replies.put(prev).then(scroll);
@@ -138,18 +117,12 @@ export const CanvasAndReplies = () => {
 
     return (
         <div className="flex flex-col h-full">
-            <div className="flex-grow  w-full mx-auto">
+            <div
+                className="flex-grow  w-full mx-auto h-full overflow-auto"
+                ref={scrollContainerRef}
+            >
                 {/* Set the scroll container height dynamically */}
-                <div
-                    id="content-scroll-root"
-                    ref={scrollContainerRef}
-                    className=" gap-2.5 overflow-y-auto w-full flex flex-col items-center"
-                    style={{
-                        height: `calc(100dvh - ${
-                            headerHeight + toolbarHeight
-                        }px)`,
-                    }}
-                >
+                <div className=" gap-2.5 w-full flex flex-col items-center">
                     <div className="max-w-[876px] w-full h-full">
                         {/* dont show header on root post */}
                         {canvases.length > 1 && (
@@ -165,6 +138,7 @@ export const CanvasAndReplies = () => {
                         />
                     </div>
                 </div>
+                <div ref={bottomScrollMarkerRef} className="h-0 w-full" />
             </div>
             <Toolbar
                 ref={toolbarRef}
