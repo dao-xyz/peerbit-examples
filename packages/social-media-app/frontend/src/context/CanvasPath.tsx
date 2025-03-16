@@ -9,7 +9,13 @@ import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { CanvasPreview } from "../canvas/Preview";
 
-export const CanvasPath = () => {
+export const CanvasPath = ({
+    isBreadcrumbExpanded,
+    setIsBreadcrumbExpanded,
+}: {
+    isBreadcrumbExpanded: boolean;
+    setIsBreadcrumbExpanded: (val: boolean) => void;
+}) => {
     const navigate = useNavigate();
     const location = useLocation();
     const [focus, setFocus] = useState(false);
@@ -73,6 +79,8 @@ export const CanvasPath = () => {
                         tags={tags}
                         onTagsChange={handleTagsChange}
                         renderTag={({ tag }, ix) => renderBreadcrumb(tag, ix)}
+                        isBreadcrumbExpanded={isBreadcrumbExpanded}
+                        setIsBreadcrumbExpanded={setIsBreadcrumbExpanded}
                     />
                 </div>
             ) : (

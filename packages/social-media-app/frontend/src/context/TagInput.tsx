@@ -1,7 +1,13 @@
-import React, { useState, useRef } from "react";
+import React, { useState } from "react";
 
 // A default tag renderer if no custom renderTag prop is provided.
-const DefaultTag = ({ tag, onRemove }) => (
+const DefaultTag = ({
+    tag,
+    onRemove,
+}: {
+    tag: string;
+    onRemove: () => void;
+}) => (
     <div className="flex items-center bg-gray-200 rounded px-2 py-1 text-sm">
         <span>{tag}</span>
         <button
@@ -26,11 +32,22 @@ const DefaultTag = ({ tag, onRemove }) => (
  * - Pressing Enter with nonempty input adds a tag.
  * - Pressing Backspace when input is empty removes the last tag.
  */
-const TagInput = ({ tags, onTagsChange, renderTag }) => {
+const TagInput = ({
+    tags,
+    onTagsChange,
+    renderTag,
+    isBreadcrumbExpanded,
+    setIsBreadcrumbExpanded,
+}: {
+    tags: string[];
+    onTagsChange: (tags: string[]) => void;
+    renderTag?: any;
+    isBreadcrumbExpanded: boolean;
+    setIsBreadcrumbExpanded: (val: boolean) => void;
+}) => {
     const [inputValue, setInputValue] = useState("");
-    const inputRef = useRef(null);
 
-    const handleKeyDown = (e) => {
+    const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === "Enter") {
             e.preventDefault();
             const trimmed = inputValue.trim();
@@ -45,11 +62,13 @@ const TagInput = ({ tags, onTagsChange, renderTag }) => {
         }
     };
 
-    const removeTag = (indexToRemove) => {
-        onTagsChange(tags.filter((_, i) => i !== indexToRemove));
+    const removeTag = (indexToRemove: number) => {
+        onTagsChange(
+            tags.filter((_: string, i: number) => i !== indexToRemove)
+        );
     };
 
-    const renderTagContent = (tag, index) => {
+    const renderTagContent = (tag: string, index: number) => {
         return renderTag ? (
             renderTag({ tag, onRemove: () => removeTag(index) })
         ) : (
@@ -58,11 +77,13 @@ const TagInput = ({ tags, onTagsChange, renderTag }) => {
     };
 
     return (
-        <div
+        <label
+            onClick={() => setIsBreadcrumbExpanded(true)}
             className="flex items-center gap-1 px-2 py-1 border border-gray-300 rounded h-full cursor-text"
-            onClick={() => inputRef.current.focus()}
         >
-            <div className="h-full flex items-center max-w-[50%] overflow-x-scroll overflow-y-hidden no-scrollbar">
+            <div
+                className={`h-full flex items-center max-w-[50%] overflow-x-scroll overflow-y-hidden no-scrollbar`}
+            >
                 {tags.map((tag, index) => (
                     <React.Fragment key={index}>
                         {index > 0 ? (
@@ -72,17 +93,7 @@ const TagInput = ({ tags, onTagsChange, renderTag }) => {
                     </React.Fragment>
                 ))}
             </div>
-
-            <input
-                ref={inputRef}
-                type="text"
-                className="flex-1 min-w-[100px] outline-none p-1 text-sm"
-                placeholder="Go somewhere..."
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyDown={handleKeyDown}
-            />
-        </div>
+        </label>
     );
 };
 

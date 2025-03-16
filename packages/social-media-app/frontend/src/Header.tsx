@@ -14,6 +14,7 @@ export const Header = forwardRef((props: any, ref) => {
     const [theme, setTheme] = useState<"dark" | "light">(
         localStorage.theme || "light"
     );
+    const [isBreadcrumbExpanded, setIsBreadcrumbExpanded] = useState(false); // Add breadcrumbExpanded state
     const { peer } = usePeer();
     const navigate = useNavigate();
 
@@ -36,7 +37,10 @@ export const Header = forwardRef((props: any, ref) => {
         >
             <HeaderLogo />
             <div className="ml-auto mr-auto max-w-xl flex-1 h-[40px] overflow-hidden">
-                <CanvasPath />
+                <CanvasPath
+                    isBreadcrumbExpanded={isBreadcrumbExpanded}
+                    setIsBreadcrumbExpanded={setIsBreadcrumbExpanded}
+                />
             </div>
 
             {peer ? (
