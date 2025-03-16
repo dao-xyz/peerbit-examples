@@ -60,7 +60,6 @@ export const CanvasAndReplies = () => {
                     scrollContainerRef.current &&
                     bottomScrollMarkerRef.current
                 ) {
-                    console.log("saving");
                     const scrollContainer = scrollContainerRef.current;
                     const bottomScrollMarkerContainer =
                         bottomScrollMarkerRef.current;
