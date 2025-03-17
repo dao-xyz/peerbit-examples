@@ -82,7 +82,7 @@ const TagInput = ({
             className="flex items-center gap-1 px-2 py-1 border border-gray-300 rounded h-full cursor-text"
         >
             <div
-                className={`h-full flex items-center max-w-[50%] overflow-x-scroll overflow-y-hidden no-scrollbar`}
+                className={`h-full flex items-center max-w-[50%] overflow-x-auto overflow-y-hidden no-scrollbar `}
             >
                 {tags.map((tag, index) => (
                     <React.Fragment key={index}>

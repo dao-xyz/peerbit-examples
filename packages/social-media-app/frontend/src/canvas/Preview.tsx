@@ -155,7 +155,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
         return (
             <PreviewFrame
                 element={variantRects as RectsForVariant<"tiny">}
-                fit="contain"
+                fit="cover"
                 maximizeHeight
             />
         );
@@ -178,6 +178,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                     noPadding={rectIsStaticMarkdownText(
                         variantRects as RectsForVariant<"breadcrumb">
                     )}
+                    maximizeHeight
                 />
             </div>
         );
