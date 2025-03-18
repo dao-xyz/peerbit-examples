@@ -1,7 +1,7 @@
 import { useNavigate } from "react-router-dom";
 import Logo from "/android-icon-192x192.png";
 
-export const HeaderLogo = () => {
+export const HeaderLogo = ({ onClick }: { onClick?: () => void }) => {
     const navigate = useNavigate();
     const asText = () => {
         return (
@@ -37,6 +37,7 @@ export const HeaderLogo = () => {
             className="btn p-0 m-0 rounded-none hover:cursor-pointer h-full flex flfex-col content-center items-center "
             onClick={() => {
                 navigate("/", {});
+                onClick && onClick();
             }}
         >
             {asText()}
@@ -44,7 +45,7 @@ export const HeaderLogo = () => {
     );
 };
 
-/* 
+/*
 
 .alfa-slab-one-regular {
   font-family: "Alfa Slab One", serif;

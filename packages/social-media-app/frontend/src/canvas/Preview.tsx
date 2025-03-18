@@ -13,7 +13,8 @@ import { Frame } from "../content/Frame";
 import { rectIsStaticMarkdownText } from "./utils/rect";
 
 interface CanvasPreviewProps {
-    variant: "tiny" | "post" | "breadcrumb";
+    variant: "tiny" | "post" | "breadcrumb" | "expanded-breadcrumb";
+    onClick?: () => void;
 }
 
 const PreviewFrame = ({
@@ -23,6 +24,7 @@ const PreviewFrame = ({
     maximizeHeight,
     fit,
     noPadding,
+    onClick,
 }: {
     element: Element<ElementContent>;
     previewLines?: number;
@@ -30,6 +32,7 @@ const PreviewFrame = ({
     maximizeHeight?: boolean;
     fit?: "cover" | "contain";
     noPadding?: boolean;
+    onClick?: () => void;
 }) => (
     <div
         className={`flex flex-col relative overflow-hidden w-full  ${
@@ -51,6 +54,7 @@ const PreviewFrame = ({
             fit={fit}
             previewLines={previewLines}
             noPadding={noPadding}
+            onClick={onClick}
         />
         {bgBlur && (
             <>
@@ -108,20 +112,21 @@ const seperateAndSortRects = (rects: Element<ElementContent>[]) => {
     return seperatedRects;
 };
 
-type RectsForVariant<V extends "tiny" | "post" | "breadcrumb"> =
-    V extends "tiny"
-        ? Element<ElementContent> | undefined
-        : V extends "breadcrumb"
-        ? Element<ElementContent> | undefined
-        : V extends "post"
-        ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
-        : never;
+type RectsForVariant<
+    V extends "tiny" | "post" | "breadcrumb" | "expanded-breadcrumb"
+> = V extends "tiny"
+    ? Element<ElementContent> | undefined
+    : V extends "breadcrumb"
+    ? Element<ElementContent> | undefined
+    : V extends "expanded-breadcrumb"
+    ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
+    : V extends "post"
+    ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
+    : never;
 
-function getRectsForVariant<Variant extends "tiny" | "post" | "breadcrumb">(
-    separatedRects: SeparatedRects,
-    variant: Variant
-): RectsForVariant<Variant> {
-    // get image, or if not present text, or if not present undefined
+function getRectsForVariant<
+    Variant extends "tiny" | "post" | "breadcrumb" | "expanded-breadcrumb"
+>(separatedRects: SeparatedRects, variant: Variant): RectsForVariant<Variant> {
     switch (variant) {
         case "tiny":
         case "breadcrumb":
@@ -129,15 +134,15 @@ function getRectsForVariant<Variant extends "tiny" | "post" | "breadcrumb">(
                 separatedRects.text[0] ??
                 undefined) as RectsForVariant<Variant>;
         case "post":
+        case "expanded-breadcrumb":
             return {
                 text: separatedRects.text[0],
                 other: separatedRects.other,
             } as RectsForVariant<Variant>;
     }
-    return undefined;
 }
 
-export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
+export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
     const { pendingRects, rects, canvas } = useCanvas();
 
     const variantRects = useMemo(
@@ -148,15 +153,15 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
             ),
         [rects, pendingRects, variant]
     );
-    // variantRects needs to be defined.
-    // TODO @marcus @ben - investigate why it isnt for some previews!
+
     if (!variantRects) return null;
     if (variant === "tiny") {
         return (
             <PreviewFrame
                 element={variantRects as RectsForVariant<"tiny">}
-                fit="contain"
+                fit="cover"
                 maximizeHeight
+                onClick={onClick}
             />
         );
     }
@@ -167,7 +172,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                     rectIsStaticMarkdownText(
                         variantRects as RectsForVariant<"breadcrumb">
                     )
-                        ? "w-full px-1"
+                        ? "w-[10ch] max-w-20% px-1"
                         : "w-6"
                 } flex-none h-6 rounded-md overflow-hidden border border-neutral-950 dark:border-neutral-50`}
             >
@@ -178,7 +183,49 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                     noPadding={rectIsStaticMarkdownText(
                         variantRects as RectsForVariant<"breadcrumb">
                     )}
+                    maximizeHeight
+                    onClick={onClick}
                 />
+            </div>
+        );
+    }
+    if (variant === "expanded-breadcrumb") {
+        const variantRectsTyped =
+            variantRects as RectsForVariant<"expanded-breadcrumb">;
+        const apps = variantRectsTyped.other || [];
+        const text = variantRectsTyped.text;
+
+        return (
+            <div className="flex gap-1.5 items-start w-full rounded-lg">
+                {apps.slice(0, 2).map((app, i) => (
+                    <div
+                        key={i}
+                        className="shrink-0 w-[3.625rem] h-[3.625rem] rounded-sm overflow-hidden border border-neutral-950 dark:border-neutral-50 relative"
+                    >
+                        <PreviewFrame
+                            element={app}
+                            fit="cover"
+                            maximizeHeight
+                            onClick={onClick}
+                        />
+                        {i === 1 && apps.slice(2).length > 0 && (
+                            <div className="absolute inset-0 bg-neutral-50/80 dark:bg-neutral-950/80 flex items-center justify-center">
+                                +{apps.slice(2).length}
+                            </div>
+                        )}
+                    </div>
+                ))}
+
+                {text && (
+                    <div className="border border-neutral-950 dark:border-neutral-50 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1">
+                        <PreviewFrame
+                            element={text}
+                            previewLines={2}
+                            noPadding
+                            onClick={onClick}
+                        />
+                    </div>
+                )}
             </div>
         );
     }
@@ -196,6 +243,7 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                             element={firstApp}
                             fit="contain"
                             maximizeHeight
+                            onClick={onClick}
                         />
                     </div>
                 )}
@@ -210,13 +258,20 @@ export const CanvasPreview = ({ variant }: CanvasPreviewProps) => {
                                     element={app}
                                     fit="cover"
                                     maximizeHeight
+                                    onClick={onClick}
                                 />
                             </div>
                         ))}
                     </div>
                 )}
 
-                {text && <PreviewFrame element={text} previewLines={3} />}
+                {text && (
+                    <PreviewFrame
+                        onClick={onClick}
+                        element={text}
+                        previewLines={3}
+                    />
+                )}
             </div>
         );
     }

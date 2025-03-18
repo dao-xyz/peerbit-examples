@@ -10,27 +10,35 @@ import { WithContext } from "@peerbit/document";
 
 // Assume peer is imported or available from context
 
-export const Header = (properties: {
+export const Header = ({
+    canvas,
+    direction,
+    className,
+    variant,
+    onClick,
+}: {
     canvas?: Canvas | WithContext<Canvas>;
     direction?: "row" | "col";
     className?: string;
+    variant: "tiny" | "large";
+    onClick?: () => void;
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
     const { profiles } = useProfiles();
 
     // Check if the current user is the owner of the post
-    const isOwner = peer.identity.publicKey.equals(
-        properties.canvas?.publicKey
-    );
+    const isOwner = peer.identity.publicKey.equals(canvas?.publicKey);
 
     return (
         <>
-            {properties.canvas && (
+            {canvas && (
                 <div
-                    className={`flex items-center gap-6 ${
-                        properties.direction === "col" ? "flex-col" : "flex-row"
-                    } ${properties.className ?? ""}`}
+                    className={`flex items-center ${
+                        variant === "large" ? "gap-6" : "gap-1.5"
+                    } ${direction === "col" ? "flex-col" : "flex-row"} ${
+                        className ?? ""
+                    }`}
                     style={
                         {
                             "--bgcolor": bgColor
@@ -40,31 +48,36 @@ export const Header = (properties: {
                     }
                 >
                     <ProfileButton
-                        publicKey={properties.canvas.publicKey}
+                        publicKey={canvas.publicKey}
                         setBgColor={setBgColor}
+                        size={variant === "large" ? 32 : 16}
+                        onClick={onClick}
                     />
-                    {"__context" in properties.canvas && (
+                    {"__context" in canvas && (
                         <RelativeTimestamp
                             timestamp={
                                 new Date(
                                     Number(
-                                        properties.canvas.__context.created /
+                                        canvas.__context.created /
                                             BigInt(1000000)
                                     )
                                 )
                             }
-                            className="text-sm"
+                            className={
+                                variant === "large" ? "text-sm" : "text-xs"
+                            }
+                            onClick={onClick}
                         />
                     )}
 
                     {/* Additional management menu for the post if the user is the author */}
-                    {isOwner && (
+                    {isOwner && variant !== "tiny" && (
                         <DropdownMenu.Root>
                             <DropdownMenu.Trigger asChild>
                                 <button
                                     className={
                                         "btn btn-icon btn-icon-sm " +
-                                        (properties.direction === "col"
+                                        (direction === "col"
                                             ? "mt-auto"
                                             : "ml-auto")
                                     }
@@ -87,7 +100,7 @@ export const Header = (properties: {
                                     className="menu-item"
                                     onSelect={() => {
                                         return profiles.create({
-                                            profile: properties.canvas,
+                                            profile: canvas,
                                         });
                                     }}
                                 >
