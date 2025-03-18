@@ -80,13 +80,15 @@ export const CanvasPath = ({
                     }
                 >
                     <div className="flex flex-row justify-start items-center overflow-x-auto w-full no-scrollbar p-1 pr-0">
-                        {path.map((x, ix) => {
+                        {path.slice(0).map((x, ix) => {
                             return (
                                 <div
                                     key={ix}
-                                    className="flex flex-row items-center"
+                                    className={`flex flex-row items-center ${
+                                        ix === 0 ? "w-0 invisible" : ""
+                                    }`}
                                 >
-                                    {ix > 0 && (
+                                    {ix > 1 && (
                                         <span className="flex-none mx-1 w-fit">
                                             /
                                         </span>
@@ -103,7 +105,7 @@ export const CanvasPath = ({
                         />
                     </div>
                     {isBreadcrumbExpanded && (
-                        <span className="bg-neutral-50 dark:bg-neutral-950 align-middle flex items-center outline outline-neutral-950 dark:outline-neutral-50 rounded-l-lg px-5">
+                        <span className="text-sm bg-neutral-50 dark:bg-neutral-950 align-middle flex items-center outline outline-neutral-950 dark:outline-neutral-50 rounded-l-lg px-2 sm:px-5">
                             Close
                         </span>
                     )}

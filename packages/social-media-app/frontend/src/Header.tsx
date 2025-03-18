@@ -49,7 +49,9 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                 <>
                     <div className="col-span-full row-start-1 bg-neutral-50 dark:bg-neutral-950"></div>
                     <div className="col-start-2 flex items-center">
-                        <HeaderLogo onClick={() => setIsBreadcrumbExpanded(false)} />
+                        <HeaderLogo
+                            onClick={() => setIsBreadcrumbExpanded(false)}
+                        />
                     </div>
                     {path.length > 1 && (
                         <button
@@ -162,14 +164,15 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                     <div className="col-span-full row-start-3 bg-neutral-50 dark:bg-neutral-950"></div>
                     {/* overlay with expanded breadcrumbs and search results */}
                     {isBreadcrumbExpanded && (
-                        <div className="sm:col-span-1 col-span-full sm:col-start-7 col-start-1 row-span-2 sm:row-start-3 row-start-4 z-40 sm:pb-10">
+                        <div
+                            onClick={() => {
+                                setIsBreadcrumbExpanded(false);
+                            }}
+                            className="sm:col-span-1 col-span-full sm:col-start-7 col-start-1 row-span-2 sm:row-start-3 row-start-4 z-40 sm:pb-10"
+                        >
                             <div className="w-full h-full sm:h-fit sm:max-h-full overflow-y-auto sm:border-x sm:border-b sm:rounded-b-md sm:bg-neutral-50 dark:sm:bg-neutral-950">
                                 <div className="w-full p-5">
-                                    <ExpandedContext
-                                        onClick={() =>
-                                            setIsBreadcrumbExpanded(false)
-                                        }
-                                    />
+                                    <ExpandedContext />
                                 </div>
                             </div>
                         </div>

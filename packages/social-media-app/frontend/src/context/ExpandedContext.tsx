@@ -9,6 +9,13 @@ interface ExpandedContextProps {
 
 const ExpandedContext = ({ children, onClick }: ExpandedContextProps) => {
     const { path } = useCanvases();
+    if (path.length === 1)
+        return (
+            <div>
+                You are at the root of giga. You will see you're context here
+                when you navigate somewhere!
+            </div>
+        );
     return (
         <div className="flex flex-col">
             {path.slice(1).map((p, i) => (
