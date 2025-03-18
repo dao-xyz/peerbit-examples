@@ -96,7 +96,11 @@ export const Replies = (props: RepliesProps) => {
             {sortedReplies.length > 0 ? (
                 <div className="flex flex-col gap-4 mt-5">
                     {sortedReplies.map((reply) => (
-                        <Reply key={reply.idString} canvas={reply} />
+                        <Reply
+                            key={reply.idString}
+                            canvas={reply}
+                            variant="large"
+                        />
                     ))}
                 </div>
             ) : (

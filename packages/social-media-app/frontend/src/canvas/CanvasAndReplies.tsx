@@ -125,7 +125,11 @@ export const CanvasAndReplies = () => {
                     <div className="max-w-[876px] w-full h-full">
                         {/* dont show header on root post */}
                         {canvases.length > 1 && (
-                            <Header canvas={lastCanvas} className="mb-2" />
+                            <Header
+                                variant="large"
+                                canvas={lastCanvas}
+                                className="mb-2"
+                            />
                         )}
                         <CanvasWrapper canvas={lastCanvas}>
                             <Canvas bgBlur fitWidth draft={false} />

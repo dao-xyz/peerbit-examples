@@ -36,6 +36,7 @@ export const Frame = (properties: {
     previewLines?: number;
 
     noPadding?: boolean;
+    onClick?: () => void;
 }) => {
     const navigate = useNavigate();
 
@@ -166,7 +167,11 @@ export const Frame = (properties: {
 
                                 <button
                                     className="w-6/12 h-full flex justify-center items-center btn"
-                                    onClick={open}
+                                    onClick={() => {
+                                        open;
+                                        properties.onClick &&
+                                            properties.onClick();
+                                    }}
                                 >
                                     <span className="mr-2 text-xl">Open</span>{" "}
                                     <MdOpenInBrowser size={30} />

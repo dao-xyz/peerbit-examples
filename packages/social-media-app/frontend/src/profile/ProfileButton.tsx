@@ -9,6 +9,14 @@ import { getCanvasPath, MISSING_PROFILE } from "../routes";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";
 
+function pxToRem(px: number) {
+    // Get computed base font size from root (html) element
+    const baseFontSize = parseFloat(
+        getComputedStyle(document.documentElement).fontSize
+    );
+    return `${px / baseFontSize}rem`;
+}
+
 // Extend the props type so any additional button props are allowed
 export const ProfileButton = forwardRef<
     HTMLButtonElement,
@@ -23,6 +31,8 @@ export const ProfileButton = forwardRef<
     const { profiles } = useProfiles();
     const [profile, setProfile] = useState<ProfileData | undefined>();
     const { identities } = useIdentities();
+    const sizeDefined = size ?? 32;
+    const sizeInRem = pxToRem(sizeDefined);
 
     const navigate = useNavigate();
     useEffect(() => {
@@ -37,17 +47,16 @@ export const ProfileButton = forwardRef<
 
     const content = profile ? (
         <div
-            className={`w-8 h-8 rounded-md overflow-hidden ${
-                size != null ? `h-[${size}px] max-w-[${size}px]` : ""
-            }`}
+            style={{ width: sizeInRem, height: sizeInRem }}
+            className={`rounded-md overflow-hidden`}
         >
             <CanvasWrapper canvas={profile.profile}>
-                <CanvasPreview variant="tiny" />
+                <CanvasPreview onClick={onClick} variant="tiny" />
             </CanvasWrapper>
         </div>
     ) : (
         <ProfilePhotoGenerated
-            size={size ?? 32}
+            size={sizeDefined}
             publicKey={publicKey}
             onColorGenerated={setBgColor}
         />
@@ -65,7 +74,10 @@ export const ProfileButton = forwardRef<
         <button
             ref={ref}
             className="btn p-0 hover:filter hover:invert"
-            onClick={onClick ? onClick : navigationHandler}
+            onClick={() => {
+                navigationHandler();
+                onClick && onClick();
+            }}
             {...rest} // Spread extra props so Radix's injected onClick, etc., get through
         >
             {content}

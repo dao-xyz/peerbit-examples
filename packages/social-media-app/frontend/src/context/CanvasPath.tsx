@@ -72,15 +72,15 @@ export const CanvasPath = ({
 
     return (
         <div className="flex flex-row gap-2 h-full items-center overflow-hidden">
-            <button
-                className="rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-950 dark:border-neutral-50 overflow-hidden"
-                onClick={() =>
-                    setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
-                }
-            >
-                <div className="flex flex-row justify-start items-center overflow-x-auto w-full no-scrollbar p-1 pr-0">
-                    {path.length > 1 ? (
-                        path.slice(1).map((x, ix) => {
+            {path && path.length > 0 && (
+                <button
+                    className="rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-950 dark:border-neutral-50 overflow-hidden"
+                    onClick={() =>
+                        setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
+                    }
+                >
+                    <div className="flex flex-row justify-start items-center overflow-x-auto w-full no-scrollbar p-1 pr-0">
+                        {path.map((x, ix) => {
                             return (
                                 <div
                                     key={ix}
@@ -96,21 +96,19 @@ export const CanvasPath = ({
                                     </div>
                                 </div>
                             );
-                        })
-                    ) : (
-                        <span>/</span>
+                        })}
+                        <span
+                            ref={endMarkerRef}
+                            className="h-full w-1 flex-none block"
+                        />
+                    </div>
+                    {isBreadcrumbExpanded && (
+                        <span className="bg-neutral-50 dark:bg-neutral-950 align-middle flex items-center outline outline-neutral-950 dark:outline-neutral-50 rounded-l-lg px-5">
+                            Close
+                        </span>
                     )}
-                    <span
-                        ref={endMarkerRef}
-                        className="h-full w-1 flex-none block"
-                    />
-                </div>
-                {isBreadcrumbExpanded && (
-                    <span className="bg-neutral-50 dark:bg-neutral-950 align-middle flex items-center outline outline-neutral-950 dark:outline-neutral-50 rounded-l-lg px-5">
-                        Close
-                    </span>
-                )}
-            </button>
+                </button>
+            )}
         </div>
     );
 };

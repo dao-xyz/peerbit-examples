@@ -31,11 +31,13 @@ function getRelativeTime(date: Date): string {
 interface RelativeTimestampProps {
     timestamp: Date | number;
     className?: string;
+    onClick?: () => void;
 }
 
 const RelativeTimestamp: React.FC<RelativeTimestampProps> = ({
     timestamp,
     className = "",
+    onClick,
 }) => {
     const date =
         typeof timestamp === "number" ? new Date(timestamp) : timestamp;
@@ -47,6 +49,7 @@ const RelativeTimestamp: React.FC<RelativeTimestampProps> = ({
             <Popover.Trigger asChild>
                 <button
                     className={`cursor-pointer hover:underline focus:outline-none ${className}`}
+                    onClick={onClick}
                 >
                     {relativeText}
                 </button>

@@ -10,6 +10,7 @@ import { CONNECT_DEVICES, getCanvasPath } from "./routes";
 import { HeaderLogo } from "./Logo";
 import { useCanvases } from "./canvas/useCanvas";
 import { IoIosArrowBack } from "react-icons/io";
+import ExpandedContext from "./context/ExpandedContext";
 
 // Define props interface
 interface HeaderProps {
@@ -48,7 +49,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                 <>
                     <div className="col-span-full row-start-1 bg-neutral-50 dark:bg-neutral-950"></div>
                     <div className="col-start-2 flex items-center">
-                        <HeaderLogo />
+                        <HeaderLogo onClick={() => setIsBreadcrumbExpanded(false)} />
                     </div>
                     {path.length > 1 && (
                         <button
@@ -63,8 +64,8 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                             <IoIosArrowBack size={15} />
                         </button>
                     )}
-                    <div className="col-start-7 relative flex h-full w-full items-center">
-                        <div className="w-full h-[40px] overflow-hidden">
+                    <div className="col-start-7 relative flex h-full w-full items-center bg-neutral-50 dark:bg-neutral-950">
+                        <div className="w-full z-10 h-[40px] overflow-hidden">
                             <CanvasPath
                                 isBreadcrumbExpanded={isBreadcrumbExpanded}
                                 setIsBreadcrumbExpanded={
@@ -72,9 +73,13 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                 }
                             />
                         </div>
+                        {/* helper block to cover the distance between overlay and breadcrumb bar */}
+                        {isBreadcrumbExpanded && (
+                            <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-orange-950 border-neutral-950 dark:border-neutral-50 border-x"></div>
+                        )}
                     </div>
 
-                    <div className="z-40 col-start-10 flex items-center">
+                    <div className="z-50 col-start-10 flex items-center">
                         {peer ? (
                             <DropdownMenu.Root>
                                 <DropdownMenu.Trigger asChild>
@@ -158,8 +163,14 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                     {/* overlay with expanded breadcrumbs and search results */}
                     {isBreadcrumbExpanded && (
                         <div className="sm:col-span-1 col-span-full sm:col-start-7 col-start-1 row-span-2 sm:row-start-3 row-start-4 z-40 sm:pb-10">
-                            <div className="w-full h-full sm:h-fit sm:max-h-full overflow-y-auto sm:border sm:rounded-md sm:bg-neutral-50 dark:sm:bg-neutral-950">
-                                <div className="h-[120vh] w-full"></div>
+                            <div className="w-full h-full sm:h-fit sm:max-h-full overflow-y-auto sm:border-x sm:border-b sm:rounded-b-md sm:bg-neutral-50 dark:sm:bg-neutral-950">
+                                <div className="w-full p-5">
+                                    <ExpandedContext
+                                        onClick={() =>
+                                            setIsBreadcrumbExpanded(false)
+                                        }
+                                    />
+                                </div>
                             </div>
                         </div>
                     )}
@@ -168,7 +179,10 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
             <div className="col-span-full relative row-start-4 overflow-hidden">
                 {/* background blur overlay over content (header still visible)*/}
                 {isBreadcrumbExpanded && (
-                    <div className="absolute inset-0 z-30 backdrop-blur-3xl sm:bg-neutral-50/50 dark:sm:bg-neutral-950/50 bg-neutral-50/80 dark:bg-neutral-950/80"></div>
+                    <div
+                        onClick={() => setIsBreadcrumbExpanded(false)}
+                        className="absolute inset-0 z-30 backdrop-blur-3xl sm:bg-neutral-50/50 dark:sm:bg-neutral-950/50 bg-neutral-50/95 dark:bg-neutral-950/95"
+                    ></div>
                 )}
 
                 <div className="w-full h-full">{props.children}</div>

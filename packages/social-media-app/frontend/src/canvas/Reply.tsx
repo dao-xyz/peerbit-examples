@@ -40,7 +40,17 @@ const ReplyButton = ({
     );
 };
 
-export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
+export const Reply = ({
+    canvas,
+    variant,
+    index,
+    onClick,
+}: {
+    canvas: WithContext<CanvasDB>;
+    variant: "tiny" | "large";
+    index?: number;
+    onClick?: () => void;
+}) => {
     const [replyCount, setReplyCount] = useState(0);
     const [showMore, setShowMore] = useState(false);
     const { peer } = usePeer();
@@ -48,10 +58,10 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
 
     useEffect(() => {
         const listener = async () => {
-            if (properties.canvas.closed) {
-                await peer.open(properties.canvas, { existing: "reuse" });
+            if (canvas.closed) {
+                await peer.open(canvas, { existing: "reuse" });
             }
-            properties.canvas.countReplies().then(async (count) => {
+            canvas.countReplies().then(async (count) => {
                 setReplyCount(Number(count));
             });
         };
@@ -62,54 +72,95 @@ export const Reply = (properties: { canvas: WithContext<CanvasDB> }) => {
 
         // Call listener immediately for the first event (leading edge)
         listener();
-        properties.canvas.replies.events.addEventListener(
-            "change",
-            debouncedListener
-        );
+        canvas.replies.events.addEventListener("change", debouncedListener);
         return () => {
-            properties.canvas.replies.events.removeEventListener(
+            canvas.replies.events.removeEventListener(
                 "change",
                 debouncedListener
             );
         };
-    }, [properties.canvas, properties.canvas.closed]);
+    }, [canvas, canvas.closed]);
 
     return (
-        <div className="py-4">
-            <div className="px-2.5 mb-2.5">
-                <Header canvas={properties.canvas} direction="row" />
+        <div className={variant === "large" ? "py-4" : ""}>
+            <div
+                className={`flex items-end px-1  ${
+                    variant === "large" ? "mb-2.5" : "mb-1"
+                }`}
+            >
+                <svg
+                    width="16"
+                    height="28"
+                    viewBox="0 0 16 28"
+                    fill="none"
+                    xmlns="http://www.w3.org/2000/svg"
+                    className={
+                        variant === "large" || index === 0 ? "hidden" : ""
+                    }
+                >
+                    <path
+                        d="M4 0V15.5C4 19.9211 6.5 20 9.5 20"
+                        stroke="black"
+                        stroke-width="0.75"
+                    />
+                    <path
+                        d="M8 18L9.5 20L8 22"
+                        stroke="black"
+                        stroke-width="0.75"
+                    />
+                </svg>
+                <Header
+                    variant={variant}
+                    canvas={canvas}
+                    direction="row"
+                    onClick={onClick}
+                />
             </div>
 
             <button
                 onClick={async () => {
-                    navigate(getCanvasPath(properties.canvas), {});
+                    navigate(getCanvasPath(canvas), {});
+                    onClick && onClick();
                 }}
                 className="w-full flex flex-row p-0 overflow-hidden"
             >
-                <CanvasWrapper canvas={properties.canvas}>
-                    {showMore ? (
-                        <Canvas bgBlur fitWidth draft={false} />
+                <CanvasWrapper canvas={canvas}>
+                    {variant === "large" ? (
+                        showMore ? (
+                            <Canvas bgBlur fitWidth draft={false} />
+                        ) : (
+                            <CanvasPreview onClick={onClick} variant="post" />
+                        )
                     ) : (
-                        <CanvasPreview variant="post" />
+                        <CanvasPreview
+                            variant="expanded-breadcrumb"
+                            onClick={onClick}
+                        />
                     )}
                 </CanvasWrapper>
             </button>
-            <div className="flex gap-2.5 mt-4 mx-2">
-                <ReplyButton
-                    className="btn btn-secondary btn-xs  h-full "
-                    onClick={() => setShowMore((showMore) => !showMore)}
-                >
-                    {showMore ? "Show less" : "Show more"}
-                </ReplyButton>
-                <ReplyButton
-                    className="ml-auto btn btn-secondary  btn-xs h-full"
-                    onClick={async () =>
-                        navigate(getCanvasPath(properties.canvas), {})
-                    }
-                >{`Open ${
-                    replyCount > 0 ? `(${replyCount})` : ""
-                }`}</ReplyButton>
-            </div>
+            {variant === "large" && (
+                <div className="flex gap-2.5 mt-4 mx-2">
+                    <ReplyButton
+                        className="btn btn-secondary btn-xs  h-full "
+                        onClick={() => {
+                            setShowMore((showMore) => !showMore);
+                            onClick && onClick();
+                        }}
+                    >
+                        {showMore ? "Show less" : "Show more"}
+                    </ReplyButton>
+                    <ReplyButton
+                        className="ml-auto btn btn-secondary  btn-xs h-full"
+                        onClick={async () => {
+                            navigate(getCanvasPath(canvas), {});
+                            onClick && onClick();
+                        }}
+                    >{`Open ${
+                        replyCount > 0 ? `(${replyCount})` : ""
+                    }`}</ReplyButton>
+                </div>
+            )}
         </div>
     );
 };
