@@ -10,6 +10,7 @@ import {
     StaticImage,
     StaticMarkdownText,
 } from "@dao-xyz/social";
+import { Ed25519Keypair } from "@peerbit/crypto";
 
 const generateATextInMarkdown = (length: number = 100) => {
     let text = "";
@@ -111,14 +112,20 @@ export const DebugGeneratePostButton = () => {
             ["image", "image"],
             "text",
         ];
-        for (const type of postsToCreate) {
+
+        for (const [px, type] of postsToCreate.entries()) {
+            let publicKeyTuse =
+                px % 2 === 0
+                    ? peer.identity.publicKey
+                    : (await Ed25519Keypair.create()).publicKey;
+
             const typeArray = Array.isArray(type) ? type : [type];
             // create a post (canvas) that references its parent
             const canvas = new Canvas({
                 parent: new CanvasAddressReference({
                     canvas: path[path.length - 1],
                 }),
-                publicKey: peer.identity.publicKey,
+                publicKey: publicKeyTuse,
             });
 
             // open it (so we can insert elements)
@@ -156,7 +163,7 @@ export const DebugGeneratePostButton = () => {
                                 breakpoint: "md",
                             }),
                         ],
-                        publicKey: peer.identity.publicKey,
+                        publicKey: publicKeyTuse,
                     })
                 );
             }
