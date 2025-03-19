@@ -253,7 +253,7 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
         ).other;
         const text = (variantRects as RectsForVariant<"post">).text;
         return (
-            <div className="w-full flex flex-col gap-4">
+            <div className="w-full flex flex-col gap-4 h-full">
                 {firstApp && (
                     <div className="w-full max-h-[40vh] flex flex-col h-full rounded-md overflow-hidden">
                         <PreviewFrame

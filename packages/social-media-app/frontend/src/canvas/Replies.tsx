@@ -55,7 +55,7 @@ export const Replies = (props: RepliesProps) => {
                     sort: new Sort({
                         key: ["__context", "created"],
                         direction:
-                            sortCriteria === "new"
+                            sortCriteria === "new" || sortCriteria === "chat"
                                 ? SortDirection.ASC
                                 : SortDirection.DESC,
                     }),
@@ -99,7 +99,11 @@ export const Replies = (props: RepliesProps) => {
                 </DropdownMenu.Root>
             </div>
             {sortedReplies.length > 0 ? (
-                <div className="flex flex-col gap-4 mt-5">
+                <div
+                    className={`flex flex-col gap-4 mt-5 ${
+                        view === "chat" ? "px-4" : ""
+                    }`}
+                >
                     {sortedReplies.map((reply) => (
                         <Reply
                             key={reply.idString}

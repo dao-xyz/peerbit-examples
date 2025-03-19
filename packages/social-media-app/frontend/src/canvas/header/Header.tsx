@@ -16,12 +16,14 @@ export const Header = ({
     className,
     variant,
     onClick,
+    reverseLayout,
 }: {
     canvas?: Canvas | WithContext<Canvas>;
     direction?: "row" | "col";
     className?: string;
-    variant: "tiny" | "large";
+    variant: "tiny" | "large" | "medium";
     onClick?: () => void;
+    reverseLayout?: boolean;
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
@@ -34,8 +36,14 @@ export const Header = ({
         <>
             {canvas && (
                 <div
-                    className={`flex items-center ${
-                        variant === "large" ? "gap-6" : "gap-1.5"
+                    className={`flex ${
+                        reverseLayout ? "flex-row-reverse" : ""
+                    } items-center ${
+                        variant === "large"
+                            ? "gap-6"
+                            : variant === "medium"
+                            ? "gap-3"
+                            : "gap-1.5"
                     } ${direction === "col" ? "flex-col" : "flex-row"} ${
                         className ?? ""
                     }`}
@@ -47,12 +55,26 @@ export const Header = ({
                         } as React.CSSProperties
                     }
                 >
-                    <ProfileButton
-                        publicKey={canvas.publicKey}
-                        setBgColor={setBgColor}
-                        size={variant === "large" ? 32 : 16}
-                        onClick={onClick}
-                    />
+                    <div
+                        className={`overflow-hidden flex ${
+                            variant === "tiny" || variant === "medium"
+                                ? "rounded-full"
+                                : "rounded-lg"
+                        }`}
+                    >
+                        <ProfileButton
+                            publicKey={canvas.publicKey}
+                            setBgColor={setBgColor}
+                            size={
+                                variant === "large"
+                                    ? 32
+                                    : variant === "medium"
+                                    ? 24
+                                    : 16
+                            }
+                            onClick={onClick}
+                        />
+                    </div>
                     {"__context" in canvas && (
                         <RelativeTimestamp
                             timestamp={
@@ -64,7 +86,9 @@ export const Header = ({
                                 )
                             }
                             className={
-                                variant === "large" ? "text-sm" : "text-xs"
+                                variant === "large" || variant === "medium"
+                                    ? "text-sm"
+                                    : "text-xs"
                             }
                             onClick={onClick}
                         />

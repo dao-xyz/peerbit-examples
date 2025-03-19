@@ -42,6 +42,31 @@ const ReplyButton = ({
 };
 
 /**
+ * Arrow svg for expanded breadcrumb view.
+ * @param props - Component props
+ * @param props.hidden - Whether the arrow should be hidden
+ */
+const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
+    return (
+        <svg
+            width="16"
+            height="28"
+            viewBox="0 0 16 28"
+            fill="none"
+            xmlns="http://www.w3.org/2000/svg"
+            className={hidden ? "hidden" : ""}
+        >
+            <path
+                d="M4 0V15.5C4 19.9211 6.5 20 9.5 20"
+                stroke="black"
+                strokeWidth="0.75"
+            />
+            <path d="M8 18L9.5 20L8 22" stroke="black" strokeWidth="0.75" />
+        </svg>
+    );
+};
+
+/**
  * Reply component for displaying a Canvas reply.
  * @param props - Component props
  * @param props.canvas - The canvas data object to display
@@ -72,6 +97,9 @@ export const Reply = ({
     const { peer } = usePeer();
     const navigate = useNavigate();
 
+    const align =
+        canvas.publicKey === peer.identity.publicKey ? "right" : "left";
+
     useEffect(() => {
         const listener = async () => {
             if (canvas.closed) {
@@ -98,38 +126,31 @@ export const Reply = ({
     }, [canvas, canvas.closed]);
 
     return (
-        <div className={variant === "large" ? "py-4" : ""}>
+        <div
+            className={`flex flex-col ${
+                view === "chat" ? "max-w-prose w-[calc(100%-2rem)]" : ""
+            } ${
+                view === "chat"
+                    ? align === "left"
+                        ? "mr-auto"
+                        : "ml-auto items-end"
+                    : ""
+            } ${variant === "large" ? "py-4" : ""}`}
+        >
             <div
                 className={`flex items-end px-1  ${
                     variant === "large" ? "mb-2.5" : "mb-1"
                 }`}
             >
-                <svg
-                    width="16"
-                    height="28"
-                    viewBox="0 0 16 28"
-                    fill="none"
-                    xmlns="http://www.w3.org/2000/svg"
-                    className={
-                        variant === "large" || index === 0 ? "hidden" : ""
-                    }
-                >
-                    <path
-                        d="M4 0V15.5C4 19.9211 6.5 20 9.5 20"
-                        stroke="black"
-                        stroke-width="0.75"
-                    />
-                    <path
-                        d="M8 18L9.5 20L8 22"
-                        stroke="black"
-                        stroke-width="0.75"
-                    />
-                </svg>
+                <SvgArrowExpandedBreadcrumb
+                    hidden={variant === "large" || index === 0}
+                />
                 <Header
-                    variant={variant}
+                    variant={view === "chat" ? "medium" : variant}
                     canvas={canvas}
                     direction="row"
                     onClick={onClick}
+                    reverseLayout={view === "chat" && align === "right"}
                 />
             </div>
 
@@ -138,8 +159,8 @@ export const Reply = ({
                     navigate(getCanvasPath(canvas), {});
                     onClick && onClick();
                 }}
-                className={`w-full flex flex-row p-0 overflow-hidden ${
-                    view === "chat" ? "border rounded-md" : ""
+                className={`flex flex-row p-0 overflow-hidden ${
+                    view === "chat" ? "border rounded-md w-fit" : "w-full"
                 }`}
             >
                 <CanvasWrapper canvas={canvas}>
@@ -167,7 +188,7 @@ export const Reply = ({
                     )}
                 </CanvasWrapper>
             </button>
-            {variant === "large" && (
+            {view === "thread" && variant === "large" && (
                 <div className="flex gap-2.5 mt-4 mx-2">
                     <ReplyButton
                         className="btn btn-secondary btn-xs  h-full "
