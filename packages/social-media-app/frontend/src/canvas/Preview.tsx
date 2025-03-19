@@ -13,7 +13,12 @@ import { Frame } from "../content/Frame";
 import { rectIsStaticMarkdownText } from "./utils/rect";
 
 interface CanvasPreviewProps {
-    variant: "tiny" | "post" | "breadcrumb" | "expanded-breadcrumb";
+    variant:
+        | "tiny"
+        | "post"
+        | "breadcrumb"
+        | "expanded-breadcrumb"
+        | "chat-message";
     onClick?: () => void;
 }
 
@@ -113,7 +118,12 @@ const seperateAndSortRects = (rects: Element<ElementContent>[]) => {
 };
 
 type RectsForVariant<
-    V extends "tiny" | "post" | "breadcrumb" | "expanded-breadcrumb"
+    V extends
+        | "tiny"
+        | "post"
+        | "breadcrumb"
+        | "expanded-breadcrumb"
+        | "chat-message"
 > = V extends "tiny"
     ? Element<ElementContent> | undefined
     : V extends "breadcrumb"
@@ -122,10 +132,17 @@ type RectsForVariant<
     ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
     : V extends "post"
     ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
+    : V extends "chat-message"
+    ? { text?: Element<ElementContent>; other: Element<ElementContent>[] }
     : never;
 
 function getRectsForVariant<
-    Variant extends "tiny" | "post" | "breadcrumb" | "expanded-breadcrumb"
+    Variant extends
+        | "tiny"
+        | "post"
+        | "breadcrumb"
+        | "expanded-breadcrumb"
+        | "chat-message"
 >(separatedRects: SeparatedRects, variant: Variant): RectsForVariant<Variant> {
     switch (variant) {
         case "tiny":
@@ -135,6 +152,7 @@ function getRectsForVariant<
                 undefined) as RectsForVariant<Variant>;
         case "post":
         case "expanded-breadcrumb":
+        case "chat-message":
             return {
                 text: separatedRects.text[0],
                 other: separatedRects.other,
@@ -229,7 +247,7 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
             </div>
         );
     }
-    if (variant === "post") {
+    if (variant === "post" || variant === "chat-message") {
         const [firstApp, ...secondaryApps] = (
             variantRects as RectsForVariant<"post">
         ).other;

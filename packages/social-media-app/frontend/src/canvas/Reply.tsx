@@ -9,6 +9,7 @@ import { getCanvasPath } from "../routes";
 import { Header } from "./header/Header";
 import { CanvasWrapper } from "./CanvasWrapper";
 import { LuMessageSquare } from "react-icons/lu";
+import { useView, ViewType } from "../view/View";
 
 // Debounce helper that triggers on the leading edge and then ignores calls for the next delay ms.
 function debounceLeading(func: (...args: any[]) => void, delay: number) {
@@ -40,14 +41,29 @@ const ReplyButton = ({
     );
 };
 
+/**
+ * Reply component for displaying a Canvas reply.
+ * @param props - Component props
+ * @param props.canvas - The canvas data object to display
+ * @param props.variant - Display size variant
+ *   - "tiny": Compact display for breadcrumbs or nested view
+ *   - "large": Full-sized display with more controls, e.g. used in post in threaded view
+ * @param props.view - Optional view type (defaults to "threaded" if not supplied)
+ *   - "chat": Optimized for chat-like display
+ *   - "threaded": Standard threaded view
+ * @param props.index - Optional index of the reply in a list
+ * @param props.onClick - Optional click handler for the reply
+ */
 export const Reply = ({
     canvas,
     variant,
     index,
     onClick,
+    view,
 }: {
     canvas: WithContext<CanvasDB>;
     variant: "tiny" | "large";
+    view?: ViewType;
     index?: number;
     onClick?: () => void;
 }) => {
@@ -122,11 +138,23 @@ export const Reply = ({
                     navigate(getCanvasPath(canvas), {});
                     onClick && onClick();
                 }}
-                className="w-full flex flex-row p-0 overflow-hidden"
+                className={`w-full flex flex-row p-0 overflow-hidden ${
+                    view === "chat" ? "border rounded-md" : ""
+                }`}
             >
                 <CanvasWrapper canvas={canvas}>
                     {variant === "large" ? (
-                        showMore ? (
+                        /* chat view */
+                        view === "chat" ? (
+                            showMore ? (
+                                <Canvas bgBlur fitWidth draft={false} />
+                            ) : (
+                                <CanvasPreview
+                                    onClick={onClick}
+                                    variant="chat-message"
+                                />
+                            )
+                        ) : /* thread view */ showMore ? (
                             <Canvas bgBlur fitWidth draft={false} />
                         ) : (
                             <CanvasPreview onClick={onClick} variant="post" />

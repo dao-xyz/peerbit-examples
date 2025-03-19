@@ -14,9 +14,9 @@ export const CanvasAndReplies = () => {
     const { peer } = usePeer();
     const { root, path: canvases, loading } = useCanvases();
     const [lastCanvas, setLastCanvas] = useState<CanvasDB>(undefined);
-    const [sortCriteria, setSortCriteria] = useState<"new" | "old" | "best">(
-        "new"
-    );
+    const [sortCriteria, setSortCriteria] = useState<
+        "new" | "old" | "best" | "chat"
+    >("new");
 
     // Refs for header, toolbar, and scroll container
     const toolbarRef = useRef<HTMLDivElement>(null);

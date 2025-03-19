@@ -6,8 +6,9 @@ import { SearchRequest } from "@peerbit/document-interface";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Reply } from "./Reply";
+import { useView } from "../view/View";
 
-type SortCriteria = "new" | "old" | "best";
+type SortCriteria = "new" | "old" | "best" | "chat";
 
 interface RepliesProps {
     canvas?: CanvasDB;
@@ -20,8 +21,16 @@ export const Replies = (props: RepliesProps) => {
     const [query, setQuery] = useState<
         { query: SearchRequest; id: string } | undefined
     >(undefined);
+    const { setView, view } = useView();
 
     useEffect(() => {
+        // Set the view based on sortCriteria
+        if (sortCriteria === "chat") {
+            setView("chat");
+        } else {
+            setView("thread");
+        }
+
         if (sortCriteria === "best") {
             setQuery({
                 query: new SearchRequest({
@@ -54,7 +63,7 @@ export const Replies = (props: RepliesProps) => {
                 id: sortCriteria,
             });
         }
-    }, [sortCriteria]);
+    }, [sortCriteria, setView]);
 
     const sortedReplies = useLocal(canvas?.replies, query);
 
@@ -72,24 +81,20 @@ export const Replies = (props: RepliesProps) => {
                         style={{ padding: "0.5rem", minWidth: "150px" }}
                         className="bg-neutral-50 dark:bg-neutral-950 rounded-md shadow-lg"
                     >
-                        <DropdownMenu.Item
-                            className="menu-item"
-                            onSelect={() => setSortCriteria("new")}
-                        >
-                            New
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item
-                            className="menu-item"
-                            onSelect={() => setSortCriteria("old")}
-                        >
-                            Old
-                        </DropdownMenu.Item>
-                        <DropdownMenu.Item
-                            className="menu-item"
-                            onSelect={() => setSortCriteria("best")}
-                        >
-                            Best
-                        </DropdownMenu.Item>
+                        {["new", "old", "best", "chat"].map(
+                            (sortCriterium, index) => (
+                                <DropdownMenu.Item
+                                    key={index}
+                                    className="menu-item"
+                                    onSelect={() =>
+                                        setSortCriteria(sortCriterium as any)
+                                    }
+                                >
+                                    {sortCriterium.charAt(0).toUpperCase() +
+                                        sortCriterium.slice(1)}
+                                </DropdownMenu.Item>
+                            )
+                        )}
                     </DropdownMenu.Content>
                 </DropdownMenu.Root>
             </div>
@@ -100,6 +105,7 @@ export const Replies = (props: RepliesProps) => {
                             key={reply.idString}
                             canvas={reply}
                             variant="large"
+                            view={view}
                         />
                     ))}
                 </div>
