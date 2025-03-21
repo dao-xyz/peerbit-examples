@@ -101,12 +101,12 @@ export const Reply = ({
                     <path
                         d="M4 0V15.5C4 19.9211 6.5 20 9.5 20"
                         stroke="black"
-                        stroke-width="0.75"
+                        strokeWidth="0.75"
                     />
                     <path
                         d="M8 18L9.5 20L8 22"
                         stroke="black"
-                        stroke-width="0.75"
+                        strokeWidth="0.75"
                     />
                 </svg>
                 <Header

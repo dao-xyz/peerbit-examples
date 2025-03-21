@@ -51,11 +51,7 @@ code {
 
 }
 
-
-@tailwind base;
-@tailwind components;
 @tailwind utilities;
-@tailwind variants;
 
 
 
@@ -235,6 +231,11 @@ code {
         @apply focus:outline-none;
     }
 
+    .btn:disabled,
+    .btn[disabled] {
+        @apply opacity-50 cursor-not-allowed pointer-events-none;
+    }
+
     /* Elevated button style */
     .btn-elevated {
         /* btn cpy alias from @apply btn */
@@ -245,6 +246,14 @@ code {
 
         @apply border border-solid border-neutral-600 dark:border-neutral-400;
         box-shadow: 0 4px #999;
+    }
+
+    /* Disabled state for elevated buttons */
+    .btn-elevated:disabled,
+    .btn-elevated[disabled] {
+        @apply opacity-50 cursor-not-allowed pointer-events-none;
+        /* Optionally remove box-shadow or other active styles */
+        box-shadow: none;
     }
 
     .btn-elevated:active {
@@ -278,6 +287,12 @@ code {
 
         @apply py-2 px-2;
         /* This helps ensure there's some clickable area around the icon */
+    }
+
+    /* Disabled state for icon buttons */
+    .btn-icon:disabled,
+    .btn-icon[disabled] {
+        @apply opacity-50 cursor-not-allowed pointer-events-none;
     }
 
     /* ========== Button Container Size Classes ========== */

@@ -1,9 +1,7 @@
 import { TestSession } from "@peerbit/test-utils";
-import { BrowsingHistory } from "../activity.js";
-import { SimpleWebManifest } from "@dao-xyz/app-service";
 import { expect } from "chai";
 import { Identities } from "../identity.js";
-import { delay, waitForResolved } from "@peerbit/time";
+import { waitForResolved } from "@peerbit/time";
 
 describe("identity", () => {
     let session: TestSession;

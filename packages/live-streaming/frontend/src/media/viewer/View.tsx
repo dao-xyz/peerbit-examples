@@ -638,7 +638,13 @@ export const View = (properties: DBArgs) => {
                             />
                         </ClickOnceForAudio>
                         {showVideo && (
-                            <div style={{ marginTop: "-40px", width: "100%" }}>
+                            <div
+                                style={{
+                                    position: "absolute",
+                                    bottom: "0px",
+                                    width: "100%",
+                                }}
+                            >
                                 <Controls
                                     liveStreamAvailable={liveStreamAvailable}
                                     isBuffering={isBuffering}

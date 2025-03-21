@@ -56,3 +56,8 @@ jobs:
       run: | 
         aws s3 sync ./packages/file-share/frontend/dist/ s3://files-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E3UHSOW1JKZXR8 --paths '/*';
+
+    - name: Chess app
+      run: |
+        aws s3 sync ./packages/social-media-app/frontend/dist/ s3://chess-dao-xyz-dist --delete
+        aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';

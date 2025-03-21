@@ -309,8 +309,8 @@ export const Content = () => {
                 </Grid>
                 <Grid item sx={{ display: "flex", flexDirection: "row" }}>
                     <Typography>Online: &nbsp;</Typography>
-                    <Typography>{modelDB.peerCounter}</Typography>
-                    {modelDB.peerCounter === 1 && (
+                    <Typography>{modelDB.peers.length}</Typography>
+                    {modelDB.peers.length === 1 && (
                         <Typography>&nbsp;(just you)</Typography>
                     )}
                 </Grid>
@@ -432,7 +432,7 @@ export const Content = () => {
                             startIcon={<PublicIcon />}
                             color="secondary"
                             disabled={
-                                !p2pStorage.current || modelDB.peerCounter <= 1
+                                !p2pStorage.current || modelDB.peers.length <= 1
                             }
                             onClick={() => {
                                 tf.loadLayersModel(p2pStorage.current)

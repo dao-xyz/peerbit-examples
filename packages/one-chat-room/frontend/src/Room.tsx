@@ -261,7 +261,7 @@ export const Room = () => {
                 <Grid item>
                     <PeopleIcon />
                 </Grid>
-                <Grid item>{room.peerCounter}</Grid>
+                <Grid item>{room.peers.length}</Grid>
             </Grid>
             <Grid
                 item
