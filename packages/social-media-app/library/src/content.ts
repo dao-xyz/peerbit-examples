@@ -51,6 +51,17 @@ export class Layout {
         this.w = properties.w;
         this.h = properties.h;
     }
+
+    static zero(breakpoint: string = "md") {
+        return new Layout({
+            breakpoint,
+            x: 0,
+            y: 0,
+            z: 0,
+            w: 0,
+            h: 0,
+        });
+    }
 }
 
 export abstract class ElementContent {
@@ -69,15 +80,15 @@ export class Element<T extends ElementContent = ElementContent> {
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
-    @field({ type: vec(Layout) })
-    location: Layout[];
+    @field({ type: Layout })
+    location: Layout;
 
     @field({ type: ElementContent })
     content: T;
 
     constructor(properties: {
         id?: Uint8Array;
-        location: Layout[];
+        location: Layout;
         publicKey: PublicSignKey;
         content: T;
     }) {
@@ -101,16 +112,21 @@ export class IndexableElement {
     @field({ type: "string" })
     content: string;
 
+    @field({ type: Layout })
+    location: Layout;
+
     constructor(properties: {
         id: Uint8Array;
         publicKey: PublicSignKey;
         type: string;
         content: string;
+        location: Layout;
     }) {
         this.id = properties.id;
         this.publicKey = properties.publicKey.bytes;
         this.content = properties.content;
         this.type = properties.type;
+        this.location = properties.location;
     }
 }
 
@@ -268,6 +284,7 @@ export class Canvas extends Program {
                         publicKey: arg.publicKey,
                         type: indexable.type,
                         content: indexable.content,
+                        location: arg.location,
                     });
                 },
             },
@@ -390,7 +407,7 @@ export class Canvas extends Program {
                         content: new StaticContent({
                             content: new StaticMarkdownText({ text: name }),
                         }),
-                        location: [],
+                        location: Layout.zero(),
                         publicKey: this.node.identity.publicKey,
                     })
                 );

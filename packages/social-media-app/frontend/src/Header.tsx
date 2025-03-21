@@ -18,6 +18,8 @@ interface HeaderProps {
     fullscreen?: boolean;
 }
 
+export const HEIGHT = "40px";
+
 export const Header = forwardRef((props: HeaderProps, ref) => {
     // Read initial theme from localStorage or default to "light"
     const [theme, setTheme] = useState<"dark" | "light">(
@@ -53,7 +55,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                             onClick={() => setIsBreadcrumbExpanded(false)}
                         />
                     </div>
-                    {path.length > 1 && (
+                    {path?.length > 1 && (
                         <button
                             className="col-start-5 btn btn-icon flex flex-row items-center gap-1 h-8 self-center"
                             onClick={() => {
@@ -67,7 +69,9 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                         </button>
                     )}
                     <div className="col-start-7 relative flex h-full w-full items-center bg-neutral-50 dark:bg-neutral-950">
-                        <div className="w-full z-10 h-[40px] overflow-hidden">
+                        <div
+                            className={`w-full z-10 h-[${HEIGHT}] overflow-hidden`}
+                        >
                             <CanvasPath
                                 isBreadcrumbExpanded={isBreadcrumbExpanded}
                                 setIsBreadcrumbExpanded={

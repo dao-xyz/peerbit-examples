@@ -1,0 +1,141 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+
+@layer base {
+    input {
+        @apply text-black;
+        @apply dark:text-white;
+        @apply bg-white;
+        @apply dark:bg-black;
+    }
+
+    body {
+        @apply text-neutral-950;
+        @apply dark:text-neutral-50;
+        @apply bg-neutral-50;
+        @apply dark:bg-neutral-950;
+    }
+
+    span {
+        @apply text-neutral-950;
+        @apply dark:text-neutral-50;
+    }
+
+    /* Base styling for headers */
+    h1,
+    h2,
+    h3,
+    h4,
+    h5 {
+        line-height: 1.2;
+        margin: 0.5em 0;
+        margin-block-start: 0.67em;
+        margin-block-end: 0.67em;
+        margin-inline-start: 0px;
+        margin-inline-end: 0px;
+        font-weight: bold;
+        unicode-bidi: isolate;
+    }
+
+    /* Individual header styles */
+    h1 {
+        font-size: 2.5rem;
+        font-weight: 700;
+        margin-bottom: 0.6em;
+    }
+
+    h2 {
+        font-size: 2rem;
+        font-weight: 600;
+        margin-bottom: 0.5em;
+    }
+
+    h3 {
+        font-size: 1.75rem;
+        font-weight: 500;
+        margin-bottom: 0.5em;
+    }
+
+    h4 {
+        font-size: 1.5rem;
+        font-weight: 500;
+        margin-bottom: 0.5em;
+    }
+
+    h5 {
+        font-size: 1.25rem;
+        font-weight: 400;
+        margin-bottom: 0.4em;
+    }
+
+    hr {
+        /* Remove default border */
+        height: 1px;
+        /* Set the thickness */
+        margin: 2rem 0;
+        /* Vertical spacing to separate sections */
+    }
+
+    hr.faded {
+        border: 0;
+        height: 1px;
+        background-image: linear-gradient(to right,
+                rgba(0, 0, 0, 0),
+                rgba(0, 0, 0, 0.75),
+                rgba(0, 0, 0, 0));
+    }
+
+    /* scrollbar color */
+    /* Narrow scrollbar track */
+    ::-webkit-scrollbar {
+        width: 6px;
+        /* Adjust the width as desired */
+        background: var(--mono-shade3);
+    }
+
+    /* Scrollbar thumb with semi-transparent default state and smooth transition */
+    ::-webkit-scrollbar-thumb {
+        background-color: rgba(136, 136, 136, 0.5);
+        /* 50% opacity */
+        transition: background-color 0.3s ease;
+    }
+
+    /* On hover, increase opacity */
+    ::-webkit-scrollbar-thumb:hover {
+        background-color: rgba(136, 136, 136, 0.8);
+        /* 80% opacity */
+    }
+}
+
+@theme {
+    /* Define your primary color shades using oklch() */
+    --color-primary-50: oklch(0.97 0.014 254.604);
+    --color-primary-100: oklch(0.932 0.032 255.585);
+    --color-primary-200: oklch(0.882 0.059 254.128);
+    --color-primary-300: oklch(0.809 0.105 251.813);
+    --color-primary-400: oklch(0.707 0.165 254.624);
+    --color-primary-500: oklch(0.623 0.214 259.815);
+    --color-primary-600: oklch(0.546 0.245 262.881);
+    --color-primary-700: oklch(0.488 0.243 264.376);
+    --color-primary-800: oklch(0.424 0.199 265.638);
+    --color-primary-900: oklch(0.379 0.146 265.522);
+    --color-primary-950: oklch(0.282 0.091 267.935);
+
+
+
+    /* Define your secondary color shades using oklch() */
+    --color-secondary-50: oklch(0.987 0.026 102.212);
+    --color-secondary-100: oklch(0.973 0.071 103.193);
+    --color-secondary-200: oklch(0.945 0.129 101.54);
+    --color-secondary-300: oklch(0.905 0.182 98.111);
+    --color-secondary-400: oklch(0.852 0.199 91.936);
+    --color-secondary-500: oklch(0.795 0.184 86.047);
+    --color-secondary-600: oklch(0.681 0.162 75.834);
+    --color-secondary-700: oklch(0.554 0.135 66.442);
+    --color-secondary-800: oklch(0.476 0.114 61.907);
+    --color-secondary-900: oklch(0.421 0.095 57.708);
+
+}
+
+@tailwind utilities;

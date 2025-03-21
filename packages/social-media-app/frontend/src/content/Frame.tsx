@@ -1,13 +1,10 @@
-import React from "react";
+import React, { useState } from "react";
 import { IFrameContent, Element, StaticContent } from "@dao-xyz/social";
-import {
-    MdOpenWith,
-    MdAddReaction,
-    MdOpenInBrowser,
-    MdSave,
-} from "react-icons/md";
 import { useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
+import { useApps } from "./useApps";
+import { CuratedWebApp } from "@giga-app/app-service";
+import { HostProvider as GigaHost } from "@giga-app/sdk";
 
 /**
  * Frame component for displaying different types of content with controls.
@@ -37,8 +34,6 @@ export const Frame = (properties: {
     element: Element;
     active: boolean;
     setActive: (value: boolean) => void;
-    editMode: boolean;
-    showCanvasControls: boolean;
     thumbnail?: boolean;
     replace: (url: string) => void;
     onLoad: (event: React.SyntheticEvent<HTMLElement, Event>) => void;
@@ -47,10 +42,7 @@ export const Frame = (properties: {
      * The new static content is provided along with the element index.
      */
     onContentChange?: (
-        properties: {
-            content: StaticContent["content"];
-            id: Uint8Array;
-        },
+        properties: { content: StaticContent["content"]; id: Uint8Array },
         options?: { save: boolean }
     ) => void;
     key?: number;
@@ -59,8 +51,19 @@ export const Frame = (properties: {
     previewLines?: number;
     noPadding?: boolean;
     onClick?: () => void;
+    // edit related stuff
+    inFullscreen?: boolean;
+    showEditControls: boolean;
+    editControls?: React.ReactNode;
+    editMode: boolean;
 }) => {
     const navigate = useNavigate();
+    const { getCuratedWebApp } = useApps();
+    const [newUrl, setNewUrl] = useState("");
+    const [inputStatus, setInputStatus] = useState<{
+        isReady: boolean;
+        info?: string;
+    } | null>(null);
 
     const open = () => {
         const url = (properties.element.content as IFrameContent).src;
@@ -72,18 +75,98 @@ export const Frame = (properties: {
         }
     };
 
+    // Renders an error card showing the app's icon, title, error message,
+    // the current invalid URL, and (if in edit mode) an input field with a Save button.
+    const renderErrorUI = (
+        status: { info: string },
+        curatedWebApp: CuratedWebApp,
+        invalidUrl: string
+    ) => {
+        return (
+            <div className="p-4 border rounded-md flex flex-col items-center justify-center">
+                {curatedWebApp.manifest && (
+                    <div className="flex items-center space-x-2 mb-2">
+                        <img
+                            src={curatedWebApp.manifest.icon}
+                            alt={curatedWebApp.manifest.title}
+                            className="w-8 h-8"
+                        />
+                        <span className="text-xl font-semibold">
+                            {curatedWebApp.manifest.title}
+                        </span>
+                    </div>
+                )}
+                <p className="font-medium mb-2 text-center">
+                    {properties.editMode
+                        ? status.info
+                        : "The provided URL is invalid."}
+                </p>
+                <p className="text-sm italic mb-2">Current URL: {invalidUrl}</p>
+                {properties.editMode && (
+                    <div className="flex flex-col w-full">
+                        <div className="flex flex-row space-x-2">
+                            <input
+                                type="text"
+                                className="w-full p-2 rounded"
+                                placeholder="Enter a valid URL..."
+                                value={newUrl}
+                                onChange={(e) => {
+                                    const updatedUrl = e.target.value;
+                                    const newStatus = curatedWebApp.getStatus(
+                                        updatedUrl,
+                                        window.location.host
+                                    );
+                                    setNewUrl(updatedUrl);
+                                    setInputStatus(newStatus);
+                                }}
+                            />
+                            <button
+                                className="btn btn-secondary"
+                                onClick={() => properties.replace(newUrl)}
+                            >
+                                Save
+                            </button>
+                        </div>
+                        {inputStatus && (
+                            <p className="text-sm mt-1">
+                                {inputStatus.isReady
+                                    ? "URL is valid."
+                                    : inputStatus.info}
+                            </p>
+                        )}
+                    </div>
+                )}
+            </div>
+        );
+    };
+
     const renderContent = ({ previewLines }: { previewLines?: number }) => {
         // For iframes, continue to use the iframe as before.
         if (properties.element.content instanceof IFrameContent) {
+            const src = (properties.element.content as IFrameContent).src;
+            const curatedWebApp = getCuratedWebApp(src);
+            if (curatedWebApp) {
+                const status = curatedWebApp.getStatus(
+                    src,
+                    window.location.host
+                );
+                if (status.isReady === false) {
+                    return renderErrorUI(status, curatedWebApp, src);
+                }
+            }
             return (
                 <iframe
-                    onLoad={(event) => properties.onLoad(event)}
+                    onLoad={(event) => {
+                        console.log("IFRAME LOAD EVENT", event);
+                        properties.onLoad(event);
+                    }}
                     style={{
                         width: "100%",
                         height: "100%",
+                        minHeight: "400px",
                         border: 0,
                     }}
-                    src={(properties.element.content as IFrameContent).src}
+                    src={src}
                     allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
                 ></iframe>
             );
@@ -109,97 +192,35 @@ export const Frame = (properties: {
                         }
                     }}
                     fit={properties.fit}
-                    previewLines={previewLines}
+                    previewLines={properties.previewLines}
                     noPadding={properties.noPadding}
+                    inFullscreen={properties.inFullscreen}
                 />
             );
         }
         return <span>Unsupported content</span>;
     };
 
-    const isApp = properties.element.content instanceof IFrameContent;
-    const showCanvasControls = properties.showCanvasControls;
+    const showCanvasControls = properties.showEditControls;
     return (
         <div
             key={properties.key}
-            className={`flex flex-row w-full max-h-full h-full max-w-full overflow-hidden ${
-                !properties.thumbnail
-                    ? "" /* TODO bg? "bg-neutral-100 dark:bg-neutral-900" */
-                    : ""
-            } group`} /* ${properties.pending ? "border-solid border-2 border-primary-400" : ""} outline-auto outline-neutral-900 dark:outline-neutral-300  */
+            className="flex flex-row w-full max-h-full h-full max-w-full overflow-hidden group"
         >
-            <div className={`w-full max-h-full overflow-hidden`}>
-                {renderContent({
-                    previewLines: properties.previewLines,
-                })}
+            <div className="w-full max-h-full overflow-hidden">
+                {renderContent({ previewLines: properties.previewLines })}
             </div>
 
             {!properties.active && (
                 <div
-                    className={`ml-auto h-full flex pointer-events-none ${
-                        showCanvasControls ? "pointer-events-auto " : ""
+                    className={`ml-auto h-full flex ${
+                        showCanvasControls
+                            ? "pointer-events-auto"
+                            : "pointer-events-none"
                     }`}
                 >
-                    {" "}
-                    {/* // opacity-0 group-hover:opacity-100 backdrop-blur-sm group-hover:bg-primary-200/40 group-hover:dark:bg-primary-600/40 */}
-                    <div className="flex flex-col  h-full">
-                        {showCanvasControls && (
-                            <div
-                                className="w-full justify-end  flex flex-col " // hidden group-hover:flex
-                            >
-                                {/*  <div className="m-1 w-full">
-                                <AppSelect
-                                    onSelected={(app) => {
-                                        properties.replace(app.url);
-                                    }}
-                                />
-                            </div> */}
-
-                                {/*  <button
-                                className="btn-icon btn-icon-sx"
-                                onClick={() => {
-                                    properties.delete();
-                                }}
-                            >
-                                <MdClear className="h-4 w-4" />
-                            </button> */}
-
-                                <button className="btn-icon btn-icon-sm drag-handle-element">
-                                    <MdOpenWith className="h-4 w-4" />
-                                </button>
-                            </div>
-                        )}
-                        {isApp && (
-                            <div className="flex flex-row h-full w-full">
-                                {properties.pending ? (
-                                    <button className="w-6/12 h-full flex justify-center items-center btn">
-                                        <span className="mr-2 text-xl">
-                                            Save
-                                        </span>{" "}
-                                        <MdSave size={30} />
-                                    </button>
-                                ) : (
-                                    <button className="w-6/12 h-full flex justify-center items-center btn">
-                                        <span className="mr-2 text-xl">
-                                            Relate
-                                        </span>{" "}
-                                        <MdAddReaction size={30} />
-                                    </button>
-                                )}
-
-                                <button
-                                    className="w-6/12 h-full flex justify-center items-center btn"
-                                    onClick={() => {
-                                        open;
-                                        properties.onClick &&
-                                            properties.onClick();
-                                    }}
-                                >
-                                    <span className="mr-2 text-xl">Open</span>{" "}
-                                    <MdOpenInBrowser size={30} />
-                                </button>
-                            </div>
-                        )}
+                    <div className="flex flex-col h-full">
+                        {showCanvasControls && properties.editControls}
                     </div>
                 </div>
             )}

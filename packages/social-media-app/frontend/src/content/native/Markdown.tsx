@@ -12,6 +12,11 @@ export type MarkdownContentProps = {
     thumbnail?: boolean;
     previewLines?: number;
     noPadding?: boolean;
+    inFullscreen?: boolean;
+};
+
+const textHasOneOrMoreLines = (text: string) => {
+    return text.split("\n").length > 1;
 };
 
 /**
@@ -36,6 +41,7 @@ export const MarkdownContent = ({
     thumbnail,
     previewLines,
     noPadding,
+    inFullscreen,
 }: MarkdownContentProps) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
@@ -75,7 +81,13 @@ export const MarkdownContent = ({
     const autoResize = useCallback(() => {
         if (textareaRef.current) {
             textareaRef.current.style.height = "auto";
-            const newHeight = textareaRef.current.scrollHeight;
+            const padding = 0;
+            const newHeight = textareaRef.current.scrollHeight + padding;
+            if (textHasOneOrMoreLines(textareaRef.current.value) === false) {
+                textareaRef.current.style.lineHeight = "40px";
+            } else {
+                textareaRef.current.style.lineHeight = "unset";
+            }
             textareaRef.current.style.height = `${newHeight}px`;
             const newWidth = containerRef.current
                 ? containerRef.current.clientWidth
@@ -104,16 +116,21 @@ export const MarkdownContent = ({
 
     // Handle key presses in the textarea.
     const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-            const currentValue = e.currentTarget.value;
-            // If there's no newline in the current value, send the message.
-            if (!currentValue.includes("\n")) {
-                e.preventDefault();
-                onChange &&
-                    onChange(new StaticMarkdownText({ text: currentValue }), {
-                        save: true,
-                    }); // save true becaus we want to save/send the content immediately
-                setIsEditing(false);
+        if (!inFullscreen) {
+            if (e.key === "Enter" && !e.shiftKey) {
+                const currentValue = e.currentTarget.value;
+                // If there's no newline in the current value, send the message.
+                if (!currentValue.includes("\n")) {
+                    e.preventDefault();
+                    onChange &&
+                        onChange(
+                            new StaticMarkdownText({ text: currentValue }),
+                            {
+                                save: true,
+                            }
+                        ); // save true becaus we want to save/send the content immediately
+                    setIsEditing(false);
+                }
             }
         }
     };

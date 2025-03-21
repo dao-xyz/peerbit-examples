@@ -21,6 +21,7 @@
         "@peerbit/document": "^9",
         "@peerbit/react": "*",
         "@peerbit/video-lib": "*",
+        "@giga-app/sdk": "^0",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-use": "^17.4.0",

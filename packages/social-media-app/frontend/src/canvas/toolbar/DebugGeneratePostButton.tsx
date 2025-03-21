@@ -5,6 +5,8 @@ import {
     Canvas,
     CanvasAddressReference,
     Element,
+    ElementContent,
+    IFrameContent,
     Layout,
     StaticContent,
     StaticImage,
@@ -105,9 +107,10 @@ export const DebugGeneratePostButton = () => {
     };
 
     const insertPostsForDebugging = async () => {
-        type PostContent = "image" | "text";
+        type PostContent = "image" | "text" | "twitch";
         const postsToCreate: (PostContent[] | PostContent)[] = [
             "image",
+            ["text", "twitch"],
             ["image", "text"],
             ["image", "image"],
             "text",
@@ -132,7 +135,7 @@ export const DebugGeneratePostButton = () => {
             const openCanvas = await peer.open(canvas, { existing: "reuse" });
 
             for (const [ix, type] of typeArray.entries()) {
-                let mockContent: StaticContent;
+                let mockContent: ElementContent;
                 if (type === "image") {
                     mockContent = new StaticContent({
                         content: await fetchImageFromUrl(undefined, {
@@ -140,7 +143,7 @@ export const DebugGeneratePostButton = () => {
                             height: 300,
                         }),
                     });
-                } else {
+                } else if (type === "text") {
                     mockContent = new StaticContent({
                         content: new StaticMarkdownText({
                             text: generateATextInMarkdown(
@@ -148,22 +151,25 @@ export const DebugGeneratePostButton = () => {
                             ),
                         }),
                     });
+                } else if (type === "twitch") {
+                    mockContent = new IFrameContent({
+                        resizer: false,
+                        src: "https://player.twitch.tv/?channel=freecodecamp&parent=localhost",
+                    });
                 }
 
                 openCanvas.elements.put(
                     new Element({
                         content: mockContent,
-                        location: [
-                            new Layout({
-                                x: 0,
-                                y: ix,
-                                z: 0,
-                                w: 0,
-                                h: 0,
-                                breakpoint: "md",
-                            }),
-                        ],
-                        publicKey: publicKeyTuse,
+                        location: new Layout({
+                            x: 0,
+                            y: ix,
+                            z: 0,
+                            w: 0,
+                            h: 0,
+                            breakpoint: "md",
+                        }),
+                        publicKey: peer.identity.publicKey,
                     })
                 );
             }
@@ -178,7 +184,7 @@ export const DebugGeneratePostButton = () => {
     return (
         <button
             onClick={insertPostsForDebugging}
-            className="btn btn-elevated btn-icon-md"
+            className="btn btn-icon-md p-2"
         >
             <VscDebug size={25} />
         </button>

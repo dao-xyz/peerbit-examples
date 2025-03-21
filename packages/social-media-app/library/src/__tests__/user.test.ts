@@ -1,6 +1,6 @@
 import { TestSession } from "@peerbit/test-utils";
 import { BrowsingHistory } from "../activity.js";
-import { SimpleWebManifest } from "@dao-xyz/app-service";
+import { SimpleWebManifest } from "@giga-app/app-service";
 import { expect } from "chai";
 
 describe("user", () => {
