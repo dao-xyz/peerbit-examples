@@ -2,7 +2,8 @@ import { field, variant } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
 import { RPC } from "@peerbit/rpc";
 import { parse } from "parse5";
-import { RequestURL, SimpleWebManifest } from "./types.js";
+import { RequestURL } from "./types.js";
+import { SimpleWebManifest } from "@dao-xyz/social";
 
 export const resolveAppFromUrl = async (
     address: string
