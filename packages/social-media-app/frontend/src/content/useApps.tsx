@@ -2,13 +2,11 @@ import { usePeer, useProgram } from "@peerbit/react";
 import React, { useContext, useRef, useState, useReducer } from "react";
 import {
     AppPreview,
-    CuratedAppCommon,
     CuratedAppNative,
     CuratedWebApp,
     getApps,
-    SimpleWebManifest,
 } from "@giga-app/app-service";
-import { BrowsingHistory } from "@dao-xyz/social";
+import { BrowsingHistory, SimpleWebManifest } from "@dao-xyz/social";
 import { ImageUploadTrigger } from "./native/image/ImageUploadToCanvas";
 
 interface IApps {

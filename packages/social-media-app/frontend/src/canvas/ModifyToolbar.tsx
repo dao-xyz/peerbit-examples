@@ -1,7 +1,7 @@
 import { TbBorderCorners } from "react-icons/tb";
 import * as Toggle from "@radix-ui/react-toggle";
 import { AppSelect } from "./toolbar/AppSelect";
-import { SimpleWebManifest } from "@giga-app/app-service";
+import { SimpleWebManifest } from "@dao-xyz/social";
 import { useCanvas } from "./CanvasWrapper";
 import { ImageUploadTrigger } from "../content/native/image/ImageUploadToCanvas";
 import { DebugGeneratePostButton } from "./toolbar/DebugGeneratePostButton";
