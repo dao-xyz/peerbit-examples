@@ -100,16 +100,22 @@ export const Replies = (props: RepliesProps) => {
             </div>
             {sortedReplies.length > 0 ? (
                 <div
-                    className={`flex flex-col gap-4 mt-5 ${
-                        view === "chat" ? "px-4" : ""
+                    className={`mt-5 grid ${
+                        view === "chat"
+                            ? "grid-cols-[2rem_2rem_1fr_2rem_1rem]"
+                            : "grid-cols-[1rem_1fr_1rem]"
                     }`}
                 >
-                    {sortedReplies.map((reply) => (
+                    {sortedReplies.map((reply, i) => (
                         <Reply
                             key={reply.idString}
                             canvas={reply}
-                            variant="large"
-                            view={view}
+                            variant={view}
+                            hideHeader={
+                                view === "chat" &&
+                                sortedReplies[i - 1]?.publicKey ===
+                                    reply.publicKey
+                            }
                         />
                     ))}
                 </div>

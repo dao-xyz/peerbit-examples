@@ -10,6 +10,7 @@ import { Header } from "./header/Header";
 import { CanvasWrapper } from "./CanvasWrapper";
 import { LuMessageSquare } from "react-icons/lu";
 import { useView, ViewType } from "../view/View";
+import { tw } from "../utils/tailwind";
 
 // Debounce helper that triggers on the leading edge and then ignores calls for the next delay ms.
 function debounceLeading(func: (...args: any[]) => void, delay: number) {
@@ -70,27 +71,26 @@ const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
  * Reply component for displaying a Canvas reply.
  * @param props - Component props
  * @param props.canvas - The canvas data object to display
- * @param props.variant - Display size variant
- *   - "tiny": Compact display for breadcrumbs or nested view
- *   - "large": Full-sized display with more controls, e.g. used in post in threaded view
- * @param props.view - Optional view type (defaults to "threaded" if not supplied)
+ * @param props.variant - type for displaying the reply
  *   - "chat": Optimized for chat-like display
- *   - "threaded": Standard threaded view
+ *   - "thread": Standard threaded variant
+ *   - "expanded-breadcrumb": Compact display for breadcrumbs or nested variant
  * @param props.index - Optional index of the reply in a list
  * @param props.onClick - Optional click handler for the reply
+ * @param props.hideHeader - Whether to hide the header section
  */
 export const Reply = ({
     canvas,
-    variant,
     index,
     onClick,
-    view,
+    variant = "thread",
+    hideHeader = false,
 }: {
     canvas: WithContext<CanvasDB>;
-    variant: "tiny" | "large";
-    view?: ViewType;
+    variant?: ViewType | "expanded-breadcrumb";
     index?: number;
     onClick?: () => void;
+    hideHeader?: boolean;
 }) => {
     const [replyCount, setReplyCount] = useState(0);
     const [showMore, setShowMore] = useState(false);
@@ -99,6 +99,8 @@ export const Reply = ({
 
     const align =
         canvas.publicKey === peer.identity.publicKey ? "right" : "left";
+
+    const isExpandedBreadcrumb = variant === "expanded-breadcrumb";
 
     useEffect(() => {
         const listener = async () => {
@@ -125,91 +127,114 @@ export const Reply = ({
         };
     }, [canvas, canvas.closed]);
 
-    return (
-        <div
-            className={`flex flex-col ${
-                view === "chat" ? "max-w-prose w-[calc(100%-2rem)]" : ""
-            } ${
-                view === "chat"
-                    ? align === "left"
-                        ? "mr-auto"
-                        : "ml-auto items-end"
-                    : ""
-            } ${variant === "large" ? "py-4" : ""}`}
-        >
-            <div
-                className={`flex items-end px-1  ${
-                    variant === "large" ? "mb-2.5" : "mb-1"
-                }`}
-            >
-                <SvgArrowExpandedBreadcrumb
-                    hidden={variant === "large" || index === 0}
-                />
-                <Header
-                    variant={view === "chat" ? "medium" : variant}
-                    canvas={canvas}
-                    direction="row"
-                    onClick={onClick}
-                    reverseLayout={view === "chat" && align === "right"}
-                />
-            </div>
+    const handleCanvasClick = () => {
+        navigate(getCanvasPath(canvas), {});
+        onClick && onClick();
+    };
 
-            <button
-                onClick={async () => {
-                    navigate(getCanvasPath(canvas), {});
-                    onClick && onClick();
-                }}
-                className={`flex flex-row p-0 overflow-hidden ${
-                    view === "chat" ? "border rounded-md w-fit" : "w-full"
-                }`}
-            >
-                <CanvasWrapper canvas={canvas}>
-                    {variant === "large" ? (
-                        /* chat view */
-                        view === "chat" ? (
-                            showMore ? (
-                                <Canvas bgBlur fitWidth draft={false} />
-                            ) : (
-                                <CanvasPreview
-                                    onClick={onClick}
-                                    variant="chat-message"
-                                />
-                            )
-                        ) : /* thread view */ showMore ? (
-                            <Canvas bgBlur fitWidth draft={false} />
-                        ) : (
-                            <CanvasPreview onClick={onClick} variant="post" />
-                        )
-                    ) : (
-                        <CanvasPreview
-                            variant="expanded-breadcrumb"
-                            onClick={onClick}
-                        />
-                    )}
-                </CanvasWrapper>
-            </button>
-            {view === "thread" && variant === "large" && (
-                <div className="flex gap-2.5 mt-4 mx-2">
-                    <ReplyButton
-                        className="btn btn-secondary btn-xs  h-full "
-                        onClick={() => {
-                            setShowMore((showMore) => !showMore);
-                            onClick && onClick();
-                        }}
+    return (
+        <>
+            {/* gap in between grid elements */}
+            <div
+                className={tw(
+                    "col-span-full",
+                    variant === "chat" ? "h-4" : "h-10",
+                    isExpandedBreadcrumb ? "hidden" : ""
+                )}
+            ></div>
+            <div className={tw("col-span-full grid grid-cols-subgrid group")}>
+                {!hideHeader && (
+                    <div
+                        className={tw(
+                            "flex items-end px-1",
+                            isExpandedBreadcrumb ? "mb-1" : "mb-2.5",
+                            variant === "chat"
+                                ? "col-start-2 col-span-3"
+                                : variant === "thread"
+                                ? "col-start-2 col-span-1"
+                                : "col-span-full",
+                            variant === "chat"
+                                ? align === "left"
+                                    ? "justify-self-start"
+                                    : "justify-self-end"
+                                : ""
+                        )}
                     >
-                        {showMore ? "Show less" : "Show more"}
-                    </ReplyButton>
-                    <ReplyButton
-                        className="ml-auto btn btn-secondary  btn-xs h-full"
-                        onClick={async () => {
-                            navigate(getCanvasPath(canvas), {});
-                            onClick && onClick();
-                        }}
-                    >{`Open ${
-                        replyCount > 0 ? `(${replyCount})` : ""
-                    }`}</ReplyButton>
+                        <SvgArrowExpandedBreadcrumb
+                            hidden={!isExpandedBreadcrumb || index === 0}
+                        />
+                        <Header
+                            variant={
+                                variant === "chat"
+                                    ? "medium"
+                                    : isExpandedBreadcrumb
+                                    ? "tiny"
+                                    : "large"
+                            }
+                            canvas={canvas}
+                            direction="row"
+                            onClick={onClick}
+                            reverseLayout={
+                                variant === "chat" && align === "right"
+                            }
+                        />
+                    </div>
+                )}
+                <div
+                    className={tw(
+                        "p-0 overflow-hidden grid grid-cols-subgrid gap-y-4 col-span-full row-start-2",
+                        variant === "chat"
+                            ? align === "left"
+                                ? "justify-items-start"
+                                : "justify-items-end"
+                            : ""
+                    )}
+                >
+                    <CanvasWrapper canvas={canvas}>
+                        {isExpandedBreadcrumb ? (
+                            <CanvasPreview
+                                variant="expanded-breadcrumb"
+                                onClick={handleCanvasClick}
+                            />
+                        ) : variant === "chat" ? (
+                            <CanvasPreview
+                                onClick={handleCanvasClick}
+                                variant="chat-message"
+                                align={align}
+                            />
+                        ) : showMore ? (
+                            <div className="col-span-full">
+                                <Canvas bgBlur fitWidth draft={false} />
+                            </div>
+                        ) : (
+                            <CanvasPreview
+                                onClick={handleCanvasClick}
+                                variant="post"
+                            />
+                        )}
+                    </CanvasWrapper>
                 </div>
-            )}
-        </div>
+                {/* Gap between header and reply content */}
+                {variant === "thread" && !isExpandedBreadcrumb && (
+                    <div className={"col-start-2 col-span-1 flex gap-2.5 mt-4"}>
+                        <ReplyButton
+                            className="btn btn-secondary btn-xs h-full"
+                            onClick={() => {
+                                setShowMore((showMore) => !showMore);
+                                onClick && onClick();
+                            }}
+                        >
+                            {showMore ? "Show less" : "Show more"}
+                        </ReplyButton>
+                        <ReplyButton
+                            className="ml-auto btn btn-secondary btn-xs h-full"
+                            onClick={handleCanvasClick}
+                        >
+                            {`Open ${replyCount > 0 ? `(${replyCount})` : ""}`}
+                        </ReplyButton>
+                    </div>
+                )}
+            </div>
+        </>
     );
 };

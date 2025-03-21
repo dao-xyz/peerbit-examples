@@ -17,14 +17,14 @@ const ExpandedContext = ({ children, onClick }: ExpandedContextProps) => {
             </div>
         );
     return (
-        <div className="flex flex-col">
+        <div className="grid grid-cols-[1rem_1fr_1rem]">
             {path.slice(1).map((p, i) => (
                 <Reply
                     onClick={onClick}
                     key={i}
                     index={i}
                     canvas={p as any}
-                    variant="tiny"
+                    variant="expanded-breadcrumb"
                 />
             ))}
         </div>
