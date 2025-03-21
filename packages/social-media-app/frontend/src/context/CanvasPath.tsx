@@ -5,6 +5,7 @@ import { getCanvasPath } from "../routes";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { CanvasPreview } from "../canvas/Preview";
+import { tw } from "../utils/tailwind";
 
 export const CanvasPath = ({
     isBreadcrumbExpanded,
@@ -77,10 +78,24 @@ export const CanvasPath = ({
                     }
                 >
                     <div className="grid grid-flow-col auto-cols-max justify-start items-center overflow-x-auto w-full shrink-0 no-scrollbar p-1 pr-0">
-                        {path.slice(1).map((x, ix) => (
+                        {path.slice(0).map((x, ix) => (
                             <>
-                                {ix > 0 && <span className="mx-1">/</span>}
-                                {renderBreadcrumb(x, ix)}
+                                <span
+                                    className={tw(
+                                        ix < 2 &&
+                                            "w-0 overflow-hidden invisible"
+                                    )}
+                                >
+                                    <span className="px-1">/</span>
+                                </span>
+                                <span
+                                    className={tw(
+                                        ix === 0 &&
+                                            "w-0 overflow-hidden invisible"
+                                    )}
+                                >
+                                    {renderBreadcrumb(x, ix)}
+                                </span>
                             </>
                         ))}
                         <span
