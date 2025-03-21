@@ -3,6 +3,7 @@ import {
     BrowsingHistory,
     StaticImage,
     StaticMarkdownText,
+    SimpleWebManifest,
 } from "@dao-xyz/social";
 import {
     SearchRequest,
@@ -10,7 +11,6 @@ import {
     Or,
     StringMatchMethod,
 } from "@peerbit/document";
-import { SimpleWebManifest } from "./types";
 import { AppPreview } from "./remote";
 
 // ─────────────────────────────────────────────────────────────

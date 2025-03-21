@@ -36,7 +36,6 @@
         "@types/qrcode": "^1.5.5"
     },
     "dependencies": {
-        "@giga-app/app-service": "^0.0.1",
         "@peerbit/document": "^9",
         "peerbit": "^4",
         "uuid": "^10.0.0",

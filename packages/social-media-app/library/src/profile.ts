@@ -1,4 +1,4 @@
-import { field, option, variant, vec } from "@dao-xyz/borsh";
+import { field, option, variant } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
 import { Canvas, IndexableCanvas } from "./content";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";

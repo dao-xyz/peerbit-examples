@@ -8,7 +8,8 @@ import {
     randomBytes,
 } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
-import { SimpleWebManifest } from "@giga-app/app-service";
+import { SimpleWebManifest } from "./types.js";
+
 export class InvalidAppError extends Error {
     constructor() {
         super("Invalid app");
