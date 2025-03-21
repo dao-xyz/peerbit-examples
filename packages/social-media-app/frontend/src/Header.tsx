@@ -81,7 +81,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                         </div>
                         {/* helper block to cover the distance between overlay and breadcrumb bar */}
                         {isBreadcrumbExpanded && (
-                            <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-orange-950 border-neutral-950 dark:border-neutral-50 border-x"></div>
+                            <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950 border-neutral-950 dark:border-neutral-50 border-x"></div>
                         )}
                     </div>
 
