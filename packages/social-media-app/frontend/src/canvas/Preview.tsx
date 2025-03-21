@@ -337,7 +337,7 @@ const ChatMessagePreview = ({
                 <button
                     key={app.id.toString()}
                     onClick={onClick}
-                    className="col-span-full sm:col-start-2 sm:col-span-3 w-full sm:w-fit max-h-[40vh] flex flex-col overflow-hidden h-full sm:rounded-md relative"
+                    className="col-start-2 col-span-3 w-fit max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative"
                 >
                     <PreviewFrame
                         bgBlur
