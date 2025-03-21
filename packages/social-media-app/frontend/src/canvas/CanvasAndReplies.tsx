@@ -122,18 +122,21 @@ export const CanvasAndReplies = () => {
             >
                 {/* Set the scroll container height dynamically */}
                 <div className=" gap-2.5 w-full flex flex-col items-center">
-                    <div className="max-w-[876px] w-full h-full">
-                        {/* dont show header on root post */}
-                        {canvases.length > 1 && (
-                            <Header
-                                variant="large"
-                                canvas={lastCanvas}
-                                className="mb-2"
-                            />
-                        )}
-                        <CanvasWrapper canvas={lastCanvas}>
-                            <Canvas bgBlur fitWidth draft={false} />
-                        </CanvasWrapper>
+                    <div className="mt-6 w-full h-full">
+                        <div className="max-w-[876px] mx-auto w-full">
+                            {/* dont show header on root post */}
+                            {canvases.length > 1 && (
+                                <Header
+                                    variant="large"
+                                    canvas={lastCanvas}
+                                    className="mb-2  px-4"
+                                />
+                            )}
+                            <CanvasWrapper canvas={lastCanvas}>
+                                <Canvas bgBlur fitWidth draft={false} />
+                            </CanvasWrapper>
+                        </div>
+
                         <Replies
                             canvas={lastCanvas}
                             sortCriteria={sortCriteria}

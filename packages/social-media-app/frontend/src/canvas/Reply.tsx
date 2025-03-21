@@ -134,13 +134,6 @@ export const Reply = ({
     return (
         <>
             {/* gap in between grid elements */}
-            <div
-                className={tw(
-                    "col-span-full",
-                    variant === "chat" ? "h-4" : "h-10",
-                    isExpandedBreadcrumb ? "hidden" : ""
-                )}
-            ></div>
             <div className={tw("col-span-full grid grid-cols-subgrid group")}>
                 {!hideHeader && (
                     <div
