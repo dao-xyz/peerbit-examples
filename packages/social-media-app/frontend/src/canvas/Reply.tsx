@@ -153,11 +153,10 @@ export const Reply = ({
                                 : variant === "thread"
                                 ? "col-start-2 col-span-1"
                                 : "col-span-full",
-                            variant === "chat"
-                                ? align === "left"
+                            variant === "chat" &&
+                                (align === "left"
                                     ? "justify-self-start"
-                                    : "justify-self-end"
-                                : ""
+                                    : "justify-self-end")
                         )}
                     >
                         <SvgArrowExpandedBreadcrumb
@@ -183,11 +182,10 @@ export const Reply = ({
                 <div
                     className={tw(
                         "p-0 overflow-hidden grid grid-cols-subgrid gap-y-4 col-span-full row-start-2",
-                        variant === "chat"
-                            ? align === "left"
+                        variant === "chat" &&
+                            (align === "left"
                                 ? "justify-items-start"
-                                : "justify-items-end"
-                            : ""
+                                : "justify-items-end")
                     )}
                 >
                     <CanvasWrapper canvas={canvas}>

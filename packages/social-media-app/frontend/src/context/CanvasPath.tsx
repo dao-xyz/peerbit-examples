@@ -1,10 +1,7 @@
 import { useEffect, useState, useRef } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
-import TagInput from "./TagInput"; // import the controlled TagInput above
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
-import { IoIosArrowBack } from "react-icons/io";
-import { Canvas } from "../canvas/Canvas";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { CanvasPreview } from "../canvas/Preview";
@@ -79,26 +76,13 @@ export const CanvasPath = ({
                         setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
                     }
                 >
-                    <div className="flex flex-row justify-start items-center overflow-x-auto w-full no-scrollbar p-1 pr-0">
-                        {path.slice(0).map((x, ix) => {
-                            return (
-                                <div
-                                    key={ix}
-                                    className={`flex flex-row items-center ${
-                                        ix === 0 ? "w-0 invisible" : ""
-                                    }`}
-                                >
-                                    {ix > 1 && (
-                                        <span className="flex-none mx-1 w-fit">
-                                            /
-                                        </span>
-                                    )}
-                                    <div className="flex-none w-fit">
-                                        {renderBreadcrumb(x, ix)}
-                                    </div>
-                                </div>
-                            );
-                        })}
+                    <div className="grid grid-flow-col auto-cols-max justify-start items-center overflow-x-auto w-full shrink-0 no-scrollbar p-1 pr-0">
+                        {path.slice(1).map((x, ix) => (
+                            <>
+                                {ix > 0 && <span className="mx-1">/</span>}
+                                {renderBreadcrumb(x, ix)}
+                            </>
+                        ))}
                         <span
                             ref={endMarkerRef}
                             className="h-full w-1 flex-none block"

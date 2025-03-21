@@ -1,8 +1,16 @@
-import { ElementContent, Element } from "@dao-xyz/social";
+import {
+    ElementContent,
+    Element,
+    StaticContent,
+    StaticMarkdownText,
+} from "@dao-xyz/social";
 import { useCanvas } from "./CanvasWrapper";
 import { useMemo } from "react";
 import { Frame } from "../content/Frame";
 import { rectIsStaticMarkdownText } from "./utils/rect";
+import { tw } from "../utils/tailwind";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import { toString } from "mdast-util-to-string";
 
 type VariantType =
     | "tiny"
@@ -36,6 +44,7 @@ const PreviewFrame = ({
     fit,
     noPadding,
     onClick,
+    charLimit,
 }: {
     element: Element<ElementContent>;
     previewLines?: number;
@@ -44,6 +53,7 @@ const PreviewFrame = ({
     fit?: "cover" | "contain";
     noPadding?: boolean;
     onClick?: () => void;
+    charLimit?: number;
 }) => (
     <div
         className={`flex flex-col relative overflow-hidden w-full  ${
@@ -66,6 +76,7 @@ const PreviewFrame = ({
             previewLines={previewLines}
             noPadding={noPadding}
             onClick={onClick}
+            charLimit={charLimit}
         />
         {bgBlur && (
             <BlurredBackground element={element} noPadding={noPadding} />
@@ -179,13 +190,23 @@ const BreadcrumbPreview = ({
     rect: Element<ElementContent>;
     onClick?: () => void;
 }) => {
-    const isText = rectIsStaticMarkdownText(rect);
+    let isText: boolean = false;
+    let textLength: number | undefined = undefined;
+    if (
+        rect.content instanceof StaticContent &&
+        rect.content.content instanceof StaticMarkdownText
+    ) {
+        isText = rectIsStaticMarkdownText(rect);
+        textLength = toString(fromMarkdown(rect.content.content.text)).length;
+    }
 
     return (
         <div
-            className={`${
-                isText ? "w-[10ch] max-w-20% px-1" : "w-6"
-            } flex-none h-6 rounded-md overflow-hidden border border-neutral-950 dark:border-neutral-50`}
+            className={tw(
+                isText ? (textLength > 10 ? "w-[10ch]" : "w-fit") : "w-6",
+                isText && "px-1",
+                "flex-none h-6 rounded-md overflow-hidden border border-neutral-950 dark:border-neutral-50"
+            )}
         >
             <PreviewFrame
                 element={rect}

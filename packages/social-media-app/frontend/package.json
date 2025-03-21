@@ -22,6 +22,8 @@
         "@radix-ui/react-toggle": "^1.0.3",
         "axios": "^1.4.0",
         "iframe-resizer": "^5",
+        "mdast-util-from-markdown": "^2.0.2",
+        "mdast-util-to-string": "^4.0.0",
         "peerbit": "^4",
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
@@ -34,12 +36,12 @@
     },
     "devDependencies": {
         "@peerbit/vite": "^1",
+        "@tailwindcss/vite": "^4.0.14",
         "@types/react": "^18.2.46",
         "@types/react-dom": "^18.2.18",
         "@vitejs/plugin-react": "^4",
         "autoprefixer": "^10.4.20",
         "tailwindcss": "^4.0.14",
-        "@tailwindcss/vite": "^4.0.14",
         "typescript": "^5.6.3",
         "vite": "^6.0.6"
     },

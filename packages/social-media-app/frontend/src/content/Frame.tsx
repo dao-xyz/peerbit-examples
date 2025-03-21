@@ -9,6 +9,29 @@ import {
 import { useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
 
+/**
+ * Frame component for displaying different types of content with controls.
+ *
+ * @param props - Component props
+ * @param props.pending - Whether the frame is in a pending state
+ * @param props.element - The element to display
+ * @param props.active - Whether the frame is in active state
+ * @param props.setActive - Function to set the active state
+ * @param props.editMode - Whether the content is in edit mode
+ * @param props.showCanvasControls - Whether to show canvas controls
+ * @param props.thumbnail - Whether to display as a thumbnail
+ * @param props.replace - Function to replace content with a new URL
+ * @param props.onLoad - Callback when the content loads
+ * @param props.onContentChange - Callback when the content changes
+ * @param props.key - React key for the component
+ * @param props.delete - Function to delete the frame
+ * @param props.fit - How this frame should fit in its container
+ * @param props.previewLines - Number of lines (text) to show in preview mode
+ * @param props.noPadding - Whether to remove padding from contained apps
+ * @param props.onClick - Callback when the frame is clicked
+ *
+ * @returns Frame component with appropriate content and controls
+ */
 export const Frame = (properties: {
     pending: boolean;
     element: Element;
@@ -34,7 +57,6 @@ export const Frame = (properties: {
     delete(): void;
     fit?: "cover" | "contain";
     previewLines?: number;
-
     noPadding?: boolean;
     onClick?: () => void;
 }) => {

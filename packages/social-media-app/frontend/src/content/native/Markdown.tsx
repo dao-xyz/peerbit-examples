@@ -14,6 +14,20 @@ export type MarkdownContentProps = {
     noPadding?: boolean;
 };
 
+/**
+ * Component for rendering markdown content with various display options.
+ *
+ * @param props - Component props
+ * @param props.content - The markdown content to display
+ * @param props.onResize - Callback when the content resizes, provides dimensions {width, height}
+ * @param props.editable - Whether the content can be edited by the user (default: false)
+ * @param props.onChange - Callback when content is changed during editing
+ * @param props.thumbnail - Whether the content is displayed as a thumbnail
+ * @param props.previewLines - Number of lines to show in preview mode, content will be truncated
+ * @param props.noPadding - Whether to remove padding from the container
+ *
+ * @returns Rendered markdown content
+ */
 export const MarkdownContent = ({
     content,
     onResize,
@@ -37,7 +51,7 @@ export const MarkdownContent = ({
     useEffect(() => {
         if (!containerRef.current) return;
         const observer = new ResizeObserver((entries) => {
-            for (let entry of entries) {
+            for (const entry of entries) {
                 const { width, height } = entry.contentRect;
                 const newDims = { width, height };
                 if (
@@ -76,8 +90,6 @@ export const MarkdownContent = ({
             autoResize();
         }
     }, [text, isEditing, autoResize]);
-
-    const padding = !thumbnail ? "" : "p-1";
 
     // When the user clicks the container (and we're editable), start editing.
     const handleStartEditing = () => {
