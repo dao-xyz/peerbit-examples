@@ -55,14 +55,13 @@ const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
             viewBox="0 0 16 28"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
-            className={hidden ? "hidden" : ""}
+            className={tw(
+                hidden ? "hidden" : "",
+                "stroke-black dark:stroke-white"
+            )}
         >
-            <path
-                d="M4 0V15.5C4 19.9211 6.5 20 9.5 20"
-                stroke="black"
-                strokeWidth="0.75"
-            />
-            <path d="M8 18L9.5 20L8 22" stroke="black" strokeWidth="0.75" />
+            <path d="M4 0V15.5C4 19.9211 6.5 20 9.5 20" strokeWidth="0.75" />
+            <path d="M8 18L9.5 20L8 22" strokeWidth="0.75" />
         </svg>
     );
 };
