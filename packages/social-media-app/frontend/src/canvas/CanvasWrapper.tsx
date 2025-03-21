@@ -11,7 +11,7 @@ import {
 } from "@dao-xyz/social";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
-import { SimpleWebManifest } from "@giga-app/app-service";
+import { SimpleWebManifest } from "@dao-xyz/social";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
 import { useError } from "../dialogs/useErrorDialog.js";

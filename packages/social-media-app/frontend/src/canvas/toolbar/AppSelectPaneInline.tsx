@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect } from "react";
 import { AiOutlineSearch } from "react-icons/ai";
-import { SimpleWebManifest } from "@giga-app/app-service";
+import { SimpleWebManifest } from "@dao-xyz/social";
 import { resolveTrigger, useApps } from "../../content/useApps";
 import { useCanvas } from "../CanvasWrapper";
 import { DebugGeneratePostButton } from "./DebugGeneratePostButton";

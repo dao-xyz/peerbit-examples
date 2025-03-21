@@ -3,7 +3,7 @@ import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import ToolbarContent from "./ToolbarContent";
 import { AppSelectPaneInline } from "./AppSelectPaneInline";
-import { SimpleWebManifest } from "@giga-app/app-service";
+import { SimpleWebManifest } from "@dao-xyz/social";
 
 // A simple media query hook to detect desktop screens.
 function useMediaQuery(query: string) {
