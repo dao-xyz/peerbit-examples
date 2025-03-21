@@ -47,6 +47,14 @@ export const Tracks = (props: {
     const containerHeight =
         tracks && tracks.length > 0 ? tracks.length * rowHeight : rowHeight;
 
+    const getIsoString = (time: number) => {
+        try {
+            return new Date(time / 1000).toISOString().substr(11, 8);
+        } catch (error) {
+            console.error(time, error);
+            throw error;
+        }
+    };
     return (
         <div className="relative w-full bg-transparent mt-2 mb-2 flex flex-col">
             {/* show 0:00 to the left and maxTime to the right */}
@@ -59,11 +67,7 @@ export const Tracks = (props: {
                     style={{ right: 0 }}
                 >
                     <p className="text-sm">
-                        {maxTime
-                            ? new Date(maxTime / 1000)
-                                  .toISOString()
-                                  .substr(11, 8)
-                            : "-:--"}
+                        {maxTime ? getIsoString(maxTime) : "-:--"}
                     </p>
                 </div>
             </div>

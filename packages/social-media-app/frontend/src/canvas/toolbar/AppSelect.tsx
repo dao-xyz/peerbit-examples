@@ -10,10 +10,8 @@ import {
 import { useApps } from "../../content/useApps";
 import { FaPlus } from "react-icons/fa6";
 import { AiOutlineQuestionCircle } from "react-icons/ai";
-import { SimpleWebManifest } from "@dao-xyz/app-service";
+import { SimpleWebManifest } from "@giga-app/app-service";
 import { InvalidAppError } from "@dao-xyz/social";
-import { FaCamera, FaImage } from "react-icons/fa";
-import { BsCamera } from "react-icons/bs";
 
 const unknownApp = (url: string) => new SimpleWebManifest({ url });
 const isNative = (app: SimpleWebManifest) => app.url.startsWith("native:");
@@ -25,7 +23,7 @@ export const AppSelect = (properties: {
         apps,
         search: appSearch,
         history: appHistory,
-        getNativeApp,
+        getCuratedNativeApp: getNativeApp,
     } = useApps();
     const nativeApps = apps
         .filter((x) => x.isNative)
@@ -46,7 +44,6 @@ export const AppSelect = (properties: {
                 setSelected(out[0] || unknownApp(target.value));
             }
         }
-        console.log("FILTERED OUT", out);
         filteredAppsRef.current = out;
         forceUpdate();
     };
@@ -155,7 +152,8 @@ export const AppSelect = (properties: {
                                         {nativeApps.map((curatedApp) => {
                                             const app = curatedApp.manifest;
 
-                                            if (curatedApp.trigger) {
+                                            /* TODO re-add trigger
+                                             if (curatedApp.trigger) {
                                                 return (
                                                     <curatedApp.trigger
                                                         key={app.url}
@@ -164,7 +162,7 @@ export const AppSelect = (properties: {
                                                         <BsCamera size={20} />
                                                     </curatedApp.trigger>
                                                 );
-                                            }
+                                            } */
 
                                             return (
                                                 <button

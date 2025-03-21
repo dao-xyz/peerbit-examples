@@ -5,12 +5,6 @@ import { MediaStreamDB } from "@peerbit/video-lib";
 import { Params } from "react-router-dom";
 export const STREAM = "s/:address";
 
-/* export const getStreamPath = (node: PublicSignKey) =>
-    "s/" + base64url.encode(serialize(node));
-
-export const getKeyFromStreamKey = (key: string) =>
-    deserialize(base64url.decode(key), PublicSignKey); */
-
 export const getMediaStreamAddress = (params: Readonly<Params<string>>) =>
     params.address;
 export const getStreamPath = (db: MediaStreamDB) => {

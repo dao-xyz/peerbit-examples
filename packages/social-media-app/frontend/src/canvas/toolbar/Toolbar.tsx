@@ -1,93 +1,107 @@
-import React, { forwardRef, useState } from "react";
+import { useState, forwardRef, useRef, useEffect } from "react";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
-import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
-import { FaPlus } from "react-icons/fa";
-import { SaveButton } from "../SaveCanvasButton";
-import { Canvas } from "../Canvas";
-import { AppSelect } from "./AppSelect";
-import { SimpleWebManifest } from "@dao-xyz/app-service";
-import { DebugGeneratePostButton } from "./DebugGeneratePostButton";
-import { BsCamera } from "react-icons/bs";
+import ToolbarContent from "./ToolbarContent";
+import { AppSelectPaneInline } from "./AppSelectPaneInline";
+import { SimpleWebManifest } from "@giga-app/app-service";
 
-// Child component that calls useCanvas
-const ToolbarContent = forwardRef<
-    HTMLDivElement,
-    { contentEmpty: boolean; setContentEmpty: (empty: boolean) => void }
->((props, ref) => {
-    // useCanvas is now called inside a child of CanvasWrapper
-    // so it is guaranteed to have the context.
-    const { insertDefault } = useCanvas();
+// A simple media query hook to detect desktop screens.
+function useMediaQuery(query: string) {
+    const [matches, setMatches] = useState(false);
+    useEffect(() => {
+        const media = window.matchMedia(query);
+        setMatches(media.matches);
+        const listener = () => setMatches(media.matches);
+        media.addEventListener("change", listener);
+        return () => media.removeEventListener("change", listener);
+    }, [query]);
+    return matches;
+}
 
-    // Insert a new app post
-    const handleNew = (app: SimpleWebManifest) =>
-        insertDefault({ app, increment: true });
+interface ToolbarContainerProps {
+    pendingCanvas: CanvasDB;
+    onSavePending: () => void;
+}
 
-    return (
-        <div
-            ref={ref}
-            className="flex flex-col sticky z-20 bottom-0 w-full left-0 pb-4"
-        >
-            {/* Top area: single plus button for images */}
-            <Canvas appearance="chat-view-images">
-                <ImageUploadTrigger className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white">
-                    {/* Add the icon size class to the icon itself */}
-                    <FaPlus className="btn-icon-md" />
-                </ImageUploadTrigger>
-            </Canvas>
+// Wrap ToolbarContainer with forwardRef so that if a parent passes a ref, it is forwarded.
+export const Toolbar = forwardRef<HTMLDivElement, ToolbarContainerProps>(
+    (props, ref) => {
+        return (
+            <CanvasWrapper
+                canvas={props.pendingCanvas}
+                draft={true}
+                multiCanvas
+                onSave={props.onSavePending}
+                onContentChange={(e) => {
+                    // Handle content changes if needed.
+                }}
+            >
+                <ToolbarInner ref={ref} />
+            </CanvasWrapper>
+        );
+    }
+);
 
-            {/* Bottom area: integrated controls and conditional button */}
-            <div className="flex items-center gap-4 p-4 bg-neutral-50 dark:bg-neutral-950">
-                {/* Left side controls */}
-                <div className="flex flex-row items-center gap-2 max-w-[600px]">
-                    {/* If you want the debug bug icon to match, add the same classes here */}
-                    {import.meta.env.MODE === "development" && (
-                        <DebugGeneratePostButton />
-                    )}
-                    {/* Example: an AppSelect control */}
-                    <AppSelect onSelected={(app) => handleNew(app)} />
+interface ToolbarInnerProps {}
+
+const ToolbarInner = forwardRef<HTMLDivElement, ToolbarInnerProps>(
+    (_props, ref) => {
+        const [appSelectOpen, setAppSelectOpen] = useState(false);
+        const appSelectRef = useRef<HTMLDivElement>(null);
+
+        const handleAppSelected = (app: SimpleWebManifest) => {
+            setAppSelectOpen(false);
+        };
+
+        useEffect(() => {
+            const handleClickOutside = (event: MouseEvent) => {
+                if (
+                    appSelectOpen &&
+                    appSelectRef.current &&
+                    !appSelectRef.current.contains(event.target as Node)
+                ) {
+                    console.log("UNMOUNTING");
+                    setAppSelectOpen(false);
+                }
+            };
+
+            document.addEventListener("mousedown", handleClickOutside);
+            return () =>
+                document.removeEventListener("mousedown", handleClickOutside);
+        }, [appSelectOpen]);
+
+        // Determine if we're on a desktop screen (min-width: 640px).
+        /*  const isDesktop = useMediaQuery("(min-width: 640px)"); */
+
+        return (
+            <div ref={ref} className="w-full flex justify-center">
+                <div className="flex flex-col w-full items-center max-w-[876px]">
+                    <ToolbarContent
+                        onToggleAppSelect={() => setAppSelectOpen(true)}
+                        appSelectOpen={appSelectOpen}
+                    />
+                    <div
+                        ref={appSelectRef}
+                        className="overflow-hidden w-full"
+                        style={
+                            appSelectOpen
+                                ? {
+                                      height: `100%`,
+                                      pointerEvents: "auto",
+                                  }
+                                : {
+                                      height: "0px",
+                                      pointerEvents: "none",
+                                  }
+                        }
+                    >
+                        <AppSelectPaneInline
+                            className="p-4 pt-2"
+                            onSelected={handleAppSelected}
+                        />
+                    </div>
                 </div>
-
-                {/* Main text canvas */}
-                <Canvas fitWidth draft={true} appearance="chat-view-text" />
-
-                {/* Right side: conditionally show camera vs. send button */}
-                {props.contentEmpty ? (
-                    <ImageUploadTrigger className=" btn-icon btn-icon-md flex items-center justify-center ">
-                        <BsCamera />
-                    </ImageUploadTrigger>
-                ) : (
-                    <SaveButton />
-                )}
             </div>
-        </div>
-    );
-});
-
-// Parent component wrapping with CanvasWrapper
-export const Toolbar = forwardRef<
-    HTMLDivElement,
-    { pendingCanvas: CanvasDB; onSavePending: () => void }
->((props, ref) => {
-    // Local state to track if the content is empty
-    const [contentEmpty, setContentEmpty] = useState(true);
-
-    return (
-        <CanvasWrapper
-            canvas={props.pendingCanvas}
-            draft={true}
-            multiCanvas
-            onSave={props.onSavePending}
-            onContentChange={(e) => {
-                // Update based on content; assume e.content.isEmpty is provided.
-                setContentEmpty(e.content.isEmpty);
-            }}
-        >
-            <ToolbarContent
-                ref={ref}
-                contentEmpty={contentEmpty}
-                setContentEmpty={setContentEmpty}
-            />
-        </CanvasWrapper>
-    );
-});
+        );
+    }
+);

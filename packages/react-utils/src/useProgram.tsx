@@ -1,17 +1,14 @@
 import { Program, OpenOptions, ProgramEvents } from "@peerbit/program";
 import { usePeer } from "./usePeer.js";
+import { PublicSignKey } from "@peerbit/crypto";
 import { useEffect, useReducer, useRef, useState } from "react";
-const addressOrUndefined = <
-    A,
-    B extends ProgramEvents,
-    P extends Program<A, B>
->(
+const addressOrDefined = <A, B extends ProgramEvents, P extends Program<A, B>>(
     p?: P
 ) => {
     try {
         return p?.address;
     } catch (error) {
-        return undefined;
+        return !!p;
     }
 };
 type ExtractArgs<T> = T extends Program<infer Args> ? Args : never;
@@ -26,12 +23,16 @@ export const useProgram = <
 ) => {
     const { peer } = usePeer();
     let [program, setProgram] = useState<P | undefined>();
+    const [id, setId] = useState<string | undefined>(options?.id);
     let [loading, setLoading] = useState(true);
     const [session, forceUpdate] = useReducer((x) => x + 1, 0);
     let programLoadingRef = useRef<Promise<P>>();
-    const [peerCounter, setPeerCounter] = useState<number>(1);
-    let closingRef = useRef<Promise<any>>(Promise.resolve());
+    const [peers, setPeers] = useState<PublicSignKey[]>([]);
 
+    let closingRef = useRef<Promise<any>>(Promise.resolve());
+    /*   if (options?.debug) {
+          console.log("useProgram", addressOrOpen, options);
+      } */
     useEffect(() => {
         if (!peer || !addressOrOpen) {
             return;
@@ -45,22 +46,28 @@ export const useProgram = <
                 .then((p) => {
                     changeListener = () => {
                         p.getReady().then((set) => {
-                            setPeerCounter(set.size);
+                            setPeers([...set.values()]);
                         });
                     };
                     p.events.addEventListener("join", changeListener);
                     p.events.addEventListener("leave", changeListener);
                     p.getReady()
                         .then((set) => {
-                            setPeerCounter(set.size);
+                            setPeers([...set.values()]);
                         })
                         .catch((e) => {
                             console.log("Error getReady()", e);
                         });
                     setProgram(p);
                     forceUpdate();
-
+                    if (options?.id) {
+                        setId(p.address);
+                    }
                     return p;
+                })
+                .catch((e) => {
+                    console.error("failed to open", e);
+                    throw e;
                 })
                 .finally(() => {
                     setLoading(false);
@@ -102,13 +109,14 @@ export const useProgram = <
         options?.id,
         typeof addressOrOpen === "string"
             ? addressOrOpen
-            : addressOrUndefined(),
+            : addressOrDefined(addressOrOpen),
     ]);
     return {
         program,
         session,
         loading,
         promise: programLoadingRef.current,
-        peerCounter,
+        peers,
+        id,
     };
 };

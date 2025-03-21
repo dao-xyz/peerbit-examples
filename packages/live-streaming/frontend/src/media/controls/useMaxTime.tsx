@@ -24,7 +24,9 @@ export const useMaxTime = (props?: {
             return;
         }
 
-        maybeUpdateMaxTime(props.videoRef.duration * 1e6);
+        if (Number.isFinite(props.videoRef.duration)) {
+            maybeUpdateMaxTime(props.videoRef.duration * 1e6);
+        }
     }, [props?.videoRef, props?.videoRef?.duration]);
 
     useEffect(() => {

@@ -7,7 +7,7 @@ import {
     Element,
 } from "@dao-xyz/social";
 import { Canvas } from "./Canvas";
-import { CanvasWrapper, useCanvas } from "./CanvasWrapper";
+import { useCanvas } from "./CanvasWrapper";
 import { useMemo } from "react";
 import { Frame } from "../content/Frame";
 import { rectIsStaticMarkdownText } from "./utils/rect";
@@ -45,7 +45,7 @@ const PreviewFrame = ({
             setActive={(v) => {}}
             delete={() => {}}
             editMode={false}
-            showCanvasControls={false}
+            showEditControls={false}
             element={element}
             replace={() => {}}
             onLoad={() => {}}
@@ -74,7 +74,7 @@ const PreviewFrame = ({
                         setActive={() => {}}
                         delete={() => {}}
                         editMode={false}
-                        showCanvasControls={false}
+                        showEditControls={false}
                         element={element}
                         replace={async () => {}}
                         onLoad={() => {}}
@@ -106,8 +106,8 @@ const seperateAndSortRects = (rects: Element<ElementContent>[]) => {
         }
     });
 
-    seperatedRects.text.sort((a, b) => a.location[0].y - b.location[0].y);
-    seperatedRects.other.sort((a, b) => a.location[0].y - b.location[0].y);
+    seperatedRects.text.sort((a, b) => a.location.y - b.location.y);
+    seperatedRects.other.sort((a, b) => a.location.y - b.location.y);
 
     return seperatedRects;
 };

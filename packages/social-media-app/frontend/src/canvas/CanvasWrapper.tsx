@@ -8,15 +8,15 @@ import {
     ElementContent,
     StaticContent,
     StaticMarkdownText,
-    AbstractStaticContent,
-    StaticImage,
 } from "@dao-xyz/social";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
-import { SimpleWebManifest } from "@dao-xyz/app-service";
+import { SimpleWebManifest } from "@giga-app/app-service";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
 import { useError } from "../dialogs/useErrorDialog.js";
+import { Sort } from "@peerbit/indexer-interface";
+import { rectIsStaticMarkdownText } from "./utils/rect.js";
 
 interface CanvasContextType {
     editMode: boolean;
@@ -33,6 +33,7 @@ interface CanvasContextType {
     savePending: () => Promise<Element[] | undefined>;
     canvas: CanvasDB;
     onContentChange: (element: Element) => void;
+    isEmpty: boolean;
     // New: Function to insert an image into the canvas
     insertImage: (file: File, options?: { pending?: boolean }) => Promise<void>;
 }
@@ -73,47 +74,109 @@ export const CanvasWrapper = ({
         keepOpenOnUnmount: true,
     });
 
-    const { getNativeApp } = useApps();
+    const { getCuratedNativeApp: getNativeApp } = useApps();
     const { showError } = useError();
 
     const [editMode, setEditMode] = useState(!!draft);
+    const [isEmpty, setIsEmpty] = useState(true);
+
     const resizeSizes = useRef(
         new Map<number, { width: number; height: number }>()
     );
-    const rects = useLocal(canvas?.elements);
+    const rects = useLocal(canvas?.elements, {
+        id: canvas?.idString,
+        query: { sort: new Sort({ key: ["location", "y"] }) },
+    });
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
     const pendingCounter = useRef(0);
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
     const latestBreakpoint = useRef<"xxs" | "md">("md");
 
-    const addRect = async (
-        content: ElementContent,
-        options: { id?: Uint8Array; pending?: boolean } = { pending: false }
-    ) => {
-        const allCurrentRects = await canvas.elements.index.search({});
-        const allPending = pendingRects;
-        const maxY = [...allCurrentRects, ...allPending]
+    const getOptimalInsertLocation = (content: ElementContent) => {
+        if (rectIsStaticMarkdownText({ content })) {
+            return 0;
+        }
+        const locationOfTopMostText = (): number | undefined => {
+            return pendingRects
+                .filter((x) => {
+                    return (
+                        x.content instanceof StaticContent &&
+                        x.content.content instanceof StaticMarkdownText
+                    );
+                })
+                .sort((x, y) => x.location.y - y.location.y)[0]?.location.y;
+        };
+
+        let insertionLocation = locationOfTopMostText();
+        if (insertionLocation < 0) {
+            insertionLocation = 0;
+        }
+        return insertionLocation;
+    };
+
+    const getMaxYPlus1 = (from: Element[]) => {
+        const maxY = from
             .map((x) => x.location)
             .flat()
             .filter((x) => x.breakpoint === latestBreakpoint.current)
-            .reduce(
-                (prev, current) => Math.max(current.y + current.h, prev),
-                -1
-            );
+            .reduce((prev, current) => Math.max(current.y, prev), -1);
+
+        return maxY != null ? maxY + 1 : 0;
+    };
+
+    const reduceYInPending = (fromY: number) => {
+        const allPending = pendingRects;
+        for (const element of allPending.sort(
+            (x, y) => x.location.y - y.location.y
+        )) {
+            if (element.location.y >= fromY) {
+                element.location.y--;
+            }
+        }
+    };
+
+    const addRect = async (
+        content: ElementContent,
+        options: {
+            id?: Uint8Array;
+            pending?: boolean;
+            y?: number | "optimize" | "max";
+        } = { pending: false }
+    ) => {
+        const yStategy = options.y ?? "optimize";
+        const allCurrentRects = await canvas.elements.index.search({});
+        const allPending = pendingRects;
+        const all = [...allCurrentRects, ...allPending];
+        let y: number | undefined = undefined;
+        if (typeof yStategy === "number") {
+            y = yStategy;
+        } else if (yStategy === "optimize") {
+            y = getOptimalInsertLocation(content);
+        } else if (yStategy === "max") {
+            y = getMaxYPlus1(all);
+        } else {
+            throw new Error("Invalid y option");
+        }
+        // justify the y position of all affected elements
+        for (const element of allPending.sort(
+            (x, y) => x.location.y - y.location.y
+        )) {
+            if (element.location.y >= y) {
+                element.location.y++;
+            }
+        }
 
         const element = new Element({
             publicKey: peer.identity.publicKey,
             id: options.id,
-            location: [
-                new Layout({
-                    breakpoint: latestBreakpoint.current,
-                    x: 0,
-                    y: maxY != null ? maxY + 1 : 0,
-                    z: 0,
-                    w: 1,
-                    h: 1,
-                }),
-            ],
+            location: new Layout({
+                breakpoint: latestBreakpoint.current,
+                x: 0,
+                y,
+                z: 0,
+                w: 1,
+                h: 1,
+            }),
             content,
         });
 
@@ -135,15 +198,24 @@ export const CanvasWrapper = ({
         } else {
             canvas.elements.put(element);
         }
+
+        return element;
     };
 
     // New function: Inserts an image element into the canvas
-    const insertImage = async (file: File, options?: { pending?: boolean }) => {
+    const insertImage = async (
+        file: File,
+        options?: { pending?: boolean; y?: number | "optimize" | "max" }
+    ) => {
         // Create an object URL for immediate preview.
-
         try {
             const image = await readFileAsImage(file);
-            await addRect(new StaticContent({ content: image }), options);
+            const element = await addRect(
+                new StaticContent({ content: image }),
+                options
+            );
+            setIsEmpty(false);
+            onContentChange(element);
         } catch (error) {
             showError("Failed to insert image", error);
         }
@@ -152,6 +224,8 @@ export const CanvasWrapper = ({
     const insertDefault = (options?: {
         app?: SimpleWebManifest;
         increment?: boolean;
+        pending?: boolean;
+        y?: number | "optimize" | "max";
     }) => {
         if (options?.increment) {
             const last = pendingRects[pendingRects.length - 1];
@@ -168,6 +242,8 @@ export const CanvasWrapper = ({
             } else {
                 pendingCounter.current++;
             }
+
+            setIsEmpty(false);
         }
         const defaultId = sha256Sync(
             concat([
@@ -176,27 +252,41 @@ export const CanvasWrapper = ({
                 new Uint8Array([pendingCounter.current]),
             ])
         );
-        let appToAdd: AbstractStaticContent;
+        let appToAdd: ElementContent;
         if (options?.app) {
-            const native = getNativeApp(options.app.url);
-            if (!native) {
-                throw new Error("Missing native app");
+            if (options.app.isNative) {
+                const native = getNativeApp(options.app.url);
+                if (!native) {
+                    throw new Error(
+                        "Missing native app for url: " + options.app.url
+                    );
+                }
+                const defaultValue = native.default();
+                appToAdd = new StaticContent({
+                    content: defaultValue,
+                });
+            } else {
+                appToAdd = new IFrameContent({
+                    resizer: false,
+                    src: options.app.url,
+                });
             }
-            const defaultValue = native.default();
-            appToAdd = defaultValue;
         } else {
-            appToAdd = new StaticMarkdownText({ text: "" });
+            appToAdd = new StaticContent({
+                content: new StaticMarkdownText({ text: "" }),
+            });
         }
-        return addRect(
-            new StaticContent({
-                content: appToAdd,
-            }),
-            { id: defaultId, pending: true }
-        );
+        return addRect(appToAdd, {
+            id: defaultId,
+            pending: true,
+            y: options?.y,
+        });
     };
 
     const removePending = (id: Uint8Array) => {
+        const pending = pendingRects.find((x) => equals(x.id, id));
         setPendingRects((prev) => prev.filter((el) => !equals(id, el.id)));
+        reduceYInPending(pending.location.y);
     };
 
     const savePending = async () => {
@@ -215,6 +305,7 @@ export const CanvasWrapper = ({
             if (draft && onSave) {
                 onSave();
             }
+            setIsEmpty(true);
             return pendingToSave;
         } catch (error) {
             showError("Failed to save", error);
@@ -250,10 +341,27 @@ export const CanvasWrapper = ({
         !canvas || canvas?.closed ? undefined : canvas.address,
     ]);
 
+    const _onContentChange = (element: Element) => {
+        if (!element.content.isEmpty) {
+            setIsEmpty(false);
+        } else {
+            // TODO handle the oppoisite direcftion (isEmpty to true) better
+            const allElements = [...pendingRects, ...rects];
+            if (allElements.every((el) => el.content.isEmpty)) {
+                setIsEmpty(true);
+            }
+        }
+
+        if (onContentChange) {
+            onContentChange(element);
+        }
+    };
+
     const contextValue = {
         editMode,
         setEditMode,
         active,
+        isEmpty,
         setActive,
         pendingRects,
         rects,
@@ -261,7 +369,7 @@ export const CanvasWrapper = ({
         removePending,
         savePending,
         canvas,
-        onContentChange,
+        onContentChange: _onContentChange,
         insertImage, // <--- expose the new function
     };
 

@@ -129,7 +129,7 @@ export const ConnectDevices = () => {
                 <h1>Connect Devices</h1>
 
                 {/* Device Name Input */}
-                <div className="bg-gray-50 p-4 rounded shadow">
+                <div>
                     <label className="block text-lg font-medium mb-2">
                         Name this device
                     </label>

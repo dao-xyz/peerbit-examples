@@ -1,11 +1,12 @@
 import { useEffect, useState } from "react";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
-import { useLocal } from "@peerbit/react";
+import { useLocal, useOnline } from "@peerbit/react";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import { SearchRequest } from "@peerbit/document-interface";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Reply } from "./Reply";
+import { OnlineProfilesDropdown } from "../profile/OnlinePeersButton";
 
 type SortCriteria = "new" | "old" | "best";
 
@@ -16,10 +17,14 @@ interface RepliesProps {
 }
 
 export const Replies = (props: RepliesProps) => {
-    const { canvas, sortCriteria, setSortCriteria } = props;
+    const { canvas: canvas, sortCriteria, setSortCriteria } = props;
     const [query, setQuery] = useState<
         { query: SearchRequest; id: string } | undefined
     >(undefined);
+
+    const { peers } = useOnline(canvas, {
+        id: canvas?.idString,
+    });
 
     useEffect(() => {
         if (sortCriteria === "best") {
@@ -61,10 +66,9 @@ export const Replies = (props: RepliesProps) => {
     return (
         <div className="flex flex-col mt-10">
             <div className="sticky top-0 z-10 bg-neutral-50 dark:bg-neutral-950 flex flex-row items-center justify-between border-t-[1px] py-1 px-2.5">
-                <span className="ganja-font">Replies</span>
                 <DropdownMenu.Root>
                     <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
-                        <span>Sort by {sortCriteria}</span>
+                        <span>Replies sorted by {sortCriteria}</span>
                         <ChevronDownIcon className="ml-2" />
                     </DropdownMenu.Trigger>
                     <DropdownMenu.Content
@@ -92,6 +96,7 @@ export const Replies = (props: RepliesProps) => {
                         </DropdownMenu.Item>
                     </DropdownMenu.Content>
                 </DropdownMenu.Root>
+                {/*  <OnlineProfilesDropdown peers={peers || []} /> */}
             </div>
             {sortedReplies.length > 0 ? (
                 <div className="flex flex-col gap-4 mt-5">
