@@ -21,7 +21,6 @@ import { ProgramClient } from "@peerbit/program";
 import { identify } from "@libp2p/identify";
 import { webSockets } from "@libp2p/websockets";
 import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
-
 import * as filters from "@libp2p/websockets/filters";
 import { detectIncognito } from "detectincognitojs";
 
@@ -30,7 +29,23 @@ export type ConnectionStatus =
     | "connected"
     | "connecting"
     | "failed";
-interface IPeerContext {
+
+/** Discriminated union for PeerContext */
+export type IPeerContext = ProxyPeerContext | NodePeerContext;
+
+export interface ProxyPeerContext {
+    type: "proxy";
+    peer: ProgramClient | undefined;
+    promise: Promise<void> | undefined;
+    loading: boolean;
+    status: ConnectionStatus;
+    persisted: boolean | undefined;
+    /** Present only in proxy (iframe) mode */
+    targetOrigin: string;
+}
+
+export interface NodePeerContext {
+    type: "node";
     peer: ProgramClient | undefined;
     promise: Promise<void> | undefined;
     loading: boolean;
@@ -44,6 +59,7 @@ if (!window.name) {
 
 export const PeerContext = React.createContext<IPeerContext>({} as any);
 export const usePeer = () => useContext(PeerContext);
+
 type IFrameOptions = {
     type: "proxy";
     targetOrigin: string;
@@ -57,13 +73,11 @@ type NodeOptions = {
     bootstrap?: (Multiaddr | string)[];
     host?: boolean;
 };
-type TopOptions = NodeOptions & WithMemory;
+
+type TopOptions = NodeOptions & { inMemory?: boolean };
 type TopAndIframeOptions = {
     iframe: IFrameOptions | NodeOptions;
     top: TopOptions;
-};
-type WithMemory = {
-    inMemory?: boolean;
 };
 type WithChildren = {
     children: JSX.Element;
@@ -77,47 +91,64 @@ export const PeerProvider = (options: PeerOptions) => {
     const [promise, setPromise] = React.useState<Promise<void> | undefined>(
         undefined
     );
-
     const [persisted, setPersisted] = React.useState<boolean | undefined>(
         undefined
     );
-
     const [loading, setLoading] = React.useState<boolean>(true);
     const [connectionState, setConnectionState] =
         React.useState<ConnectionStatus>("disconnected");
-    const memo = React.useMemo<IPeerContext>(
-        () => ({
-            peer,
-            promise,
-            loading,
-            connectionState,
-            status: connectionState,
-            persisted: persisted,
-        }),
-        [
-            loading,
-            !!promise,
-            connectionState,
-            peer?.identity?.publicKey?.hashcode(),
-            persisted,
-        ]
-    );
+
+    // Decide which options to use based on whether we're in an iframe.
+    // If options.top is defined, assume we have separate settings for iframe vs. host.
+    const nodeOptions: IFrameOptions | TopOptions = (
+        options as TopAndIframeOptions
+    ).top
+        ? inIframe()
+            ? (options as TopAndIframeOptions).iframe
+            : (options as TopAndIframeOptions).top
+        : (options as TopOptions);
+
+    // If running as a proxy (iframe), expect a targetOrigin.
+    const computedTargetOrigin =
+        nodeOptions.type === "proxy"
+            ? (nodeOptions as IFrameOptions).targetOrigin
+            : undefined;
+
+    const memo = React.useMemo<IPeerContext>(() => {
+        if (nodeOptions.type === "proxy") {
+            return {
+                type: "proxy",
+                peer,
+                promise,
+                loading,
+                status: connectionState,
+                persisted,
+                targetOrigin: computedTargetOrigin as string,
+            };
+        } else {
+            return {
+                type: "node",
+                peer,
+                promise,
+                loading,
+                status: connectionState,
+                persisted,
+            };
+        }
+    }, [
+        loading,
+        promise,
+        connectionState,
+        peer,
+        persisted,
+        computedTargetOrigin,
+    ]);
 
     useMount(() => {
         setLoading(true);
         const fn = async () => {
             await sodium.ready;
-            if (peer) {
-                await peer.stop();
-                setPeer(undefined);
-            }
-
             let newPeer: ProgramClient;
-            const nodeOptions = (options as TopAndIframeOptions).top
-                ? inIframe()
-                    ? (options as TopAndIframeOptions).iframe
-                    : (options as TopAndIframeOptions).top
-                : (options as TopOptions);
 
             if (nodeOptions.type !== "proxy") {
                 const releaseFirstLock = cookiesWhereClearedJustNow();
@@ -132,8 +163,8 @@ export const PeerProvider = (options: PeerOptions) => {
                             }),
                             undefined,
                             {
-                                releaseFirstLock, // when clearing cookies sometimes the localStorage is not cleared immediately so we need to release the lock forcefully. TODO investigate why this is happening
-                                releaseLockIfSameId: true, // reuse keypairs from same tab, (force release)
+                                releaseFirstLock,
+                                releaseLockIfSameId: true,
                             }
                         )
                     ).key;
@@ -141,83 +172,49 @@ export const PeerProvider = (options: PeerOptions) => {
 
                 let directory: string | undefined = undefined;
                 if (
-                    !(nodeOptions as WithMemory).inMemory &&
+                    !(nodeOptions as TopOptions).inMemory &&
                     !(await detectIncognito()).isPrivate
                 ) {
                     const persisted = await navigator.storage.persist();
                     setPersisted(persisted);
                     if (!persisted) {
                         setPersisted(false);
-                        if (window["chrome"]) {
-                            console.error(
-                                "Request persistance but was not given permission by browser. Adding this site to your bookmarks or enabling push notifications might allow your chrome browser to persist data"
-                            );
-                        } else {
-                            console.error(
-                                "Request persistance but was not given permission by browser."
-                            );
-                        }
+                        console.error(
+                            "Request persistence but permission was not granted by browser."
+                        );
                     } else {
                         directory = `./repo/${peerId.toString()}/`;
                     }
                 }
 
-                // We create a new directrory to make tab to tab communication go smoothly
                 console.log("Create client");
                 newPeer = await Peerbit.create({
                     libp2p: {
-                        addresses: {
-                            listen: [
-                                "/p2p-circuit",
-                                /* "/webrtc" */
-                            ], // TMP disable because flaky behaviour with libp2p 1.8.1
-                        },
+                        addresses: { listen: ["/p2p-circuit"] },
                         connectionEncrypters: [noise()],
-                        peerId, //, having the same peer accross broswers does not work, only one tab will be recognized by other peers
-                        connectionManager: {
-                            maxConnections: 100,
-                        },
-                        connectionMonitor: {
-                            enabled: false,
-                        },
-
+                        peerId,
+                        connectionManager: { maxConnections: 100 },
+                        connectionMonitor: { enabled: false },
                         streamMuxers: [yamux()],
                         ...(nodeOptions.network === "local"
                             ? {
                                   connectionGater: {
-                                      denyDialMultiaddr: () => {
-                                          // by default we refuse to dial local addresses from the browser since they
-                                          // are usually sent by remote peers broadcasting undialable multiaddrs but
-                                          // here we are explicitly connecting to a local node so do not deny dialing
-                                          // any discovered address
-                                          return false;
-                                      },
+                                      denyDialMultiaddr: () => false,
                                   },
                                   transports: [
-                                      // Add websocket impl so we can connect to "unsafe" ws (production only allows wss)
-                                      webSockets({
-                                          filter: filters.all,
-                                      }),
+                                      webSockets({ filter: filters.all }),
                                       circuitRelayTransport(),
-                                      /*    webRTC(), */ // TMP disable because flaky behaviour with libp2p 1.8.1
                                   ],
                               }
                             : {
                                   transports: [
                                       webSockets({ filter: filters.wss }),
                                       circuitRelayTransport(),
-                                      /*   webRTC(), */ // TMP disable because flaky behaviour with libp2p 1.8.1
                                   ],
                               }),
-
                         services: {
                             pubsub: (c) =>
-                                new DirectSub(c, {
-                                    canRelayMessage: true,
-                                    /*      connectionManager: {
-                                            autoDial: false,
-                                        }, */
-                                }),
+                                new DirectSub(c, { canRelayMessage: true }),
                             identify: identify(),
                         },
                     },
@@ -232,7 +229,6 @@ export const PeerProvider = (options: PeerOptions) => {
 
                 setConnectionState("connecting");
 
-                // Resolve bootstrap nodes async (we want to return before this is done)
                 const connectFn = async () => {
                     try {
                         if (nodeOptions.network === "local") {
@@ -245,7 +241,6 @@ export const PeerProvider = (options: PeerOptions) => {
                                     ).text())
                             );
                         } else {
-                            // TODO fix types. When proxy client this will not be available
                             if (nodeOptions.bootstrap) {
                                 for (const addr of nodeOptions.bootstrap) {
                                     await newPeer.dial(addr);
@@ -272,13 +267,14 @@ export const PeerProvider = (options: PeerOptions) => {
                 promise.then(() => {
                     console.log("Bootstrap done");
                 });
-                // Make sure data flow as expected between tabs and windows locally (offline states)
-
                 if (nodeOptions.waitForConnnected !== false) {
                     await promise;
                 }
             } else {
-                newPeer = await createClient(nodeOptions.targetOrigin);
+                // When in proxy mode (iframe), use the provided targetOrigin.
+                newPeer = await createClient(
+                    (nodeOptions as IFrameOptions).targetOrigin
+                );
             }
 
             setPeer(newPeer);

@@ -1,6 +1,8 @@
 import { HashRouter } from "react-router-dom";
 import { Content } from "./Content";
-import { inIframe, PeerProvider } from "@peerbit/react";
+import { PeerProvider } from "@peerbit/react";
+import { AppProvider } from "@giga-app/sdk";
+
 import "./index.css";
 document.documentElement.classList.add("dark");
 
@@ -13,12 +15,11 @@ export const App = () => {
                 import.meta.env.MODE === "development" ? "local" : "remote"
             }
         >
-            {/*  <ThemeProvider theme={theme}>
-                <CssBaseline /> */}
-            <HashRouter basename="/">
-                <Content />
-            </HashRouter>
-            {/*    </ThemeProvider> */}
+            <AppProvider navigation="emit-all">
+                <HashRouter basename="/">
+                    <Content />
+                </HashRouter>
+            </AppProvider>
         </PeerProvider>
     );
 };

@@ -1,4 +1,12 @@
-import { ElementContent, Element } from "@dao-xyz/social";
+import {
+    Canvas as CanvasDB,
+    StaticContent,
+    StaticImage,
+    StaticMarkdownText,
+    ElementContent,
+    Element,
+} from "@dao-xyz/social";
+import { Canvas } from "./Canvas";
 import { useCanvas } from "./CanvasWrapper";
 import { useMemo } from "react";
 import { Frame } from "../content/Frame";
@@ -56,7 +64,7 @@ const PreviewFrame = ({
             setActive={() => {}}
             delete={() => {}}
             editMode={false}
-            showCanvasControls={false}
+            showEditControls={false}
             element={element}
             replace={() => {}}
             onLoad={() => {}}
@@ -97,7 +105,7 @@ const BlurredBackground = ({
                 setActive={() => {}}
                 delete={() => {}}
                 editMode={false}
-                showCanvasControls={false}
+                showEditControls={false}
                 element={element}
                 replace={async () => {}}
                 onLoad={() => {}}
@@ -129,8 +137,8 @@ const separateAndSortRects = (
         }
     });
 
-    separatedRects.text.sort((a, b) => a.location[0].y - b.location[0].y);
-    separatedRects.other.sort((a, b) => a.location[0].y - b.location[0].y);
+    separatedRects.text.sort((a, b) => a.location.y - b.location.y);
+    separatedRects.other.sort((a, b) => a.location.y - b.location.y);
 
     return separatedRects;
 };

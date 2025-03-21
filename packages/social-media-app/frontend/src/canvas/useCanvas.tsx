@@ -200,16 +200,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                 console.log("SET ROOT", result?.address);
                 await result.elements.put(
                     new Element({
-                        location: [
-                            new Layout({
-                                breakpoint: "md",
-                                x: 0,
-                                y: 0,
-                                z: 0,
-                                w: 20,
-                                h: 500,
-                            }),
-                        ],
+                        location: Layout.zero(),
                         id: new Uint8Array(32),
                         publicKey: peer.identity.publicKey,
                         content: new StaticContent({

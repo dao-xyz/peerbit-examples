@@ -116,7 +116,7 @@ export const Lobby = () => {
                         }}
                     >
                         <Typography>
-                            Peers in lobby: {lobby.peerCounter}
+                            Peers in lobby: {lobby.peers.length}
                         </Typography>
                     </Grid>
                 </Grid>

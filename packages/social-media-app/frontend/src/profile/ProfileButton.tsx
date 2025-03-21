@@ -4,8 +4,6 @@ import { Profile as ProfileData } from "@dao-xyz/social";
 import { useProfiles } from "./useProfiles";
 import { CanvasPreview } from "../canvas/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
-import { useNavigate } from "react-router-dom";
-import { getCanvasPath, MISSING_PROFILE } from "../routes";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";
 
@@ -28,13 +26,12 @@ export const ProfileButton = forwardRef<
         size?: number;
     } & React.ButtonHTMLAttributes<HTMLButtonElement>
 >(({ size, publicKey, direction, setBgColor, onClick, ...rest }, ref) => {
-    const { profiles } = useProfiles();
+    const { profiles, navigateTo } = useProfiles();
     const [profile, setProfile] = useState<ProfileData | undefined>();
     const { identities } = useIdentities();
     const sizeDefined = size ?? 32;
     const sizeInRem = pxToRem(sizeDefined);
 
-    const navigate = useNavigate();
     useEffect(() => {
         if (profiles?.closed || !profiles) return;
         profiles.get(publicKey, identities).then((profile) => {
@@ -62,22 +59,11 @@ export const ProfileButton = forwardRef<
         />
     );
 
-    const navigationHandler = () => {
-        if (profile) {
-            navigate(getCanvasPath(profile.profile), {});
-        } else {
-            navigate(MISSING_PROFILE);
-        }
-    };
-
     return (
         <button
             ref={ref}
             className="btn p-0 hover:filter hover:invert"
-            onClick={() => {
-                navigationHandler();
-                onClick && onClick();
-            }}
+            onClick={onClick ? onClick : () => navigateTo(profile)}
             {...rest} // Spread extra props so Radix's injected onClick, etc., get through
         >
             {content}

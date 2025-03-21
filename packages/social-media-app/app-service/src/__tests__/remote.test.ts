@@ -1,8 +1,21 @@
 import { TestSession } from "@peerbit/test-utils";
-import { AppPreview } from "..";
+import { AppPreview, resolveAppFromUrl } from "../remote";
 import { v4 as uuid } from "uuid";
 import { expect } from "chai";
-describe("index", () => {
+describe("resolveAppFromUrl", () => {
+    it("Twitch xqc", async () => {
+        const resolved = await resolveAppFromUrl("https://www.twitch.tv/xqc");
+        expect(resolved.icon!.length > 0).to.be.true;
+    });
+
+    /* not working  
+    it('kick maki95', async () => {
+         const resolved = await resolveAppFromUrl("https://kick.com/maki95")
+         expect(resolved.icon!.length > 0).to.be.true
+     }) */
+});
+
+describe("service", () => {
     let session: TestSession;
 
     beforeEach(async () => {
