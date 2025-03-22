@@ -7,7 +7,7 @@ import {
 
 export const rectIsStaticMarkdownText = (rect: {
     content: ElementContent;
-}): boolean => {
+}): rect is { content: StaticContent<StaticMarkdownText> } => {
     return (
         rect.content instanceof StaticContent &&
         rect.content.content instanceof StaticMarkdownText
@@ -16,7 +16,7 @@ export const rectIsStaticMarkdownText = (rect: {
 
 export const rectIsStaticImage = (rect: {
     content: ElementContent;
-}): boolean => {
+}): rect is { content: StaticContent<StaticImage> } => {
     return (
         rect.content instanceof StaticContent &&
         rect.content.content instanceof StaticImage

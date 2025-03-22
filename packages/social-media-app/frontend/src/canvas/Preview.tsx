@@ -194,11 +194,8 @@ const BreadcrumbPreview = ({
 }) => {
     let isText: boolean = false;
     let textLength: number | undefined = undefined;
-    if (
-        rect.content instanceof StaticContent &&
-        rect.content.content instanceof StaticMarkdownText
-    ) {
-        isText = rectIsStaticMarkdownText(rect);
+    if (rectIsStaticMarkdownText(rect)) {
+        isText = true;
         textLength = toString(fromMarkdown(rect.content.content.text)).length;
     }
 

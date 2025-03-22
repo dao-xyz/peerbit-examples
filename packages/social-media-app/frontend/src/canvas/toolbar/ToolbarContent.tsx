@@ -55,8 +55,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             pendingRects.some((rect) => !rectIsStaticMarkdownText(rect)) ||
             pendingRects.some(
                 (rect) =>
-                    rect.content instanceof StaticContent &&
-                    rect.content.content instanceof StaticMarkdownText &&
+                    rectIsStaticMarkdownText(rect) &&
                     rect.content.content.text.length > 0
             );
 
