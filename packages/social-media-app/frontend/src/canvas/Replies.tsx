@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import {
     Canvas,
     Canvas as CanvasDB,
@@ -27,6 +27,54 @@ interface RepliesProps {
 
 const getQueryId = (canvas: Canvas, sortCriteria: SortCriteria) => {
     return canvas.idString + sortCriteria;
+};
+
+export const StickyHeader = ({ children }) => {
+    const headerRef = useRef(null);
+    const [isScrolled, setIsScrolled] = useState(false);
+
+    useEffect(() => {
+        let animationFrame;
+
+        const checkPosition = () => {
+            if (headerRef.current) {
+                const rect = headerRef.current.getBoundingClientRect();
+                // If the header is within 50px of the top of the viewport, trigger the transition.
+                setIsScrolled(rect.top <= 150);
+            }
+            // Continue checking on the next animation frame.
+            animationFrame = requestAnimationFrame(checkPosition);
+        };
+
+        // Start the loop.
+        animationFrame = requestAnimationFrame(checkPosition);
+
+        return () => {
+            cancelAnimationFrame(animationFrame);
+        };
+    }, []);
+
+    return (
+        <div
+            ref={headerRef}
+            className="sticky top-14 z-10 flex flex-row items-center justify-between py-1 px-2.5 "
+        >
+            {/* Base layer: gradient background */}
+            <div
+                className="absolute inset-0 bg-[linear-gradient(rgb(211,211,211)_0%,rgb(200,200,200)_100%)]
+                     dark:bg-[radial-gradient(circle,rgba(57,57,57,1)_0%,rgba(10,10,10,1)_100%)]"
+            ></div>
+            {/* Overlay: default background that fades in/out */}
+            <div
+                className={`absolute inset-0 transition-opacity duration-700 ${isScrolled ? "opacity-100" : "opacity-0"
+                    } bg-neutral-50 dark:bg-neutral-950`}
+            ></div>
+            {/* Content */}
+            <div className="relative z-10 flex w-full justify-center">
+                {children}
+            </div>
+        </div>
+    );
 };
 
 export const Replies = (props: RepliesProps) => {
@@ -114,8 +162,8 @@ export const Replies = (props: RepliesProps) => {
     );
 
     return (
-        <div className="flex flex-col mt-10">
-            <div className="sticky top-14 z-10 dark:bg-neutral-800 flex flex-row items-center justify-between border-y-[1px] bg-neutral-100 py-1 px-2.5">
+        <div className="flex flex-col mt-10 ">
+            <StickyHeader>
                 <div className="w-full max-w-[876px] mx-auto">
                     <DropdownMenu.Root>
                         <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
@@ -147,7 +195,7 @@ export const Replies = (props: RepliesProps) => {
                     </DropdownMenu.Root>
                 </div>
                 {/*  <OnlineProfilesDropdown peers={peers || []} /> */}
-            </div>
+            </StickyHeader>
             {sortedReplies.length > 0 ? (
                 <div
                     className={tw(
@@ -165,8 +213,8 @@ export const Replies = (props: RepliesProps) => {
                                     view === "chat"
                                         ? "h-4"
                                         : i === 0
-                                        ? "h-6"
-                                        : "h-10"
+                                            ? "h-6"
+                                            : "h-10"
                                 )}
                             ></div>
                             <Reply
@@ -176,7 +224,7 @@ export const Replies = (props: RepliesProps) => {
                                 hideHeader={
                                     view === "chat" &&
                                     sortedReplies[i - 1]?.publicKey ===
-                                        reply.publicKey
+                                    reply.publicKey
                                 }
                             />
                         </Fragment>
