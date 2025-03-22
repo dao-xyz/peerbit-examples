@@ -25,7 +25,11 @@ const ChessGamePage = () => {
         } else {
             setIsSpectator(true);
         }
-    }, [gameInstance.id]);
+    }, [
+        gameInstance.id,
+        gameInstance.program?.closed,
+        peer?.identity.publicKey.hashcode(),
+    ]);
 
     useEffect(() => {
         if (!gameInstance.program) {
@@ -94,12 +98,12 @@ const ChessGamePage = () => {
     return (
         <div className="p-4">
             {isWaiting && (
-                <p className="text-xl text-yellow-600 mb-2">
+                <p className="text-xl mb-2">
                     Waiting for an opponent to join...
                 </p>
             )}
             {isSpectator && (
-                <p className="text-xl text-blue-600 mb-2">
+                <p className="text-xl mb-2">
                     You are a spectator in this game.
                 </p>
             )}
@@ -114,6 +118,21 @@ const ChessGamePage = () => {
                         <>
                             <FaCircle className="text-red-500 mr-2" />
                             <span>Opponent is offline</span>
+                        </>
+                    )}
+                </p>
+            )}
+
+            {!isSpectator && (
+                /* Show a text indicating if its my turn or not  */
+                <p className="mb-2 flex items-center">
+                    {isMyTurn ? (
+                        <>
+                            <span>Your turn</span>
+                        </>
+                    ) : (
+                        <>
+                            <span>Waiting opponent to move</span>
                         </>
                     )}
                 </p>

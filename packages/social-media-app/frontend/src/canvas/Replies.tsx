@@ -66,8 +66,9 @@ export const StickyHeader = ({ children }) => {
             ></div>
             {/* Overlay: default background that fades in/out */}
             <div
-                className={`absolute inset-0 transition-opacity duration-700 ${isScrolled ? "opacity-100" : "opacity-0"
-                    } bg-neutral-50 dark:bg-neutral-950`}
+                className={`absolute inset-0 transition-opacity duration-700 ${
+                    isScrolled ? "opacity-100" : "opacity-0"
+                } bg-neutral-50 dark:bg-neutral-950`}
             ></div>
             {/* Content */}
             <div className="relative z-10 flex w-full justify-center">
@@ -213,8 +214,8 @@ export const Replies = (props: RepliesProps) => {
                                     view === "chat"
                                         ? "h-4"
                                         : i === 0
-                                            ? "h-6"
-                                            : "h-10"
+                                        ? "h-6"
+                                        : "h-10"
                                 )}
                             ></div>
                             <Reply
@@ -224,7 +225,7 @@ export const Replies = (props: RepliesProps) => {
                                 hideHeader={
                                     view === "chat" &&
                                     sortedReplies[i - 1]?.publicKey ===
-                                    reply.publicKey
+                                        reply.publicKey
                                 }
                             />
                         </Fragment>
