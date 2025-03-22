@@ -114,8 +114,8 @@ export const Replies = (props: RepliesProps) => {
     );
 
     return (
-        <div className="flex flex-col mt-10 dark:bg-black">
-            <div className="sticky top-14 z-10  flex flex-row items-center justify-between py-1 px-2.5 bg-[linear-gradient(rgb(238,206,206)_0%,rgb(212,219,234)_100%)] dark:bg-[radial-gradient(circle,rgba(34,34,34,1)_0%,rgba(0,0,0,1)_100%)]">
+        <div className="flex flex-col mt-10">
+            <div className="sticky top-14 z-10 dark:bg-neutral-800 flex flex-row items-center justify-between border-y-[1px] bg-neutral-100 py-1 px-2.5">
                 <div className="w-full max-w-[876px] mx-auto">
                     <DropdownMenu.Root>
                         <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
