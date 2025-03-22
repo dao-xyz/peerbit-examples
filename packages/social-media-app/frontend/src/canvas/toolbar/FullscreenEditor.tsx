@@ -1,11 +1,15 @@
 import { Canvas } from "../Canvas";
 import { useToolbar } from "./Toolbar";
 
-export const FullscreenEditor = () => {
+type FullscreenEditorProps = {
+    children: React.ReactNode;
+};
+
+export const FullscreenEditor = ({ children }: FullscreenEditorProps) => {
     const { fullscreenEditorActive } = useToolbar();
     if (fullscreenEditorActive)
         return (
-            <div className="z-10 absolute inset-0 overflow-auto bg-neutral-50 dark:bg-neutral-950">
+            <div className="overflow-auto bg-neutral-50 dark:bg-neutral-950">
                 <Canvas
                     fitWidth
                     draft={true}
@@ -14,5 +18,5 @@ export const FullscreenEditor = () => {
                 />
             </div>
         );
-    return null;
+    return <>{children}</>;
 };
