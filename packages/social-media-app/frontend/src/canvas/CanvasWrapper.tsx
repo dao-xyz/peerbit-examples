@@ -99,10 +99,7 @@ export const CanvasWrapper = ({
         const locationOfTopMostText = (): number | undefined => {
             return pendingRects
                 .filter((x) => {
-                    return (
-                        x.content instanceof StaticContent &&
-                        x.content.content instanceof StaticMarkdownText
-                    );
+                    return rectIsStaticMarkdownText(x);
                 })
                 .sort((x, y) => x.location.y - y.location.y)[0]?.location.y;
         };

@@ -404,7 +404,7 @@ export class Canvas extends Program {
                 // TODO Dont put if already exists
                 await nextCanvas.elements.put(
                     new Element({
-                        content: new StaticContent({
+                        content: new StaticContent<StaticMarkdownText>({
                             content: new StaticMarkdownText({ text: name }),
                         }),
                         location: Layout.zero(),
@@ -533,11 +533,13 @@ export class IFrameContent extends ElementContent {
 }
 
 @variant(1)
-export class StaticContent extends ElementContent {
+export class StaticContent<
+    T extends AbstractStaticContent = AbstractStaticContent
+> extends ElementContent {
     @field({ type: AbstractStaticContent })
-    content: AbstractStaticContent; // https://a.cool.thing.com/abc123
+    content: T;
 
-    constructor(properties: { content: AbstractStaticContent }) {
+    constructor(properties: { content: T }) {
         super();
         this.content = properties.content;
     }
