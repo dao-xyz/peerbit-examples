@@ -103,10 +103,7 @@ export const Reply = ({
 
     useEffect(() => {
         const listener = async () => {
-            if (canvas.closed) {
-                await peer.open(canvas, { existing: "reuse" });
-            }
-            canvas.countReplies().then(async (count) => {
+            await canvas.countReplies().then(async (count) => {
                 setReplyCount(Number(count));
             });
         };
@@ -116,13 +113,31 @@ export const Reply = ({
         const debouncedListener = debounceLeading(listener, 3000);
 
         // Call listener immediately for the first event (leading edge)
-        listener();
-        canvas.replies.events.addEventListener("change", debouncedListener);
+        let openPromise: Promise<any>;
+        if (canvas.closed) {
+            openPromise = (async () =>
+                peer.open(canvas, { existing: "reuse" }))();
+        } else {
+            openPromise = Promise.resolve();
+        }
+        openPromise.then(() =>
+            canvas.loadReplies().then(() => {
+                canvas.replies.events.addEventListener(
+                    "change",
+                    debouncedListener
+                );
+                listener();
+            })
+        );
         return () => {
-            canvas.replies.events.removeEventListener(
-                "change",
-                debouncedListener
-            );
+            try {
+                canvas.replies.events.removeEventListener(
+                    "change",
+                    debouncedListener
+                );
+            } catch (error) {
+                // TODO handle error when we can not resolve replies
+            }
         };
     }, [canvas, canvas.closed]);
 

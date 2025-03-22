@@ -55,7 +55,7 @@ export const CreateRoot = () => {
         if (peer && !pendingCanvasState) {
             const newCanvas = new CanvasDB({
                 publicKey: peer.identity.publicKey,
-                parent: undefined, // root canvas
+                path: [], // root canvas
             });
             setPendingCanvasState(newCanvas);
             createSetBase64(newCanvas);

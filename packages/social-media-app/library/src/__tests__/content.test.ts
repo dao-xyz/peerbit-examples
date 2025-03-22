@@ -1,5 +1,9 @@
 import { TestSession } from "@peerbit/test-utils";
-import { Canvas } from "../content.js";
+import {
+    Canvas,
+    getImmediateRepliesQuery,
+    getRepliesQuery,
+} from "../content.js";
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
 
@@ -34,7 +38,7 @@ describe("content", () => {
             expect((await abd[0].getCanvasPath())[3]).to.eq(abd[0]);
 
             const childrenFromRoot = await root.replies.index.index
-                .iterate()
+                .iterate({ query: getImmediateRepliesQuery(root) })
                 .all();
             expect(childrenFromRoot).to.have.length(1); // both paths start at "a"
 
@@ -44,7 +48,9 @@ describe("content", () => {
             ).to.deep.eq(["b"]);
 
             const elementsInB = await ab.canvases[0].replies.index.search(
-                new SearchRequest()
+                new SearchRequest({
+                    query: getImmediateRepliesQuery(ab.canvases[0]),
+                })
             );
 
             const titlesFromB = await Promise.all(
@@ -66,6 +72,7 @@ describe("content", () => {
             await root.getCreateRoomByPath(["a", "c"]);
 
             const sortedByReplies = await root.replies.index.search({
+                query: getImmediateRepliesQuery(root),
                 sort: new Sort({
                     key: "replies",
                     direction: SortDirection.DESC,
@@ -75,6 +82,58 @@ describe("content", () => {
             expect(
                 await Promise.all(sortedByReplies.map((x) => x.createTitle()))
             ).to.deep.eq(["a", "b", "c"]);
+        });
+
+        describe("replies", () => {
+            it("getRepliesQuery", async () => {
+                const root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                await root.getCreateRoomByPath(["a", "b", "c"]);
+                await root.getCreateRoomByPath(["a", "b", "d"]);
+                const a = (await root.getCreateRoomByPath(["a"]))[0];
+                expect(await a.createTitle()).to.eq("a");
+
+                const all = await a.replies.index
+                    .iterate({
+                        query: getRepliesQuery(a),
+                    })
+                    .all();
+                // should return all children
+                // b, c, d
+                expect(all).to.have.length(3);
+                const allTitles = await Promise.all(
+                    all.map((x) => x.createTitle())
+                );
+                expect(allTitles.sort()).to.deep.eq(["b", "c", "d"]);
+            });
+
+            it("getImmediateRepliesQuery", async () => {
+                const root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                await root.getCreateRoomByPath(["a", "b", "c"]);
+                await root.getCreateRoomByPath(["a", "b", "d"]);
+                const b = (await root.getCreateRoomByPath(["a", "b"]))[0];
+                expect(await b.createTitle()).to.eq("b");
+
+                const all = await b.replies.index
+                    .iterate({
+                        query: getImmediateRepliesQuery(b),
+                    })
+                    .all();
+
+                const allTitles = await Promise.all(
+                    all.map((x) => x.createTitle())
+                );
+                expect(allTitles.sort()).to.deep.eq(["c", "d"]);
+            });
         });
 
         /*  it("determinstic with seed", async () => {

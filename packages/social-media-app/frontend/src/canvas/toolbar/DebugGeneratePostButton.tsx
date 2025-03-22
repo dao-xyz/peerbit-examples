@@ -125,9 +125,12 @@ export const DebugGeneratePostButton = () => {
             const typeArray = Array.isArray(type) ? type : [type];
             // create a post (canvas) that references its parent
             const canvas = new Canvas({
-                parent: new CanvasAddressReference({
-                    canvas: path[path.length - 1],
-                }),
+                path: path.map(
+                    (x) =>
+                        new CanvasAddressReference({
+                            canvas: x,
+                        })
+                ),
                 publicKey: publicKeyTuse,
             });
 

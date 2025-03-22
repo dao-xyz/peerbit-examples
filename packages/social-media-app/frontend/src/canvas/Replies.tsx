@@ -1,13 +1,20 @@
-import { useEffect, useState } from "react";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Fragment, useEffect, useState } from "react";
+import {
+    Canvas,
+    Canvas as CanvasDB,
+    getImmediateRepliesQuery,
+    getRepliesQuery,
+} from "@dao-xyz/social";
 import { useLocal, useOnline } from "@peerbit/react";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
-import { SearchRequest } from "@peerbit/document-interface";
+import {
+    SearchRequest,
+    SearchRequestIndexed,
+} from "@peerbit/document-interface";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Reply } from "./Reply";
 import { useView } from "../view/View";
-import { OnlineProfilesDropdown } from "../profile/OnlinePeersButton";
 import { tw } from "../utils/tailwind";
 
 type SortCriteria = "new" | "old" | "best" | "chat";
@@ -18,6 +25,10 @@ interface RepliesProps {
     setSortCriteria: (criteria: SortCriteria) => void;
 }
 
+const getQueryId = (canvas: Canvas, sortCriteria: SortCriteria) => {
+    return canvas.idString + sortCriteria;
+};
+
 export const Replies = (props: RepliesProps) => {
     const { canvas: canvas, sortCriteria, setSortCriteria } = props;
     const [query, setQuery] = useState<
@@ -25,21 +36,16 @@ export const Replies = (props: RepliesProps) => {
     >(undefined);
     const { setView, view } = useView();
 
-    const { peers } = useOnline(canvas, {
-        id: canvas?.idString,
-    });
-
     useEffect(() => {
+        if (!canvas) {
+            return;
+        }
         // Set the view based on sortCriteria
         if (sortCriteria === "chat") {
             setView("chat");
-        } else {
-            setView("thread");
-        }
-
-        if (sortCriteria === "best") {
             setQuery({
                 query: new SearchRequest({
+                    query: getRepliesQuery(canvas), // fetch all replies, even children
                     sort: [
                         // sort by most replies
                         new Sort({
@@ -49,29 +55,63 @@ export const Replies = (props: RepliesProps) => {
                         // in tie cases, sort by newest
                         new Sort({
                             key: ["__context", "created"],
-                            direction: SortDirection.DESC,
+                            direction: SortDirection.ASC,
                         }),
                     ],
                 }),
-                id: sortCriteria,
+                id: getQueryId(canvas, sortCriteria),
             });
         } else {
-            setQuery({
-                query: new SearchRequest({
-                    sort: new Sort({
-                        key: ["__context", "created"],
-                        direction:
-                            sortCriteria === "new" || sortCriteria === "chat"
-                                ? SortDirection.ASC
-                                : SortDirection.DESC,
-                    }),
-                }),
-                id: sortCriteria,
-            });
-        }
-    }, [sortCriteria, setView]);
+            setView("thread");
 
-    const sortedReplies = useLocal(canvas?.replies, query);
+            if (sortCriteria === "best") {
+                setQuery({
+                    query: new SearchRequest({
+                        query: getImmediateRepliesQuery(canvas), // fetch only immediate replies (feed)
+                        sort: [
+                            // sort by most replies
+                            new Sort({
+                                key: ["replies"],
+                                direction: SortDirection.DESC,
+                            }),
+                            // in tie cases, sort by newest
+                            new Sort({
+                                key: ["__context", "created"],
+                                direction: SortDirection.DESC,
+                            }),
+                        ],
+                    }),
+                    id: getQueryId(canvas, sortCriteria),
+                });
+            } else {
+                setQuery({
+                    query: new SearchRequest({
+                        query: getImmediateRepliesQuery(canvas), // fetch only immediate replies (feed)
+                        sort: new Sort({
+                            key: ["__context", "created"],
+                            direction:
+                                sortCriteria === "new"
+                                    ? SortDirection.ASC
+                                    : SortDirection.DESC,
+                        }),
+                    }),
+                    id: getQueryId(canvas, sortCriteria),
+                });
+            }
+        }
+    }, [sortCriteria, setView, canvas?.idString]);
+
+    useEffect(() => {
+        if (!canvas || canvas?.closed) {
+            return;
+        }
+        canvas.loadReplies();
+    }, [canvas]);
+
+    const sortedReplies = useLocal(
+        canvas?.loadedReplies ? canvas?.replies : undefined,
+        query
+    );
 
     return (
         <div className="flex flex-col mt-10">
@@ -118,7 +158,7 @@ export const Replies = (props: RepliesProps) => {
                     )}
                 >
                     {sortedReplies.map((reply, i) => (
-                        <>
+                        <Fragment key={i}>
                             <div
                                 className={tw(
                                     "col-span-full",
@@ -139,7 +179,7 @@ export const Replies = (props: RepliesProps) => {
                                         reply.publicKey
                                 }
                             />
-                        </>
+                        </Fragment>
                     ))}
                 </div>
             ) : (

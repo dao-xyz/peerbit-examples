@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useState, useRef, Fragment } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
@@ -79,7 +79,7 @@ export const CanvasPath = ({
                 >
                     <div className="grid grid-flow-col auto-cols-max justify-start items-center overflow-x-auto w-full shrink-0 no-scrollbar p-1 pr-0">
                         {path.slice(0).map((x, ix) => (
-                            <>
+                            <Fragment key={ix}>
                                 <span
                                     className={tw(
                                         ix < 2 &&
@@ -96,7 +96,7 @@ export const CanvasPath = ({
                                 >
                                     {renderBreadcrumb(x, ix)}
                                 </span>
-                            </>
+                            </Fragment>
                         ))}
                         <span
                             ref={endMarkerRef}

@@ -1,6 +1,7 @@
 import { ClosedError, Documents, WithContext } from "@peerbit/document";
 import { useEffect, useRef, useState } from "react";
 import * as indexerTypes from "@peerbit/indexer-interface";
+import { resolve } from "path";
 
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -73,6 +74,7 @@ export const useLocal = <
     db?: Documents<T, I>,
     options?: {
         resolve?: R;
+        debug?: boolean;
         onChanges?: (all: RT[]) => void;
         debounce?: number;
     } & QueryOptons
@@ -100,6 +102,11 @@ export const useLocal = <
                 const results: WithContext<RT>[] =
                     (await iterator.all()) as any; // TODO fix types
                 // Update the state and call onChanges if provided.
+
+                if (options?.debug) {
+                    console.log("useLocal", { results, query: options?.query });
+                }
+
                 setAll(() => {
                     options?.onChanges?.(results);
                     return results;

@@ -1,10 +1,11 @@
 import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
+    Compare,
     Documents,
+    IntegerCompare,
     SearchRequest,
     StringMatch,
     StringMatchMethod,
-    toId,
 } from "@peerbit/document";
 import {
     PublicSignKey,
@@ -143,16 +144,30 @@ export class IndexableCanvas {
     @field({ type: "u64" })
     replies: bigint;
 
+    @field({ type: vec("string") })
+    path: string[]; // address path
+
+    @field({ type: "u32" })
+    pathDepth: number;
+
+    @field({ type: vec("string") })
+    replyTo: string[]; // addresses
+
     constructor(properties: {
         id: Uint8Array;
         publicKey: PublicSignKey;
         content: string;
         replies: bigint;
+        path: string[]; // address path
+        replyTo: string[]; // addresses
     }) {
         this.id = properties.id;
         this.publicKey = properties.publicKey.bytes;
         this.content = properties.content;
         this.replies = properties.replies;
+        this.path = properties.path;
+        this.replyTo = properties.replyTo;
+        this.pathDepth = properties.path.length;
     }
 
     static async from(canvas: Canvas, node: ProgramClient) {
@@ -167,11 +182,14 @@ export class IndexableCanvas {
             publicKey: canvas.publicKey,
             content: indexable,
             replies,
+            path: canvas.path.map((x) => x.address),
+            replyTo: canvas.replyTo.map((x) => x.address),
         });
     }
 }
 
 abstract class CanvasReference {
+    abstract get address(): string;
     abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
 }
 
@@ -200,7 +218,34 @@ export class CanvasAddressReference extends CanvasReference {
             }))
         );
     }
+
+    get address() {
+        return this.canvas;
+    }
 }
+
+export const getRepliesQuery = (to: Canvas) => [
+    new StringMatch({
+        key: "path",
+        value: to.address,
+        caseInsensitive: true,
+        method: StringMatchMethod.exact,
+    }),
+];
+
+export const getImmediateRepliesQuery = (to: Canvas) => [
+    new StringMatch({
+        key: "path",
+        value: to.address,
+        caseInsensitive: true,
+        method: StringMatchMethod.exact,
+    }),
+    new IntegerCompare({
+        key: "pathDepth",
+        value: to.path.length + 1,
+        compare: Compare.Equal,
+    }),
+];
 
 @variant("canvas")
 export class Canvas extends Program {
@@ -208,30 +253,47 @@ export class Canvas extends Program {
     elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
 
     @field({ type: Documents })
-    replies: Documents<Canvas, IndexableCanvas>; // Replies are subcanvases
+    private _replies: Documents<Canvas, IndexableCanvas>; // Replies or Sub Replies
 
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
-    @field({ type: option(CanvasReference) })
-    parent?: CanvasReference;
+    @field({ type: vec(CanvasReference) })
+    path: CanvasReference[];
+
+    @field({ type: vec(CanvasReference) })
+    replyTo: CanvasReference[];
 
     constructor(
         properties: (
-            | { parent: CanvasAddressReference }
+            | { path: CanvasReference[] }
+            | { parent: Canvas }
             | { seed: Uint8Array }
         ) & {
             publicKey: PublicSignKey;
+        } & { replyTo?: CanvasReference[] } & {
+            topMostCanvasWithSameACL?: Canvas | null;
         }
     ) {
         super();
         this.publicKey = properties.publicKey;
-        this.parent = properties["parent"];
+        if ("parent" in properties) {
+            this.path = [
+                ...properties.parent.path,
+                new CanvasAddressReference({
+                    canvas: properties.parent.address,
+                }),
+            ];
+        } else {
+            this.path = properties["path"] ?? [];
+        }
+        this.replyTo = properties["replyTo"] ?? [];
         const elementsId = (properties as { seed: Uint8Array }).seed
             ? sha256Sync((properties as { seed: Uint8Array }).seed)
             : randomBytes(32);
         this.elements = new Documents({ id: elementsId });
-        this.replies = new Documents({ id: sha256Sync(elementsId) });
+        this._replies = new Documents({ id: sha256Sync(elementsId) });
+        this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
     }
 
     get id(): Uint8Array {
@@ -290,7 +352,7 @@ export class Canvas extends Program {
             },
         });
 
-        await this.replies.open({
+        await this._replies.open({
             type: Canvas,
             replicate: { factor: 1 }, // TODO choose better
             canOpen: () => false,
@@ -315,38 +377,50 @@ export class Canvas extends Program {
                 },
             },
         });
-        this._repliesChangeListener = async () => {
-            // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
-
-            const parent = await this.parent?.load(this.node);
-            if (parent) {
-                let indexedParent = await parent.replies.index.get(this.id, {
-                    resolve: false,
-                });
-                await parent.replies.index.putWithContext(
-                    this,
-                    toId(this.id),
-                    indexedParent.__context
-                );
-            }
-        };
-        this.replies.events.addEventListener(
-            "change",
-            this._repliesChangeListener
-        );
+        /*   this._repliesChangeListener = async () => {
+              // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
+  
+              const parent = await this.parent?.load(this.node);
+              if (parent) {
+                  let indexedParent = await parent.replies.index.get(this.id, {
+                      resolve: false,
+                  });
+                  await parent.replies.index.putWithContext(
+                      this,
+                      toId(this.id),
+                      indexedParent.__context
+                  );
+              }
+          };
+          this.replies.events.addEventListener(
+              "change",
+              this._repliesChangeListener
+          ); */
         await this.countReplies();
     }
 
     close(from?: Program): Promise<boolean> {
-        this._repliesChangeListener &&
-            this.replies.events.removeEventListener(
-                "change",
-                this._repliesChangeListener
-            );
+        /*    this._repliesChangeListener &&
+               this.replies.events.removeEventListener(
+                   "change",
+                   this._repliesChangeListener
+               ); */
 
         return super.close(from);
     }
     private _repliesCount: bigint | null = null;
+
+    async loadPath(includeSelf?: boolean) {
+        const path: Canvas[] = [];
+        for (const element of this.path) {
+            const next = await element.load(this.node);
+            path.push(next);
+        }
+        if (includeSelf) {
+            path.push(this);
+        }
+        return path;
+    }
     get repliesCount(): bigint {
         return this._repliesCount || 0n;
     }
@@ -355,7 +429,12 @@ export class Canvas extends Program {
         try {
             const replies = this.replies.index.closed
                 ? 0n
-                : BigInt(await this.replies.count({ approximate: true }));
+                : BigInt(
+                      await this.replies.count({
+                          query: getRepliesQuery(this),
+                          approximate: true,
+                      })
+                  );
             return (this._repliesCount = replies);
         } catch (error) {
             // TODO handle errors that arrise from the database being closed
@@ -364,11 +443,9 @@ export class Canvas extends Program {
     }
     async getCanvasPath() {
         const path: Canvas[] = [this];
-        let currentParent = path[path.length - 1].parent;
-        while (currentParent) {
-            const next = await currentParent.load(this.node);
+        for (const element of this.path) {
+            const next = await element.load(this.node);
             path.push(next);
-            currentParent = path[path.length - 1].parent;
         }
         return path.reverse();
     }
@@ -376,6 +453,9 @@ export class Canvas extends Program {
     async getCreateRoomByPath(path: string[]): Promise<Canvas[]> {
         const results = await this.findCanvasesByPath(path);
         let rooms = results.canvases;
+        const existingPath = await results.canvases[0]?.loadPath(true);
+        let createdPath: Canvas[] =
+            existingPath?.length > 0 ? existingPath : [this];
 
         if (path.length !== results.path.length) {
             if (results.canvases?.length > 1) {
@@ -388,18 +468,28 @@ export class Canvas extends Program {
                     existing: "reuse",
                 });
             }
+            await currentCanvas.loadReplies();
 
             for (let i = results.path.length; i < path.length; i++) {
                 const canvas = new Canvas({
-                    parent: new CanvasAddressReference({
-                        canvas: currentCanvas,
-                    }),
+                    path: createdPath.map(
+                        (x) =>
+                            new CanvasAddressReference({
+                                canvas: x,
+                            })
+                    ),
                     publicKey: this.node.identity.publicKey,
+                    topMostCanvasWithSameACL:
+                        currentCanvas.topMostCanvasWithSameACLLoaded,
                 });
 
                 const nextCanvas = await this.node.open(canvas, {
                     existing: "reuse",
                 });
+                await nextCanvas.loadReplies();
+
+                createdPath.push(canvas);
+
                 const name = path[i];
                 // TODO Dont put if already exists
                 await nextCanvas.elements.put(
@@ -455,6 +545,7 @@ export class Canvas extends Program {
                         caseInsensitive: true,
                         method: StringMatchMethod.exact,
                     }),
+                    ...getImmediateRepliesQuery(this), // only descendants of this canvas
                 ],
             })
         );
@@ -476,6 +567,37 @@ export class Canvas extends Program {
             }
         }
         return concat;
+    }
+    private _topMostCanvasWithSameACL: Canvas | null | undefined = null;
+    async loadReplies() {
+        if (this._topMostCanvasWithSameACL) {
+            return this._topMostCanvasWithSameACL;
+        }
+
+        // TODO use the rootmost canvas with same ACL
+        // for now lets just use the root
+        const root = this.path[0];
+        if (root) {
+            const rootLoaded = (this._topMostCanvasWithSameACL =
+                await root.load(this.node));
+            return rootLoaded;
+        }
+    }
+
+    get loadedReplies() {
+        return this._topMostCanvasWithSameACL != null || this.path.length === 0;
+    }
+
+    private get topMostCanvasWithSameACLLoaded() {
+        if (!this._topMostCanvasWithSameACL && this.path.length > 0) {
+            throw new Error("Root not found or loaded");
+        }
+        return this._topMostCanvasWithSameACL;
+    }
+
+    get replies(): Documents<Canvas, IndexableCanvas, any> {
+        const root: Canvas = this.topMostCanvasWithSameACLLoaded ?? this;
+        return root._replies;
     }
 }
 

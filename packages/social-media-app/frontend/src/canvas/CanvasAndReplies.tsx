@@ -42,7 +42,7 @@ export const CanvasAndReplies = () => {
             setPendingCanvasState(
                 new CanvasDB({
                     publicKey: peer.identity.publicKey,
-                    parent: new CanvasAddressReference({ canvas: lastCanvas }),
+                    parent: lastCanvas,
                 })
             );
     }, [lastCanvas?.idString, peer?.identity.publicKey.hashcode()]);
@@ -90,7 +90,7 @@ export const CanvasAndReplies = () => {
             lastCanvas.replies.put(prev).then(scroll);
             return new CanvasDB({
                 publicKey: peer.identity.publicKey,
-                parent: new CanvasAddressReference({ canvas: lastCanvas }),
+                parent: lastCanvas,
             });
         });
     };
