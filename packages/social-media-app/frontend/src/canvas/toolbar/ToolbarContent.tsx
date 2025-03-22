@@ -8,6 +8,8 @@ import { BsCamera } from "react-icons/bs";
 import { BsArrowsFullscreen, BsArrowsCollapse } from "react-icons/bs";
 import { HEIGHT as HEADER_HEIGHT } from "../../Header";
 import { rectIsStaticImage, rectIsStaticMarkdownText } from "../utils/rect";
+import { StaticContent, StaticMarkdownText } from "@dao-xyz/social";
+import { useToolbar } from "./Toolbar";
 
 interface ToolbarContentProps {
     onToggleAppSelect: () => void;
@@ -17,13 +19,13 @@ interface ToolbarContentProps {
 const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
     (props, ref) => {
         const { isEmpty, pendingRects } = useCanvas();
-        const [isFullscreen, setIsFullscreen] = useState(false);
+        const { fullscreenEditorActive, setFullscreenEditorActive } =
+            useToolbar();
         const [fullscreenAutomaticallyOnce, setFullscreenAutomaticallyOnce] =
             useState(false);
-        const [showFullScreenButton, setShowFullScreenButton] = useState(false);
 
         const toggleFullscreen = () => {
-            setIsFullscreen((prev) => !prev);
+            setFullscreenEditorActive((prev) => !prev);
         };
 
         useEffect(() => {
@@ -44,32 +46,26 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                 pendingRects.filter((rect) => rectIsStaticMarkdownText(rect))
                     .length > 1;
             if (fullScreenForNonStaticContent || fullScreenForText) {
-                setIsFullscreen(true);
+                setFullscreenEditorActive(true);
                 setFullscreenAutomaticallyOnce(true);
-                setShowFullScreenButton(true);
             }
         }, [pendingRects]);
 
-        if (isFullscreen) {
+        const showFullscreenEditor =
+            pendingRects.some((rect) => !rectIsStaticMarkdownText(rect)) ||
+            pendingRects.some(
+                (rect) =>
+                    rect.content instanceof StaticContent &&
+                    rect.content.content instanceof StaticMarkdownText &&
+                    rect.content.content.text.length > 0
+            );
+
+        if (fullscreenEditorActive) {
             return (
-                <div
-                    ref={ref}
-                    style={{
-                        height: `calc(100dvh - ${HEADER_HEIGHT})`,
-                    }}
-                    className="flex flex-col z-20 w-full left-0"
-                >
+                <div ref={ref} className="flex flex-col z-20 w-full left-0">
                     {/* Fullscreen mode layout */}
                     <div className="flex flex-col h-full">
                         {/* Canvas wrapper: scrollable only on this area */}
-                        <div className="flex-grow overflow-auto">
-                            <Canvas
-                                fitWidth
-                                draft={true}
-                                className="w-full h-full"
-                                inFullScreen
-                            />
-                        </div>
                         {/* Bottom toolbar: not part of the scrolling area */}
                         <div className="flex-shrink-0 flex items-center  bg-neutral-50 dark:bg-neutral-950 box-border p-4 mb-4">
                             <div className="flex flex-row items-center gap-2">
@@ -98,7 +94,9 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 </ImageUploadTrigger>
                             ) : (
                                 <SaveButton
-                                    onClick={() => setIsFullscreen(false)}
+                                    onClick={() =>
+                                        setFullscreenEditorActive(false)
+                                    }
                                 />
                             )}
                         </div>
@@ -142,7 +140,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                         />
                     </div>
 
-                    {showFullScreenButton && (
+                    {showFullscreenEditor && (
                         <button
                             className="btn btn-icon btn-icon-md ml-auto"
                             onClick={toggleFullscreen}

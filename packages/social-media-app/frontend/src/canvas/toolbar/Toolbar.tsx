@@ -1,9 +1,71 @@
-import { useState, forwardRef, useRef, useEffect } from "react";
+import {
+    useState,
+    forwardRef,
+    useRef,
+    useEffect,
+    createContext,
+    ReactNode,
+    useContext,
+} from "react";
 import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import ToolbarContent from "./ToolbarContent";
 import { AppSelectPaneInline } from "./AppSelectPaneInline";
 import { SimpleWebManifest } from "@dao-xyz/social";
+
+interface ToolbarContextType {
+    fullscreenEditorActive: boolean;
+    setFullscreenEditorActive: React.Dispatch<React.SetStateAction<boolean>>;
+}
+
+// Create the context with a default value
+const ToolbarContext = createContext<ToolbarContextType>({
+    fullscreenEditorActive: false,
+    setFullscreenEditorActive: () => {},
+});
+
+// Create a provider component
+type ToolbarProviderProps = {
+    children: ReactNode;
+} & ToolbarContainerProps;
+
+export const ToolbarProvider = ({
+    children,
+    pendingCanvas,
+    onSavePending,
+}: ToolbarProviderProps) => {
+    const [fullscreenEditor, setFullscreenEditor] = useState(false);
+
+    return (
+        <ToolbarContext.Provider
+            value={{
+                fullscreenEditorActive: fullscreenEditor,
+                setFullscreenEditorActive: setFullscreenEditor,
+            }}
+        >
+            <CanvasWrapper
+                canvas={pendingCanvas}
+                draft={true}
+                multiCanvas
+                onSave={onSavePending}
+                onContentChange={(e) => {
+                    // Handle content changes if needed.
+                }}
+            >
+                {children}
+            </CanvasWrapper>
+        </ToolbarContext.Provider>
+    );
+};
+
+// Create a custom hook to use the toolbar context
+export const useToolbar = () => {
+    const context = useContext(ToolbarContext);
+    if (context === undefined) {
+        throw new Error("useToolbar must be used within a ToolbarProvider");
+    }
+    return context;
+};
 
 // A simple media query hook to detect desktop screens.
 function useMediaQuery(query: string) {
@@ -18,29 +80,10 @@ function useMediaQuery(query: string) {
     return matches;
 }
 
-interface ToolbarContainerProps {
-    pendingCanvas: CanvasDB;
-    onSavePending: () => void;
-}
-
 // Wrap ToolbarContainer with forwardRef so that if a parent passes a ref, it is forwarded.
-export const Toolbar = forwardRef<HTMLDivElement, ToolbarContainerProps>(
-    (props, ref) => {
-        return (
-            <CanvasWrapper
-                canvas={props.pendingCanvas}
-                draft={true}
-                multiCanvas
-                onSave={props.onSavePending}
-                onContentChange={(e) => {
-                    // Handle content changes if needed.
-                }}
-            >
-                <ToolbarInner ref={ref} />
-            </CanvasWrapper>
-        );
-    }
-);
+export const Toolbar = forwardRef<HTMLDivElement>((props, ref) => {
+    return <ToolbarInner ref={ref} />;
+});
 
 interface ToolbarInnerProps {}
 

@@ -8,7 +8,8 @@ import { Replies } from "./Replies.js";
 import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
 import { Header } from "./header/Header.js";
-import { Toolbar } from "./toolbar/Toolbar.js";
+import { Toolbar, ToolbarProvider } from "./toolbar/Toolbar.js";
+import { FullscreenEditor } from "./toolbar/FullscreenEditor.js";
 
 export const CanvasAndReplies = () => {
     const { peer } = usePeer();
@@ -115,42 +116,49 @@ export const CanvasAndReplies = () => {
     }
 
     return (
-        <div className="flex flex-col h-full">
-            <div
-                className="flex-grow  w-full mx-auto h-full overflow-auto"
-                ref={scrollContainerRef}
-            >
-                {/* Set the scroll container height dynamically */}
-                <div className=" gap-2.5 w-full flex flex-col items-center">
-                    <div className="mt-6 w-full h-full">
-                        <div className="max-w-[876px] mx-auto w-full">
-                            {/* dont show header on root post */}
-                            {canvases.length > 1 && (
-                                <Header
-                                    variant="large"
-                                    canvas={lastCanvas}
-                                    className="mb-2  px-4"
-                                />
-                            )}
-                            <CanvasWrapper canvas={lastCanvas}>
-                                <Canvas bgBlur fitWidth draft={false} />
-                            </CanvasWrapper>
-                        </div>
-
-                        <Replies
-                            canvas={lastCanvas}
-                            sortCriteria={sortCriteria}
-                            setSortCriteria={setSortCriteria}
-                        />
-                    </div>
-                </div>
-                <div ref={bottomScrollMarkerRef} className="h-0 w-full" />
-            </div>
-            <Toolbar
-                ref={toolbarRef}
+        <div className="h-full flex flex-col overflow-hidden">
+            <ToolbarProvider
                 pendingCanvas={pendingCanvas.program}
                 onSavePending={onSavePending}
-            />
+            >
+                <div className="h-full flex flex-col relative overflow-hidden">
+                    <div
+                        className="flex-grow  w-full mx-auto h-full overflow-auto"
+                        ref={scrollContainerRef}
+                    >
+                        {/* Set the scroll container height dynamically */}
+                        <div className=" gap-2.5 w-full flex flex-col items-center">
+                            <div className="mt-6 w-full h-full">
+                                <div className="max-w-[876px] mx-auto w-full">
+                                    {/* dont show header on root post */}
+                                    {canvases.length > 1 && (
+                                        <Header
+                                            variant="large"
+                                            canvas={lastCanvas}
+                                            className="mb-2  px-4"
+                                        />
+                                    )}
+                                    <CanvasWrapper canvas={lastCanvas}>
+                                        <Canvas bgBlur fitWidth draft={false} />
+                                    </CanvasWrapper>
+                                </div>
+
+                                <Replies
+                                    canvas={lastCanvas}
+                                    sortCriteria={sortCriteria}
+                                    setSortCriteria={setSortCriteria}
+                                />
+                            </div>
+                        </div>
+                        <div
+                            ref={bottomScrollMarkerRef}
+                            className="h-0 w-full"
+                        />
+                        <FullscreenEditor />
+                    </div>
+                </div>
+                <Toolbar ref={toolbarRef} />
+            </ToolbarProvider>
         </div>
     );
 };
