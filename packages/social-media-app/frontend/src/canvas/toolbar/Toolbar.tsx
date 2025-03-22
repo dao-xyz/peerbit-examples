@@ -24,6 +24,11 @@ const ToolbarContext = createContext<ToolbarContextType>({
     setFullscreenEditorActive: () => {},
 });
 
+type ToolbarContainerProps = {
+    pendingCanvas: CanvasDB;
+    onSavePending: () => void;
+};
+
 // Create a provider component
 type ToolbarProviderProps = {
     children: ReactNode;
