@@ -2,10 +2,12 @@ import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
     Compare,
     Documents,
+    DocumentsChange,
     IntegerCompare,
     SearchRequest,
     StringMatch,
     StringMatchMethod,
+    toId,
 } from "@peerbit/document";
 import {
     PublicSignKey,
@@ -175,8 +177,8 @@ export class IndexableCanvas {
             await node.open(canvas, { existing: "reuse" });
         }
         const indexable = await canvas.createTitle();
-
         const replies = await canvas.countReplies();
+
         return new IndexableCanvas({
             id: canvas.id,
             publicKey: canvas.publicKey,
@@ -301,25 +303,15 @@ export class Canvas extends Program {
     }
 
     private _idString: string;
-    private _repliesChangeListener: () => void;
+    private _repliesChangeListener: (
+        evt: CustomEvent<DocumentsChange<Canvas>>
+    ) => void;
 
     get idString() {
         return this._idString || (this._idString = sha256Base64Sync(this.id));
     }
 
     async open(): Promise<void> {
-        /*  await this.name.open({
-             canPerform: async (operation, { entry }) => {
-                 // Only allow updates from the creator
-                 return (
-                     entry.signatures.find(
-                         (x) =>
-                             x.publicKey.equals(this.key)
-                     ) != null
-                 );
-             }
-         })
-     */
         await this.elements.open({
             type: Element,
             replicate: { factor: 1 }, // TODO choose better
@@ -356,19 +348,12 @@ export class Canvas extends Program {
             type: Canvas,
             replicate: { factor: 1 }, // TODO choose better
             canOpen: () => false,
-            canPerform: async (operation) => {
+            canPerform: async (_operation) => {
                 /**
-                 * Only allow updates if we created it
+                 *  TODOD Only allow updates if we created it
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
                  */
-                return (
-                    !this.publicKey ||
-                    operation.entry.signatures.find(
-                        (x) =>
-                            x.publicKey.equals(this.publicKey!) ||
-                            x.publicKey.equals(this.node.identity.publicKey)
-                    ) != null
-                );
+                return true;
             },
             index: {
                 type: IndexableCanvas,
@@ -377,34 +362,50 @@ export class Canvas extends Program {
                 },
             },
         });
-        /*   this._repliesChangeListener = async () => {
-              // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
-  
-              const parent = await this.parent?.load(this.node);
-              if (parent) {
-                  let indexedParent = await parent.replies.index.get(this.id, {
-                      resolve: false,
-                  });
-                  await parent.replies.index.putWithContext(
-                      this,
-                      toId(this.id),
-                      indexedParent.__context
-                  );
-              }
-          };
-          this.replies.events.addEventListener(
-              "change",
-              this._repliesChangeListener
-          ); */
+        this._repliesChangeListener = async (
+            evt: CustomEvent<DocumentsChange<Canvas>>
+        ) => {
+            // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
+
+            const reIndex = async (canvas: Canvas, parent: Canvas) => {
+                await parent.loadReplies();
+                let indexedCanvas = await parent.replies.index.get(canvas.id, {
+                    resolve: false,
+                });
+                await parent.replies.index.putWithContext(
+                    canvas,
+                    toId(canvas.id),
+                    indexedCanvas.__context
+                );
+            };
+
+            for (const added of evt.detail.added) {
+                const loadedPath = await added.loadPath(true);
+                for (let i = 1; i < loadedPath.length; i++) {
+                    await reIndex(loadedPath[i], loadedPath[i - 1]);
+                }
+            }
+
+            for (const removed of evt.detail.removed) {
+                const loadedPath = await removed.loadPath(true);
+                for (let i = 1; i < loadedPath.length; i++) {
+                    await reIndex(loadedPath[i], loadedPath[i - 1]);
+                }
+            }
+        };
+        this._replies.events.addEventListener(
+            "change",
+            this._repliesChangeListener
+        );
         await this.countReplies();
     }
 
     close(from?: Program): Promise<boolean> {
-        /*    this._repliesChangeListener &&
-               this.replies.events.removeEventListener(
-                   "change",
-                   this._repliesChangeListener
-               ); */
+        this._repliesChangeListener &&
+            this._replies.events.removeEventListener(
+                "change",
+                this._repliesChangeListener
+            );
 
         return super.close(from);
     }
@@ -425,13 +426,15 @@ export class Canvas extends Program {
         return this._repliesCount || 0n;
     }
 
-    async countReplies() {
+    async countReplies(options?: { onlyImmediate: boolean }): Promise<bigint> {
         try {
             const replies = this.replies.index.closed
                 ? 0n
                 : BigInt(
                       await this.replies.count({
-                          query: getRepliesQuery(this),
+                          query: options?.onlyImmediate
+                              ? getImmediateRepliesQuery(this)
+                              : getRepliesQuery(this),
                           approximate: true,
                       })
                   );

@@ -6,6 +6,7 @@ import {
 } from "../content.js";
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
+import { waitForResolved } from "@peerbit/time";
 
 describe("content", () => {
     describe("canvas", () => {
@@ -57,6 +58,18 @@ describe("content", () => {
                 elementsInB.map((x) => x.createTitle())
             );
             expect(titlesFromB.sort()).to.deep.eq(["c", "d"]);
+
+            const rootFromAnotherNode = await session.peers[1].open(
+                new Canvas({
+                    publicKey: session.peers[0].identity.publicKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            // the root will contain all posts eventually because of the flattening
+            await waitForResolved(() =>
+                expect(rootFromAnotherNode.replies.log.log.length).to.eq(4)
+            );
         });
 
         it("can sort by replies", async () => {
@@ -71,20 +84,54 @@ describe("content", () => {
             await root.getCreateRoomByPath(["c"]);
             await root.getCreateRoomByPath(["a", "c"]);
 
-            const sortedByReplies = await root.replies.index.search({
-                query: getImmediateRepliesQuery(root),
-                sort: new Sort({
-                    key: "replies",
-                    direction: SortDirection.DESC,
-                }),
+            await waitForResolved(async () => {
+                const sortedByReplies = await root.replies.index.search({
+                    query: getImmediateRepliesQuery(root),
+                    sort: new Sort({
+                        key: "replies",
+                        direction: SortDirection.DESC,
+                    }),
+                });
+                expect(
+                    await Promise.all(
+                        sortedByReplies.map((x) => x.createTitle())
+                    )
+                ).to.deep.eq(["a", "b", "c"]);
             });
-
-            expect(
-                await Promise.all(sortedByReplies.map((x) => x.createTitle()))
-            ).to.deep.eq(["a", "b", "c"]);
         });
 
         describe("replies", () => {
+            it("index 1 reply", async () => {
+                const root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                const [ab] = await root.getCreateRoomByPath(["a", "b"]);
+                expect(ab.path).to.have.length(2);
+
+                // index updates are not immediate, so we do checks until it's updated
+                await waitForResolved(async () => {
+                    const countedAllRepliesFromRoot = await root.countReplies();
+                    expect(countedAllRepliesFromRoot).to.eq(2n); // a immediate child of root, b immediate child of a
+
+                    const countedImmediateRepliesFromRoot =
+                        await root.countReplies({ onlyImmediate: true });
+                    expect(countedImmediateRepliesFromRoot).to.eq(1n); // a immediate child of root
+
+                    const replies = await root.replies.index
+                        .iterate(
+                            { query: getImmediateRepliesQuery(root) },
+                            { resolve: false }
+                        )
+                        .all();
+                    expect(replies).to.have.length(1);
+                    expect(replies[0].content).to.eq("a");
+                    expect(replies[0].replies).to.eq(1n); // one reply (b)
+                });
+            });
+
             it("getRepliesQuery", async () => {
                 const root = await session.peers[0].open(
                     new Canvas({
