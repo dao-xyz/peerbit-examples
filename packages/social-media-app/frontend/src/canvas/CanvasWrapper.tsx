@@ -14,7 +14,7 @@ import { concat, equals } from "uint8arrays";
 import { SimpleWebManifest } from "@dao-xyz/social";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
-import { useError } from "../dialogs/useErrorDialog.js";
+import { useErrorDialog } from "../dialogs/useErrorDialog.js";
 import { Sort } from "@peerbit/indexer-interface";
 import { rectIsStaticMarkdownText } from "./utils/rect.js";
 
@@ -75,7 +75,7 @@ export const CanvasWrapper = ({
     });
 
     const { getCuratedNativeApp: getNativeApp } = useApps();
-    const { showError } = useError();
+    const { showError } = useErrorDialog();
 
     const [editMode, setEditMode] = useState(!!draft);
     const [isEmpty, setIsEmpty] = useState(true);
@@ -214,7 +214,7 @@ export const CanvasWrapper = ({
             setIsEmpty(false);
             onContentChange(element);
         } catch (error) {
-            showError("Failed to insert image", error);
+            showError({ message: "Failed to insert image", error });
         }
     };
 
@@ -305,7 +305,7 @@ export const CanvasWrapper = ({
             setIsEmpty(true);
             return pendingToSave;
         } catch (error) {
-            showError("Failed to save", error);
+            showError({ message: "Failed to save", error, severity: "error" });
         }
     };
 

@@ -1,13 +1,22 @@
-import React, { createContext, useCallback, useContext, useState } from "react";
+import React, {
+    createContext,
+    useCallback,
+    useContext,
+    useMemo,
+    useState,
+} from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 
 type ErrorState = {
+    title?: string;
     message: string;
     error?: Error;
+    deadend?: boolean;
+    severity?: "error" | "warning" | "info";
 } | null;
 
 type ErrorContextType = {
-    showError: (message: string, error?: Error) => void;
+    showError: (properties: ErrorState) => void;
 };
 
 const ErrorContext = createContext<ErrorContextType | undefined>(undefined);
@@ -18,11 +27,11 @@ export const ErrorProvider: React.FC<{ children: React.ReactNode }> = ({
     const [errorState, setErrorState] = useState<ErrorState>(null);
     const [showDetails, setShowDetails] = useState<boolean>(false);
 
-    const showError = useCallback((message: string, error?: Error) => {
-        if (error) {
-            console.error("Error encountered:", error);
+    const showError = useCallback((properties: ErrorState) => {
+        if (properties.error) {
+            console.error("Error encountered:", properties.error);
         }
-        setErrorState({ message, error });
+        setErrorState(properties);
         setShowDetails(false);
     }, []);
 
@@ -30,6 +39,29 @@ export const ErrorProvider: React.FC<{ children: React.ReactNode }> = ({
         setErrorState(null);
         setShowDetails(false);
     }, []);
+    const getSeverityClassnameForTitle = (severity: string) => {
+        switch (severity) {
+            case "error":
+                return "text-[red] dark:text-[#ff4d4d]";
+            case "warning":
+                return "text-[yellow] dark:text-[#ffcc00]";
+            case "info":
+                return "";
+            default:
+                return "";
+        }
+    };
+    const severityClassName = useMemo(() => {
+        return getSeverityClassnameForTitle(errorState?.severity || "error");
+    }, [errorState?.severity]);
+
+    const avoidDefaultDomBehavior = (e: Event) => {
+        e.preventDefault();
+    };
+
+    const onClickOutside = errorState?.deadend
+        ? avoidDefaultDomBehavior
+        : undefined;
 
     return (
         <ErrorContext.Provider value={{ showError }}>
@@ -40,13 +72,19 @@ export const ErrorProvider: React.FC<{ children: React.ReactNode }> = ({
             >
                 <Dialog.Portal>
                     {/* Dark overlay */}
-                    <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
+                    <Dialog.Overlay className="fixed inset-0  backdrop-blur-sm z-50" />
                     {/* Centered modal */}
-                    <Dialog.Content className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 bg-white dark:bg-black p-6 rounded-lg shadow-xl max-w-sm w-full z-50">
-                        <Dialog.Title className="text-2xl font-bold text-[red]">
-                            Error
+                    <Dialog.Content
+                        onPointerDownOutside={onClickOutside}
+                        onInteractOutside={onClickOutside}
+                        className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2  p-6 rounded-lg max-w-sm w-full z-50 outline-0"
+                    >
+                        <Dialog.Title
+                            className={`text-2xl font-bold ${severityClassName}`}
+                        >
+                            {errorState?.title || "Error"}
                         </Dialog.Title>
-                        <Dialog.Description className="mt-4 text-gray-700">
+                        <Dialog.Description className="mt-4 ">
                             {errorState?.message}
                         </Dialog.Description>
                         {errorState?.error && (
@@ -69,14 +107,16 @@ export const ErrorProvider: React.FC<{ children: React.ReactNode }> = ({
                                 )}
                             </div>
                         )}
-                        <div className="mt-6 flex justify-end">
-                            <button
-                                onClick={hideError}
-                                className="px-4 py-2 bg-red-600  rounded hover:bg-red-700 focus:outline-none"
-                            >
-                                Close
-                            </button>
-                        </div>
+                        {!errorState?.deadend && (
+                            <div className="mt-6 flex justify-end">
+                                <button
+                                    onClick={hideError}
+                                    className="btn btn-secondary "
+                                >
+                                    Close
+                                </button>
+                            </div>
+                        )}
                     </Dialog.Content>
                 </Dialog.Portal>
             </Dialog.Root>
@@ -84,7 +124,7 @@ export const ErrorProvider: React.FC<{ children: React.ReactNode }> = ({
     );
 };
 
-export const useError = (): ErrorContextType => {
+export const useErrorDialog = (): ErrorContextType => {
     const context = useContext(ErrorContext);
     if (!context) {
         throw new Error("useError must be used within an ErrorProvider");
