@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppClient } from "./client-host";
 
 interface NavigationEmitterProps {
@@ -25,11 +25,11 @@ export const IframeNavigationEmitter = ({
     }, [targetOrigin]);
 
     // Use the custom hook to detect location changes.
-    useLocationChange((pathname) => {
+    useLocationChange((href) => {
         if (clientRef.current) {
             clientRef.current.send({
                 type: "navigate",
-                to: pathname,
+                to: href,
             });
         }
     });
@@ -41,10 +41,14 @@ export const IframeNavigationEmitter = ({
  * A custom hook that calls the provided callback whenever the URL's pathname changes.
  * It patches history.pushState and history.replaceState and listens to popstate and hashchange events.
  */
-function useLocationChange(callback: (pathname: string) => void) {
+function useLocationChange(callback: (href: string) => void) {
+    const [prevHref, setPrevHref] = useState(window.location.href);
     useEffect(() => {
         const handleLocationChange = () => {
-            callback(window.location.pathname);
+            if (window.location.href !== prevHref) {
+                setPrevHref(window.location.href);
+                callback(window.location.href);
+            }
         };
 
         // Save original history methods.
