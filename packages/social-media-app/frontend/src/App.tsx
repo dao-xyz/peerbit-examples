@@ -1,6 +1,5 @@
-import { releaseKey } from "@peerbit/react";
+import { ClientBusyError, releaseKey, usePeer } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
-import { getRootKeypair } from "./keys";
 import { HashRouter } from "react-router-dom";
 import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
@@ -9,16 +8,8 @@ import { inIframe } from "@peerbit/react";
 import { CanvasProvider } from "./canvas/useCanvas";
 import { ProfileProvider } from "./profile/useProfiles";
 import { IdentitiesProvider } from "./identity/useIdentities";
-import { ErrorProvider } from "./dialogs/useErrorDialog";
-
-/* import { logger, enable } from "@libp2p/logger";
-enable("libp2p:*"); */
-
-let { key: keypair, path: rootKeyPath } = await getRootKeypair();
-
-window.onbeforeunload = function () {
-    releaseKey(rootKeyPath);
-};
+import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
+import { useEffect } from "react";
 
 const setTheme = () => {
     // On page load or when changing themes, best to add inline in `head` to avoid FOUC
@@ -33,49 +24,77 @@ const setTheme = () => {
         document.documentElement.classList.remove("dark");
     }
 };
-
+export const Content = () => {
+    const { error: peerError } = usePeer();
+    const { showError } = useErrorDialog();
+    useEffect(() => {
+        if (peerError) {
+            if (peerError instanceof ClientBusyError) {
+                showError({
+                    title: "Session already open",
+                    message:
+                        "You already have a session open in another tab. Please close this tab and use the other one.",
+                    deadend: true,
+                    severity: "info",
+                });
+            } else {
+                showError({
+                    message: peerError.message,
+                    severity: "error",
+                });
+            }
+        }
+    }, [peerError]);
+    return (
+        <>
+            <Header fullscreen={inIframe()}>
+                <div
+                    /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
+                    /*  */
+                    /*   */
+                    className="content-container w-full h-full"
+                >
+                    <BaseRoutes />
+                </div>
+            </Header>
+        </>
+    );
+};
 export const App = () => {
     setTheme();
     return (
-        <PeerProvider
-            network={
-                import.meta.env.MODE === "development" ? "local" : "remote"
-            }
-            keypair={keypair}
-            top={{
-                type: "node",
-                network:
-                    import.meta.env.MODE === "development" ? "local" : "remote",
-                host: true,
-            }}
-            iframe={{ type: "proxy", targetOrigin: "*" }}
-            waitForConnnected={false}
-            inMemory={false}
-        >
-            <HashRouter basename="/">
-                <ErrorProvider>
+        <HashRouter basename="/">
+            <ErrorProvider>
+                <PeerProvider
+                    network={
+                        import.meta.env.MODE === "development"
+                            ? "local"
+                            : "remote"
+                    }
+                    top={{
+                        type: "node",
+                        network:
+                            import.meta.env.MODE === "development"
+                                ? "local"
+                                : "remote",
+                        host: true,
+                    }}
+                    iframe={{ type: "proxy", targetOrigin: "*" }}
+                    waitForConnnected={false}
+                    inMemory={false}
+                    singleton
+                >
                     <IdentitiesProvider>
                         <AppProvider>
                             <CanvasProvider>
                                 <ProfileProvider>
-                                    <>
-                                        <Header fullscreen={inIframe()}>
-                                            <div
-                                                /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
-                                                /*  */
-                                                /*   */
-                                                className="content-container w-full h-full"
-                                            >
-                                                <BaseRoutes />
-                                            </div>
-                                        </Header>
-                                    </>
+                                    <Content />
                                 </ProfileProvider>
                             </CanvasProvider>
                         </AppProvider>
                     </IdentitiesProvider>
-                </ErrorProvider>
-            </HashRouter>
-        </PeerProvider>
+                </PeerProvider>
+            </ErrorProvider>
+        </HashRouter>
     );
 };

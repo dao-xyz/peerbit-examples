@@ -4,7 +4,7 @@ import { FastMutex } from "./lockstorage";
 import { v4 as uuid } from "uuid";
 import sodium from "libsodium-wrappers";
 
-const TAB_ID_KEY = "TAB_ID";
+const CLIENT_ID_STORAGE_KEY = "CLIENT_ID";
 export const cookiesWhereClearedJustNow = () => {
     const lastPersistedAt = localStorage.getItem("lastPersistedAt");
     if (lastPersistedAt) {
@@ -14,13 +14,14 @@ export const cookiesWhereClearedJustNow = () => {
     return true;
 };
 
-export const getTabId = () => {
-    const idFromStorage = sessionStorage.getItem(TAB_ID_KEY);
+export const getClientId = (type: "session" | "local") => {
+    const storage = type === "session" ? sessionStorage : localStorage;
+    const idFromStorage = storage.getItem(CLIENT_ID_STORAGE_KEY);
     if (idFromStorage) {
         return idFromStorage;
     } else {
         const id = uuid(); // generate unique UUID
-        sessionStorage.setItem(TAB_ID_KEY, id);
+        storage.setItem(CLIENT_ID_STORAGE_KEY, id);
         return id;
     }
 };
@@ -29,16 +30,13 @@ const ID_COUNTER_KEY = "idc/";
 
 const getKeyId = (prefix: string, id: number) => prefix + "/" + id;
 
-export const releaseKey = (
-    path: string,
-    lock: FastMutex = new FastMutex({ clientId: getTabId() })
-) => {
+export const releaseKey = (path: string, lock: FastMutex) => {
     lock.release(path);
 };
 
 export const getFreeKeypair = async (
     id: string = "",
-    lock: FastMutex = new FastMutex({ clientId: getTabId() }),
+    lock: FastMutex,
     lockCondition: () => boolean = () => true,
     options?: {
         releaseLockIfSameId?: boolean;
@@ -52,16 +50,16 @@ export const getFreeKeypair = async (
     for (let i = 0; i < 10000; i++) {
         const key = getKeyId(id, i);
         let lockedInfo = lock.getLockedInfo(key);
-        console.log(
-            "KEY KEY AT",
-            key,
-            id,
-            i,
-            lockedInfo,
-            lockedInfo === lock.clientId,
-            options
-        );
-
+        /*         console.log(
+                    "KEY KEY AT",
+                    key,
+                    id,
+                    i,
+                    lockedInfo,
+                    lockedInfo === lock.clientId,
+                    options
+                );
+         */
         if (lockedInfo) {
             if (
                 (lockedInfo === lock.clientId &&
@@ -73,7 +71,7 @@ export const getFreeKeypair = async (
                 continue;
             }
         }
-        console.log("aquire id at", i);
+
         await lock.lock(key, lockCondition);
 
         localStorage.setItem(
@@ -82,6 +80,7 @@ export const getFreeKeypair = async (
         );
         await lock.release(idCounterKey);
         return {
+            index: i,
             path: key,
             key: await getKeypair(key),
         };

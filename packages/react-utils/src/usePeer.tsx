@@ -5,7 +5,7 @@ import { DirectSub } from "@peerbit/pubsub";
 import { yamux } from "@chainsafe/libp2p-yamux";
 import {
     getFreeKeypair,
-    getTabId,
+    getClientId,
     inIframe,
     cookiesWhereClearedJustNow,
 } from "./utils.js";
@@ -24,6 +24,13 @@ import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import * as filters from "@libp2p/websockets/filters";
 import { detectIncognito } from "detectincognitojs";
 
+export class ClientBusyError extends Error {
+    constructor(message: string) {
+        super(message);
+        this.name = "CreateClientError";
+    }
+}
+
 export type ConnectionStatus =
     | "disconnected"
     | "connected"
@@ -31,7 +38,9 @@ export type ConnectionStatus =
     | "failed";
 
 /** Discriminated union for PeerContext */
-export type IPeerContext = ProxyPeerContext | NodePeerContext;
+export type IPeerContext = (ProxyPeerContext | NodePeerContext) & {
+    error?: Error;
+};
 
 export interface ProxyPeerContext {
     type: "proxy";
@@ -51,6 +60,7 @@ export interface NodePeerContext {
     loading: boolean;
     status: ConnectionStatus;
     persisted: boolean | undefined;
+    tabIndex: number;
 }
 
 if (!window.name) {
@@ -72,6 +82,7 @@ type NodeOptions = {
     keypair?: Ed25519Keypair;
     bootstrap?: (Multiaddr | string)[];
     host?: boolean;
+    singleton?: boolean;
 };
 
 type TopOptions = NodeOptions & { inMemory?: boolean };
@@ -98,6 +109,10 @@ export const PeerProvider = (options: PeerOptions) => {
     const [connectionState, setConnectionState] =
         React.useState<ConnectionStatus>("disconnected");
 
+    const [tabIndex, setTabIndex] = React.useState<number>(-1);
+
+    const [error, setError] = React.useState<Error | undefined>(undefined); // <-- error state
+
     // Decide which options to use based on whether we're in an iframe.
     // If options.top is defined, assume we have separate settings for iframe vs. host.
     const nodeOptions: IFrameOptions | TopOptions = (
@@ -105,7 +120,7 @@ export const PeerProvider = (options: PeerOptions) => {
     ).top
         ? inIframe()
             ? (options as TopAndIframeOptions).iframe
-            : (options as TopAndIframeOptions).top
+            : { ...options, ...(options as TopAndIframeOptions).top } // we merge root and top options, TODO should this be made in a different way to prevent confusion about top props?
         : (options as TopOptions);
 
     // If running as a proxy (iframe), expect a targetOrigin.
@@ -124,6 +139,7 @@ export const PeerProvider = (options: PeerOptions) => {
                 status: connectionState,
                 persisted,
                 targetOrigin: computedTargetOrigin as string,
+                error,
             };
         } else {
             return {
@@ -133,6 +149,8 @@ export const PeerProvider = (options: PeerOptions) => {
                 loading,
                 status: connectionState,
                 persisted,
+                tabIndex,
+                error,
             };
         }
     }, [
@@ -141,7 +159,9 @@ export const PeerProvider = (options: PeerOptions) => {
         connectionState,
         peer,
         persisted,
+        tabIndex,
         computedTargetOrigin,
+        error,
     ]);
 
     useMount(() => {
@@ -152,22 +172,42 @@ export const PeerProvider = (options: PeerOptions) => {
 
             if (nodeOptions.type !== "proxy") {
                 const releaseFirstLock = cookiesWhereClearedJustNow();
-                const nodeId =
-                    nodeOptions.keypair ||
-                    (
-                        await getFreeKeypair(
-                            "",
-                            new FastMutex({
-                                clientId: getTabId(),
-                                timeout: 1000,
-                            }),
-                            undefined,
-                            {
-                                releaseFirstLock,
-                                releaseLockIfSameId: true,
-                            }
-                        )
-                    ).key;
+
+                const sessionId = getClientId("session");
+                const mutex = new FastMutex({
+                    clientId: sessionId,
+                    timeout: 1000,
+                });
+                if (nodeOptions.singleton) {
+                    const localId = getClientId("local");
+                    try {
+                        const lockKey = localId + "-singleton";
+                        window.onbeforeunload = function () {
+                            mutex.release(lockKey);
+                        };
+                        await mutex.lock(lockKey, () => true);
+                    } catch (error) {
+                        console.error("Failed to lock singleton client", error);
+                        throw new ClientBusyError(
+                            "Failed to lock single client"
+                        );
+                    }
+                }
+
+                let nodeId: Ed25519Keypair;
+                if (nodeOptions.keypair) {
+                    nodeId = nodeOptions.keypair;
+                } else {
+                    const kp = await getFreeKeypair("", mutex, undefined, {
+                        releaseFirstLock,
+                        releaseLockIfSameId: true,
+                    });
+                    window.onbeforeunload = function () {
+                        mutex.release(kp.path);
+                    };
+                    nodeId = kp.key;
+                    setTabIndex(kp.index);
+                }
                 const peerId = nodeId.toPeerId();
 
                 let directory: string | undefined = undefined;
@@ -280,7 +320,15 @@ export const PeerProvider = (options: PeerOptions) => {
             setPeer(newPeer);
             setLoading(false);
         };
-        setPromise(fn());
+        const fnWithErrorHandling = async () => {
+            try {
+                await fn();
+            } catch (error: any) {
+                setError(error);
+                setLoading(false);
+            }
+        };
+        setPromise(fnWithErrorHandling());
     });
 
     return (
