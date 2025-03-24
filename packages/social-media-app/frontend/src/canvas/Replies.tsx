@@ -40,7 +40,7 @@ export const StickyHeader = ({ children }) => {
             if (headerRef.current) {
                 const rect = headerRef.current.getBoundingClientRect();
                 // If the header is within 50px of the top of the viewport, trigger the transition.
-                setIsScrolled(rect.top <= 150);
+                setIsScrolled(rect.top <= 130);
             }
             // Continue checking on the next animation frame.
             animationFrame = requestAnimationFrame(checkPosition);
@@ -60,15 +60,12 @@ export const StickyHeader = ({ children }) => {
             className="sticky top-14 z-10 flex flex-row items-center justify-between py-1 px-2.5 "
         >
             {/* Base layer: gradient background */}
-            <div
-                className="absolute inset-0 bg-[linear-gradient(rgb(211,211,211)_0%,rgb(200,200,200)_100%)]
-                     dark:bg-[radial-gradient(circle,rgba(57,57,57,1)_0%,rgba(10,10,10,1)_100%)]"
-            ></div>
+            <div className="absolute inset-0 bg-[#e5e5e5] border-[#ccc] dark:border-[#6e6e6e82]  border-t-[1px] border-b-[1px] dark:bg-[radial-gradient(circle,rgba(57,57,57,1)_0%,rgba(10,10,10,1)_100%)]  drop-shadow-md "></div>
             {/* Overlay: default background that fades in/out */}
             <div
                 className={`absolute inset-0 transition-opacity duration-700 ${
                     isScrolled ? "opacity-100" : "opacity-0"
-                } bg-neutral-50 dark:bg-neutral-950`}
+                } bg-neutral-50 dark:bg-neutral-950 `}
             ></div>
             {/* Content */}
             <div className="relative z-10 flex w-full justify-center">
