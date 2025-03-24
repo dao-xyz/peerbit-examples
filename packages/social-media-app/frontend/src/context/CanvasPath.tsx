@@ -1,4 +1,4 @@
-import { useEffect, useState, useRef, Fragment } from "react";
+import { useEffect, useState, useRef, Fragment, useLayoutEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
@@ -6,6 +6,48 @@ import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { CanvasPreview } from "../canvas/Preview";
 import { tw } from "../utils/tailwind";
+
+const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
+    const endMarkerRef = useRef<HTMLSpanElement>(null);
+
+    // scroll to last element in breadcrumb bar
+    useLayoutEffect(() => {
+        if (endMarkerRef.current) {
+            endMarkerRef.current.scrollIntoView({
+                behavior: "smooth",
+                block: "nearest",
+                inline: "end",
+            });
+        }
+    }, [path]);
+
+    return (
+        <div className="grid grid-flow-col auto-cols-max justify-start items-center overflow-x-auto w-full shrink-0 no-scrollbar p-1 pr-0">
+            {path.map((x, ix) => (
+                <Fragment key={ix}>
+                    <span
+                        className={tw(
+                            ix < 2 && "w-0 overflow-hidden invisible"
+                        )}
+                    >
+                        <span className="px-1">/</span>
+                    </span>
+                    <span
+                        className={tw(
+                            ix === 0 && "w-0 overflow-hidden invisible"
+                        )}
+                        key={ix}
+                    >
+                        <CanvasWrapper canvas={x}>
+                            <CanvasPreview variant="breadcrumb" />
+                        </CanvasWrapper>
+                    </span>
+                </Fragment>
+            ))}
+            <span ref={endMarkerRef} className="h-full w-1 flex-none block" />
+        </div>
+    );
+};
 
 export const CanvasPath = ({
     isBreadcrumbExpanded,
@@ -18,7 +60,6 @@ export const CanvasPath = ({
     const location = useLocation();
     const [focus, setFocus] = useState(false);
     const { path, root } = useCanvases();
-    const endMarkerRef = useRef<HTMLSpanElement>(null);
 
     // Maintain controlled tags state (each tag is an address string)
     const [tags, setTags] = useState(() => path.slice(1).map((x) => x.address));
@@ -26,14 +67,6 @@ export const CanvasPath = ({
     useEffect(() => {
         // Update tags when the path changes externally.
         setTags(path.slice(1).map((x) => x.address));
-        // scroll to last element in breadcrumb bar
-        setTimeout(() => {
-            endMarkerRef.current?.scrollIntoView({
-                behavior: "smooth",
-                block: "nearest",
-                inline: "end",
-            });
-        }, 100); // 100ms delay
     }, [path]);
 
     // When tags change, resolve the new path and navigate if needed.
@@ -62,12 +95,6 @@ export const CanvasPath = ({
         }
     };
 
-    const renderBreadcrumb = (canvas: CanvasDB, ix) => (
-        <CanvasWrapper canvas={canvas}>
-            <CanvasPreview variant="breadcrumb" key={ix} />
-        </CanvasWrapper>
-    );
-
     return (
         <div className="flex flex-row gap-2 h-full items-center overflow-hidden">
             {path && path.length > 0 && (
@@ -77,32 +104,7 @@ export const CanvasPath = ({
                         setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
                     }
                 >
-                    <div className="grid grid-flow-col auto-cols-max justify-start items-center overflow-x-auto w-full shrink-0 no-scrollbar p-1 pr-0">
-                        {path.slice(0).map((x, ix) => (
-                            <Fragment key={ix}>
-                                <span
-                                    className={tw(
-                                        ix < 2 &&
-                                            "w-0 overflow-hidden invisible"
-                                    )}
-                                >
-                                    <span className="px-1">/</span>
-                                </span>
-                                <span
-                                    className={tw(
-                                        ix === 0 &&
-                                            "w-0 overflow-hidden invisible"
-                                    )}
-                                >
-                                    {renderBreadcrumb(x, ix)}
-                                </span>
-                            </Fragment>
-                        ))}
-                        <span
-                            ref={endMarkerRef}
-                            className="h-full w-1 flex-none block"
-                        />
-                    </div>
+                    <BreadCrumb path={path} />
                     {isBreadcrumbExpanded && (
                         <span className="text-sm bg-neutral-50 dark:bg-neutral-950 align-middle flex items-center outline outline-neutral-950 dark:outline-neutral-50 rounded-l-lg px-2 sm:px-5">
                             Close
