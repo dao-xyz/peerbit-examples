@@ -116,12 +116,12 @@ export const CanvasAndReplies = () => {
     }
 
     return (
-        <div className="h-full flex flex-col">
+        <div className="h-fit min-h-full grow shrink-0 flex flex-col">
             <ToolbarProvider
                 pendingCanvas={pendingCanvas.program}
                 onSavePending={onSavePending}
             >
-                <div className="h-full flex flex-col relative">
+                <div className="h-fit flex flex-col relative grow shrink-0">
                     <div
                         className="flex-grow  w-full mx-auto h-full"
                         ref={scrollContainerRef}
