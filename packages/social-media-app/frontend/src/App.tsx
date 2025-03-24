@@ -48,14 +48,7 @@ export const Content = () => {
     return (
         <>
             <Header fullscreen={inIframe()}>
-                <div
-                    /*     className={`flex-row h-[calc(100vh-${HEIGHT}px)] w-full`} */
-                    /*  */
-                    /*   */
-                    className="content-container w-full h-full"
-                >
-                    <BaseRoutes />
-                </div>
+                <BaseRoutes />
             </Header>
         </>
     );
