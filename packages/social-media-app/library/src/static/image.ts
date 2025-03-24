@@ -46,5 +46,14 @@ export class StaticImage extends AbstractStaticContent {
     get isEmpty() {
         return this.base64.length === 0;
     }
+
+    equals(other: StaticImage): boolean {
+        return this.base64 === other.base64 &&
+            this.mimeType === other.mimeType &&
+            this.width === other.width &&
+            this.height === other.height &&
+            this.alt === other.alt &&
+            this.caption === other.caption;
+    }
 }
 

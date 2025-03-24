@@ -22,4 +22,8 @@ export class StaticMarkdownText extends AbstractStaticContent {
     toString(): string {
         return this.text;
     }
+
+    equals(other: StaticMarkdownText): boolean {
+        return this.text === other.text;
+    }
 }

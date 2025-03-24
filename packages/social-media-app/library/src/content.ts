@@ -73,6 +73,7 @@ export abstract class ElementContent {
         | { type: string; content: string };
 
     abstract get isEmpty(): boolean;
+    abstract equals(other: ElementContent): boolean;
 }
 
 @variant(0)
@@ -655,6 +656,10 @@ export class IFrameContent extends ElementContent {
     get isEmpty(): boolean {
         return false;
     }
+
+    equals(other: ElementContent): boolean {
+        return other instanceof IFrameContent && other.src === this.src;
+    }
 }
 
 @variant(1)
@@ -678,5 +683,11 @@ export class StaticContent<
 
     get isEmpty() {
         return this.content.isEmpty;
+    }
+
+    equals(other: ElementContent): boolean {
+        return (
+            other instanceof StaticContent && other.content.equals(this.content)
+        );
     }
 }
