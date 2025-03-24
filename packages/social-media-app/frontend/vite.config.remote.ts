@@ -26,7 +26,7 @@ export default defineConfig({
                   cert: fs.readFileSync("./.cert/cert.pem"),
               },
               host: "social.test.xyz",
-              port: 443,
+              port: 6083,
           }
         : undefined,
 });
