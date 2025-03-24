@@ -28,8 +28,6 @@ export const IdentitiesProvider = ({ children }: { children: JSX.Element }) => {
         existing: "reuse",
         args: {
             deviceName: generateDefaultDeviceName(),
-            tabId:
-                peerContext.type === "node" ? peerContext.tabIndex : undefined,
         },
     });
 
