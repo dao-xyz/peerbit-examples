@@ -43,7 +43,10 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
     };
 
     return (
-        <div ref={ref as any} className="h-full min-h-fit w-full flex flex-col">
+        <div
+            ref={ref as any}
+            className="h-fit grid grid-rows-[auto_1fr_auto] min-h-full relative"
+        >
             {!props.fullscreen && (
                 <>
                     <div className="sticky top-0 inset-x-0 grid grid-cols-[0.5rem_auto_0.5rem_1fr_min-content_0.5rem_minmax(0%,var(--container-xl))_1fr_0.5rem_auto_0.5rem] grid-rows-[0.5rem_auto_0.5rem] z-40 bg-neutral-50 dark:bg-neutral-950">
@@ -68,7 +71,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                         )}
                         <div className="col-start-7 relative flex h-full w-full items-center bg-neutral-50 dark:bg-neutral-950">
                             <div
-                                className={`w-full z-10 h-[${HEIGHT}] overflow-hidden`}
+                                className={`w-full z-10 h-[${HEIGHT}] overflow-visible`}
                             >
                                 <CanvasPath
                                     isBreadcrumbExpanded={isBreadcrumbExpanded}
@@ -182,16 +185,14 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                     </div>
                 </>
             )}
-            <div className="relative h-full">
-                {/* background blur overlay over content (header still visible)*/}
-                {isBreadcrumbExpanded && (
-                    <div
-                        onClick={() => setIsBreadcrumbExpanded(false)}
-                        className="absolute inset-0 z-30 backdrop-blur-3xl sm:bg-neutral-50/50 dark:sm:bg-neutral-950/50 bg-neutral-50/95 dark:bg-neutral-950/95"
-                    ></div>
-                )}
-                {props.children}
-            </div>
+            {/* background blur overlay over content (header still visible)*/}
+            {isBreadcrumbExpanded && (
+                <div
+                    onClick={() => setIsBreadcrumbExpanded(false)}
+                    className="absolute inset-0 z-30 backdrop-blur-3xl sm:bg-neutral-50/50 dark:sm:bg-neutral-950/50 bg-neutral-50/95 dark:bg-neutral-950/95"
+                ></div>
+            )}
+            {props.children}
         </div>
     );
 });

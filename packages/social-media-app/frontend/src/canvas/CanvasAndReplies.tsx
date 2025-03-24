@@ -116,56 +116,45 @@ export const CanvasAndReplies = () => {
     }
 
     return (
-        <div className="h-fit min-h-full grow shrink-0 flex flex-col">
-            <ToolbarProvider
-                pendingCanvas={pendingCanvas.program}
-                onSavePending={onSavePending}
+        <ToolbarProvider
+            pendingCanvas={pendingCanvas.program}
+            onSavePending={onSavePending}
+        >
+            <div
+                className="h-fit flex flex-col relative grow shrink-0"
+                ref={scrollContainerRef}
             >
-                <div className="h-fit flex flex-col relative grow shrink-0">
-                    <div
-                        className="flex-grow  w-full mx-auto h-full"
-                        ref={scrollContainerRef}
-                    >
-                        <FullscreenEditor>
-                            {/* Set the scroll container height dynamically */}
-                            <div className=" gap-2.5 w-full flex flex-col items-center">
-                                <div className="mt-6 w-full h-full">
-                                    <div className="max-w-[876px] mx-auto w-full">
-                                        {/* dont show header on root post */}
-                                        {canvases.length > 1 && (
-                                            <Header
-                                                variant="large"
-                                                canvas={lastCanvas}
-                                                className="mb-2  px-4"
-                                            />
-                                        )}
-                                        <CanvasWrapper canvas={lastCanvas}>
-                                            <Canvas
-                                                bgBlur
-                                                fitWidth
-                                                draft={false}
-                                            />
-                                        </CanvasWrapper>
-                                    </div>
-
-                                    <Replies
+                <FullscreenEditor>
+                    {/* Set the scroll container height dynamically */}
+                    <div className=" gap-2.5 w-full flex flex-col items-center">
+                        <div className="mt-6 w-full h-full">
+                            <div className="max-w-[876px] mx-auto w-full">
+                                {/* dont show header on root post */}
+                                {canvases.length > 1 && (
+                                    <Header
+                                        variant="large"
                                         canvas={lastCanvas}
-                                        sortCriteria={sortCriteria}
-                                        setSortCriteria={setSortCriteria}
+                                        className="mb-2  px-4"
                                     />
-                                </div>
+                                )}
+                                <CanvasWrapper canvas={lastCanvas}>
+                                    <Canvas bgBlur fitWidth draft={false} />
+                                </CanvasWrapper>
                             </div>
-                            <div
-                                ref={bottomScrollMarkerRef}
-                                className="h-0 w-full"
+
+                            <Replies
+                                canvas={lastCanvas}
+                                sortCriteria={sortCriteria}
+                                setSortCriteria={setSortCriteria}
                             />
-                        </FullscreenEditor>
+                        </div>
                     </div>
-                </div>
-                <div className="sticky z-20 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950">
-                    <Toolbar ref={toolbarRef} />
-                </div>
-            </ToolbarProvider>
-        </div>
+                    <div ref={bottomScrollMarkerRef} className="h-0 w-full" />
+                </FullscreenEditor>
+            </div>
+            <div className="sticky z-20 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950">
+                <Toolbar ref={toolbarRef} />
+            </div>
+        </ToolbarProvider>
     );
 };
