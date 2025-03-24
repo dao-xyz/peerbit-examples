@@ -95,7 +95,7 @@ export const CanvasAndReplies = () => {
         });
     };
 
-    if (canvases.length === 0) {
+    if (!canvases || canvases.length === 0) {
         return (
             <div className="h-full flex flex-col justify-center">
                 <div className="flex flex-col gap-4 items-center">
