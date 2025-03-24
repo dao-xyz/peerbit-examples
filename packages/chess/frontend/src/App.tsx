@@ -26,9 +26,12 @@ export const App = () => {
         <PeerProvider
             inMemory={false}
             waitForConnnected={true}
-            network={
-                import.meta.env.MODE === "development" ? "local" : "remote"
-            }
+            top={{
+                type: "node",
+                network:
+                    import.meta.env.MODE === "development" ? "local" : "remote",
+            }}
+            iframe={{ type: "proxy", targetOrigin: "*" }}
         >
             <AppProvider navigation="emit-all">
                 <HashRouter basename="/">
