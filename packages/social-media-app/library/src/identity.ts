@@ -13,7 +13,6 @@ import {
     ByteMatchQuery,
     Documents,
     Or,
-    Query,
 } from "@peerbit/document";
 import { concat } from "uint8arrays";
 import { deserialize } from "@dao-xyz/borsh";
@@ -100,6 +99,9 @@ export class Connection {
 
     // Called by the responder to update this connection with its device info.
     updateWithDevice2(device2: Device) {
+        if (this.device1.publicKey.equals(device2.publicKey)) {
+            throw new Error("Device 1 and Device 2 are the same");
+        }
         this.device2 = device2;
         this.verified = true;
     }
@@ -143,17 +145,35 @@ export class ConnectionIndexed {
         this.verified = connection.verified;
     }
 }
+type BroadcastConnectionRequest = {
+    type: "connection-start";
+    connection: Uint8Array;
+};
+
+type BroadcastTabIsAvailable = {
+    type: "tab-available";
+    tabId: number;
+};
 
 /* ───── IDENTITIES (SINGLE DB) ───────────────────── */
 
 @variant("identity")
-export class Identities extends Program {
+export class Identities extends Program<{
+    deviceName: string;
+    connectTabs?: {
+        id: number;
+    };
+}> {
     // The single DB for connection objects.
     @field({ type: Documents })
     connections: Documents<Connection, ConnectionIndexed>;
 
     // Base URL (including deep-link prefix, e.g. "http://localhost:5173/#/connect?data=").
     public baseUrl: string;
+    private device: Device;
+
+    // Broadcast channel for syncing identities across tabs.
+    broadcastChannel?: BroadcastChannel;
 
     constructor(properties: { id?: Uint8Array; baseUrl: string }) {
         super();
@@ -168,7 +188,19 @@ export class Identities extends Program {
         });
     }
 
-    async open(): Promise<void> {
+    set deviceName(name: string) {
+        this.device = new Device(this.node.identity.publicKey, name);
+    }
+    async open(args?: {
+        deviceName?: string;
+        connectTabs?: {
+            id: number;
+        };
+    }): Promise<void> {
+        if (!this.device) {
+            this.deviceName = args?.deviceName ?? "Device McDeviceface";
+        }
+
         await this.connections.open({
             replicate: {
                 factor: 1,
@@ -196,6 +228,77 @@ export class Identities extends Program {
             },
             canPerform: () => true, // TODO make sure first signer assigned device 1 and second signer device 2
         });
+
+        // Initialize the broadcast channel and set up the listener.
+        if (args?.connectTabs) {
+            this.setupBroadcastChannel();
+
+            if (args?.connectTabs.id === 0) {
+                this.broadcastChannel!.postMessage({
+                    type: "connection-start",
+                    connection: serialize(
+                        new Connection({
+                            device1: this.device,
+                            nonce: randomBytes(32),
+                        })
+                    ),
+                } as BroadcastConnectionRequest);
+            } else if (args?.connectTabs.id) {
+                this.broadcastChannel!.postMessage({
+                    type: "tab-available",
+                    tabId: args?.connectTabs.id,
+                } as BroadcastTabIsAvailable);
+            }
+        }
+    }
+    async close(from?: Program): Promise<boolean> {
+        this.broadcastChannel?.close();
+        return super.close(from);
+    }
+
+    setupBroadcastChannel() {
+        this.broadcastChannel = new BroadcastChannel("identities-sync");
+        this.broadcastChannel.onmessage = async (event) => {
+            const message = event.data as
+                | BroadcastConnectionRequest
+                | BroadcastTabIsAvailable;
+
+            if (message.type === "connection-start") {
+                const serializedConnection = event.data.connection;
+                // Deserialize the connection.
+                const connection = deserialize(
+                    serializedConnection,
+                    Connection
+                );
+
+                // Update the local document store.
+                await this.approveAndDeduplicateConnection(connection); // approve connecitons updates that are sent to me through other tabs
+            }
+            if (message.type === "tab-available") {
+                this.broadcastChannel!.postMessage({
+                    type: "connection-start",
+                    connection: serialize(
+                        new Connection({
+                            device1: this.device,
+                            nonce: randomBytes(32),
+                        })
+                    ),
+                } as BroadcastConnectionRequest);
+            }
+        };
+    }
+
+    async broadcastConnectionUpdate(connection: Connection) {
+        if (!this.broadcastChannel) {
+            return;
+        }
+
+        const serialized = serialize(connection);
+        this.broadcastChannel.postMessage({
+            type: "connection-start",
+            connection: serialized,
+        });
+        console.log("Broadcasted connection update");
     }
 
     async getAllLinkedDevices(
@@ -205,6 +308,12 @@ export class Identities extends Program {
             query: this.getLinkedDevicesQuery(publicKey),
         });
     }
+
+    async isConnected(publicKey: PublicSignKey) {
+        const linked = await this.getAllLinkedDevices(publicKey);
+        return linked.length > 0;
+    }
+
     getLinkedDevicesQuery(
         publicKey: PublicSignKey = this.node.identity.publicKey
     ): And {
@@ -247,6 +356,15 @@ export class Identities extends Program {
         return toBase64URL(serializedData);
     }
 
+    private async approveAndDeduplicateConnection(connection: Connection) {
+        if (await this.isConnected(connection.device1.publicKey)) {
+            // "Already connected";
+            return;
+        }
+        // Update the connection document with the responder’s info.
+        connection.updateWithDevice2(this.device);
+        await this.connections.put(connection);
+    }
     /**
      * Initiates the connection flow.
      *
@@ -266,7 +384,7 @@ export class Identities extends Program {
      * @returns The public key of the remote (other) device.
      */
     async connectDevicesFlow(
-        properties: { deviceName?: string } & (
+        properties:
             | {
                   canvas?: HTMLCanvasElement;
                   onCode?: (result: {
@@ -278,13 +396,7 @@ export class Identities extends Program {
             | {
                   deepLinkOrCode: string;
               }
-        )
     ): Promise<Connection> {
-        const myPublicKey = this.node.identity.publicKey;
-        const device = new Device(
-            myPublicKey,
-            properties.deviceName || "Device McDeviceface"
-        );
         if (!this.baseUrl) {
             throw new Error("Baseurl not set!");
         }
@@ -296,15 +408,14 @@ export class Identities extends Program {
             const connectionBytes = fromBase64URL(data);
             const connection = deserialize(connectionBytes, Connection);
             // Update the connection document with the responder’s info.
-            connection.updateWithDevice2(device);
-            await this.connections.put(connection);
+            await this.approveAndDeduplicateConnection(connection);
 
             // Return the initiator’s public key.
             return connection;
         } else {
             // Initiator flow:
             const nonce = crypto.getRandomValues(new Uint8Array(32));
-            const connection = new Connection({ device1: device, nonce });
+            const connection = new Connection({ device1: this.device, nonce });
             const serializedData = serialize(connection);
             const encodedConnection = this.getEncodedConnection(serializedData);
             const deepLinkUrl = this.baseUrl + encodedConnection;
@@ -321,6 +432,10 @@ export class Identities extends Program {
             }
             // Put the new connection document into the DB.
             await this.connections.put(connection);
+            /* this.broadcastChannel.postMessage({
+                type: "connection-start",
+                connection: serializedData,
+            }); */
 
             // Wait for the responder to update the document (i.e. verified becomes true).
             let deferred = pDefer<Connection>();

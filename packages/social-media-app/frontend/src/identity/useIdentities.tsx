@@ -2,6 +2,7 @@ import { useLocal, usePeer, useProgram } from "@peerbit/react";
 import React, { useContext } from "react";
 import { Connection, Identities } from "@dao-xyz/social";
 import { And, BoolQuery, ByteMatchQuery, Or } from "@peerbit/indexer-interface";
+import { generateDefaultDeviceName } from "./utils";
 
 interface IIdentitiesContext {
     identities?: Identities;
@@ -20,11 +21,18 @@ export const IdentitiesProvider = ({ children }: { children: JSX.Element }) => {
             ? "http://localhost:5173/#/connect?data="
             : "https://giga.place/#/connect?data=";
 
+    const peerContext = usePeer();
+    const { peer } = peerContext;
+
     const identities = useProgram(new Identities({ baseUrl }), {
         existing: "reuse",
+        args: {
+            deviceName: generateDefaultDeviceName(),
+            tabId:
+                peerContext.type === "node" ? peerContext.tabIndex : undefined,
+        },
     });
 
-    const { peer } = usePeer();
     const devices = useLocal(
         peer ? identities?.program?.connections : undefined,
         peer

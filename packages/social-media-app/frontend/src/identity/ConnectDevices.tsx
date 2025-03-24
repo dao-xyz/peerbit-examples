@@ -48,7 +48,6 @@ export const ConnectDevices = () => {
         try {
             setStatus("Processing incoming connection...");
             const connection = await identities.connectDevicesFlow({
-                deviceName,
                 deepLinkOrCode: token,
             });
             setStatus(
@@ -92,7 +91,6 @@ export const ConnectDevices = () => {
                 // Initiator mode: start connection flow and display deep link & QR code.
                 identities
                     .connectDevicesFlow({
-                        deviceName,
                         onCode: ({
                             encodedConnection,
                             deepLinkUrl,
