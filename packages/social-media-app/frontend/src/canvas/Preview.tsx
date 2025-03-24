@@ -71,10 +71,7 @@ const PreviewFrame = ({
             editMode={false}
             showEditControls={false}
             element={element}
-            replace={() => {}}
             onLoad={() => {}}
-            onContentChange={() => {}}
-            pending={false}
             fit={fit}
             previewLines={previewLines}
             noPadding={noPadding}
@@ -112,10 +109,7 @@ const BlurredBackground = ({
                 editMode={false}
                 showEditControls={false}
                 element={element}
-                replace={async () => {}}
                 onLoad={() => {}}
-                onContentChange={() => {}}
-                pending={false}
                 fit="cover"
                 noPadding={noPadding}
             />

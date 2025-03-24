@@ -36,6 +36,13 @@ interface CanvasContextType {
     isEmpty: boolean;
     // New: Function to insert an image into the canvas
     insertImage: (file: File, options?: { pending?: boolean }) => Promise<void>;
+    mutate: (
+        rect: { id: Uint8Array },
+        fn: (
+            element: Element<ElementContent>,
+            ix: number
+        ) => Promise<boolean> | boolean
+    ) => Promise<void>;
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -129,6 +136,34 @@ export const CanvasWrapper = ({
             if (element.location.y >= fromY) {
                 element.location.y--;
             }
+        }
+    };
+
+    const mutate = async (
+        rect: { id: Uint8Array },
+        fn: (
+            element: Element<ElementContent>,
+            ix: number
+        ) => Promise<boolean> | boolean
+    ) => {
+        // only mutate if we are the owner
+        if (!canvas?.publicKey.equals(peer?.identity.publicKey)) {
+            return;
+        }
+        const pending = pendingRects.find((pending) =>
+            equals(pending.id, rect.id)
+        );
+
+        const index = rects.findIndex((pending) => equals(pending.id, rect.id));
+
+        if (pending) {
+            await fn(pending, index);
+        }
+
+        const existing = rects[index];
+        const mutated = await fn(existing, index);
+        if (mutated) {
+            await canvas.elements.put(existing);
         }
     };
 
@@ -368,6 +403,7 @@ export const CanvasWrapper = ({
         canvas,
         onContentChange: _onContentChange,
         insertImage, // <--- expose the new function
+        mutate,
     };
 
     return (

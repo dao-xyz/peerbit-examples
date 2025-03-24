@@ -183,14 +183,14 @@ export const CreateRoot = () => {
                         {/* Global overlay messages in the center of the screen */}
                         {importError && (
                             <div className="fixed inset-0 flex items-center justify-center z-50 pointer-events-none ">
-                                <div className="bg-red-200 text-red-800 px-6 py-3 rounded shadow-lg bg-white dark:bg-black">
+                                <div className=" text-red-800 px-6 py-3 rounded shadow-lg bg-white dark:bg-black">
                                     Invalid base64!
                                 </div>
                             </div>
                         )}
                         {copySuccess && (
                             <div className="fixed inset-0 flex items-center justify-center z-50 pointer-events-none ">
-                                <div className="bg-gray-200 text-gray-800 px-6 py-3 rounded shadow-lg bg-white dark:bg-black">
+                                <div className="text-gray-800 px-6 py-3 rounded shadow-lg bg-white dark:bg-black">
                                     Copied to clipboard!
                                 </div>
                             </div>

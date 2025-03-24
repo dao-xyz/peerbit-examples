@@ -1,15 +1,8 @@
-import {
-    Element,
-    IFrameContent,
-    ElementContent,
-    StaticContent,
-    StaticMarkdownText,
-} from "@dao-xyz/social";
-import { equals } from "uint8arrays";
+import { Element, ElementContent } from "@dao-xyz/social";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
-import { ReactNode, useCallback, useMemo, useReducer } from "react";
+import { ReactNode, useMemo, useReducer } from "react";
 import { rectIsStaticMarkdownText } from "./utils/rect";
 import { IoIosArrowDown, IoIosArrowUp } from "react-icons/io";
 import { MdClear } from "react-icons/md";
@@ -40,8 +33,8 @@ export const Canvas = (
         rects,
         removePending,
         canvas,
-        savePending,
-        onContentChange: onContentChangeContextTrigger,
+
+        mutate,
     } = useCanvas();
 
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
@@ -61,30 +54,6 @@ export const Canvas = (
                 return x.location.y - y.location.y;
             });
     }, [rects, _, pendingRects, properties.appearance]);
-
-    const mutate = async (
-        rect: { id: Uint8Array },
-        fn: (
-            element: Element<ElementContent>,
-            ix: number
-        ) => Promise<void> | void
-    ) => {
-        const pending = pendingRects.find((pending) =>
-            equals(pending.id, rect.id)
-        );
-
-        const index = filteredRects.findIndex((pending) =>
-            equals(pending.id, rect.id)
-        );
-
-        if (pending) {
-            return fn(pending, index);
-        }
-
-        const existing = filteredRects[index];
-        await fn(existing, index);
-        await canvas.elements.put(existing);
-    };
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((rect, ix) => {
@@ -146,31 +115,7 @@ export const Canvas = (
                                 filteredRects.length > 1
                             }
                             element={rect}
-                            replace={async (url) => {
-                                await mutate(rect, (element) => {
-                                    (element.content as IFrameContent).src =
-                                        url;
-                                });
-                            }}
                             onLoad={() => {}}
-                            onContentChange={async (change, options) => {
-                                const content = new StaticContent({
-                                    content: change.content,
-                                });
-
-                                await mutate(rect, (element) => {
-                                    element.content = content;
-                                    onContentChangeContextTrigger(element);
-                                });
-                                if (options?.save && properties.draft) {
-                                    savePending();
-                                }
-                            }}
-                            pending={
-                                !!pendingRects.find((p) =>
-                                    equals(p.id, rect.id)
-                                )
-                            }
                             fit={
                                 properties.appearance === "chat-view-images"
                                     ? "cover"
@@ -192,19 +137,22 @@ export const Canvas = (
                                                 (element, ix) => {
                                                     const prev =
                                                         filteredRects[ix - 1];
-
-                                                    console.log("move up!", {
-                                                        prev,
-                                                        filteredRects,
-                                                        ix,
-                                                    });
-
                                                     element.location.y -= 1;
-                                                    mutate(prev, (element) => {
-                                                        element.location.y += 1;
-                                                    }).then(() => {
-                                                        forceUpdate();
-                                                    });
+                                                    return mutate(
+                                                        prev,
+                                                        (element) => {
+                                                            element.location.y += 1;
+                                                            forceUpdate();
+                                                            return true;
+                                                        }
+                                                    )
+                                                        .then(() => {
+                                                            return true;
+                                                        })
+                                                        .catch((e) => {
+                                                            console.error(e);
+                                                            return false;
+                                                        });
                                                 }
                                             );
                                         }}
@@ -224,23 +172,27 @@ export const Canvas = (
                                             rectsToRender.length - 1 === ix
                                         }
                                         onClick={() => {
-                                            console.log(
-                                                "move down!",
-                                                filteredRects.map(
-                                                    (x) => x.location.y
-                                                )
-                                            );
                                             return mutate(
                                                 rect,
                                                 (element, ix) => {
                                                     const next =
                                                         filteredRects[ix + 1];
                                                     element.location.y += 1;
-                                                    mutate(next, (element) => {
-                                                        element.location.y -= 1;
-                                                    }).then(() => {
-                                                        forceUpdate();
-                                                    });
+                                                    return mutate(
+                                                        next,
+                                                        (element) => {
+                                                            element.location.y -= 1;
+                                                            return true;
+                                                        }
+                                                    )
+                                                        .then(() => {
+                                                            forceUpdate();
+                                                            return true;
+                                                        })
+                                                        .catch((e) => {
+                                                            console.error(e);
+                                                            return false;
+                                                        });
                                                 }
                                             );
                                         }}
@@ -273,10 +225,7 @@ export const Canvas = (
                                         editMode={false}
                                         showEditControls={false}
                                         element={rect}
-                                        replace={async () => {}}
                                         onLoad={() => {}}
-                                        onContentChange={() => {}}
-                                        pending={false}
                                         fit="cover"
                                     />
                                 </div>

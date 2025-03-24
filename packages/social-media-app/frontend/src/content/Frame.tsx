@@ -1,10 +1,12 @@
-import React, { useState } from "react";
+import React, { useRef, useState } from "react";
 import { IFrameContent, Element, StaticContent } from "@dao-xyz/social";
-import { useNavigate } from "react-router-dom";
+import { replace, useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
 import { useApps } from "./useApps";
 import { CuratedWebApp } from "@giga-app/app-service";
-import { HostProvider as GigaHost } from "@giga-app/sdk";
+import { HostProvider as GigaHost, HostProvider } from "@giga-app/sdk";
+import { useCanvas } from "../canvas/CanvasWrapper";
+import { equals } from "uint8arrays";
 
 /**
  * Frame component for displaying different types of content with controls.
@@ -30,21 +32,25 @@ import { HostProvider as GigaHost } from "@giga-app/sdk";
  * @returns Frame component with appropriate content and controls
  */
 export const Frame = (properties: {
-    pending: boolean;
     element: Element;
     active: boolean;
     setActive: (value: boolean) => void;
     thumbnail?: boolean;
-    replace: (url: string) => void;
     onLoad: (event: React.SyntheticEvent<HTMLElement, Event>) => void;
+
     /**
      * Called when static content is edited.
      * The new static content is provided along with the element index.
      */
+
+    /*   
+        pending: boolean;
     onContentChange?: (
-        properties: { content: StaticContent["content"]; id: Uint8Array },
-        options?: { save: boolean }
-    ) => void;
+           properties: { content: StaticContent["content"]; id: Uint8Array },
+           options?: { save: boolean }
+       ) => void; */
+    /* replaceIFrameUrl: (url: string) => void; */
+
     key?: number;
     delete(): void;
     fit?: "cover" | "contain";
@@ -64,6 +70,13 @@ export const Frame = (properties: {
         isReady: boolean;
         info?: string;
     } | null>(null);
+    const iframeRef = useRef<HTMLIFrameElement>(null);
+
+    const {
+        mutate,
+        savePending,
+        onContentChange: onContentChangeContextTrigger,
+    } = useCanvas();
 
     const open = () => {
         const url = (properties.element.content as IFrameContent).src;
@@ -122,7 +135,17 @@ export const Frame = (properties: {
                             />
                             <button
                                 className="btn btn-secondary"
-                                onClick={() => properties.replace(newUrl)}
+                                onClick={async () => {
+                                    await mutate(
+                                        properties.element,
+                                        (element) => {
+                                            (
+                                                element.content as IFrameContent
+                                            ).src = newUrl;
+                                            return true;
+                                        }
+                                    );
+                                }}
                             >
                                 Save
                             </button>
@@ -154,21 +177,42 @@ export const Frame = (properties: {
                     return renderErrorUI(status, curatedWebApp, src);
                 }
             }
+
             return (
-                <iframe
-                    onLoad={(event) => {
-                        console.log("IFRAME LOAD EVENT", event);
-                        properties.onLoad(event);
+                <HostProvider
+                    iframeRef={iframeRef}
+                    onNavigate={async (message) => {
+                        console.log("NAVIGATE EVENT", message.data.to);
+
+                        await mutate(properties.element, (element) => {
+                            const currentUrl = (
+                                element.content as IFrameContent
+                            ).src;
+                            if (currentUrl === message.data.to) {
+                                return false;
+                            }
+                            (element.content as IFrameContent).src =
+                                message.data.to;
+                            return true;
+                        });
                     }}
-                    style={{
-                        width: "100%",
-                        height: "100%",
-                        minHeight: "400px",
-                        border: 0,
-                    }}
-                    src={src}
-                    allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
-                ></iframe>
+                >
+                    <iframe
+                        ref={iframeRef}
+                        onLoad={(event) => {
+                            console.log("IFRAME LOAD EVENT", src);
+                            properties.onLoad(event);
+                        }}
+                        style={{
+                            width: "100%",
+                            height: "100%",
+                            minHeight: "400px",
+                            border: 0,
+                        }}
+                        src={src}
+                        allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
+                    ></iframe>
+                </HostProvider>
             );
         }
         // For static content (markdown or images), use EditableStaticContent.
@@ -180,15 +224,18 @@ export const Frame = (properties: {
                     editable={properties.editMode}
                     thumbnail={properties.thumbnail}
                     onResize={() => {}}
-                    onChange={(newContent, options) => {
-                        if (properties.onContentChange) {
-                            properties.onContentChange(
-                                {
-                                    content: newContent,
-                                    id: properties.element.id,
-                                },
-                                options
-                            );
+                    onChange={async (newContent, options) => {
+                        const content = new StaticContent({
+                            content: newContent,
+                        });
+
+                        await mutate(properties.element, (element) => {
+                            element.content = content;
+                            onContentChangeContextTrigger(element);
+                            return true;
+                        });
+                        if (options?.save /* && properties.draft */) {
+                            savePending();
                         }
                     }}
                     fit={properties.fit}
