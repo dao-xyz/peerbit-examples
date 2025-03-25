@@ -51,6 +51,7 @@ export class AppClient {
             useThemeClasses?: boolean;
         }
     ) {
+        import("@iframe-resizer/child");
         this.listener = (message) => {
             const data = message.data as AppMessage;
             // For now, we only handle size events (and others can be handled by custom listeners).
@@ -88,17 +89,17 @@ export class AppHost {
     constructor(
         readonly properties: {
             iframe: HTMLIFrameElement;
-            onResize: (event: MessageEvent<ResizeMessage>) => void;
-            onNavigate: (event: MessageEvent<NavigationEvent>) => void;
+            onResize: (event: ResizeMessage) => void;
+            onNavigate: (event: NavigationEvent) => void;
             // Optionally, you can add onFullscreen or onPreview handlers here as well.
         }
     ) {
         this.listener = (message) => {
             const data = message.data as AppMessage;
-            if (data.type === "size") {
-                properties.onResize(message);
-            } else if (data.type === "navigate") {
-                properties.onNavigate(message);
+            /* if (data.type === "size") { // Handled by the iframeresizer lib
+                properties.onResize(message.data);
+            } else  */ if (data.type === "navigate") {
+                properties.onNavigate(message.data);
             }
             // Additional events can be handled here if needed.
         };

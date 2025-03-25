@@ -158,9 +158,18 @@ export const CanvasWrapper = ({
 
         if (pending) {
             await fn(pending, index);
+            return; // return here, because we are in drafting mode. When we "save" we want to mutate existing. I.e. this allows use to do modifications and preview them before saving/announcing them to the world
         }
 
         const existing = rects[index];
+        if (!existing) {
+            throw new Error(
+                "Missing rects in existing and pending. Index: " +
+                    index +
+                    ". Rects: " +
+                    rects.length
+            );
+        }
         const mutated = await fn(existing, index);
         if (mutated) {
             await canvas.elements.put(existing);

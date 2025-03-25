@@ -6,7 +6,6 @@ import { useApps } from "./useApps";
 import { CuratedWebApp } from "@giga-app/app-service";
 import { HostProvider as GigaHost, HostProvider } from "@giga-app/sdk";
 import { useCanvas } from "../canvas/CanvasWrapper";
-import { equals } from "uint8arrays";
 
 /**
  * Frame component for displaying different types of content with controls.
@@ -180,38 +179,36 @@ export const Frame = (properties: {
 
             return (
                 <HostProvider
-                    iframeRef={iframeRef}
-                    onNavigate={async (message) => {
-                        console.log("NAVIGATE EVENT", message.data.to);
-
+                    onNavigate={async (evt) => {
                         await mutate(properties.element, (element) => {
                             const currentUrl = (
                                 element.content as IFrameContent
                             ).src;
-                            if (currentUrl === message.data.to) {
+                            if (currentUrl === evt.to) {
                                 return false;
                             }
-                            (element.content as IFrameContent).src =
-                                message.data.to;
+                            (element.content as IFrameContent).src = evt.to;
                             return true;
                         });
                     }}
                 >
-                    <iframe
-                        ref={iframeRef}
-                        onLoad={(event) => {
-                            console.log("IFRAME LOAD EVENT", src);
-                            properties.onLoad(event);
-                        }}
-                        style={{
-                            width: "100%",
-                            height: "100%",
-                            minHeight: "400px",
-                            border: 0,
-                        }}
-                        src={src}
-                        allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
-                    ></iframe>
+                    {(iframeRef) => (
+                        <iframe
+                            ref={iframeRef}
+                            onLoad={(event) => {
+                                console.log("IFRAME LOAD EVENT", src);
+                                properties.onLoad(event);
+                            }}
+                            style={{
+                                width: "100%",
+                                height: "100%",
+                                minHeight: "400px",
+                                border: 0,
+                            }}
+                            src={src}
+                            allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
+                        ></iframe>
+                    )}
                 </HostProvider>
             );
         }
