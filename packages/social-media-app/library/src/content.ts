@@ -423,6 +423,7 @@ export class Canvas extends Program {
         }
         return path;
     }
+
     get repliesCount(): bigint {
         return this._repliesCount || 0n;
     }
@@ -444,14 +445,6 @@ export class Canvas extends Program {
             // TODO handle errors that arrise from the database being closed
             return 0n;
         }
-    }
-    async getCanvasPath() {
-        const path: Canvas[] = [this];
-        for (const element of this.path) {
-            const next = await element.load(this.node);
-            path.push(next);
-        }
-        return path.reverse();
     }
 
     async getCreateRoomByPath(path: string[]): Promise<Canvas[]> {

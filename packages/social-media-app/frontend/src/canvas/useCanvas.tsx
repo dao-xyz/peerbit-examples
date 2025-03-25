@@ -60,7 +60,7 @@ const getCanvasesPathFromURL = async (
         existing: "reuse",
     });
     console.log({ current });
-    return current.getCanvasPath();
+    return current.loadPath(true);
 };
 
 export const CanvasContext = React.createContext<ICanvasContext>({} as any);
