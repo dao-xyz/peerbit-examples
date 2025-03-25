@@ -11,6 +11,7 @@ import { HeaderLogo } from "./Logo";
 import { useCanvases } from "./canvas/useCanvas";
 import { IoIosArrowBack } from "react-icons/io";
 import ExpandedContext from "./context/ExpandedContext";
+import { useThemeContext } from "./theme/useTheme";
 
 // Define props interface
 interface HeaderProps {
@@ -22,25 +23,11 @@ export const HEIGHT = "40px";
 
 export const Header = forwardRef((props: HeaderProps, ref) => {
     // Read initial theme from localStorage or default to "light"
-    const [theme, setTheme] = useState<"dark" | "light">(
-        localStorage.theme || "light"
-    );
+    const { toggleTheme, theme } = useThemeContext();
     const [isBreadcrumbExpanded, setIsBreadcrumbExpanded] = useState(false); // Add breadcrumbExpanded state
     const { peer } = usePeer();
     const { path } = useCanvases();
     const navigate = useNavigate();
-
-    // Toggle the dark/light mode
-    const toggleTheme = () => {
-        const newTheme = theme === "dark" ? "light" : "dark";
-        localStorage.theme = newTheme;
-        setTheme(newTheme);
-        if (newTheme === "dark") {
-            document.documentElement.classList.add("dark");
-        } else {
-            document.documentElement.classList.remove("dark");
-        }
-    };
 
     return (
         <div

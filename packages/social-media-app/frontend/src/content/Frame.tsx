@@ -1,11 +1,46 @@
-import React, { useRef, useState } from "react";
+import React, { SyntheticEvent, useEffect, useRef, useState } from "react";
 import { IFrameContent, Element, StaticContent } from "@dao-xyz/social";
-import { replace, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
 import { useApps } from "./useApps";
 import { CuratedWebApp } from "@giga-app/app-service";
-import { HostProvider as GigaHost, HostProvider } from "@giga-app/sdk";
+import { HostProvider as GigaHost, HostProvider, useHost } from "@giga-app/sdk";
 import { useCanvas } from "../canvas/CanvasWrapper";
+import { useThemeContext } from "../theme/useTheme";
+
+const ThemedIframe = (properties: {
+    src: string;
+    onLoad: (evt: SyntheticEvent<HTMLIFrameElement, Event>) => void;
+    iframeRef: React.RefObject<HTMLIFrameElement>;
+}) => {
+    const { send, ready } = useHost();
+    const { theme } = useThemeContext();
+
+    useEffect(() => {
+        if (!ready) {
+            return;
+        }
+        send?.({ type: "theme", theme });
+    }, [theme, send, ready]);
+
+    return (
+        <iframe
+            ref={properties.iframeRef}
+            onLoad={(evt) => {
+                console.log("IFRAME LOAD EVENT", properties.src);
+                properties.onLoad(evt);
+            }}
+            style={{
+                width: "100%",
+                height: "100%",
+                minHeight: "400px",
+                border: 0,
+            }}
+            src={properties.src}
+            allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
+        ></iframe>
+    );
+};
 
 /**
  * Frame component for displaying different types of content with controls.
@@ -179,6 +214,7 @@ export const Frame = (properties: {
 
             return (
                 <HostProvider
+                    iframeOriginalSource={properties.element.content.orgSrc}
                     onNavigate={async (evt) => {
                         await mutate(properties.element, (element) => {
                             const currentUrl = (
@@ -193,21 +229,11 @@ export const Frame = (properties: {
                     }}
                 >
                     {(iframeRef) => (
-                        <iframe
-                            ref={iframeRef}
-                            onLoad={(event) => {
-                                console.log("IFRAME LOAD EVENT", src);
-                                properties.onLoad(event);
-                            }}
-                            style={{
-                                width: "100%",
-                                height: "100%",
-                                minHeight: "400px",
-                                border: 0,
-                            }}
+                        <ThemedIframe
+                            iframeRef={iframeRef}
+                            onLoad={properties.onLoad}
                             src={src}
-                            allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
-                        ></iframe>
+                        ></ThemedIframe>
                     )}
                 </HostProvider>
             );

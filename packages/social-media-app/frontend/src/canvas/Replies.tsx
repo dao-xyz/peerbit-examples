@@ -5,12 +5,9 @@ import {
     getImmediateRepliesQuery,
     getRepliesQuery,
 } from "@dao-xyz/social";
-import { useLocal, useOnline, usePeer } from "@peerbit/react";
+import { useLocal, usePeer } from "@peerbit/react";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
-import {
-    SearchRequest,
-    SearchRequestIndexed,
-} from "@peerbit/document-interface";
+import { SearchRequest } from "@peerbit/document-interface";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Reply } from "./Reply";

@@ -630,12 +630,16 @@ export class IFrameContent extends ElementContent {
     @field({ type: "string" })
     src: string; // https://a.cool.thing.com/abc123
 
+    @field({ type: "string" })
+    orgSrc: string; // the src before any navigation. This is used to determine if the src has changed to another origin for example
+
     @field({ type: "bool" })
     resizer: boolean; // if IFrameResizer is installed on the target site
 
     constructor(properties: { src: string; resizer: boolean }) {
         super();
         this.src = properties.src;
+        this.orgSrc = properties.src;
         this.resizer = properties.resizer;
     }
 

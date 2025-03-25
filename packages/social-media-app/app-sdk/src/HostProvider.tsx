@@ -1,4 +1,11 @@
-import React, { createContext, useContext, useEffect, useRef } from "react";
+import React, {
+    createContext,
+    useContext,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import {
     AppHost,
     AppMessage,
@@ -6,6 +13,7 @@ import {
     NavigationEvent,
 } from "./client-host";
 import IFrameResizer from "./IFrameResizer";
+import { useHostRegistry } from "./HostRegistryProvider"; // import the registry hook
 
 export interface HostProviderProps {
     /**
@@ -22,13 +30,23 @@ export interface HostProviderProps {
      * Optional callback for handling navigation messages from the app.
      */
     onNavigate?: (message: NavigationEvent) => void;
+
+    /**
+     * The original source of the iframe. Before any navigation.
+     */
+    iframeOriginalSource: string;
 }
 
 export interface HostContextType {
     /**
      * Send a message to the embedded app.
      */
-    send: (message: AppMessage) => void;
+    send?: (message: AppMessage) => void;
+
+    /**
+     * Is the client ready?
+     */
+    ready: boolean;
 }
 
 const HostContext = createContext<HostContextType | undefined>(undefined);
@@ -42,16 +60,21 @@ export const useHost = () => {
 };
 
 export const HostProvider: React.FC<HostProviderProps> = ({
+    iframeOriginalSource,
     children,
     onResize,
     onNavigate,
 }) => {
     const iframeRef = useRef<HTMLIFrameElement>(null);
     const hostRef = useRef<AppHost | null>(null);
+    const { registerHost, unregisterHost } = useHostRegistry();
+    const registeredFn = useRef<((args: any) => any) | undefined>(undefined);
+    const [ready, setReady] = useState(false);
 
     useEffect(() => {
         if (!iframeRef.current) return;
         hostRef.current = new AppHost({
+            iframeOriginalSource,
             iframe: iframeRef.current,
             onResize:
                 onResize ||
@@ -59,22 +82,40 @@ export const HostProvider: React.FC<HostProviderProps> = ({
             onNavigate:
                 onNavigate ||
                 ((message) => console.log("AppHost navigate:", message)),
+            onReady: () => {
+                setReady(true);
+            },
         });
+        // Register this host's send function.
+        if (hostRef.current) {
+            registeredFn.current = hostRef.current.send.bind(hostRef.current);
+            registerHost(registeredFn.current);
+        }
+
         return () => {
-            hostRef.current?.stop();
-            hostRef.current = null;
+            if (hostRef.current) {
+                registeredFn.current && unregisterHost(registeredFn.current);
+                hostRef.current.stop();
+                hostRef.current = null;
+            }
         };
     }, [iframeRef.current]);
 
-    const send = (message: AppMessage) => {
-        if (!hostRef.current) {
-            throw new Error("HostProvider is not initialized");
-        }
-        hostRef.current.send(message);
-    };
+    const send = hostRef.current
+        ? (message: AppMessage) => {
+              hostRef.current?.send(message);
+          }
+        : undefined;
+
+    const context = useMemo(() => {
+        return {
+            send,
+            ready,
+        };
+    }, [send, ready]);
 
     return (
-        <HostContext.Provider value={{ send }}>
+        <HostContext.Provider value={context}>
             <IFrameResizer
                 license="GPLv3"
                 iframeRef={iframeRef}

@@ -9,6 +9,10 @@ export interface NavigationEvent {
     to: string;
 }
 
+export interface ReadyEvent {
+    type: "ready";
+}
+
 export interface LoadingEvent {
     type: "loading";
     state: "loading" | "loaded";
@@ -39,7 +43,8 @@ export type AppMessage =
     | LoadingEvent
     | FullscreenEvent
     | PreviewEvent
-    | ThemeEvent;
+    | ThemeEvent
+    | ReadyEvent;
 
 export class AppClient {
     private listener: (message: MessageEvent) => void;
@@ -58,8 +63,8 @@ export class AppClient {
             if (data.type === "size") {
                 properties.onResize(message);
             }
-            if (data.type === "theme" && properties.onTheme) {
-                properties.onTheme(message);
+            if (data.type === "theme") {
+                properties.onTheme?.(message);
                 if (properties.useThemeClasses) {
                     if (data.theme === "dark") {
                         document.documentElement.classList.add("dark");
@@ -70,6 +75,8 @@ export class AppClient {
             }
         };
         globalThis.addEventListener("message", this.listener);
+
+        this.send({ type: "ready" });
     }
 
     send(message: AppMessage) {
@@ -86,21 +93,30 @@ export class AppClient {
 
 export class AppHost {
     private listener: (message: MessageEvent) => void;
+
+    private targetOrigin: string;
     constructor(
         readonly properties: {
+            iframeOriginalSource: string;
             iframe: HTMLIFrameElement;
             onResize: (event: ResizeMessage) => void;
             onNavigate: (event: NavigationEvent) => void;
+            onReady: () => void;
             // Optionally, you can add onFullscreen or onPreview handlers here as well.
         }
     ) {
+        this.targetOrigin = new URL(properties.iframeOriginalSource).origin;
+
         this.listener = (message) => {
             const data = message.data as AppMessage;
             /* if (data.type === "size") { // Handled by the iframeresizer lib
                 properties.onResize(message.data);
             } else  */ if (data.type === "navigate") {
                 properties.onNavigate(message.data);
+            } else if (data.type === "ready") {
+                properties.onReady();
             }
+
             // Additional events can be handled here if needed.
         };
         globalThis.addEventListener("message", this.listener);
@@ -110,7 +126,9 @@ export class AppHost {
         if (!this.properties.iframe.contentWindow) {
             throw new Error("Missing content window");
         }
-        this.properties.iframe.contentWindow.postMessage(message);
+        this.properties.iframe.contentWindow.postMessage(message, {
+            targetOrigin: this.targetOrigin,
+        });
     }
 
     stop() {
