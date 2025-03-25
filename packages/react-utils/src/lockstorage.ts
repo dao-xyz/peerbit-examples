@@ -45,8 +45,13 @@ export class FastMutex {
 
     lock(
         key: string,
-        keepLocked?: () => boolean
-    ): Promise<{ restartCount: number; contentionCount; locksLost: number }> {
+        keepLocked?: () => boolean,
+        options?: { replaceIfSameClient?: boolean }
+    ): Promise<{
+        restartCount: number;
+        contentionCount: number;
+        locksLost: number;
+    }> {
         debug(
             'Attempting to acquire Lock on "%s" using FastMutex instance "%s"',
             key,
@@ -54,25 +59,47 @@ export class FastMutex {
         );
         const x = this.xPrefix + key;
         const y = this.yPrefix + key;
-        let acquireStart = +new Date();
+        let acquireStart = Date.now();
         return new Promise((resolve, reject) => {
-            // we need to differentiate between API calls to lock() and our internal
-            // recursive calls so that we can timeout based on the original lock() and
-            // not each subsequent call.  Therefore, create a new function here within
-            // the promise closure that we use for subsequent calls:
             let restartCount = 0;
             let contentionCount = 0;
             let locksLost = 0;
-            const acquireLock = (key) => {
+
+            const acquireLock = (key: string) => {
+                // If the option is set and the same client already holds both keys,
+                // update the expiry and resolve immediately.
+                if (options?.replaceIfSameClient) {
+                    const currentX = this.getItem(x);
+                    const currentY = this.getItem(y);
+                    if (
+                        currentX === this.clientId &&
+                        currentY === this.clientId
+                    ) {
+                        // Update expiry so that the lock is effectively "replaced"
+                        this.setItem(x, this.clientId, keepLocked);
+                        this.setItem(y, this.clientId, keepLocked);
+                        debug(
+                            'FastMutex client "%s" replaced its own lock on "%s".',
+                            this.clientId,
+                            key
+                        );
+                        return resolve({
+                            restartCount,
+                            contentionCount,
+                            locksLost,
+                        });
+                    }
+                }
+
+                // Check for overall retries/timeouts.
                 if (
                     restartCount > 1000 ||
                     contentionCount > 1000 ||
                     locksLost > 1000
                 ) {
-                    reject("Failed to resolve lock");
+                    return reject("Failed to resolve lock");
                 }
-
-                const elapsedTime = new Date().getTime() - acquireStart;
+                const elapsedTime = Date.now() - acquireStart;
                 if (elapsedTime >= this.timeout) {
                     debug(
                         'Lock on "%s" could not be acquired within %sms by FastMutex client "%s"',
@@ -87,43 +114,40 @@ export class FastMutex {
                     );
                 }
 
+                // First, set key X.
                 this.setItem(x, this.clientId, keepLocked);
 
-                // if y exists, another client is getting a lock, so retry in a bit
+                // Check if key Y exists (another client may be acquiring the lock)
                 let lsY = this.getItem(y);
                 if (lsY) {
                     debug("Lock exists on Y (%s), restarting...", lsY);
                     restartCount++;
-                    setTimeout(() => acquireLock(key));
+                    setTimeout(() => acquireLock(key), 10);
                     return;
                 }
 
-                // ask for inner lock
+                // Request the inner lock by setting Y.
                 this.setItem(y, this.clientId, keepLocked);
 
-                // if x was changed, another client is contending for an inner lock
+                // Re-check X; if it was changed, we have contention.
                 let lsX = this.getItem(x);
                 if (lsX !== this.clientId) {
                     contentionCount++;
                     debug('Lock contention detected. X="%s"', lsX);
-
-                    // Give enough time for critical section:
                     setTimeout(() => {
                         lsY = this.getItem(y);
                         if (lsY === this.clientId) {
-                            // we have a lock
                             debug(
                                 'FastMutex client "%s" won the lock contention on "%s"',
                                 this.clientId,
                                 key
                             );
                             resolve({
+                                restartCount,
                                 contentionCount,
                                 locksLost,
-                                restartCount,
                             });
                         } else {
-                            // we lost the lock, restart the process again
                             restartCount++;
                             locksLost++;
                             debug(
@@ -132,19 +156,19 @@ export class FastMutex {
                                 key,
                                 lsY
                             );
-                            setTimeout(() => acquireLock(key));
+                            setTimeout(() => acquireLock(key), 10);
                         }
                     }, 50);
                     return;
                 }
 
-                // no contention:
+                // No contention: lock is acquired.
                 debug(
                     'FastMutex client "%s" acquired a lock on "%s" with no contention',
                     this.clientId,
                     key
                 );
-                resolve({ contentionCount, locksLost, restartCount });
+                resolve({ restartCount, contentionCount, locksLost });
             };
 
             acquireLock(key);

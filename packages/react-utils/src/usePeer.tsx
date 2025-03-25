@@ -176,16 +176,18 @@ export const PeerProvider = (options: PeerOptions) => {
                 const sessionId = getClientId("session");
                 const mutex = new FastMutex({
                     clientId: sessionId,
-                    timeout: 1000,
+                    timeout: 1e3,
                 });
                 if (nodeOptions.singleton) {
                     const localId = getClientId("local");
                     try {
                         const lockKey = localId + "-singleton";
-                        window.onbeforeunload = function () {
+                        globalThis.onbeforeunload = function () {
                             mutex.release(lockKey);
                         };
-                        await mutex.lock(lockKey, () => true);
+                        await mutex.lock(lockKey, () => true, {
+                            replaceIfSameClient: true,
+                        });
                     } catch (error) {
                         console.error("Failed to lock singleton client", error);
                         throw new ClientBusyError(
@@ -202,7 +204,7 @@ export const PeerProvider = (options: PeerOptions) => {
                         releaseFirstLock,
                         releaseLockIfSameId: true,
                     });
-                    window.onbeforeunload = function () {
+                    globalThis.onbeforeunload = function () {
                         mutex.release(kp.path);
                     };
                     nodeId = kp.key;
