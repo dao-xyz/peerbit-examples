@@ -21,7 +21,6 @@ export const CanvasAndReplies = () => {
 
     // Refs for header, toolbar, and scroll container
     const toolbarRef = useRef<HTMLDivElement>(null);
-    const bottomScrollMarkerRef = useRef<HTMLDivElement>(null);
     const scrollContainerRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -55,39 +54,8 @@ export const CanvasAndReplies = () => {
 
     // onSavePending remains largely the same.
     const onSavePending = () => {
-        const scroll = () => {
-            setTimeout(() => {
-                if (
-                    scrollContainerRef.current &&
-                    bottomScrollMarkerRef.current
-                ) {
-                    const scrollContainer = scrollContainerRef.current;
-                    const bottomScrollMarkerContainer =
-                        bottomScrollMarkerRef.current;
-                    if (sortCriteria === "old") {
-                        scrollContainer.scrollTo({
-                            top: 0,
-                            behavior: "smooth",
-                        });
-                    } else if (sortCriteria === "best") {
-                        setSortCriteria("new");
-                        bottomScrollMarkerContainer.scrollIntoView({
-                            block: "end",
-                            inline: "nearest",
-                            behavior: "smooth",
-                        });
-                    } else {
-                        bottomScrollMarkerContainer.scrollIntoView({
-                            block: "end",
-                            inline: "nearest",
-                            behavior: "smooth",
-                        });
-                    }
-                }
-            }, 100); // 100ms delay
-        };
         setPendingCanvasState((prev) => {
-            lastCanvas.replies.put(prev).then(scroll);
+            lastCanvas.replies.put(prev);
             return new CanvasDB({
                 publicKey: peer.identity.publicKey,
                 parent: lastCanvas,
@@ -149,7 +117,6 @@ export const CanvasAndReplies = () => {
                             />
                         </div>
                     </div>
-                    <div ref={bottomScrollMarkerRef} className="h-0 w-full" />
                 </FullscreenEditor>
             </div>
             <div className="sticky z-20 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950">

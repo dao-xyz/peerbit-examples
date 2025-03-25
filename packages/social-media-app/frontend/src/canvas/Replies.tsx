@@ -1,11 +1,11 @@
-import { Fragment, useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
     Canvas,
     Canvas as CanvasDB,
     getImmediateRepliesQuery,
     getRepliesQuery,
 } from "@dao-xyz/social";
-import { useLocal, useOnline } from "@peerbit/react";
+import { useLocal, useOnline, usePeer } from "@peerbit/react";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import {
     SearchRequest,
@@ -75,12 +75,29 @@ export const StickyHeader = ({ children }) => {
     );
 };
 
+function refIsInView(ref: React.MutableRefObject<HTMLDivElement>) {
+    if (ref.current) {
+        const boundingClientRect = ref.current.getBoundingClientRect();
+        if (
+            boundingClientRect.bottom <=
+                (window.innerHeight || document.documentElement.clientHeight) &&
+            boundingClientRect.top >= 0
+        ) {
+            return true;
+        }
+    }
+    return false;
+}
+
 export const Replies = (props: RepliesProps) => {
+    const { peer } = usePeer();
     const { canvas: canvas, sortCriteria, setSortCriteria } = props;
     const [query, setQuery] = useState<
         { query: SearchRequest; id: string } | undefined
     >(undefined);
     const { setView, view } = useView();
+
+    const lastReplyTopRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         if (!canvas) {
@@ -159,6 +176,45 @@ export const Replies = (props: RepliesProps) => {
         query
     );
 
+    const [freshToChatView, setFreshToChatView] = useState(false);
+
+    // track first visit to chat view
+    useEffect(() => {
+        if (view === "chat") setFreshToChatView(true);
+    }, [view]);
+
+    // scroll bottom into View, but only when
+    // (we are in chat view)
+    //  && (
+    //      I just switched to chat-view (useEffect on view)
+    //      || (the new message is from me)
+    //      || (the last element is partly in view or exactly at bottom with d = 0 <-> I had scrolled down before)
+    // )
+    useLayoutEffect(() => {
+        setTimeout(() => {
+            // fresh to chat view
+            if (freshToChatView) {
+                window.scrollTo({
+                    top: document.body.scrollHeight,
+                    left: 0,
+                    behavior: "smooth",
+                });
+                setFreshToChatView(false);
+            } else if (
+                view === "chat" &&
+                sortedReplies.length > 0 &&
+                (sortedReplies[sortedReplies.length - 1].publicKey ===
+                    peer.identity.publicKey || // last message is from me
+                    refIsInView(lastReplyTopRef)) // the top edge of last message is in view
+            )
+                window.scrollTo({
+                    top: document.body.scrollHeight,
+                    left: 0,
+                    behavior: "smooth",
+                });
+        }, 200);
+    }, [sortedReplies, lastReplyTopRef]);
+
     return (
         <div className="flex flex-col mt-10 ">
             <StickyHeader>
@@ -215,6 +271,13 @@ export const Replies = (props: RepliesProps) => {
                                         : "h-10"
                                 )}
                             ></div>
+                            {/* Marker before last message */}
+                            {i === sortedReplies.length - 1 && (
+                                <div
+                                    ref={lastReplyTopRef}
+                                    className="w-full h-0"
+                                ></div>
+                            )}
                             <Reply
                                 key={reply.idString}
                                 canvas={reply}
@@ -227,6 +290,7 @@ export const Replies = (props: RepliesProps) => {
                             />
                         </Fragment>
                     ))}
+                    <div className="w-full h-4"></div>
                 </div>
             ) : (
                 <div className="flex-grow flex items-center justify-center h-40 font ganja-font">
