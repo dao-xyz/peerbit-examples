@@ -197,7 +197,7 @@ export const Replies = (props: RepliesProps) => {
                 window.scrollTo({
                     top: document.body.scrollHeight,
                     left: 0,
-                    behavior: "smooth",
+                    behavior: "instant",
                 });
                 setFreshToChatView(false);
             } else if (
