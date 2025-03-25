@@ -38,8 +38,13 @@ export const Content = () => {
                     severity: "info",
                 });
             } else {
+                console.error("Unexpected error", typeof peerError);
                 showError({
-                    message: peerError.message,
+                    message:
+                        typeof peerError === "string"
+                            ? peerError
+                            : peerError?.message,
+                    error: peerError,
                     severity: "error",
                 });
             }

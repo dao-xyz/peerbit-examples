@@ -10,7 +10,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 type ErrorState = {
     title?: string;
     message: string;
-    error?: Error;
+    error?: Error | string;
     deadend?: boolean;
     severity?: "error" | "warning" | "info";
 } | null;
@@ -101,8 +101,10 @@ export const ErrorProvider: React.FC<{ children: React.ReactNode }> = ({
                                 </button>
                                 {showDetails && (
                                     <pre className="mt-2 text-sm overflow-auto max-h-40 whitespace-pre-wrap">
-                                        {errorState.error.stack ||
-                                            errorState.error.message}
+                                        {typeof errorState.error === "string"
+                                            ? errorState.error
+                                            : errorState.error.stack ||
+                                              errorState.error.message}
                                     </pre>
                                 )}
                             </div>
