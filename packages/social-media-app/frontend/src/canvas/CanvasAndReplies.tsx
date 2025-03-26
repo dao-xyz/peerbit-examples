@@ -10,6 +10,7 @@ import { Spinner } from "../utils/Spinner.js";
 import { Header } from "./header/Header.js";
 import { Toolbar, ToolbarProvider } from "./toolbar/Toolbar.js";
 import { FullscreenEditor } from "./toolbar/FullscreenEditor.js";
+import pDefer from "p-defer";
 
 export const CanvasAndReplies = () => {
     const { peer } = usePeer();
@@ -53,14 +54,21 @@ export const CanvasAndReplies = () => {
     });
 
     // onSavePending remains largely the same.
-    const onSavePending = () => {
+    const onSavePending = async () => {
+        let savePromise = pDefer();
         setPendingCanvasState((prev) => {
-            lastCanvas.replies.put(prev);
+            lastCanvas.replies
+                .put(prev)
+                .then(savePromise.resolve)
+                .catch(savePromise.reject);
+            console.log("PUT PREV", prev);
             return new CanvasDB({
                 publicKey: peer.identity.publicKey,
                 parent: lastCanvas,
             });
         });
+        await savePromise.promise;
+        console.log("SAVING CANVAS DONE!");
     };
 
     if (!canvases || canvases.length === 0) {

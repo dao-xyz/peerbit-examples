@@ -52,7 +52,7 @@ const getCanvasesPathFromURL = async (
     root: Canvas
 ): Promise<Canvas[]> => {
     const canvasAddress = getCanvasAdressFromUrl();
-    console.log({ canvasAddress });
+
     if (!canvasAddress) {
         return [root];
     }
@@ -218,6 +218,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                                 text: GIGA_ROOT_POST,
                             }),
                         }),
+                        canvas: result,
                     })
                 );
                 loading.current = undefined;

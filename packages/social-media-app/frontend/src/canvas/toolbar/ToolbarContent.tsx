@@ -6,9 +6,7 @@ import { FaPlus } from "react-icons/fa";
 import { SaveButton } from "../SaveCanvasButton";
 import { BsCamera } from "react-icons/bs";
 import { BsArrowsFullscreen, BsArrowsCollapse } from "react-icons/bs";
-import { HEIGHT as HEADER_HEIGHT } from "../../Header";
 import { rectIsStaticImage, rectIsStaticMarkdownText } from "../utils/rect";
-import { StaticContent, StaticMarkdownText } from "@dao-xyz/social";
 import { useToolbar } from "./Toolbar";
 
 interface ToolbarContentProps {

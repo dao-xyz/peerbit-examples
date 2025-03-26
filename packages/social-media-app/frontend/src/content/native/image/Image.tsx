@@ -2,21 +2,13 @@
  * @fileoverview React component for displaying and editing images with drag-and-drop functionality.
  */
 
-import React, { useRef, useEffect, useState, useCallback } from "react";
+import React, { useRef, useEffect, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { FiMaximize, FiX } from "react-icons/fi";
 import { StaticImage } from "@dao-xyz/social";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
 
-/**
- * Props interface for the ImageContent component
- * ImageContentProps
- * content - The image data to display
- * onResize - Callback when image dimensions change
- * [editable] - Whether the image can be edited/replaced
- * [onChange] - Callback when image content changes
- * [thumbnail] - Display as thumbnail
- * [fit] - How image should fit container. If not given, scales to parent on width and height
- */
 export type ImageContentProps = {
     content: StaticImage;
     onResize: (dims: { width: number; height: number }) => void;
@@ -26,10 +18,6 @@ export type ImageContentProps = {
     fit?: "cover" | "contain";
 };
 
-/**
- * Component for displaying and editing image content
- * Supports drag-and-drop uploads and dimension monitoring
- */
 export const ImageContent = ({
     content,
     onResize,
@@ -37,16 +25,25 @@ export const ImageContent = ({
     onChange,
     fit,
 }: ImageContentProps) => {
-    // References for container element and dimension tracking
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
     const threshold = 1;
     const [isDragOver, setIsDragOver] = useState(false);
+    const [imgUrl, setImgUrl] = useState("");
+    const [dialogOpen, setDialogOpen] = useState(false);
 
-    /**
-     * ResizeObserver setup to monitor container dimensions
-     * Triggers onResize callback when dimensions change beyond threshold
-     */
+    // Create a Blob URL from the raw binary data (Uint8Array) stored in content.data.
+    useEffect(() => {
+        if (!content.data || !content.mimeType) return;
+        const blob = new Blob([content.data], { type: content.mimeType });
+        const url = URL.createObjectURL(blob);
+        setImgUrl(url);
+        return () => {
+            URL.revokeObjectURL(url);
+        };
+    }, [content.data, content.mimeType]);
+
+    // Resize observer to call onResize
     useEffect(() => {
         if (!containerRef.current) return;
         const observer = new ResizeObserver((entries) => {
@@ -70,18 +67,12 @@ export const ImageContent = ({
         return () => observer.disconnect();
     }, [onResize, threshold]);
 
-    /**
-     * Handles file input change events
-     */
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files && e.target.files[0];
         const image = await readFileAsImage(file);
         onChange && onChange(image);
     };
 
-    /**
-     * Drag and drop event handlers
-     */
     const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
         setIsDragOver(true);
@@ -100,6 +91,14 @@ export const ImageContent = ({
         onChange && onChange(image);
     };
 
+    // Determine object-fit class based on the `fit` prop.
+    const fitClass =
+        fit === "cover"
+            ? "object-cover"
+            : fit === "contain"
+            ? "object-contain"
+            : "";
+
     return (
         <div
             ref={containerRef}
@@ -116,26 +115,72 @@ export const ImageContent = ({
                     : ""
             }`}
         >
-            <img
-                src={`data:${content.mimeType};base64,${content.base64}`}
-                alt={content.alt}
-                className={`w-full h-full ${
-                    {
-                        cover: "object-cover",
-                        contain: "object-contain w-auto",
-                        default: "",
-                    }[fit ?? "default"]
-                }`}
-            />
+            {/* For non‑editable images, wrap image with Dialog.Trigger so that tapping opens preview */}
+            {!editable ? (
+                <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
+                    <Dialog.Trigger asChild>
+                        <img
+                            src={imgUrl}
+                            alt={content.alt}
+                            className={`w-full h-full ${fitClass}`}
+                        />
+                    </Dialog.Trigger>
+                    <Dialog.Portal>
+                        <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
+                        <Dialog.Content className="fixed inset-0 flex items-center justify-center z-50 ">
+                            <img
+                                src={imgUrl}
+                                alt={content.alt}
+                                className="max-h-full max-w-full object-contain"
+                            />
+                            <Dialog.Close asChild>
+                                <button className="absolute top-4 right-4 p-2 text-white text-2xl">
+                                    <FiX />
+                                </button>
+                            </Dialog.Close>
+                        </Dialog.Content>
+                    </Dialog.Portal>
+                </Dialog.Root>
+            ) : (
+                <>
+                    {/* Editable image: keep file input behavior and add a preview button */}
+                    <img
+                        src={imgUrl}
+                        alt={content.alt}
+                        className={`w-full h-full ${fitClass}`}
+                    />
+                    <button
+                        onClick={() => setDialogOpen(true)}
+                        className="absolute bottom-4 right-4 z-10 p-2 bg-black bg-opacity-50 rounded-full text-white"
+                    >
+                        <FiMaximize />
+                    </button>
+                    <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
+                        <Dialog.Portal>
+                            <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
+                            <Dialog.Content className="fixed inset-0 flex items-center justify-center z-50 p-4">
+                                <img
+                                    src={imgUrl}
+                                    alt={content.alt}
+                                    className="max-h-full max-w-full object-contain"
+                                />
+                                <Dialog.Close asChild>
+                                    <button className="absolute top-4 right-4 p-2 text-white text-2xl">
+                                        <FiX />
+                                    </button>
+                                </Dialog.Close>
+                            </Dialog.Content>
+                        </Dialog.Portal>
+                    </Dialog.Root>
+                </>
+            )}
             {editable && (
                 <>
-                    {/* Overlay message */}
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                         <span className="text-sm text-neutral-500 dark:text-neutral-300 bg-white dark:bg-neutral-900 bg-opacity-75 px-2 py-1 rounded">
                             Click to upload or drop an image
                         </span>
                     </div>
-                    {/* Transparent input covering the entire area */}
                     <input
                         type="file"
                         accept="image/*"

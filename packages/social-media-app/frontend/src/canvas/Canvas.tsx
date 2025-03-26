@@ -1,9 +1,17 @@
-import { Element, ElementContent } from "@dao-xyz/social";
+import {
+    Element,
+    ElementContent,
+    StaticContent,
+    StaticPartialImage,
+} from "@dao-xyz/social";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
 import { ReactNode, useMemo, useReducer } from "react";
-import { rectIsStaticMarkdownText } from "./utils/rect";
+import {
+    rectIsStaticMarkdownText,
+    rectIsStaticPartialImage,
+} from "./utils/rect";
 import { IoIosArrowDown, IoIosArrowUp } from "react-icons/io";
 import { MdClear } from "react-icons/md";
 
@@ -41,7 +49,8 @@ export const Canvas = (
 
     // rects and pendingRects purpose filtered for properties.appearance
     const filteredRects = useMemo(() => {
-        return [...rects, ...pendingRects]
+        // First, filter and sort all rects based on the appearance.
+        const allRects = [...rects, ...pendingRects]
             .filter((rect, i) =>
                 properties.appearance === "chat-view-images"
                     ? i > 0 || !rectIsStaticMarkdownText(rect)
@@ -49,11 +58,59 @@ export const Canvas = (
                     ? rectIsStaticMarkdownText(rect)
                     : true
             )
-            .sort((x, y) => {
-                // sort by y position
-                return x.location.y - y.location.y;
-            });
-    }, [rects, _, pendingRects, properties.appearance]);
+            .sort((a, b) => a.location.y - b.location.y);
+
+        // Group any rects that contain a StaticPartialImage
+        const grouped = new Map<
+            string,
+            { rects: Element<ElementContent>[]; parts: StaticPartialImage[] }
+        >();
+        const finalRects: Element<ElementContent>[] = [];
+
+        allRects.forEach((rect) => {
+            // If the inner content is a StaticPartialImage, group it.
+            if (rectIsStaticPartialImage(rect)) {
+                const partial = rect.content.content as StaticPartialImage;
+                const key = partial.groupKey;
+                if (!grouped.has(key)) {
+                    grouped.set(key, { rects: [], parts: [] });
+                }
+                const group = grouped.get(key)!;
+                group.rects.push(rect);
+                group.parts.push(partial);
+            } else {
+                finalRects.push(rect);
+            }
+        });
+
+        // For each group, if all parts are present, combine them.
+        grouped.forEach((group) => {
+            if (
+                group.parts.length > 0 &&
+                group.parts[0].totalParts === group.parts.length
+            ) {
+                // All parts are here: combine into a full StaticImage.
+                const combinedImage = StaticPartialImage.combine(group.parts);
+                // Use the layout (and other metadata) from the first rect.
+                const rep = group.rects[0];
+                const combinedRect = new Element({
+                    publicKey: rep.publicKey,
+                    id: rep.id,
+                    location: rep.location,
+                    content: new StaticContent({ content: combinedImage }),
+                    canvas: rep.canvas,
+                });
+                finalRects.push(combinedRect);
+            } else {
+                // Incomplete groups are added individually.
+                finalRects.push(...group.rects);
+            }
+        });
+
+        // Finally, sort the resulting array by the y-coordinate.
+        finalRects.sort((a, b) => a.location.y - b.location.y);
+        return finalRects;
+    }, [rects, pendingRects, properties.appearance]);
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((rect, ix) => {

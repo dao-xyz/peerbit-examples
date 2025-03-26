@@ -8,8 +8,11 @@ import {
     ElementContent,
     StaticContent,
     StaticMarkdownText,
+    getElementsQuery,
+    StaticPartialImage,
+    StaticImage,
 } from "@dao-xyz/social";
-import { sha256Sync } from "@peerbit/crypto";
+import { fromBase64, sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { SimpleWebManifest } from "@dao-xyz/social";
 import { useApps } from "../content/useApps.js";
@@ -28,14 +31,17 @@ interface CanvasContextType {
     insertDefault: (options?: {
         app?: SimpleWebManifest;
         increment?: boolean;
-    }) => void;
+    }) => Promise<Element | Element[]>;
     removePending: (id: Uint8Array) => void;
     savePending: () => Promise<Element[] | undefined>;
     canvas: CanvasDB;
     onContentChange: (element: Element) => void;
     isEmpty: boolean;
     // New: Function to insert an image into the canvas
-    insertImage: (file: File, options?: { pending?: boolean }) => Promise<void>;
+    insertImage: (
+        file: File,
+        options?: { pending?: boolean; y?: number | "optimize" | "max" }
+    ) => Promise<void>;
     mutate: (
         rect: { id: Uint8Array },
         fn: (
@@ -61,9 +67,9 @@ interface CanvasWrapperProps {
     children: React.ReactNode;
     canvas: CanvasDB;
     draft?: boolean;
-    onSave?: () => void;
+    onSave?: () => void | Promise<void>;
     multiCanvas?: boolean;
-    onContentChange?: (element: Element) => void;
+    onContentChange?: (element: Element[]) => void;
 }
 
 export const CanvasWrapper = ({
@@ -90,10 +96,19 @@ export const CanvasWrapper = ({
     const resizeSizes = useRef(
         new Map<number, { width: number; height: number }>()
     );
-    const rects = useLocal(canvas?.elements, {
-        id: canvas?.idString,
-        query: { sort: new Sort({ key: ["location", "y"] }) },
-    });
+    const rects = useLocal(
+        canvas?.loadedElements ? canvas?.elements : undefined,
+        {
+            id: canvas?.idString,
+            query:
+                !canvas || canvas.closed
+                    ? undefined
+                    : {
+                          query: getElementsQuery(canvas.address),
+                          sort: new Sort({ key: ["location", "y"] }),
+                      },
+        }
+    );
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
     const pendingCounter = useRef(0);
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
@@ -105,14 +120,12 @@ export const CanvasWrapper = ({
         }
         const locationOfTopMostText = (): number | undefined => {
             return pendingRects
-                .filter((x) => {
-                    return rectIsStaticMarkdownText(x);
-                })
+                .filter((x) => rectIsStaticMarkdownText(x))
                 .sort((x, y) => x.location.y - y.location.y)[0]?.location.y;
         };
 
         let insertionLocation = locationOfTopMostText();
-        if (insertionLocation < 0) {
+        if (insertionLocation == null || insertionLocation < 0) {
             insertionLocation = 0;
         }
         return insertionLocation;
@@ -121,7 +134,6 @@ export const CanvasWrapper = ({
     const getMaxYPlus1 = (from: Element[]) => {
         const maxY = from
             .map((x) => x.location)
-            .flat()
             .filter((x) => x.breakpoint === latestBreakpoint.current)
             .reduce((prev, current) => Math.max(current.y, prev), -1);
 
@@ -155,10 +167,11 @@ export const CanvasWrapper = ({
         );
 
         const index = rects.findIndex((pending) => equals(pending.id, rect.id));
+        console.log("MUTATE START", { pending });
 
         if (pending) {
             await fn(pending, index);
-            return; // return here, because we are in drafting mode. When we "save" we want to mutate existing. I.e. this allows use to do modifications and preview them before saving/announcing them to the world
+            return;
         }
 
         const existing = rects[index];
@@ -176,87 +189,174 @@ export const CanvasWrapper = ({
         }
     };
 
-    const addRect = async (
+    // Overloaded addRect function:
+    async function addRect(
         content: ElementContent,
+        options?: {
+            id?: Uint8Array;
+            pending?: boolean;
+            y?: number | "optimize" | "max";
+        }
+    ): Promise<Element>;
+    async function addRect(
+        contents: ElementContent[],
+        options?: { pending?: boolean; y?: number | "optimize" | "max" }
+    ): Promise<Element[]>;
+    async function addRect(
+        contentOrContents: ElementContent | ElementContent[],
         options: {
             id?: Uint8Array;
             pending?: boolean;
             y?: number | "optimize" | "max";
         } = { pending: false }
-    ) => {
-        const yStategy = options.y ?? "optimize";
-        const allCurrentRects = await canvas.elements.index.search({});
+    ): Promise<Element | Element[]> {
+        const oneContent = Array.isArray(contentOrContents)
+            ? contentOrContents[0]
+            : contentOrContents;
+        if (!oneContent) {
+            throw new Error("Missing content");
+        }
+        if (options?.id && Array.isArray(contentOrContents)) {
+            throw new Error("Cannot set id when adding multiple elements");
+        }
+
+        const yStrategy = options.y ?? "optimize";
+        await canvas.load();
+        const allCurrentRects = await canvas.elements.index.search({
+            query: getElementsQuery(canvas.address),
+        });
         const allPending = pendingRects;
         const all = [...allCurrentRects, ...allPending];
         let y: number | undefined = undefined;
-        if (typeof yStategy === "number") {
-            y = yStategy;
-        } else if (yStategy === "optimize") {
-            y = getOptimalInsertLocation(content);
-        } else if (yStategy === "max") {
+        if (typeof yStrategy === "number") {
+            y = yStrategy;
+        } else if (yStrategy === "optimize") {
+            y = getOptimalInsertLocation(oneContent);
+        } else if (yStrategy === "max") {
             y = getMaxYPlus1(all);
         } else {
             throw new Error("Invalid y option");
         }
-        // justify the y position of all affected elements
+        // Adjust the y position of all affected pending elements.
         for (const element of allPending.sort(
-            (x, y) => x.location.y - y.location.y
+            (a, b) => a.location.y - b.location.y
         )) {
             if (element.location.y >= y) {
                 element.location.y++;
             }
         }
-
-        const element = new Element({
-            publicKey: peer.identity.publicKey,
-            id: options.id,
-            location: new Layout({
-                breakpoint: latestBreakpoint.current,
-                x: 0,
-                y,
-                z: 0,
-                w: 1,
-                h: 1,
-            }),
-            content,
-        });
-
-        if (options.pending) {
-            setPendingRects((prev) => {
-                const prevElement = prev.find((x) => equals(x.id, element.id));
-                if (prevElement) {
-                    if (
-                        prevElement.content instanceof StaticContent &&
-                        prevElement.content.content.isEmpty
-                    ) {
-                        prevElement.content = element.content;
-                        return [...prev];
-                    }
-                    return prev;
-                }
-                return [...prev, element];
+        const results: Element[] = [];
+        const contents = Array.isArray(contentOrContents)
+            ? contentOrContents
+            : [contentOrContents];
+        for (const content of contents) {
+            const element = new Element({
+                publicKey: peer.identity.publicKey,
+                id: options.id,
+                location: new Layout({
+                    breakpoint: latestBreakpoint.current,
+                    x: 0,
+                    y,
+                    z: 0,
+                    w: 1,
+                    h: 1,
+                }),
+                content,
+                canvas,
             });
-        } else {
-            canvas.elements.put(element);
+            if (options.pending) {
+                setPendingRects((prev) => {
+                    const prevElement = prev.find((x) =>
+                        equals(x.id, element.id)
+                    );
+                    if (prevElement) {
+                        if (
+                            prevElement.content instanceof StaticContent &&
+                            prevElement.content.content.isEmpty
+                        ) {
+                            prevElement.content = element.content;
+                            return [...prev];
+                        }
+                        return prev;
+                    }
+                    return [...prev, element];
+                });
+            } else {
+                canvas.elements.put(element);
+            }
+            results.push(element);
         }
+        return Array.isArray(contentOrContents) ? results : results[0];
+    }
 
-        return element;
-    };
-
-    // New function: Inserts an image element into the canvas
+    // New function: Inserts an image element into the canvas using Uint8Array data.
     const insertImage = async (
         file: File,
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
     ) => {
-        // Create an object URL for immediate preview.
         try {
+            // 3 MB in bytes.
+            const threshold = 3 * 1024 * 1024;
+            // Get image preview, dimensions, and raw binary data.
             const image = await readFileAsImage(file);
-            const element = await addRect(
-                new StaticContent({ content: image }),
-                options
-            );
-            setIsEmpty(false);
-            onContentChange(element);
+            // Assume that readFileAsImage returns an object with a "data" property (Uint8Array)
+            console.log("FILE SIZE", file.size);
+            if (file.size > threshold) {
+                // For large files, split the binary data.
+                const fullData = image.data;
+                const chunkSize = threshold; // chunk size in bytes
+                const parts: Uint8Array[] = [];
+                for (let i = 0; i < fullData.length; i += chunkSize) {
+                    parts.push(fullData.slice(i, i + chunkSize));
+                }
+                const totalParts = parts.length;
+                const groupKey = sha256Base64Sync(fullData);
+                const partialImages = parts.map(
+                    (partialData, index) =>
+                        new StaticPartialImage({
+                            partialData,
+                            partIndex: index,
+                            totalParts,
+                            mimeType: file.type,
+                            width: image.width,
+                            height: image.height,
+                            alt: image.alt,
+                            caption: image.caption,
+                            groupKey,
+                        })
+                );
+                // Wrap each partial image in a StaticContent container.
+                const newElements: Element<ElementContent>[] = await addRect(
+                    partialImages.map((x) => new StaticContent({ content: x })),
+                    options
+                );
+                console.log({
+                    newElements: newElements.map((x) =>
+                        x.content["content"] instanceof StaticPartialImage
+                            ? x.content["content"].partialData.length
+                            : 0
+                    ),
+                });
+                setIsEmpty(false);
+                onContentChange?.(newElements);
+            } else {
+                // For small files, create a full StaticImage using the raw data.
+                const element = await addRect(
+                    new StaticContent({
+                        content: new StaticImage({
+                            data: image.data,
+                            mimeType: file.type,
+                            width: image.width,
+                            height: image.height,
+                            alt: image.alt,
+                            caption: image.caption,
+                        }),
+                    }),
+                    options
+                );
+                setIsEmpty(false);
+                onContentChange?.([element]);
+            }
         } catch (error) {
             showError({ message: "Failed to insert image", error });
         }
@@ -271,19 +371,15 @@ export const CanvasWrapper = ({
         if (options?.increment) {
             const last = pendingRects[pendingRects.length - 1];
             if (
-                // if we are describing multiple canvases, dont try to replace some empty content
-                // because one element might dissapear from one Canvas and appear in another
                 !multiCanvas &&
-                // check if the "last" element is empty
                 last &&
                 last.content instanceof StaticContent &&
                 last.content.content.isEmpty
             ) {
-                // Do not increment, instead replace it
+                // Do not increment; instead, replace it.
             } else {
                 pendingCounter.current++;
             }
-
             setIsEmpty(false);
         }
         const defaultId = sha256Sync(
@@ -327,10 +423,13 @@ export const CanvasWrapper = ({
     const removePending = (id: Uint8Array) => {
         const pending = pendingRects.find((x) => equals(x.id, id));
         setPendingRects((prev) => prev.filter((el) => !equals(id, el.id)));
-        reduceYInPending(pending.location.y);
+        if (pending) {
+            reduceYInPending(pending.location.y);
+        }
     };
 
     const savePending = async () => {
+        console.log("savePending?", pendingRects);
         if (!pendingRects) return;
         try {
             const pendingToSave = pendingRects.filter(
@@ -338,14 +437,17 @@ export const CanvasWrapper = ({
                     x.content instanceof StaticContent === false ||
                     x.content.content.isEmpty === false
             );
-
-            if (pendingToSave.length === 0) return;
+            if (pendingToSave.length === 0) {
+                console.log("No pending to save", pendingRects);
+                return;
+            }
             setPendingRects([]);
             pendingCounter.current += pendingToSave.length;
             await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
             if (draft && onSave) {
-                onSave();
+                await onSave();
             }
+            console.log("savePending!", pendingToSave, draft, onSave);
             setIsEmpty(true);
             return pendingToSave;
         } catch (error) {
@@ -371,6 +473,7 @@ export const CanvasWrapper = ({
     useEffect(() => {
         if (!peer || !canvas) return;
         reset();
+        console.log("RESET");
         if (canvas?.closed) {
             throw new Error("Expecting canvas to be open");
         }
@@ -386,19 +489,17 @@ export const CanvasWrapper = ({
         if (!element.content.isEmpty) {
             setIsEmpty(false);
         } else {
-            // TODO handle the oppoisite direcftion (isEmpty to true) better
             const allElements = [...pendingRects, ...rects];
             if (allElements.every((el) => el.content.isEmpty)) {
                 setIsEmpty(true);
             }
         }
-
         if (onContentChange) {
-            onContentChange(element);
+            onContentChange([element]);
         }
     };
 
-    const contextValue = {
+    const contextValue: CanvasContextType = {
         editMode,
         setEditMode,
         active,
@@ -411,7 +512,7 @@ export const CanvasWrapper = ({
         savePending,
         canvas,
         onContentChange: _onContentChange,
-        insertImage, // <--- expose the new function
+        insertImage,
         mutate,
     };
 

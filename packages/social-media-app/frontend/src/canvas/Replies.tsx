@@ -5,7 +5,7 @@ import {
     getImmediateRepliesQuery,
     getRepliesQuery,
 } from "@dao-xyz/social";
-import { useLocal, usePeer } from "@peerbit/react";
+import { useLocal, useOnline, usePeer } from "@peerbit/react";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import { SearchRequest } from "@peerbit/document-interface";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -13,6 +13,7 @@ import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Reply } from "./Reply";
 import { useView } from "../view/View";
 import { tw } from "../utils/tailwind";
+import { OnlineProfilesDropdown } from "../profile/OnlinePeersButton";
 
 type SortCriteria = "new" | "old" | "best" | "chat";
 
@@ -93,7 +94,7 @@ export const Replies = (props: RepliesProps) => {
         { query: SearchRequest; id: string } | undefined
     >(undefined);
     const { setView, view } = useView();
-
+    const { peers } = useOnline(canvas);
     const lastReplyTopRef = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
@@ -165,7 +166,7 @@ export const Replies = (props: RepliesProps) => {
         if (!canvas || canvas?.closed) {
             return;
         }
-        canvas.loadReplies();
+        canvas.load();
     }, [canvas]);
 
     const sortedReplies = useLocal(
@@ -215,7 +216,7 @@ export const Replies = (props: RepliesProps) => {
     return (
         <div className="flex flex-col mt-10 ">
             <StickyHeader>
-                <div className="w-full max-w-[876px] mx-auto">
+                <div className="w-full max-w-[876px] mx-auto flex flex-row">
                     <DropdownMenu.Root>
                         <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
                             <span>Replies sorted by {sortCriteria}</span>
@@ -244,8 +245,10 @@ export const Replies = (props: RepliesProps) => {
                             )}
                         </DropdownMenu.Content>
                     </DropdownMenu.Root>
+                    <div className="ml-auto">
+                        <OnlineProfilesDropdown peers={peers || []} />
+                    </div>
                 </div>
-                {/*  <OnlineProfilesDropdown peers={peers || []} /> */}
             </StickyHeader>
             {sortedReplies.length > 0 ? (
                 <div

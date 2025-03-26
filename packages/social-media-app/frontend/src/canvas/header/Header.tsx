@@ -4,7 +4,7 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
 import { usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
-import { Canvas, IFrameContent } from "@dao-xyz/social";
+import { Canvas, getElementsQuery, IFrameContent } from "@dao-xyz/social";
 import RelativeTimestamp from "./RelativeTimestamp";
 import { WithContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
@@ -41,7 +41,9 @@ export const Header = ({
     const handleMoreInfo = async () => {
         if (!canvas) return;
         try {
-            const elements = await canvas.elements.index.iterate({}).all();
+            const elements = await canvas.elements.index
+                .iterate({ query: getElementsQuery(canvas.address) })
+                .all();
             const info = elements.map((x) => {
                 if (x.content instanceof IFrameContent) {
                     return { type: "IFrame", url: x.content.src };
