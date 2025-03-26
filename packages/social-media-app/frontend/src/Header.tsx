@@ -87,8 +87,8 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                 <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950 border-neutral-950 dark:border-neutral-50 border-x"></div>
                             )}
                         </div>
-
-                        <div className="z-50 col-start-10 flex items-center">
+                        {/*  TODO do we really need to set the z-index to 2 here? */}
+                        <div className="z-2 col-start-10 flex items-center">
                             {peer ? (
                                 <DropdownMenu.Root>
                                     <DropdownMenu.Trigger asChild>
