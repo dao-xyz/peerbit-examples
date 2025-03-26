@@ -101,6 +101,38 @@ export const ImageContent = ({
             ? "object-contain"
             : "";
 
+    // Fullscreen preview container.
+    // Clicking on the overlay (outside the content) closes the dialog.
+    const FullscreenPreview = (
+        <Dialog.Portal>
+            <Dialog.Overlay
+                className="fixed inset-0 z-[10000] bg-black bg-opacity-80"
+                onClick={() => {
+                    console.log("CLOSE!");
+                    setDialogOpen(false);
+                }}
+            />
+            <Dialog.Content
+                className="fixed inset-0 z-[10001] flex items-center justify-center"
+                onClick={(e) => e.stopPropagation()} // prevent clicks inside content from bubbling to overlay
+            >
+                <Dialog.Title className="sr-only">Image Preview</Dialog.Title>
+                <div className="w-full h-full max-w-4xl max-h-[100vh]">
+                    <img
+                        src={imgUrl}
+                        alt={content.alt}
+                        className="w-full h-full object-contain"
+                    />
+                </div>
+                <Dialog.Close asChild>
+                    <button className="absolute top-4 right-4 p-2 text-white text-2xl">
+                        <FiX />
+                    </button>
+                </Dialog.Close>
+            </Dialog.Content>
+        </Dialog.Portal>
+    );
+
     return (
         <div
             ref={containerRef}
@@ -118,7 +150,6 @@ export const ImageContent = ({
             }`}
         >
             {canOpenFullscreen ? (
-                // Fullscreen-enabled: Wrap with Dialog components.
                 !editable ? (
                     <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
                         <Dialog.Trigger asChild>
@@ -128,25 +159,7 @@ export const ImageContent = ({
                                 className={`w-full h-full ${fitClass}`}
                             />
                         </Dialog.Trigger>
-                        <Dialog.Portal>
-                            <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
-                            <Dialog.Content className="fixed inset-0 flex items-center justify-center z-50 p-4">
-                                {/* Hidden title for accessibility */}
-                                <Dialog.Title className="sr-only">
-                                    Image Preview
-                                </Dialog.Title>
-                                <img
-                                    src={imgUrl}
-                                    alt={content.alt}
-                                    className="max-h-full max-w-full object-contain"
-                                />
-                                <Dialog.Close asChild>
-                                    <button className="absolute top-4 right-4 p-2 text-white text-2xl">
-                                        <FiX />
-                                    </button>
-                                </Dialog.Close>
-                            </Dialog.Content>
-                        </Dialog.Portal>
+                        {FullscreenPreview}
                     </Dialog.Root>
                 ) : (
                     <>
@@ -165,29 +178,11 @@ export const ImageContent = ({
                             open={dialogOpen}
                             onOpenChange={setDialogOpen}
                         >
-                            <Dialog.Portal>
-                                <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
-                                <Dialog.Content className="fixed inset-0 flex items-center justify-center z-50 p-4">
-                                    <Dialog.Title className="sr-only">
-                                        Image Preview
-                                    </Dialog.Title>
-                                    <img
-                                        src={imgUrl}
-                                        alt={content.alt}
-                                        className="max-h-full max-w-full object-contain"
-                                    />
-                                    <Dialog.Close asChild>
-                                        <button className="absolute top-4 right-4 p-2 text-white text-2xl">
-                                            <FiX />
-                                        </button>
-                                    </Dialog.Close>
-                                </Dialog.Content>
-                            </Dialog.Portal>
+                            {FullscreenPreview}
                         </Dialog.Root>
                     </>
                 )
             ) : (
-                // If fullscreen is disabled: Render the plain image.
                 <img
                     src={imgUrl}
                     alt={content.alt}
