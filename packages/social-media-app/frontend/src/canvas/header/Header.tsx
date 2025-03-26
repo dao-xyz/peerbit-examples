@@ -34,10 +34,7 @@ export const Header = ({
         Array<{ type: string; url?: string }>
     >([]);
 
-    // Check if the current user is the owner of the post
-    const isOwner = canvas && peer.identity.publicKey.equals(canvas.publicKey);
-
-    // Fetch and show more info about the post's elements
+    // Always show "More info" regardless of ownership.
     const handleMoreInfo = async () => {
         if (!canvas) return;
         try {
@@ -120,79 +117,92 @@ export const Header = ({
                         />
                     )}
 
-                    {/* Additional management menu for the post if the user is the author */}
-                    {isOwner && variant !== "tiny" && (
-                        <DropdownMenu.Root>
-                            <DropdownMenu.Trigger asChild>
-                                <button
-                                    className={
-                                        "btn btn-icon btn-icon-sm " +
-                                        (direction === "col"
-                                            ? "mt-auto"
-                                            : "ml-auto")
-                                    }
-                                >
-                                    <HiDotsHorizontal size={20} />
-                                </button>
-                            </DropdownMenu.Trigger>
-                            <DropdownMenu.Content className="dropdown-menu-responsive bg-white dark:bg-black p-2 rounded shadow-md">
-                                <DropdownMenu.Item
-                                    className="menu-item"
-                                    onSelect={() => {
-                                        // Handler to delete the post
-                                        console.log("Delete post");
-                                    }}
-                                >
-                                    Delete Post
-                                </DropdownMenu.Item>
-                                <DropdownMenu.Item
-                                    className="menu-item"
-                                    onSelect={() => {
-                                        return profiles.create({
-                                            profile: canvas,
-                                        });
-                                    }}
-                                >
-                                    Set as Profile Photo
-                                </DropdownMenu.Item>
-                                <DropdownMenu.Item
-                                    className="menu-item"
-                                    onSelect={handleMoreInfo}
-                                >
-                                    More info
-                                </DropdownMenu.Item>
-                            </DropdownMenu.Content>
-                        </DropdownMenu.Root>
-                    )}
+                    {/* Dropdown menu always available */}
+                    <DropdownMenu.Root>
+                        <DropdownMenu.Trigger asChild>
+                            <button
+                                className={
+                                    "btn btn-icon btn-icon-sm " +
+                                    (direction === "col"
+                                        ? "mt-auto"
+                                        : "ml-auto")
+                                }
+                            >
+                                <HiDotsHorizontal size={20} />
+                            </button>
+                        </DropdownMenu.Trigger>
+                        <DropdownMenu.Content className="dropdown-menu-responsive bg-white dark:bg-black p-2 rounded shadow-md">
+                            {canvas &&
+                                peer.identity.publicKey.equals(
+                                    canvas.publicKey
+                                ) &&
+                                variant !== "tiny" && (
+                                    <>
+                                        <DropdownMenu.Item
+                                            className="menu-item"
+                                            onSelect={() => {
+                                                console.log("Delete post");
+                                            }}
+                                        >
+                                            Delete Post
+                                        </DropdownMenu.Item>
+                                        <DropdownMenu.Item
+                                            className="menu-item"
+                                            onSelect={() => {
+                                                return profiles.create({
+                                                    profile: canvas,
+                                                });
+                                            }}
+                                        >
+                                            Set as Profile Photo
+                                        </DropdownMenu.Item>
+                                    </>
+                                )}
+                            <DropdownMenu.Item
+                                className="menu-item"
+                                onSelect={handleMoreInfo}
+                            >
+                                More info
+                            </DropdownMenu.Item>
+                        </DropdownMenu.Content>
+                    </DropdownMenu.Root>
                 </div>
             )}
 
             {/* Dialog to display the additional post information */}
             <Dialog.Root open={moreInfoOpen} onOpenChange={setMoreInfoOpen}>
                 <Dialog.Portal>
-                    <Dialog.Overlay className="fixed inset-0 " />
-                    <Dialog.Content className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2  p-6 rounded-lg shadow-lg w-6/12 max-w-md bg-neutral-100 dark:bg-neutral-900 z-20">
-                        <Dialog.Title>
-                            <h2>Post Details</h2>
+                    <Dialog.Overlay
+                        className="fixed inset-0 z-20"
+                        style={{
+                            backgroundColor: "rgba(0,0,0,0.1)",
+                            backdropFilter: "blur(4px)",
+                        }}
+                    />
+                    <Dialog.Content className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 p-6 rounded-lg shadow-lg w-11/12 max-w-md bg-neutral-100 dark:bg-neutral-900 z-30">
+                        <Dialog.Title className="text-lg font-bold mb-2">
+                            Post Details
                         </Dialog.Title>
                         <div className="space-y-2">
                             <p>Element Count: {elementsInfo.length}</p>
-                            <ul>
+                            <ul className="space-y-1">
                                 {elementsInfo.map((info, index) => (
                                     <li key={index} className="py-1">
-                                        <span>Type: </span>
-                                        {info.type}
+                                        <span>Type: {info.type}</span>
                                         {info.url && (
-                                            <>
+                                            <div className="mt-1">
                                                 <a
                                                     href={info.url}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
-                                                    className="ml-2 text-blue-500 underline"
+                                                    className="text-blue-500 underline break-all block"
+                                                    style={{
+                                                        wordBreak: "break-all",
+                                                    }}
                                                 >
                                                     {info.url}
                                                 </a>
-                                            </>
+                                            </div>
                                         )}
                                     </li>
                                 ))}
