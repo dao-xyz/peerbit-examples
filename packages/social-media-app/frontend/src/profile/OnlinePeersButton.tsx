@@ -7,7 +7,15 @@ import { ProfileButton } from "./ProfileButton";
 export const OnlinePeersButton = (props: { peers: PublicSignKey[] }) => (
     <div className="flex flex-row justify-center items-center gap-1">
         <FaUserGroup />
-        <span>({props.peers.length || 0})</span>
+        <span
+            className="text-xs"
+            style={{
+                marginLeft: "-2px",
+                marginTop: "-9px",
+            }}
+        >
+            {props.peers.length || 0}
+        </span>
     </div>
 );
 
