@@ -45,11 +45,9 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
 
     const onSelected = (app: SimpleWebManifest) => {
         // Insert a new app post using the Canvas context.
+        setQuery("");
         insertDefault({ app, increment: true });
         _onSelected(app);
-        if (inputRef.current) {
-            inputRef.current.value = "";
-        }
     };
 
     return (

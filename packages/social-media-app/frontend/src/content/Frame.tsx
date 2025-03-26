@@ -72,19 +72,6 @@ export const Frame = (properties: {
     thumbnail?: boolean;
     onLoad: (event: React.SyntheticEvent<HTMLElement, Event>) => void;
 
-    /**
-     * Called when static content is edited.
-     * The new static content is provided along with the element index.
-     */
-
-    /*   
-        pending: boolean;
-    onContentChange?: (
-           properties: { content: StaticContent["content"]; id: Uint8Array },
-           options?: { save: boolean }
-       ) => void; */
-    /* replaceIFrameUrl: (url: string) => void; */
-
     key?: number;
     delete(): void;
     fit?: "cover" | "contain";
@@ -104,7 +91,6 @@ export const Frame = (properties: {
         isReady: boolean;
         info?: string;
     } | null>(null);
-    const iframeRef = useRef<HTMLIFrameElement>(null);
 
     const {
         mutate,
@@ -258,7 +244,7 @@ export const Frame = (properties: {
                             return true;
                         });
                         if (options?.save /* && properties.draft */) {
-                            savePending();
+                            await savePending();
                         }
                     }}
                     fit={properties.fit}
