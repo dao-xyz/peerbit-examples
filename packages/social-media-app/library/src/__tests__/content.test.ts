@@ -1,12 +1,14 @@
 import { TestSession } from "@peerbit/test-utils";
 import {
     Canvas,
+    getElementsQuery,
     getImmediateRepliesQuery,
     getRepliesQuery,
 } from "../content.js";
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
 import { waitForResolved } from "@peerbit/time";
+import { Ed25519Keypair } from "@peerbit/crypto";
 
 describe("content", () => {
     describe("canvas", () => {
@@ -20,9 +22,10 @@ describe("content", () => {
             await session.stop();
         });
         it("can make path", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
             const root = await session.peers[0].open(
                 new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
+                    publicKey: randomRootKey,
                     seed: new Uint8Array(),
                 })
             );
@@ -61,7 +64,7 @@ describe("content", () => {
 
             const rootFromAnotherNode = await session.peers[1].open(
                 new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
+                    publicKey: randomRootKey,
                     seed: new Uint8Array(),
                 })
             );
@@ -70,6 +73,16 @@ describe("content", () => {
             await waitForResolved(() =>
                 expect(rootFromAnotherNode.replies.log.log.length).to.eq(4)
             );
+
+            // try to fetch the content
+            const allReplies = await rootFromAnotherNode.replies.index
+                .iterate({ query: [] }, { local: true })
+                .all();
+            expect(allReplies).to.have.length(4);
+            for (const x of allReplies) {
+                const title = await x.createTitle();
+                expect(title.length > 0).to.be.true;
+            }
         });
 
         it("can sort by replies", async () => {

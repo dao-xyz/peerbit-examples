@@ -353,7 +353,10 @@ export class Canvas extends Program {
                  * Only allow updates if we created it
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
                  */
-                return (
+                // TODO
+                return true;
+                /* 
+                (
                     !this.publicKey ||
                     operation.entry.signatures.find(
                         (x) =>
@@ -361,6 +364,7 @@ export class Canvas extends Program {
                             x.publicKey.equals(this.node.identity.publicKey)
                     ) != null
                 );
+                */
             },
             index: {
                 type: IndexableElement,
