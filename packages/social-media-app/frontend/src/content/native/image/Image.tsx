@@ -16,6 +16,7 @@ export type ImageContentProps = {
     onChange?: ChangeCallback;
     thumbnail?: boolean;
     fit?: "cover" | "contain";
+    canOpenFullscreen?: boolean;
 };
 
 export const ImageContent = ({
@@ -24,6 +25,7 @@ export const ImageContent = ({
     editable = false,
     onChange,
     fit,
+    canOpenFullscreen = true,
 }: ImageContentProps) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
@@ -32,7 +34,7 @@ export const ImageContent = ({
     const [imgUrl, setImgUrl] = useState("");
     const [dialogOpen, setDialogOpen] = useState(false);
 
-    // Create a Blob URL from the raw binary data (Uint8Array) stored in content.data.
+    // Create a Blob URL from the raw binary data stored in content.data.
     useEffect(() => {
         if (!content.data || !content.mimeType) return;
         const blob = new Blob([content.data], { type: content.mimeType });
@@ -43,7 +45,7 @@ export const ImageContent = ({
         };
     }, [content.data, content.mimeType]);
 
-    // Resize observer to call onResize
+    // Resize observer to trigger onResize.
     useEffect(() => {
         if (!containerRef.current) return;
         const observer = new ResizeObserver((entries) => {
@@ -115,50 +117,24 @@ export const ImageContent = ({
                     : ""
             }`}
         >
-            {/* For non‑editable images, wrap image with Dialog.Trigger so that tapping opens preview */}
-            {!editable ? (
-                <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-                    <Dialog.Trigger asChild>
-                        <img
-                            src={imgUrl}
-                            alt={content.alt}
-                            className={`w-full h-full ${fitClass}`}
-                        />
-                    </Dialog.Trigger>
-                    <Dialog.Portal>
-                        <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
-                        <Dialog.Content className="fixed inset-0 flex items-center justify-center z-50 ">
+            {canOpenFullscreen ? (
+                // Fullscreen-enabled: Wrap with Dialog components.
+                !editable ? (
+                    <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
+                        <Dialog.Trigger asChild>
                             <img
                                 src={imgUrl}
                                 alt={content.alt}
-                                className="max-h-full max-w-full object-contain"
+                                className={`w-full h-full ${fitClass}`}
                             />
-                            <Dialog.Close asChild>
-                                <button className="absolute top-4 right-4 p-2 text-white text-2xl">
-                                    <FiX />
-                                </button>
-                            </Dialog.Close>
-                        </Dialog.Content>
-                    </Dialog.Portal>
-                </Dialog.Root>
-            ) : (
-                <>
-                    {/* Editable image: keep file input behavior and add a preview button */}
-                    <img
-                        src={imgUrl}
-                        alt={content.alt}
-                        className={`w-full h-full ${fitClass}`}
-                    />
-                    <button
-                        onClick={() => setDialogOpen(true)}
-                        className="absolute bottom-4 right-4 z-10 p-2 bg-black bg-opacity-50 rounded-full text-white"
-                    >
-                        <FiMaximize />
-                    </button>
-                    <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
+                        </Dialog.Trigger>
                         <Dialog.Portal>
                             <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
                             <Dialog.Content className="fixed inset-0 flex items-center justify-center z-50 p-4">
+                                {/* Hidden title for accessibility */}
+                                <Dialog.Title className="sr-only">
+                                    Image Preview
+                                </Dialog.Title>
                                 <img
                                     src={imgUrl}
                                     alt={content.alt}
@@ -172,7 +148,51 @@ export const ImageContent = ({
                             </Dialog.Content>
                         </Dialog.Portal>
                     </Dialog.Root>
-                </>
+                ) : (
+                    <>
+                        <img
+                            src={imgUrl}
+                            alt={content.alt}
+                            className={`w-full h-full ${fitClass}`}
+                        />
+                        <button
+                            onClick={() => setDialogOpen(true)}
+                            className="absolute bottom-4 right-4 z-10 p-2 bg-black bg-opacity-50 rounded-full text-white"
+                        >
+                            <FiMaximize />
+                        </button>
+                        <Dialog.Root
+                            open={dialogOpen}
+                            onOpenChange={setDialogOpen}
+                        >
+                            <Dialog.Portal>
+                                <Dialog.Overlay className="fixed inset-0 bg-black bg-opacity-50 z-50" />
+                                <Dialog.Content className="fixed inset-0 flex items-center justify-center z-50 p-4">
+                                    <Dialog.Title className="sr-only">
+                                        Image Preview
+                                    </Dialog.Title>
+                                    <img
+                                        src={imgUrl}
+                                        alt={content.alt}
+                                        className="max-h-full max-w-full object-contain"
+                                    />
+                                    <Dialog.Close asChild>
+                                        <button className="absolute top-4 right-4 p-2 text-white text-2xl">
+                                            <FiX />
+                                        </button>
+                                    </Dialog.Close>
+                                </Dialog.Content>
+                            </Dialog.Portal>
+                        </Dialog.Root>
+                    </>
+                )
+            ) : (
+                // If fullscreen is disabled: Render the plain image.
+                <img
+                    src={imgUrl}
+                    alt={content.alt}
+                    className={`w-full h-full ${fitClass}`}
+                />
             )}
             {editable && (
                 <>

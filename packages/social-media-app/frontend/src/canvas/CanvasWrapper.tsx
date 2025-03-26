@@ -1,4 +1,11 @@
-import { useState, useEffect, useRef, useContext, createContext } from "react";
+import {
+    useState,
+    useEffect,
+    useRef,
+    useContext,
+    createContext,
+    useReducer,
+} from "react";
 import { usePeer, useProgram, useLocal } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
@@ -11,15 +18,18 @@ import {
     getElementsQuery,
     StaticPartialImage,
     StaticImage,
+    SimpleWebManifest,
 } from "@dao-xyz/social";
 import { fromBase64, sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
-import { SimpleWebManifest } from "@dao-xyz/social";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
 import { useErrorDialog } from "../dialogs/useErrorDialog.js";
 import { Sort } from "@peerbit/indexer-interface";
-import { rectIsStaticMarkdownText } from "./utils/rect.js";
+import {
+    rectIsStaticMarkdownText,
+    rectIsStaticPartialImage,
+} from "./utils/rect.js";
 
 interface CanvasContextType {
     editMode: boolean;
@@ -37,7 +47,6 @@ interface CanvasContextType {
     canvas: CanvasDB;
     onContentChange: (element: Element) => void;
     isEmpty: boolean;
-    // New: Function to insert an image into the canvas
     insertImage: (
         file: File,
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
@@ -49,6 +58,13 @@ interface CanvasContextType {
             ix: number
         ) => Promise<boolean> | boolean
     ) => Promise<void>;
+
+    // NEW: Grouping & filtering functions
+    groupPartialImages: (rects: Element[]) => Element[];
+    separateAndSortRects: (rects: Element[]) => {
+        text: Element[];
+        other: Element[];
+    };
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -58,7 +74,7 @@ export const CanvasContext = createContext<CanvasContextType | undefined>(
 export const useCanvas = () => {
     const context = useContext(CanvasContext);
     if (!context) {
-        throw new Error("useCanvas must be used within a CanvasProvider");
+        throw new Error("useCanvas must be used within a CanvasWrapper");
     }
     return context;
 };
@@ -136,7 +152,6 @@ export const CanvasWrapper = ({
             .map((x) => x.location)
             .filter((x) => x.breakpoint === latestBreakpoint.current)
             .reduce((prev, current) => Math.max(current.y, prev), -1);
-
         return maxY != null ? maxY + 1 : 0;
     };
 
@@ -158,22 +173,18 @@ export const CanvasWrapper = ({
             ix: number
         ) => Promise<boolean> | boolean
     ) => {
-        // only mutate if we are the owner
         if (!canvas?.publicKey.equals(peer?.identity.publicKey)) {
             return;
         }
         const pending = pendingRects.find((pending) =>
             equals(pending.id, rect.id)
         );
-
         const index = rects.findIndex((pending) => equals(pending.id, rect.id));
         console.log("MUTATE START", { pending });
-
         if (pending) {
             await fn(pending, index);
             return;
         }
-
         const existing = rects[index];
         if (!existing) {
             throw new Error(
@@ -237,7 +248,6 @@ export const CanvasWrapper = ({
         } else {
             throw new Error("Invalid y option");
         }
-        // Adjust the y position of all affected pending elements.
         for (const element of allPending.sort(
             (a, b) => a.location.y - b.location.y
         )) {
@@ -295,16 +305,12 @@ export const CanvasWrapper = ({
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
     ) => {
         try {
-            // 3 MB in bytes.
             const threshold = 3 * 1024 * 1024;
-            // Get image preview, dimensions, and raw binary data.
             const image = await readFileAsImage(file);
-            // Assume that readFileAsImage returns an object with a "data" property (Uint8Array)
             console.log("FILE SIZE", file.size);
             if (file.size > threshold) {
-                // For large files, split the binary data.
                 const fullData = image.data;
-                const chunkSize = threshold; // chunk size in bytes
+                const chunkSize = threshold;
                 const parts: Uint8Array[] = [];
                 for (let i = 0; i < fullData.length; i += chunkSize) {
                     parts.push(fullData.slice(i, i + chunkSize));
@@ -325,7 +331,6 @@ export const CanvasWrapper = ({
                             groupKey,
                         })
                 );
-                // Wrap each partial image in a StaticContent container.
                 const newElements: Element<ElementContent>[] = await addRect(
                     partialImages.map((x) => new StaticContent({ content: x })),
                     options
@@ -340,7 +345,6 @@ export const CanvasWrapper = ({
                 setIsEmpty(false);
                 onContentChange?.(newElements);
             } else {
-                // For small files, create a full StaticImage using the raw data.
                 const element = await addRect(
                     new StaticContent({
                         content: new StaticImage({
@@ -473,7 +477,6 @@ export const CanvasWrapper = ({
     useEffect(() => {
         if (!peer || !canvas) return;
         reset();
-        console.log("RESET");
         if (canvas?.closed) {
             throw new Error("Expecting canvas to be open");
         }
@@ -499,6 +502,70 @@ export const CanvasWrapper = ({
         }
     };
 
+    // Group partial images: if all parts are present, combine them.
+    const groupPartialImages = (rects: Element[]): Element[] => {
+        const grouped = new Map<
+            string,
+            { rects: Element[]; parts: StaticPartialImage[] }
+        >();
+        const finalRects: Element[] = [];
+        rects.forEach((rect) => {
+            if (rectIsStaticPartialImage(rect)) {
+                const partial = rect.content.content as StaticPartialImage;
+                const key = partial.groupKey;
+                if (!grouped.has(key)) {
+                    grouped.set(key, { rects: [], parts: [] });
+                }
+                const group = grouped.get(key)!;
+                group.rects.push(rect);
+                group.parts.push(partial);
+            } else {
+                finalRects.push(rect);
+            }
+        });
+        grouped.forEach((group) => {
+            if (
+                group.parts.length > 0 &&
+                group.parts[0].totalParts === group.parts.length
+            ) {
+                const combinedImage = StaticPartialImage.combine(group.parts);
+                const rep = group.rects[0];
+                const combinedRect = new Element({
+                    publicKey: rep.publicKey,
+                    id: rep.id,
+                    location: rep.location,
+                    content: new StaticContent({ content: combinedImage }),
+                    canvas,
+                });
+                finalRects.push(combinedRect);
+            } else {
+                finalRects.push(...group.rects);
+            }
+        });
+        finalRects.sort((a, b) => a.location.y - b.location.y);
+        return finalRects;
+    };
+
+    // Separate rects into text and non‑text groups, and sort each by y.
+    const separateAndSortRects = (
+        rects: Element[]
+    ): { text: Element[]; other: Element[] } => {
+        const groupedRects = groupPartialImages(rects);
+        const separated = { text: [] as Element[], other: [] as Element[] };
+        groupedRects.forEach((rect) => {
+            if (rectIsStaticMarkdownText(rect)) {
+                separated.text.push(rect);
+            } else {
+                separated.other.push(rect);
+            }
+        });
+        separated.text.sort((a, b) => a.location.y - b.location.y);
+        separated.other.sort((a, b) => a.location.y - b.location.y);
+        return separated;
+    };
+
+    const [update, forceUpdate] = useReducer((x) => x + 1, 0); // For triggering re‑renders if needed
+
     const contextValue: CanvasContextType = {
         editMode,
         setEditMode,
@@ -514,6 +581,8 @@ export const CanvasWrapper = ({
         onContentChange: _onContentChange,
         insertImage,
         mutate,
+        groupPartialImages,
+        separateAndSortRects,
     };
 
     return (

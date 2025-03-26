@@ -80,6 +80,7 @@ export const Frame = (properties: {
     onClick?: () => void;
     // edit related stuff
     inFullscreen?: boolean;
+    canOpenFullscreen?: boolean;
     showEditControls: boolean;
     editControls?: React.ReactNode;
     editMode: boolean;
@@ -232,6 +233,7 @@ export const Frame = (properties: {
                     staticContent={staticContent}
                     editable={properties.editMode}
                     thumbnail={properties.thumbnail}
+                    canOpenFullscreen={properties.canOpenFullscreen}
                     onResize={() => {}}
                     onChange={async (newContent, options) => {
                         const content = new StaticContent({

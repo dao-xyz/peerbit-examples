@@ -1,24 +1,16 @@
-import {
-    Element,
-    ElementContent,
-    StaticContent,
-    StaticPartialImage,
-} from "@dao-xyz/social";
+import { Element, ElementContent, StaticContent } from "@dao-xyz/social";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
 import { ReactNode, useMemo, useReducer } from "react";
-import {
-    rectIsStaticMarkdownText,
-    rectIsStaticPartialImage,
-} from "./utils/rect";
+import { rectIsStaticMarkdownText } from "./utils/rect";
 import { IoIosArrowDown, IoIosArrowUp } from "react-icons/io";
 import { MdClear } from "react-icons/md";
 
 type SizeProps = {
     width?: number;
     height?: number;
-    scaled?: boolean; // when true, use CSS transform scaling to fit without overflow
+    scaled?: boolean;
     fitHeight?: boolean;
     fitWidth?: boolean;
 };
@@ -41,88 +33,31 @@ export const Canvas = (
         rects,
         removePending,
         canvas,
-
         mutate,
+        groupPartialImages, // from context!
     } = useCanvas();
-
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
-    // rects and pendingRects purpose filtered for properties.appearance
+    // First filter based on appearance, then group partial images.
     const filteredRects = useMemo(() => {
-        // First, filter and sort all rects based on the appearance.
-        const allRects = [...rects, ...pendingRects]
-            .filter((rect, i) =>
-                properties.appearance === "chat-view-images"
-                    ? i > 0 || !rectIsStaticMarkdownText(rect)
-                    : properties.appearance === "chat-view-text"
-                    ? rectIsStaticMarkdownText(rect)
-                    : true
-            )
-            .sort((a, b) => a.location.y - b.location.y);
-
-        // Group any rects that contain a StaticPartialImage
-        const grouped = new Map<
-            string,
-            { rects: Element<ElementContent>[]; parts: StaticPartialImage[] }
-        >();
-        const finalRects: Element<ElementContent>[] = [];
-
-        allRects.forEach((rect) => {
-            // If the inner content is a StaticPartialImage, group it.
-            if (rectIsStaticPartialImage(rect)) {
-                const partial = rect.content.content as StaticPartialImage;
-                const key = partial.groupKey;
-                if (!grouped.has(key)) {
-                    grouped.set(key, { rects: [], parts: [] });
-                }
-                const group = grouped.get(key)!;
-                group.rects.push(rect);
-                group.parts.push(partial);
-            } else {
-                finalRects.push(rect);
-            }
-        });
-
-        // For each group, if all parts are present, combine them.
-        grouped.forEach((group) => {
-            if (
-                group.parts.length > 0 &&
-                group.parts[0].totalParts === group.parts.length
-            ) {
-                // All parts are here: combine into a full StaticImage.
-                const combinedImage = StaticPartialImage.combine(group.parts);
-                // Use the layout (and other metadata) from the first rect.
-                const rep = group.rects[0];
-                const combinedRect = new Element({
-                    publicKey: rep.publicKey,
-                    id: rep.id,
-                    location: rep.location,
-                    content: new StaticContent({ content: combinedImage }),
-                    canvas: rep.canvas,
-                });
-                finalRects.push(combinedRect);
-            } else {
-                // Incomplete groups are added individually.
-                finalRects.push(...group.rects);
-            }
-        });
-
-        // Finally, sort the resulting array by the y-coordinate.
-        finalRects.sort((a, b) => a.location.y - b.location.y);
-        return finalRects;
-    }, [rects, pendingRects, properties.appearance]);
+        const allRects = [...rects, ...pendingRects].filter((rect, i) =>
+            properties.appearance === "chat-view-images"
+                ? i > 0 || !rectIsStaticMarkdownText(rect)
+                : properties.appearance === "chat-view-text"
+                ? rectIsStaticMarkdownText(rect)
+                : true
+        );
+        return groupPartialImages(allRects);
+    }, [rects, pendingRects, properties.appearance, groupPartialImages]);
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((rect, ix) => {
             const deleteFn = async () => {
                 removePending(rect.id);
-                // TODO: make this logic smarter in the future.
-                // We don't always want to delete.
                 try {
                     await canvas?.elements.del(rect.id);
                 } catch (error) {
-                    // missing entry
-                    // TODO delete on save???
+                    // Ignore errors if the entry is already missing.
                 }
                 forceUpdate();
             };
@@ -186,8 +121,8 @@ export const Canvas = (
                             editControls={
                                 <>
                                     <button
-                                        className="btn btn-elevated  m-1 btn-icon btn-icon-sm "
-                                        disabled={ix == 0}
+                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                        disabled={ix === 0}
                                         onClick={() => {
                                             return mutate(
                                                 rect,
@@ -203,9 +138,7 @@ export const Canvas = (
                                                             return true;
                                                         }
                                                     )
-                                                        .then(() => {
-                                                            return true;
-                                                        })
+                                                        .then(() => true)
                                                         .catch((e) => {
                                                             console.error(e);
                                                             return false;
@@ -217,14 +150,13 @@ export const Canvas = (
                                         <IoIosArrowUp />
                                     </button>
                                     <button
-                                        className="btn btn-elevated  m-1 btn-icon btn-icon-sm "
+                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
                                         onClick={deleteFn}
                                     >
                                         <MdClear />
                                     </button>
-
                                     <button
-                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm "
+                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
                                         disabled={
                                             rectsToRender.length - 1 === ix
                                         }
@@ -273,7 +205,7 @@ export const Canvas = (
                         </svg>
                         {!rectIsStaticMarkdownText(rect) &&
                             properties.bgBlur && (
-                                <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2  [filter:url('#gaussianBlurCanvas')]">
+                                <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 [filter:url('#gaussianBlurCanvas')]">
                                     <Frame
                                         thumbnail={false}
                                         active={false}
@@ -292,8 +224,6 @@ export const Canvas = (
             );
         });
     };
-
-    // Exclude the first rect if it is a text content form rendering in chat-view-images appearance mode
 
     return (
         (filteredRects.length > 0 && (

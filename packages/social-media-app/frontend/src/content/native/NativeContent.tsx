@@ -18,6 +18,7 @@ export type EditableStaticContentProps = {
     thumbnail?: boolean;
     fit?: "cover" | "contain";
     previewLines?: number;
+    canOpenFullscreen?: boolean;
     noPadding?: boolean;
     inFullscreen?: boolean;
 };
@@ -44,6 +45,7 @@ export const EditableStaticContent = ({
     onChange,
     thumbnail,
     fit,
+    canOpenFullscreen,
     previewLines,
     noPadding,
     inFullscreen,
@@ -70,6 +72,7 @@ export const EditableStaticContent = ({
                 editable={editable}
                 onChange={onChange}
                 thumbnail={thumbnail}
+                canOpenFullscreen={canOpenFullscreen}
                 fit={fit}
             />
         );
