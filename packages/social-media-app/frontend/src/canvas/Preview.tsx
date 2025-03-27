@@ -1,19 +1,21 @@
 import {
-    Canvas as CanvasDB,
     StaticContent,
     StaticImage,
     StaticMarkdownText,
-    ElementContent,
     Element,
+    ElementContent,
+    StaticPartialImage,
 } from "@dao-xyz/social";
-import { Canvas } from "./Canvas";
-import { useCanvas } from "./CanvasWrapper";
 import { useMemo } from "react";
 import { Frame } from "../content/Frame";
-import { rectIsStaticMarkdownText } from "./utils/rect";
+import {
+    rectIsStaticMarkdownText,
+    rectIsStaticPartialImage,
+} from "./utils/rect";
 import { tw } from "../utils/tailwind";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { toString } from "mdast-util-to-string";
+import { useCanvas } from "./CanvasWrapper";
 
 type VariantType =
     | "tiny"
@@ -29,7 +31,7 @@ type BaseCanvasPreviewProps = {
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
     variant: Exclude<VariantType, "chat-message">;
-    align?: never; // Explicitly forbid align
+    align?: never;
 };
 
 type ChatMessageVariantProps = BaseCanvasPreviewProps & {
@@ -37,7 +39,32 @@ type ChatMessageVariantProps = BaseCanvasPreviewProps & {
     align: "left" | "right";
 };
 
-type CanvasPreviewProps = StandardVariantProps | ChatMessageVariantProps;
+export type CanvasPreviewProps = StandardVariantProps | ChatMessageVariantProps;
+
+function getRectsForVariant<V extends VariantType>(
+    separatedRects: {
+        text: Element<ElementContent>[];
+        other: Element<ElementContent>[];
+    },
+    variant: V
+): V extends "tiny" | "breadcrumb"
+    ? Element<ElementContent> | undefined
+    : { text?: Element<ElementContent>; other: Element<ElementContent>[] } {
+    switch (variant) {
+        case "tiny":
+        case "breadcrumb":
+            return (separatedRects.other[0] ??
+                separatedRects.text[0] ??
+                undefined) as any;
+        case "post":
+        case "expanded-breadcrumb":
+        case "chat-message":
+            return {
+                text: separatedRects.text[0],
+                other: separatedRects.other,
+            } as any;
+    }
+}
 
 const PreviewFrame = ({
     element,
@@ -47,7 +74,6 @@ const PreviewFrame = ({
     fit,
     noPadding,
     onClick,
-    charLimit,
 }: {
     element: Element<ElementContent>;
     previewLines?: number;
@@ -56,10 +82,9 @@ const PreviewFrame = ({
     fit?: "cover" | "contain";
     noPadding?: boolean;
     onClick?: () => void;
-    charLimit?: number;
 }) => (
     <div
-        className={`flex flex-col relative overflow-hidden w-full  ${
+        className={`flex flex-col relative overflow-hidden w-full ${
             maximizeHeight ? "h-full" : ""
         }`}
     >
@@ -76,6 +101,7 @@ const PreviewFrame = ({
             previewLines={previewLines}
             noPadding={noPadding}
             onClick={onClick}
+            canOpenFullscreen={false}
         />
         {bgBlur && (
             <BlurredBackground element={element} noPadding={noPadding} />
@@ -117,58 +143,6 @@ const BlurredBackground = ({
     </>
 );
 
-interface SeparatedRects {
-    text: Element<ElementContent>[];
-    other: Element<ElementContent>[];
-}
-
-/* Separates rects by preview relevant types: text and other. Also sorts by y layout location. */
-const separateAndSortRects = (
-    rects: Element<ElementContent>[]
-): SeparatedRects => {
-    const separatedRects: SeparatedRects = { text: [], other: [] };
-
-    rects.forEach((rect) => {
-        if (rectIsStaticMarkdownText(rect)) {
-            separatedRects.text.push(rect);
-        } else {
-            separatedRects.other.push(rect);
-        }
-    });
-
-    separatedRects.text.sort((a, b) => a.location.y - b.location.y);
-    separatedRects.other.sort((a, b) => a.location.y - b.location.y);
-
-    return separatedRects;
-};
-
-type RectsForVariant<V extends VariantType> = V extends "tiny" | "breadcrumb"
-    ? Element<ElementContent> | undefined
-    : {
-          text?: Element<ElementContent>;
-          other: Element<ElementContent>[];
-      };
-
-function getRectsForVariant<V extends VariantType>(
-    separatedRects: SeparatedRects,
-    variant: V
-): RectsForVariant<V> {
-    switch (variant) {
-        case "tiny":
-        case "breadcrumb":
-            return (separatedRects.other[0] ??
-                separatedRects.text[0] ??
-                undefined) as RectsForVariant<V>;
-        case "post":
-        case "expanded-breadcrumb":
-        case "chat-message":
-            return {
-                text: separatedRects.text[0],
-                other: separatedRects.other,
-            } as RectsForVariant<V>;
-    }
-}
-
 const TinyPreview = ({
     rect,
     onClick,
@@ -186,17 +160,20 @@ const BreadcrumbPreview = ({
     rect: Element<ElementContent>;
     onClick?: () => void;
 }) => {
-    let isText: boolean = false;
+    let isText = false;
     let textLength: number | undefined = undefined;
     if (rectIsStaticMarkdownText(rect)) {
         isText = true;
         textLength = toString(fromMarkdown(rect.content.content.text)).length;
     }
-
     return (
         <div
             className={tw(
-                isText ? (textLength > 10 ? "w-[10ch]" : "w-fit") : "w-6",
+                isText
+                    ? textLength && textLength > 10
+                        ? "w-[10ch]"
+                        : "w-fit"
+                    : "w-6",
                 isText && "px-1",
                 "flex-none h-6 rounded-md overflow-hidden border border-neutral-950 dark:border-neutral-50"
             )}
@@ -221,7 +198,6 @@ const ExpandedBreadcrumbPreview = ({
     onClick?: () => void;
 }) => {
     const { other: apps, text } = rects;
-
     return (
         <div className="col-span-full flex gap-1.5 items-start w-full rounded-lg">
             {apps.slice(0, 2).map((app, i) => (
@@ -242,7 +218,6 @@ const ExpandedBreadcrumbPreview = ({
                     )}
                 </div>
             ))}
-
             {text && (
                 <div className="border border-neutral-950 dark:border-neutral-50 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1">
                     <PreviewFrame
@@ -266,7 +241,6 @@ const PostPreview = ({
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
     const { text } = rects;
-
     return (
         <>
             {firstApp && (
@@ -282,7 +256,6 @@ const PostPreview = ({
                     />
                 </button>
             )}
-
             {secondaryApps.length > 0 && (
                 <div className="col-span-full flex overflow-x-scroll no-scrollbar px-2.5">
                     {secondaryApps.map((app, i) => (
@@ -300,11 +273,10 @@ const PostPreview = ({
                     ))}
                 </div>
             )}
-
             {text && (
                 <button
                     onClick={onClick}
-                    className="col-start-2 col-span-1 border border-neutral-950 dark:border-neutral-50 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
+                    className="col-start-2 col-span-1 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
                 >
                     <PreviewFrame element={text} previewLines={3} noPadding />
                 </button>
@@ -321,7 +293,6 @@ const ChatMessagePreview = ({
     onClick?: () => void;
 }) => {
     const { other: apps, text } = rects;
-
     return (
         <>
             {apps.map((app) => (
@@ -338,11 +309,10 @@ const ChatMessagePreview = ({
                     />
                 </button>
             ))}
-
             {text && (
                 <button
                     onClick={onClick}
-                    className="max-w-prose col-span-3 col-start-2 border border-neutral-950 dark:border-neutral-50 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
+                    className="max-w-prose col-span-3 col-start-2 border border-neutral-500 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
                 >
                     <PreviewFrame element={text} previewLines={3} noPadding />
                 </button>
@@ -352,7 +322,7 @@ const ChatMessagePreview = ({
 };
 
 export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
-    const { pendingRects, rects } = useCanvas();
+    const { rects, pendingRects, separateAndSortRects } = useCanvas();
 
     const variantRects = useMemo(
         () =>
@@ -360,12 +330,11 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                 separateAndSortRects([...rects, ...pendingRects]),
                 variant
             ),
-        [rects, pendingRects, variant]
+        [rects, pendingRects, variant, separateAndSortRects]
     );
 
     if (!variantRects) return null;
 
-    // Render the appropriate component based on variant
     switch (variant) {
         case "tiny":
             return (
@@ -374,7 +343,6 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                     onClick={onClick}
                 />
             );
-
         case "breadcrumb":
             return (
                 <BreadcrumbPreview
@@ -382,7 +350,6 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                     onClick={onClick}
                 />
             );
-
         case "expanded-breadcrumb":
             return (
                 <ExpandedBreadcrumbPreview
@@ -395,7 +362,6 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                     onClick={onClick}
                 />
             );
-
         case "post":
             return (
                 <PostPreview
@@ -408,7 +374,6 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                     onClick={onClick}
                 />
             );
-
         case "chat-message":
             return (
                 <ChatMessagePreview
@@ -421,7 +386,6 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                     onClick={onClick}
                 />
             );
-
         default:
             return null;
     }

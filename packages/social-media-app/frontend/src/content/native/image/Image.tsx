@@ -2,21 +2,13 @@
  * @fileoverview React component for displaying and editing images with drag-and-drop functionality.
  */
 
-import React, { useRef, useEffect, useState, useCallback } from "react";
+import React, { useRef, useEffect, useState } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { FiMaximize, FiX } from "react-icons/fi";
 import { StaticImage } from "@dao-xyz/social";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
 
-/**
- * Props interface for the ImageContent component
- * ImageContentProps
- * content - The image data to display
- * onResize - Callback when image dimensions change
- * [editable] - Whether the image can be edited/replaced
- * [onChange] - Callback when image content changes
- * [thumbnail] - Display as thumbnail
- * [fit] - How image should fit container. If not given, scales to parent on width and height
- */
 export type ImageContentProps = {
     content: StaticImage;
     onResize: (dims: { width: number; height: number }) => void;
@@ -24,29 +16,36 @@ export type ImageContentProps = {
     onChange?: ChangeCallback;
     thumbnail?: boolean;
     fit?: "cover" | "contain";
+    canOpenFullscreen?: boolean;
 };
 
-/**
- * Component for displaying and editing image content
- * Supports drag-and-drop uploads and dimension monitoring
- */
 export const ImageContent = ({
     content,
     onResize,
     editable = false,
     onChange,
     fit,
+    canOpenFullscreen = true,
 }: ImageContentProps) => {
-    // References for container element and dimension tracking
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
     const threshold = 1;
     const [isDragOver, setIsDragOver] = useState(false);
+    const [imgUrl, setImgUrl] = useState("");
+    const [dialogOpen, setDialogOpen] = useState(false);
 
-    /**
-     * ResizeObserver setup to monitor container dimensions
-     * Triggers onResize callback when dimensions change beyond threshold
-     */
+    // Create a Blob URL from the raw binary data stored in content.data.
+    useEffect(() => {
+        if (!content.data || !content.mimeType) return;
+        const blob = new Blob([content.data], { type: content.mimeType });
+        const url = URL.createObjectURL(blob);
+        setImgUrl(url);
+        return () => {
+            URL.revokeObjectURL(url);
+        };
+    }, [content.data, content.mimeType]);
+
+    // Resize observer to trigger onResize.
     useEffect(() => {
         if (!containerRef.current) return;
         const observer = new ResizeObserver((entries) => {
@@ -70,18 +69,12 @@ export const ImageContent = ({
         return () => observer.disconnect();
     }, [onResize, threshold]);
 
-    /**
-     * Handles file input change events
-     */
     const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files && e.target.files[0];
         const image = await readFileAsImage(file);
         onChange && onChange(image);
     };
 
-    /**
-     * Drag and drop event handlers
-     */
     const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
         e.preventDefault();
         setIsDragOver(true);
@@ -100,6 +93,46 @@ export const ImageContent = ({
         onChange && onChange(image);
     };
 
+    // Determine object-fit class based on the `fit` prop.
+    const fitClass =
+        fit === "cover"
+            ? "object-cover"
+            : fit === "contain"
+            ? "object-contain"
+            : "";
+
+    // Fullscreen preview container.
+    // Clicking on the overlay (outside the content) closes the dialog.
+    const FullscreenPreview = (
+        <Dialog.Portal>
+            <Dialog.Overlay
+                className="fixed inset-0 z-[10000] bg-black bg-opacity-80"
+                onClick={() => {
+                    console.log("CLOSE!");
+                    setDialogOpen(false);
+                }}
+            />
+            <Dialog.Content
+                className="fixed inset-0 z-[10001] flex items-center justify-center"
+                onClick={(e) => e.stopPropagation()} // prevent clicks inside content from bubbling to overlay
+            >
+                <Dialog.Title className="sr-only">Image Preview</Dialog.Title>
+                <div className="w-full h-full max-w-4xl max-h-[100vh]">
+                    <img
+                        src={imgUrl}
+                        alt={content.alt}
+                        className="w-full h-full object-contain"
+                    />
+                </div>
+                <Dialog.Close asChild>
+                    <button className="absolute top-4 right-4 p-2 text-white text-2xl">
+                        <FiX />
+                    </button>
+                </Dialog.Close>
+            </Dialog.Content>
+        </Dialog.Portal>
+    );
+
     return (
         <div
             ref={containerRef}
@@ -116,26 +149,53 @@ export const ImageContent = ({
                     : ""
             }`}
         >
-            <img
-                src={`data:${content.mimeType};base64,${content.base64}`}
-                alt={content.alt}
-                className={`w-full h-full ${
-                    {
-                        cover: "object-cover",
-                        contain: "object-contain w-auto",
-                        default: "",
-                    }[fit ?? "default"]
-                }`}
-            />
+            {canOpenFullscreen ? (
+                !editable ? (
+                    <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
+                        <Dialog.Trigger asChild>
+                            <img
+                                src={imgUrl}
+                                alt={content.alt}
+                                className={`w-full h-full ${fitClass}`}
+                            />
+                        </Dialog.Trigger>
+                        {FullscreenPreview}
+                    </Dialog.Root>
+                ) : (
+                    <>
+                        <img
+                            src={imgUrl}
+                            alt={content.alt}
+                            className={`w-full h-full ${fitClass}`}
+                        />
+                        <button
+                            onClick={() => setDialogOpen(true)}
+                            className="absolute bottom-4 right-4 z-10 p-2 bg-black bg-opacity-50 rounded-full text-white"
+                        >
+                            <FiMaximize />
+                        </button>
+                        <Dialog.Root
+                            open={dialogOpen}
+                            onOpenChange={setDialogOpen}
+                        >
+                            {FullscreenPreview}
+                        </Dialog.Root>
+                    </>
+                )
+            ) : (
+                <img
+                    src={imgUrl}
+                    alt={content.alt}
+                    className={`w-full h-full ${fitClass}`}
+                />
+            )}
             {editable && (
                 <>
-                    {/* Overlay message */}
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
                         <span className="text-sm text-neutral-500 dark:text-neutral-300 bg-white dark:bg-neutral-900 bg-opacity-75 px-2 py-1 rounded">
                             Click to upload or drop an image
                         </span>
                     </div>
-                    {/* Transparent input covering the entire area */}
                     <input
                         type="file"
                         accept="image/*"

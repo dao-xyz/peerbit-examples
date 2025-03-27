@@ -108,6 +108,12 @@
     }
 }
 
+@layer components {
+    .chess-parent>div {
+        width: auto !important;
+    }
+}
+
 @theme {
     /* Define your primary color shades using oklch() */
     --color-primary-50: oklch(0.97 0.014 254.604);

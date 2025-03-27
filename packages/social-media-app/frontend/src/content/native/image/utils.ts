@@ -3,27 +3,31 @@ import pDefer from "p-defer";
 
 export const readFileAsImage = (file: File): Promise<StaticImage> => {
     if (!file) {
-        return;
+        return Promise.reject(new Error("No file provided"));
     }
     const deferred = pDefer<StaticImage>();
     const reader = new FileReader();
     reader.onload = () => {
         const result = reader.result;
-        if (typeof result === "string") {
+        if (result instanceof ArrayBuffer) {
+            const data = new Uint8Array(result);
             deferred.resolve(
                 new StaticImage({
-                    base64: result.split(",")[1],
+                    data,
                     mimeType: file.type,
                     alt: file.name,
                     width: 300, // TODO: get real width and height
                     height: 200, // TODO: get real width and height
+                    caption: "",
                 })
             );
+        } else {
+            deferred.reject(new Error("Unexpected result type"));
         }
     };
     reader.onerror = (error) => {
         deferred.reject(error);
     };
-    reader.readAsDataURL(file);
+    reader.readAsArrayBuffer(file);
     return deferred.promise;
 };

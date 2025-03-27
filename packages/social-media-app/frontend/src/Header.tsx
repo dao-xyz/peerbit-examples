@@ -11,6 +11,7 @@ import { HeaderLogo } from "./Logo";
 import { useCanvases } from "./canvas/useCanvas";
 import { IoIosArrowBack } from "react-icons/io";
 import ExpandedContext from "./context/ExpandedContext";
+import { useThemeContext } from "./theme/useTheme";
 
 // Define props interface
 interface HeaderProps {
@@ -22,25 +23,11 @@ export const HEIGHT = "40px";
 
 export const Header = forwardRef((props: HeaderProps, ref) => {
     // Read initial theme from localStorage or default to "light"
-    const [theme, setTheme] = useState<"dark" | "light">(
-        localStorage.theme || "light"
-    );
+    const { toggleTheme, theme } = useThemeContext();
     const [isBreadcrumbExpanded, setIsBreadcrumbExpanded] = useState(false); // Add breadcrumbExpanded state
     const { peer } = usePeer();
     const { path } = useCanvases();
     const navigate = useNavigate();
-
-    // Toggle the dark/light mode
-    const toggleTheme = () => {
-        const newTheme = theme === "dark" ? "light" : "dark";
-        localStorage.theme = newTheme;
-        setTheme(newTheme);
-        if (newTheme === "dark") {
-            document.documentElement.classList.add("dark");
-        } else {
-            document.documentElement.classList.remove("dark");
-        }
-    };
 
     return (
         <div
@@ -100,8 +87,8 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                 <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950 border-neutral-950 dark:border-neutral-50 border-x"></div>
                             )}
                         </div>
-
-                        <div className="z-50 col-start-10 flex items-center">
+                        {/*  TODO do we really need to set the z-index to 2 here? */}
+                        <div className="z-2 col-start-10 flex items-center">
                             {peer ? (
                                 <DropdownMenu.Root>
                                     <DropdownMenu.Trigger asChild>

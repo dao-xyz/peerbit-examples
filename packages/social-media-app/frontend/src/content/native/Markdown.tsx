@@ -46,9 +46,18 @@ export const MarkdownContent = ({
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
     const threshold = 1;
+    const saving = useRef(false);
 
     // Local state for the markdown text.
     const [text, setText] = useState(content.text);
+
+    // this statement is used to update the text when the content changes
+    // without this, the text will not update when the content changes, for example if we are emitting a change with the "save" flag
+    // which will make content.text to be set to ''
+    useEffect(() => {
+        setText(content.text);
+    }, [content.text]);
+
     // Start editing automatically if there's no text.
     const [isEditing, setIsEditing] = useState(content.text.length === 0);
     const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -115,21 +124,32 @@ export const MarkdownContent = ({
     useEffect(handleStartEditing, [textareaRef.current]);
 
     // Handle key presses in the textarea.
-    const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const handleKeyDown = async (
+        e: React.KeyboardEvent<HTMLTextAreaElement>
+    ) => {
         if (!inFullscreen) {
             if (e.key === "Enter" && !e.shiftKey) {
                 const currentValue = e.currentTarget.value;
-                // If there's no newline in the current value, send the message.
                 if (!currentValue.includes("\n")) {
                     e.preventDefault();
-                    onChange &&
-                        onChange(
+                    // Send the current text
+                    try {
+                        saving.current = true;
+                        await onChange?.(
                             new StaticMarkdownText({ text: currentValue }),
-                            {
-                                save: true,
-                            }
-                        ); // save true becaus we want to save/send the content immediately
-                    setIsEditing(false);
+                            { save: true }
+                        );
+                    } catch (error) {
+                        console.error("Failed to save", error);
+                    } finally {
+                        saving.current = false;
+                    }
+
+                    setText("");
+                    autoResize();
+
+                    // focus the container
+                    containerRef.current?.focus();
                 }
             }
         }
@@ -145,9 +165,6 @@ export const MarkdownContent = ({
     const handleBlur = () => {
         if (text.length > 0) setIsEditing(false);
     };
-
-    // Use local text if editable, otherwise use content.text.
-    const markdownContent = editable ? text : content.text;
 
     return (
         <div
@@ -186,7 +203,7 @@ export const MarkdownContent = ({
                         unwrapDisallowed
                         remarkPlugins={[remarkGfm]}
                     >
-                        {markdownContent}
+                        {text}
                     </Markdown>
                 </div>
             )}

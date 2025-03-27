@@ -34,13 +34,13 @@ export const HeaderLogo = ({ onClick }: { onClick?: () => void }) => {
     );
     return (
         <button
-            className="btn p-0 m-0 rounded-none hover:cursor-pointer h-full flex flfex-col content-center items-center "
+            className="btn p-0 mb-[-10px] rounded-none hover:cursor-pointer h-full flex flfex-col content-center items-center "
             onClick={() => {
                 navigate("/", {});
                 onClick && onClick();
             }}
         >
-            {asText()}
+            {asImage()}
         </button>
     );
 };

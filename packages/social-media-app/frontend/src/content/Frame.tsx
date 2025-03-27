@@ -1,12 +1,46 @@
-import React, { useRef, useState } from "react";
+import React, { SyntheticEvent, useEffect, useRef, useState } from "react";
 import { IFrameContent, Element, StaticContent } from "@dao-xyz/social";
-import { replace, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
 import { useApps } from "./useApps";
 import { CuratedWebApp } from "@giga-app/app-service";
-import { HostProvider as GigaHost, HostProvider } from "@giga-app/sdk";
+import { HostProvider as GigaHost, HostProvider, useHost } from "@giga-app/sdk";
 import { useCanvas } from "../canvas/CanvasWrapper";
-import { equals } from "uint8arrays";
+import { useThemeContext } from "../theme/useTheme";
+
+const ThemedIframe = (properties: {
+    src: string;
+    onLoad: (evt: SyntheticEvent<HTMLIFrameElement, Event>) => void;
+    iframeRef: React.RefObject<HTMLIFrameElement>;
+}) => {
+    const { send, ready } = useHost();
+    const { theme } = useThemeContext();
+
+    useEffect(() => {
+        if (!ready) {
+            return;
+        }
+        send?.({ type: "theme", theme });
+    }, [theme, send, ready]);
+
+    return (
+        <iframe
+            ref={properties.iframeRef}
+            onLoad={(evt) => {
+                console.log("IFRAME LOAD EVENT", properties.src);
+                properties.onLoad(evt);
+            }}
+            style={{
+                width: "100%",
+                height: "100%",
+                minHeight: "400px",
+                border: 0,
+            }}
+            src={properties.src}
+            allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
+        ></iframe>
+    );
+};
 
 /**
  * Frame component for displaying different types of content with controls.
@@ -38,19 +72,6 @@ export const Frame = (properties: {
     thumbnail?: boolean;
     onLoad: (event: React.SyntheticEvent<HTMLElement, Event>) => void;
 
-    /**
-     * Called when static content is edited.
-     * The new static content is provided along with the element index.
-     */
-
-    /*   
-        pending: boolean;
-    onContentChange?: (
-           properties: { content: StaticContent["content"]; id: Uint8Array },
-           options?: { save: boolean }
-       ) => void; */
-    /* replaceIFrameUrl: (url: string) => void; */
-
     key?: number;
     delete(): void;
     fit?: "cover" | "contain";
@@ -59,6 +80,7 @@ export const Frame = (properties: {
     onClick?: () => void;
     // edit related stuff
     inFullscreen?: boolean;
+    canOpenFullscreen?: boolean;
     showEditControls: boolean;
     editControls?: React.ReactNode;
     editMode: boolean;
@@ -70,7 +92,6 @@ export const Frame = (properties: {
         isReady: boolean;
         info?: string;
     } | null>(null);
-    const iframeRef = useRef<HTMLIFrameElement>(null);
 
     const {
         mutate,
@@ -180,38 +201,27 @@ export const Frame = (properties: {
 
             return (
                 <HostProvider
-                    iframeRef={iframeRef}
-                    onNavigate={async (message) => {
-                        console.log("NAVIGATE EVENT", message.data.to);
-
+                    iframeOriginalSource={properties.element.content.orgSrc}
+                    onNavigate={async (evt) => {
                         await mutate(properties.element, (element) => {
                             const currentUrl = (
                                 element.content as IFrameContent
                             ).src;
-                            if (currentUrl === message.data.to) {
+                            if (currentUrl === evt.to) {
                                 return false;
                             }
-                            (element.content as IFrameContent).src =
-                                message.data.to;
+                            (element.content as IFrameContent).src = evt.to;
                             return true;
                         });
                     }}
                 >
-                    <iframe
-                        ref={iframeRef}
-                        onLoad={(event) => {
-                            console.log("IFRAME LOAD EVENT", src);
-                            properties.onLoad(event);
-                        }}
-                        style={{
-                            width: "100%",
-                            height: "100%",
-                            minHeight: "400px",
-                            border: 0,
-                        }}
-                        src={src}
-                        allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
-                    ></iframe>
+                    {(iframeRef) => (
+                        <ThemedIframe
+                            iframeRef={iframeRef}
+                            onLoad={properties.onLoad}
+                            src={src}
+                        ></ThemedIframe>
+                    )}
                 </HostProvider>
             );
         }
@@ -223,6 +233,7 @@ export const Frame = (properties: {
                     staticContent={staticContent}
                     editable={properties.editMode}
                     thumbnail={properties.thumbnail}
+                    canOpenFullscreen={properties.canOpenFullscreen}
                     onResize={() => {}}
                     onChange={async (newContent, options) => {
                         const content = new StaticContent({
@@ -235,7 +246,7 @@ export const Frame = (properties: {
                             return true;
                         });
                         if (options?.save /* && properties.draft */) {
-                            savePending();
+                            await savePending();
                         }
                     }}
                     fit={properties.fit}

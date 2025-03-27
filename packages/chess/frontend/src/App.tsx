@@ -33,7 +33,7 @@ export const App = () => {
             }}
             iframe={{ type: "proxy", targetOrigin: "*" }}
         >
-            <AppProvider navigation="emit-all">
+            <AppProvider navigation="emit-all" theme={{ useClasses: true }}>
                 <HashRouter basename="/">
                     <Routes>
                         <Route path="/" element={<HomePage />} />

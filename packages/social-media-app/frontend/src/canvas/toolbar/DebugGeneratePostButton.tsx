@@ -83,26 +83,22 @@ export const DebugGeneratePostButton = () => {
         url: string | undefined,
         options?: { width: number; height: number }
     ) => {
-        let definedUrl = url
-            ? url
-            : `https://picsum.photos/${options.width ?? 200}/${
-                  options.height ?? 300
-              }`;
-        const image = await fetch(definedUrl).then((response) =>
-            response.blob()
-        );
-        const base64 = await new Promise<string>((resolve) => {
-            const reader = new FileReader();
-            reader.onloadend = () => {
-                resolve(reader.result as string);
-            };
-            reader.readAsDataURL(image);
-        });
+        const definedUrl =
+            url ||
+            `https://picsum.photos/${options?.width ?? 200}/${
+                options?.height ?? 300
+            }`;
+        const response = await fetch(definedUrl);
+        // Convert the response to an ArrayBuffer then to a Uint8Array.
+        const buffer = await response.arrayBuffer();
+        const data = new Uint8Array(buffer);
         return new StaticImage({
-            base64: base64.split(",")[1],
-            height: options.height ?? 300,
-            width: options.width ?? 200,
+            data,
+            height: options?.height ?? 300,
+            width: options?.width ?? 200,
             mimeType: "image/jpeg",
+            alt: "Debug image",
+            caption: "",
         });
     };
 
@@ -123,7 +119,7 @@ export const DebugGeneratePostButton = () => {
                     : (await Ed25519Keypair.create()).publicKey;
 
             const typeArray = Array.isArray(type) ? type : [type];
-            // create a post (canvas) that references its parent
+            // Create a post (canvas) that references its parent.
             const canvas = new Canvas({
                 path: path.map(
                     (x) =>
@@ -134,7 +130,7 @@ export const DebugGeneratePostButton = () => {
                 publicKey: publicKeyTuse,
             });
 
-            // open it (so we can insert elements)
+            // Open the canvas so we can insert elements.
             const openCanvas = await peer.open(canvas, { existing: "reuse" });
 
             for (const [ix, type] of typeArray.entries()) {
@@ -161,6 +157,8 @@ export const DebugGeneratePostButton = () => {
                     });
                 }
 
+                await openCanvas.load();
+
                 openCanvas.elements.put(
                     new Element({
                         content: mockContent,
@@ -173,12 +171,12 @@ export const DebugGeneratePostButton = () => {
                             breakpoint: "md",
                         }),
                         publicKey: peer.identity.publicKey,
+                        canvas: openCanvas,
                     })
                 );
             }
 
-            // last step - add this post as a reply to the parent
-
+            // Last step – add this post as a reply to the parent.
             console.log(leaf.closed);
             leaf.replies.put(openCanvas);
         }

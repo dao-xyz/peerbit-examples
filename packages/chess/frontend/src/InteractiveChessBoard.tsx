@@ -56,7 +56,7 @@ const InteractiveChessBoard = ({
     };
 
     return (
-        <div className="flex flex-col items-center">
+        <div className="flex flex-col items-center chess-parent">
             <Chessboard
                 isDraggablePiece={() => isPlayer && isMyTurn}
                 position={game.fen()}

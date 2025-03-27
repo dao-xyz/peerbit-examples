@@ -9,21 +9,10 @@ import { CanvasProvider } from "./canvas/useCanvas";
 import { ProfileProvider } from "./profile/useProfiles";
 import { IdentitiesProvider } from "./identity/useIdentities";
 import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
+import { HostRegistryProvider } from "@giga-app/sdk";
 import { useEffect } from "react";
+import { ThemeProvider } from "./theme/useTheme";
 
-const setTheme = () => {
-    // On page load or when changing themes, best to add inline in `head` to avoid FOUC
-    if (
-        localStorage.theme === "dark" ||
-        (!("theme" in localStorage) &&
-            window.matchMedia("(prefers-color-scheme: dark)").matches)
-    ) {
-        localStorage.setItem("theme", "dark");
-        document.documentElement.classList.add("dark");
-    } else {
-        document.documentElement.classList.remove("dark");
-    }
-};
 export const Content = () => {
     const { error: peerError } = usePeer();
     const { showError } = useErrorDialog();
@@ -38,8 +27,13 @@ export const Content = () => {
                     severity: "info",
                 });
             } else {
+                console.error("Unexpected error", typeof peerError);
                 showError({
-                    message: peerError.message,
+                    message:
+                        typeof peerError === "string"
+                            ? peerError
+                            : peerError?.message,
+                    error: peerError,
                     severity: "error",
                 });
             }
@@ -54,39 +48,42 @@ export const Content = () => {
     );
 };
 export const App = () => {
-    setTheme();
     return (
         <HashRouter basename="/">
             <ErrorProvider>
-                <PeerProvider
-                    network={
-                        import.meta.env.MODE === "development"
-                            ? "local"
-                            : "remote"
-                    }
-                    top={{
-                        type: "node",
-                        network:
+                <ThemeProvider>
+                    <PeerProvider
+                        network={
                             import.meta.env.MODE === "development"
                                 ? "local"
-                                : "remote",
-                        host: true,
-                    }}
-                    iframe={{ type: "proxy", targetOrigin: "*" }}
-                    waitForConnnected={false}
-                    inMemory={false}
-                    singleton
-                >
-                    <IdentitiesProvider>
-                        <AppProvider>
-                            <CanvasProvider>
-                                <ProfileProvider>
-                                    <Content />
-                                </ProfileProvider>
-                            </CanvasProvider>
-                        </AppProvider>
-                    </IdentitiesProvider>
-                </PeerProvider>
+                                : "remote"
+                        }
+                        top={{
+                            type: "node",
+                            network:
+                                import.meta.env.MODE === "development"
+                                    ? "local"
+                                    : "remote",
+                            host: true,
+                        }}
+                        iframe={{ type: "proxy", targetOrigin: "*" }}
+                        waitForConnnected={false}
+                        inMemory={false}
+                        singleton
+                    >
+                        <IdentitiesProvider>
+                            <AppProvider>
+                                <CanvasProvider>
+                                    <ProfileProvider>
+                                        <HostRegistryProvider>
+                                            <Content />
+                                        </HostRegistryProvider>
+                                    </ProfileProvider>
+                                </CanvasProvider>
+                            </AppProvider>
+                        </IdentitiesProvider>
+                    </PeerProvider>
+                </ThemeProvider>
             </ErrorProvider>
         </HashRouter>
     );

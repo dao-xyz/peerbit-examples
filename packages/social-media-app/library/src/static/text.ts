@@ -1,7 +1,7 @@
 import { field, variant } from '@dao-xyz/borsh';
 import { AbstractStaticContent } from './content.js';
 
-@variant(1)
+@variant(0)
 export class StaticMarkdownText extends AbstractStaticContent {
     @field({ type: "string" })
     text: string;

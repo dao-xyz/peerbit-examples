@@ -52,7 +52,7 @@ const getCanvasesPathFromURL = async (
     root: Canvas
 ): Promise<Canvas[]> => {
     const canvasAddress = getCanvasAdressFromUrl();
-    console.log({ canvasAddress });
+
     if (!canvasAddress) {
         return [root];
     }
@@ -60,7 +60,7 @@ const getCanvasesPathFromURL = async (
         existing: "reuse",
     });
     console.log({ current });
-    return current.getCanvasPath();
+    return current.loadPath(true);
 };
 
 export const CanvasContext = React.createContext<ICanvasContext>({} as any);
@@ -218,6 +218,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                                 text: GIGA_ROOT_POST,
                             }),
                         }),
+                        canvas: result,
                     })
                 );
                 loading.current = undefined;

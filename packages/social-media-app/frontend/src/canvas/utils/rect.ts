@@ -3,6 +3,7 @@ import {
     StaticMarkdownText,
     ElementContent,
     StaticImage,
+    StaticPartialImage,
 } from "@dao-xyz/social";
 
 export const rectIsStaticMarkdownText = (rect: {
@@ -20,5 +21,14 @@ export const rectIsStaticImage = (rect: {
     return (
         rect.content instanceof StaticContent &&
         rect.content.content instanceof StaticImage
+    );
+};
+
+export const rectIsStaticPartialImage = (rect: {
+    content: ElementContent;
+}): rect is { content: StaticContent<StaticPartialImage> } => {
+    return (
+        rect.content instanceof StaticContent &&
+        rect.content.content instanceof StaticPartialImage
     );
 };

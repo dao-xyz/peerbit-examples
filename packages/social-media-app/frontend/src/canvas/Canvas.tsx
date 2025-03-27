@@ -1,4 +1,4 @@
-import { Element, ElementContent } from "@dao-xyz/social";
+import { Element, ElementContent, StaticContent } from "@dao-xyz/social";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
@@ -10,7 +10,7 @@ import { MdClear } from "react-icons/md";
 type SizeProps = {
     width?: number;
     height?: number;
-    scaled?: boolean; // when true, use CSS transform scaling to fit without overflow
+    scaled?: boolean;
     fitHeight?: boolean;
     fitWidth?: boolean;
 };
@@ -33,39 +33,31 @@ export const Canvas = (
         rects,
         removePending,
         canvas,
-
         mutate,
+        groupPartialImages, // from context!
     } = useCanvas();
-
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
-    // rects and pendingRects purpose filtered for properties.appearance
+    // First filter based on appearance, then group partial images.
     const filteredRects = useMemo(() => {
-        return [...rects, ...pendingRects]
-            .filter((rect, i) =>
-                properties.appearance === "chat-view-images"
-                    ? i > 0 || !rectIsStaticMarkdownText(rect)
-                    : properties.appearance === "chat-view-text"
-                    ? rectIsStaticMarkdownText(rect)
-                    : true
-            )
-            .sort((x, y) => {
-                // sort by y position
-                return x.location.y - y.location.y;
-            });
-    }, [rects, _, pendingRects, properties.appearance]);
+        const allRects = [...rects, ...pendingRects].filter((rect, i) =>
+            properties.appearance === "chat-view-images"
+                ? i > 0 || !rectIsStaticMarkdownText(rect)
+                : properties.appearance === "chat-view-text"
+                ? rectIsStaticMarkdownText(rect)
+                : true
+        );
+        return groupPartialImages(allRects);
+    }, [rects, pendingRects, properties.appearance, groupPartialImages]);
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((rect, ix) => {
             const deleteFn = async () => {
                 removePending(rect.id);
-                // TODO: make this logic smarter in the future.
-                // We don't always want to delete.
                 try {
                     await canvas?.elements.del(rect.id);
                 } catch (error) {
-                    // missing entry
-                    // TODO delete on save???
+                    // Ignore errors if the entry is already missing.
                 }
                 forceUpdate();
             };
@@ -129,8 +121,8 @@ export const Canvas = (
                             editControls={
                                 <>
                                     <button
-                                        className="btn btn-elevated  m-1 btn-icon btn-icon-sm "
-                                        disabled={ix == 0}
+                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                        disabled={ix === 0}
                                         onClick={() => {
                                             return mutate(
                                                 rect,
@@ -146,9 +138,7 @@ export const Canvas = (
                                                             return true;
                                                         }
                                                     )
-                                                        .then(() => {
-                                                            return true;
-                                                        })
+                                                        .then(() => true)
                                                         .catch((e) => {
                                                             console.error(e);
                                                             return false;
@@ -160,14 +150,13 @@ export const Canvas = (
                                         <IoIosArrowUp />
                                     </button>
                                     <button
-                                        className="btn btn-elevated  m-1 btn-icon btn-icon-sm "
+                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
                                         onClick={deleteFn}
                                     >
                                         <MdClear />
                                     </button>
-
                                     <button
-                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm "
+                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
                                         disabled={
                                             rectsToRender.length - 1 === ix
                                         }
@@ -216,7 +205,7 @@ export const Canvas = (
                         </svg>
                         {!rectIsStaticMarkdownText(rect) &&
                             properties.bgBlur && (
-                                <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2  [filter:url('#gaussianBlurCanvas')]">
+                                <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 [filter:url('#gaussianBlurCanvas')]">
                                     <Frame
                                         thumbnail={false}
                                         active={false}
@@ -235,8 +224,6 @@ export const Canvas = (
             );
         });
     };
-
-    // Exclude the first rect if it is a text content form rendering in chat-view-images appearance mode
 
     return (
         (filteredRects.length > 0 && (

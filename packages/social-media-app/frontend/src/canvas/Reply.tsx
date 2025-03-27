@@ -121,7 +121,7 @@ export const Reply = ({
             openPromise = Promise.resolve();
         }
         openPromise.then(() =>
-            canvas.loadReplies().then(() => {
+            canvas.load().then(() => {
                 canvas.replies.events.addEventListener(
                     "change",
                     debouncedListener

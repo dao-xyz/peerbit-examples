@@ -1,7 +1,6 @@
 import { ClosedError, Documents, WithContext } from "@peerbit/document";
 import { useEffect, useRef, useState } from "react";
 import * as indexerTypes from "@peerbit/indexer-interface";
-import { resolve } from "path";
 
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -74,24 +73,20 @@ export const useLocal = <
     db?: Documents<T, I>,
     options?: {
         resolve?: R;
-        debug?: boolean;
         onChanges?: (all: RT[]) => void;
         debounce?: number;
+        debug?: boolean; // add debug option here
     } & QueryOptons
 ) => {
-    // Local state to store results.
     const [all, setAll] = useState<RT[]>([]);
-
-    // useRef to store the current search function.
+    const emptyResultsRef = useRef(false);
     const changeListener = useRef<(() => void) | undefined>(undefined);
 
-    // Effect that sets up the search function and listens for DB changes.
     useEffect(() => {
         if (!db || db.closed) {
             return;
         }
 
-        // Define the search function.
         const _l = async (args?: any) => {
             try {
                 const iterator = db.index.iterate(options?.query ?? {}, {
@@ -100,43 +95,60 @@ export const useLocal = <
                     resolve: options?.resolve as any,
                 });
                 const results: WithContext<RT>[] =
-                    (await iterator.all()) as any; // TODO fix types
-                // Update the state and call onChanges if provided.
-
+                    (await iterator.all()) as any;
+                emptyResultsRef.current = results.length === 0;
                 if (options?.debug) {
-                    console.log("useLocal", { results, query: options?.query });
+                    console.log("Search results:", results);
                 }
-
                 setAll(() => {
                     options?.onChanges?.(results);
                     return results;
                 });
             } catch (error) {
                 if (error instanceof ClosedError) {
-                    // If the DB is closed, we ignore the error.
                     return;
                 }
                 throw error;
             }
         };
-        const l = debounceLeadingTrailing(_l, options?.debounce ?? 1e3);
 
-        // Update the ref with the latest search function.
-        changeListener.current = l;
+        const debounced = debounceLeadingTrailing(
+            _l,
+            options?.debounce ?? 1000
+        );
 
-        // Run the search initially.
-        l();
+        const handleChange = () => {
+            if (options?.debug) {
+                console.log(
+                    "Event triggered: emptyResultsRef =",
+                    emptyResultsRef.current
+                );
+            }
+            if (emptyResultsRef.current) {
+                debounced.cancel();
+                if (options?.debug) {
+                    console.log(
+                        "Empty results detected. Bypassing debounce for immediate search."
+                    );
+                }
+                _l();
+            } else {
+                if (options?.debug) {
+                    console.log("Non-empty results. Using debounced search.");
+                }
+                debounced();
+            }
+        };
 
-        // Add event listener for changes.
-        db.events.addEventListener("change", l);
+        changeListener.current = handleChange;
+        debounced();
+        db.events.addEventListener("change", handleChange);
 
-        // Cleanup the event listener on unmount or when dependencies change.
         return () => {
-            db.events.removeEventListener("change", l);
-            l.cancel();
+            db.events.removeEventListener("change", handleChange);
+            debounced.cancel();
         };
     }, [
-        // Ensure the search function is updated when these dependencies change.
         db?.closed ? undefined : db?.address,
         options?.id,
         options?.resolve,

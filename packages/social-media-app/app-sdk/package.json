@@ -29,7 +29,9 @@
         "react": "^18.2.0",
         "react-dom": "^18.2.0",
         "react-router-dom": "^6.27.0",
-        "react-use": "^17.4.0"
+        "react-use": "^17.4.0",
+        "@iframe-resizer/parent": "^5",
+        "@iframe-resizer/child": "^5"
     },
     "devDependencies": {},
     "scripts": {

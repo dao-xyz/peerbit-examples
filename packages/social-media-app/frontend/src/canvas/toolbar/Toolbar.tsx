@@ -53,9 +53,6 @@ export const ToolbarProvider = ({
                 draft={true}
                 multiCanvas
                 onSave={onSavePending}
-                onContentChange={(e) => {
-                    // Handle content changes if needed.
-                }}
             >
                 {children}
             </CanvasWrapper>

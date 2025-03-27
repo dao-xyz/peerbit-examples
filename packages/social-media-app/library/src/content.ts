@@ -76,6 +76,11 @@ export abstract class ElementContent {
     abstract equals(other: ElementContent): boolean;
 }
 
+abstract class CanvasReference {
+    abstract get address(): string;
+    abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
+}
+
 @variant(0)
 export class Element<T extends ElementContent = ElementContent> {
     @field({ type: fixedArray("u8", 32) })
@@ -83,6 +88,9 @@ export class Element<T extends ElementContent = ElementContent> {
 
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
+
+    @field({ type: CanvasReference })
+    canvas: CanvasReference;
 
     @field({ type: Layout })
     location: Layout;
@@ -94,12 +102,22 @@ export class Element<T extends ElementContent = ElementContent> {
         id?: Uint8Array;
         location: Layout;
         publicKey: PublicSignKey;
+        canvas: CanvasReference | Canvas;
         content: T;
     }) {
         this.location = properties.location;
         this.publicKey = properties.publicKey;
         this.content = properties.content;
         this.id = properties.id || randomBytes(32);
+        this.canvas =
+            properties.canvas instanceof Canvas
+                ? new CanvasAddressReference({ canvas: properties.canvas })
+                : properties.canvas;
+    }
+
+    private _idString: string;
+    get idString() {
+        return this._idString || (this._idString = sha256Base64Sync(this.id));
     }
 }
 
@@ -109,6 +127,9 @@ export class IndexableElement {
 
     @field({ type: Uint8Array })
     publicKey: Uint8Array;
+
+    @field({ type: "string" })
+    canvas: string;
 
     @field({ type: "string" })
     type: string;
@@ -125,12 +146,19 @@ export class IndexableElement {
         type: string;
         content: string;
         location: Layout;
+        canvas: string;
     }) {
         this.id = properties.id;
         this.publicKey = properties.publicKey.bytes;
         this.content = properties.content;
         this.type = properties.type;
         this.location = properties.location;
+        this.canvas = properties.canvas;
+    }
+
+    private _idString: string;
+    get idString() {
+        return this._idString || (this._idString = sha256Base64Sync(this.id));
     }
 }
 
@@ -191,11 +219,6 @@ export class IndexableCanvas {
     }
 }
 
-abstract class CanvasReference {
-    abstract get address(): string;
-    abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
-}
-
 @variant(0)
 export class CanvasAddressReference extends CanvasReference {
     @field({ type: "string" })
@@ -250,10 +273,19 @@ export const getImmediateRepliesQuery = (to: Canvas) => [
     }),
 ];
 
+export const getElementsQuery = (address: string) => [
+    new StringMatch({
+        key: "canvas",
+        value: address,
+        caseInsensitive: true,
+        method: StringMatchMethod.exact,
+    }),
+];
+
 @variant("canvas")
 export class Canvas extends Program {
     @field({ type: Documents })
-    elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
+    private _elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
 
     @field({ type: Documents })
     private _replies: Documents<Canvas, IndexableCanvas>; // Replies or Sub Replies
@@ -294,26 +326,26 @@ export class Canvas extends Program {
         const elementsId = (properties as { seed: Uint8Array }).seed
             ? sha256Sync((properties as { seed: Uint8Array }).seed)
             : randomBytes(32);
-        this.elements = new Documents({ id: elementsId });
+        this._elements = new Documents({ id: elementsId });
         this._replies = new Documents({ id: sha256Sync(elementsId) });
         this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
     }
 
     get id(): Uint8Array {
-        return this.elements.log.log.id;
+        return this._elements.log.log.id;
     }
 
     private _idString: string;
-    private _repliesChangeListener: (
-        evt: CustomEvent<DocumentsChange<Canvas>>
-    ) => void;
-
     get idString() {
         return this._idString || (this._idString = sha256Base64Sync(this.id));
     }
 
+    private _repliesChangeListener: (
+        evt: CustomEvent<DocumentsChange<Canvas>>
+    ) => void;
+
     async open(): Promise<void> {
-        await this.elements.open({
+        await this._elements.open({
             type: Element,
             replicate: { factor: 1 }, // TODO choose better
             canPerform: async (operation) => {
@@ -321,7 +353,10 @@ export class Canvas extends Program {
                  * Only allow updates if we created it
                  *  or from myself (this allows us to modifying someone elsecanvas locally)
                  */
-                return (
+                // TODO
+                return true;
+                /* 
+                (
                     !this.publicKey ||
                     operation.entry.signatures.find(
                         (x) =>
@@ -329,6 +364,7 @@ export class Canvas extends Program {
                             x.publicKey.equals(this.node.identity.publicKey)
                     ) != null
                 );
+                */
             },
             index: {
                 type: IndexableElement,
@@ -340,6 +376,7 @@ export class Canvas extends Program {
                         type: indexable.type,
                         content: indexable.content,
                         location: arg.location,
+                        canvas: arg.canvas.address,
                     });
                 },
             },
@@ -369,7 +406,7 @@ export class Canvas extends Program {
             // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
 
             const reIndex = async (canvas: Canvas, parent: Canvas) => {
-                await parent.loadReplies();
+                await parent.load();
                 let indexedCanvas = await parent.replies.index.get(canvas.id, {
                     resolve: false,
                 });
@@ -423,6 +460,7 @@ export class Canvas extends Program {
         }
         return path;
     }
+
     get repliesCount(): bigint {
         return this._repliesCount || 0n;
     }
@@ -445,14 +483,6 @@ export class Canvas extends Program {
             return 0n;
         }
     }
-    async getCanvasPath() {
-        const path: Canvas[] = [this];
-        for (const element of this.path) {
-            const next = await element.load(this.node);
-            path.push(next);
-        }
-        return path.reverse();
-    }
 
     async getCreateRoomByPath(path: string[]): Promise<Canvas[]> {
         const results = await this.findCanvasesByPath(path);
@@ -472,7 +502,7 @@ export class Canvas extends Program {
                     existing: "reuse",
                 });
             }
-            await currentCanvas.loadReplies();
+            await currentCanvas.load();
 
             for (let i = results.path.length; i < path.length; i++) {
                 const canvas = new Canvas({
@@ -490,7 +520,7 @@ export class Canvas extends Program {
                 const nextCanvas = await this.node.open(canvas, {
                     existing: "reuse",
                 });
-                await nextCanvas.loadReplies();
+                await nextCanvas.load();
 
                 createdPath.push(canvas);
 
@@ -503,6 +533,7 @@ export class Canvas extends Program {
                         }),
                         location: Layout.zero(),
                         publicKey: this.node.identity.publicKey,
+                        canvas: nextCanvas,
                     })
                 );
                 await currentCanvas.replies.put(nextCanvas);
@@ -557,10 +588,12 @@ export class Canvas extends Program {
     }
 
     async createTitle(): Promise<string> {
-        if (this.elements.index.closed) {
-            throw new Error("Can not create title because database is closed");
+        if (!this.loadedElements) {
+            await this.load();
         }
-        const elements = await this.elements.index.index.iterate().all();
+        const elements = await this.elements.index.index
+            .iterate({ query: getElementsQuery(this.address) })
+            .all();
         let concat = "";
         for (const element of elements) {
             if (element.value.type !== "canvas") {
@@ -573,7 +606,7 @@ export class Canvas extends Program {
         return concat;
     }
     private _topMostCanvasWithSameACL: Canvas | null | undefined = null;
-    async loadReplies() {
+    async load() {
         if (this._topMostCanvasWithSameACL) {
             return this._topMostCanvasWithSameACL;
         }
@@ -592,6 +625,10 @@ export class Canvas extends Program {
         return this._topMostCanvasWithSameACL != null || this.path.length === 0;
     }
 
+    get loadedElements() {
+        return this._topMostCanvasWithSameACL != null || this.path.length === 0;
+    }
+
     private get topMostCanvasWithSameACLLoaded() {
         if (!this._topMostCanvasWithSameACL && this.path.length > 0) {
             throw new Error("Root not found or loaded");
@@ -602,6 +639,11 @@ export class Canvas extends Program {
     get replies(): Documents<Canvas, IndexableCanvas, any> {
         const root: Canvas = this.topMostCanvasWithSameACLLoaded ?? this;
         return root._replies;
+    }
+
+    get elements(): Documents<Element, IndexableElement, any> {
+        const root: Canvas = this.topMostCanvasWithSameACLLoaded ?? this;
+        return root._elements;
     }
 }
 
@@ -637,12 +679,16 @@ export class IFrameContent extends ElementContent {
     @field({ type: "string" })
     src: string; // https://a.cool.thing.com/abc123
 
+    @field({ type: "string" })
+    orgSrc: string; // the src before any navigation. This is used to determine if the src has changed to another origin for example
+
     @field({ type: "bool" })
     resizer: boolean; // if IFrameResizer is installed on the target site
 
     constructor(properties: { src: string; resizer: boolean }) {
         super();
         this.src = properties.src;
+        this.orgSrc = properties.src;
         this.resizer = properties.resizer;
     }
 

@@ -1,33 +1,52 @@
-// @giga-app/sdk/src/HostProvider.tsx
-import React, { createContext, useContext, useEffect, useRef } from "react";
+import React, {
+    createContext,
+    useContext,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import {
     AppHost,
     AppMessage,
     ResizeMessage,
     NavigationEvent,
 } from "./client-host";
+import IFrameResizer from "./IFrameResizer";
+import { useHostRegistry } from "./HostRegistryProvider"; // import the registry hook
 
 export interface HostProviderProps {
-    children: React.ReactNode;
     /**
-     * A ref to the iframe element that hosts the embedded app.
+     * A function child that receives the iframe ref.
      */
-    iframeRef: React.RefObject<HTMLIFrameElement>;
+    children: (
+        iframeRef: React.RefObject<HTMLIFrameElement>
+    ) => React.ReactNode;
     /**
      * Optional callback for handling resize messages from the app.
      */
-    onResize?: (message: MessageEvent<ResizeMessage>) => void;
+    onResize?: (message: ResizeMessage) => void;
     /**
      * Optional callback for handling navigation messages from the app.
      */
-    onNavigate?: (message: MessageEvent<NavigationEvent>) => void;
+    onNavigate?: (message: NavigationEvent) => void;
+
+    /**
+     * The original source of the iframe. Before any navigation.
+     */
+    iframeOriginalSource: string;
 }
 
 export interface HostContextType {
     /**
      * Send a message to the embedded app.
      */
-    send: (message: AppMessage) => void;
+    send?: (message: AppMessage) => void;
+
+    /**
+     * Is the client ready?
+     */
+    ready: boolean;
 }
 
 const HostContext = createContext<HostContextType | undefined>(undefined);
@@ -40,39 +59,76 @@ export const useHost = () => {
     return context;
 };
 
-export const HostProvider = ({
+export const HostProvider: React.FC<HostProviderProps> = ({
+    iframeOriginalSource,
     children,
-    iframeRef,
     onResize,
     onNavigate,
-}: HostProviderProps) => {
+}) => {
+    const iframeRef = useRef<HTMLIFrameElement>(null);
     const hostRef = useRef<AppHost | null>(null);
+    const { registerHost, unregisterHost } = useHostRegistry();
+    const registeredFn = useRef<((args: any) => any) | undefined>(undefined);
+    const [ready, setReady] = useState(false);
 
     useEffect(() => {
         if (!iframeRef.current) return;
         hostRef.current = new AppHost({
+            iframeOriginalSource,
             iframe: iframeRef.current,
             onResize:
                 onResize ||
-                ((message) => console.log("AppHost resize:", message.data)),
+                ((message) => console.log("AppHost resize:", message)),
             onNavigate:
                 onNavigate ||
-                ((message) => console.log("AppHost navigate:", message.data)),
+                ((message) => console.log("AppHost navigate:", message)),
+            onReady: () => {
+                setReady(true);
+            },
         });
+        // Register this host's send function.
+        if (hostRef.current) {
+            registeredFn.current = hostRef.current.send.bind(hostRef.current);
+            registerHost(registeredFn.current);
+        }
+
         return () => {
-            hostRef.current?.stop();
-            hostRef.current = null;
+            if (hostRef.current) {
+                registeredFn.current && unregisterHost(registeredFn.current);
+                hostRef.current.stop();
+                hostRef.current = null;
+            }
         };
     }, [iframeRef.current]);
 
-    const send = (message: AppMessage) => {
-        if (!hostRef.current) {
-            throw new Error("HostProvider is not initialized");
-        }
-        hostRef.current.send(message);
-    };
+    const send = hostRef.current
+        ? (message: AppMessage) => {
+              hostRef.current?.send(message);
+          }
+        : undefined;
+
+    const context = useMemo(() => {
+        return {
+            send,
+            ready,
+        };
+    }, [send, ready]);
 
     return (
-        <HostContext.Provider value={{ send }}>{children}</HostContext.Provider>
+        <HostContext.Provider value={context}>
+            <IFrameResizer
+                license="GPLv3"
+                iframeRef={iframeRef}
+                onResize={(evt) => {
+                    onResize?.({
+                        height: evt.height,
+                        width: evt.width,
+                        type: "size",
+                    });
+                }}
+            >
+                {children(iframeRef)}
+            </IFrameResizer>
+        </HostContext.Provider>
     );
 };
