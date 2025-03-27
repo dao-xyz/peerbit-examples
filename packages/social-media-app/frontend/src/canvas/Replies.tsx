@@ -1,4 +1,12 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+    Fragment,
+    ReactNode,
+    useEffect,
+    useLayoutEffect,
+    useRef,
+    useState,
+} from "react";
+import debounce from "lodash.debounce";
 import {
     Canvas,
     Canvas as CanvasDB,
@@ -73,18 +81,16 @@ export const StickyHeader = ({ children }) => {
     );
 };
 
-function refIsInView(ref: React.MutableRefObject<HTMLDivElement>) {
-    if (ref.current) {
-        const boundingClientRect = ref.current.getBoundingClientRect();
-        if (
-            boundingClientRect.bottom <=
-                (window.innerHeight || document.documentElement.clientHeight) &&
-            boundingClientRect.top >= 0
-        ) {
-            return true;
-        }
-    }
-    return false;
+function getScrollBottomOffset() {
+    return Math.abs(
+        window.innerHeight +
+            window.scrollY -
+            document.documentElement.scrollHeight
+    );
+}
+
+function getScrollTop() {
+    return window.scrollY || document.documentElement.scrollTop;
 }
 
 export const Replies = (props: RepliesProps) => {
@@ -95,7 +101,7 @@ export const Replies = (props: RepliesProps) => {
     >(undefined);
     const { setView, view } = useView();
     const { peers } = useOnline(canvas);
-    const lastReplyTopRef = useRef<HTMLDivElement>(null);
+    const [userManuallyScrolled, setUserManuallyScrolled] = useState(false);
 
     useEffect(() => {
         if (!canvas) {
@@ -174,44 +180,101 @@ export const Replies = (props: RepliesProps) => {
         query
     );
 
-    const [freshToChatView, setFreshToChatView] = useState(false);
-
     // track first visit to chat view
     useEffect(() => {
-        if (view === "chat") setFreshToChatView(true);
+        window.scrollTo({
+            top: view === "chat" ? document.body.scrollHeight : 0,
+            left: 0,
+            behavior: "instant",
+        });
+        setUserManuallyScrolled(false);
     }, [view]);
 
-    // scroll bottom into View, but only when
-    // (we are in chat view)
-    //  && (
-    //      I just switched to chat-view (useEffect on view)
-    //      || (the new message is from me)
-    //      || (the last element is partly in view or exactly at bottom with d = 0 <-> I had scrolled down before)
-    // )
-    useLayoutEffect(() => {
-        setTimeout(() => {
-            // fresh to chat view
-            if (freshToChatView) {
-                window.scrollTo({
-                    top: document.body.scrollHeight,
-                    left: 0,
-                    behavior: "instant",
-                });
-                setFreshToChatView(false);
-            } else if (
-                view === "chat" &&
-                sortedReplies.length > 0 &&
-                (sortedReplies[sortedReplies.length - 1].publicKey ===
-                    peer.identity.publicKey || // last message is from me
-                    refIsInView(lastReplyTopRef)) // the top edge of last message is in view
-            )
-                window.scrollTo({
-                    top: document.body.scrollHeight,
-                    left: 0,
-                    behavior: "smooth",
-                });
-        }, 200);
-    }, [sortedReplies, lastReplyTopRef]);
+    const lastWindowHeight = useRef<number>(window.innerHeight);
+    const lastBodyHeight = useRef<number>(document.body.clientHeight);
+    const lastScrollTop = useRef<number>(getScrollTop());
+    const lastInvocationTime = useRef<number>(Date.now());
+    const lastRepliesLength = useRef<number>(sortedReplies.length);
+    const rafId = useRef<number>();
+
+    useEffect(() => {
+        const throttleDelay = 50;
+        const checkSize = () => {
+            const now = Date.now();
+
+            if (now - lastInvocationTime.current >= throttleDelay) {
+                const currentWindowHeight = window.innerHeight;
+                const currentBodyHeight = document.documentElement.scrollHeight;
+                const currentScrollTop = getScrollTop();
+
+                // user resized the browser
+                if (lastWindowHeight.current !== currentWindowHeight) {
+                    if (
+                        view === "chat" &&
+                        sortedReplies.length > 0 &&
+                        !userManuallyScrolled
+                    ) {
+                        window.scrollTo({
+                            top: document.body.scrollHeight,
+                            left: 0,
+                            behavior: "instant",
+                        });
+                        if (getScrollBottomOffset() < 10) {
+                            setUserManuallyScrolled(false);
+                        }
+                    }
+                    lastWindowHeight.current = currentWindowHeight;
+                }
+                // body height changed
+                else if (lastBodyHeight.current !== currentBodyHeight) {
+                    if (
+                        view === "chat" &&
+                        sortedReplies.length > 0 &&
+                        (!userManuallyScrolled ||
+                            (sortedReplies[sortedReplies.length - 1]
+                                .publicKey === peer.identity.publicKey &&
+                                sortedReplies.length !==
+                                    lastRepliesLength.current))
+                    ) {
+                        window.scrollTo({
+                            top: document.body.scrollHeight,
+                            left: 0,
+                            behavior: "smooth",
+                        });
+                        if (getScrollBottomOffset() < 10) {
+                            setUserManuallyScrolled(false);
+                        }
+                    }
+                    lastBodyHeight.current = currentBodyHeight;
+                }
+                // on scroll set that the user scrolled.
+                else if (lastScrollTop.current !== currentScrollTop) {
+                    if (getScrollBottomOffset() >= 10)
+                        setUserManuallyScrolled(true);
+                    lastScrollTop.current = currentScrollTop;
+                }
+
+                if (sortedReplies.length !== lastRepliesLength.current) {
+                    lastRepliesLength.current = sortedReplies.length;
+                }
+
+                lastInvocationTime.current = now;
+            }
+
+            // Continue requesting frames
+            rafId.current = requestAnimationFrame(checkSize);
+        };
+
+        // Start the loop
+        rafId.current = requestAnimationFrame(checkSize);
+
+        // Cleanup on unmount
+        return () => {
+            if (rafId.current !== undefined) {
+                cancelAnimationFrame(rafId.current);
+            }
+        };
+    }, [view, sortedReplies, userManuallyScrolled, peer.identity.publicKey]);
 
     return (
         <div className="flex flex-col mt-10 ">
@@ -271,13 +334,6 @@ export const Replies = (props: RepliesProps) => {
                                         : "h-10"
                                 )}
                             ></div>
-                            {/* Marker before last message */}
-                            {i === sortedReplies.length - 1 && (
-                                <div
-                                    ref={lastReplyTopRef}
-                                    className="w-full h-0"
-                                ></div>
-                            )}
                             <Reply
                                 key={reply.idString}
                                 canvas={reply}
