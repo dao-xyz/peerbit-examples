@@ -1,13 +1,18 @@
-import { forwardRef, useEffect, useState } from "react";
+import React, { forwardRef, useEffect, useState } from "react";
 import { useCanvas } from "../CanvasWrapper";
 import { Canvas } from "../Canvas";
 import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
-import { FaPlus } from "react-icons/fa";
+import { MdAdd as FaPlus } from "react-icons/md";
 import { SaveButton } from "../SaveCanvasButton";
-import { BsCamera } from "react-icons/bs";
-import { BsArrowsFullscreen, BsArrowsCollapse } from "react-icons/bs";
-import { rectIsStaticImage, rectIsStaticMarkdownText } from "../utils/rect";
+import { FiSend } from "react-icons/fi";
+import { BsCamera, BsArrowsCollapse } from "react-icons/bs";
 import { useToolbar } from "./Toolbar";
+import { useApps } from "../../content/useApps";
+import { AppButton } from "./AppButton";
+import { SimpleWebManifest } from "@dao-xyz/social";
+import * as Toggle from "@radix-ui/react-toggle";
+import { useAiReply } from "../../ai/AiReplyProvider";
+import VscRobot from "/vscrobot.svg";
 
 interface ToolbarContentProps {
     onToggleAppSelect: () => void;
@@ -16,77 +21,61 @@ interface ToolbarContentProps {
 
 const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
     (props, ref) => {
-        const { isEmpty, pendingRects } = useCanvas();
+        const {
+            isEmpty,
+            text,
+            savePending,
+            insertDefault,
+            setRequestAIReply,
+            requestAIReply,
+        } = useCanvas();
+
         const { fullscreenEditorActive, setFullscreenEditorActive } =
             useToolbar();
-        const [fullscreenAutomaticallyOnce, setFullscreenAutomaticallyOnce] =
-            useState(false);
+        const { search } = useApps();
+        const [resolvedApp, setResolvedApp] =
+            useState<null | SimpleWebManifest>(null);
 
-        const toggleFullscreen = () => {
-            setFullscreenEditorActive((prev) => !prev);
-        };
-
+        // Try to resolve a matching app when the text changes.
         useEffect(() => {
-            // only do automatic fullscreen behaviour once
-            if (fullscreenAutomaticallyOnce) {
-                return;
+            const trimmed = text?.trim();
+            if (trimmed) {
+                search(trimmed).then((apps) => {
+                    setResolvedApp(apps[0] || null);
+                });
+            } else {
+                setResolvedApp(null);
             }
-            // if we have 2 or more text elements, go fullscreen
-            // if we have a non static content, go fullscreen
-            // TODO if apps are in pending state, go fullscreen
+        }, [text, search]);
 
-            let fullScreenForNonStaticContent = pendingRects.some(
-                (rect) =>
-                    !rectIsStaticMarkdownText(rect) && !rectIsStaticImage(rect)
-            );
-            let fullScreenForText =
-                !fullScreenForNonStaticContent &&
-                pendingRects.filter((rect) => rectIsStaticMarkdownText(rect))
-                    .length > 1;
-            if (fullScreenForNonStaticContent || fullScreenForText) {
-                setFullscreenEditorActive(true);
-                setFullscreenAutomaticallyOnce(true);
-            }
-        }, [pendingRects]);
+        const AddButton = () => (
+            <button
+                onClick={props.onToggleAppSelect}
+                className="btn btn-icon p-0 m-0"
+            >
+                <FaPlus
+                    className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300 ${
+                        props.appSelectOpen ? "rotate-45" : "rotate-0"
+                    }`}
+                />
+            </button>
+        );
 
-        const showFullscreenEditor =
-            pendingRects.some((rect) => !rectIsStaticMarkdownText(rect)) ||
-            pendingRects.some(
-                (rect) =>
-                    rectIsStaticMarkdownText(rect) &&
-                    rect.content.content.text.length > 0
-            );
-
+        // Fullscreen mode: retain your existing layout.
         if (fullscreenEditorActive) {
             return (
                 <div ref={ref} className="flex flex-col z-20 w-full left-0">
-                    {/* Fullscreen mode layout */}
                     <div className="flex flex-col h-full">
-                        {/* Canvas wrapper: scrollable only on this area */}
-                        {/* Bottom toolbar: not part of the scrolling area */}
-                        <div className="flex-shrink-0 flex items-center  bg-neutral-50 dark:bg-neutral-950 box-border p-4 mb-4">
-                            <div className="flex flex-row items-center gap-2">
-                                <button
-                                    onClick={props.onToggleAppSelect}
-                                    className="btn btn-icon btn-icon-md"
-                                >
-                                    <FaPlus
-                                        className={`btn-icon-md transition-transform duration-300 ${
-                                            props.appSelectOpen
-                                                ? "rotate-45"
-                                                : "rotate-0"
-                                        }`}
-                                    />
-                                </button>
-                            </div>
+                        <div className="flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-950 p-4">
+                            {AddButton()}
                             <button
                                 className="btn btn-icon btn-icon-md ml-auto"
-                                onClick={toggleFullscreen}
+                                onClick={() => setFullscreenEditorActive(false)}
                             >
                                 <BsArrowsCollapse />
                             </button>
                             {isEmpty ? (
-                                <ImageUploadTrigger className="btn-icon btn-icon-md flex items-center justify-center">
+                                <ImageUploadTrigger className="btn btn-icon btn-icon-md flex items-center justify-center">
                                     <BsCamera />
                                 </ImageUploadTrigger>
                             ) : (
@@ -102,59 +91,74 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             );
         }
 
-        // Non-fullscreen layout remains unchanged.
         return (
-            <div ref={ref} className="flex flex-col z-20 w-full left-0">
-                {/* Top area: single plus button for images */}
-                <Canvas appearance="chat-view-images">
-                    <ImageUploadTrigger className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white">
-                        <FaPlus className="btn-icon-md" />
-                    </ImageUploadTrigger>
-                </Canvas>
-
-                {/* Bottom area: integrated one-row controls */}
-                <div className="flex items-end bg-neutral-50 dark:bg-neutral-950 flex-shrink-0 box-border p-4">
-                    <div className="flex flex-row items-center gap-2">
-                        <button
-                            onClick={props.onToggleAppSelect}
-                            className="btn btn-icon btn-icon-md"
-                        >
-                            <FaPlus
-                                className={`btn-icon-md transition-transform duration-300 ${
-                                    props.appSelectOpen
-                                        ? "rotate-45"
-                                        : "rotate-0"
-                                }`}
-                            />
-                        </button>
-                    </div>
-
-                    <div className="w-full h-full">
+            <>
+                <div
+                    ref={ref}
+                    className="flex flex-col z-20 w-full left-0 rounded bg-neutral-100 dark:bg-neutral-900"
+                >
+                    {/* First row: Input field */}
+                    <div className="pt-2">
                         <Canvas
                             fitWidth
                             draft={true}
                             appearance="chat-view-text"
+                            className="rounded"
                         />
                     </div>
 
-                    {showFullscreenEditor && (
-                        <button
-                            className="btn btn-icon btn-icon-md ml-auto"
-                            onClick={toggleFullscreen}
-                        >
-                            <BsArrowsFullscreen />
-                        </button>
-                    )}
+                    {/* Second row: Toolbar buttons */}
+                    <div className="flex items-center p-1 h-full">
+                        {/* Left: Plus button */}
+                        {AddButton()}
 
-                    {isEmpty ? (
-                        <ImageUploadTrigger className="btn btn-icon btn-icon-md flex items-center justify-center">
-                            <BsCamera />
-                        </ImageUploadTrigger>
-                    ) : (
-                        <SaveButton />
-                    )}
+                        {/* AI reply button */}
+                        <Toggle.Root
+                            onPressedChange={(e) => {
+                                setRequestAIReply(e);
+                            }}
+                            pressed={requestAIReply}
+                            className="btn btn-toggle h-max flex flex-row pt-0 pb-0 px-2"
+                            aria-label="Toggle italic"
+                        >
+                            <div className="flex flex-row items-center gap-2">
+                                <img
+                                    src={VscRobot}
+                                    className="w-4 h-4 dark:invert"
+                                    alt="AI reply"
+                                />
+                                <span className="ganja-font">AI reply</span>
+                            </div>
+                        </Toggle.Root>
+
+                        {/* Center: Space for additional buttons */}
+                        <div className="flex justify-center ml-auto">
+                            {resolvedApp && (
+                                <AppButton
+                                    app={resolvedApp}
+                                    onClick={() =>
+                                        insertDefault({
+                                            app: resolvedApp,
+                                            increment: true,
+                                        }).then(() => savePending())
+                                    }
+                                    className="btn items-center px-2 p-1"
+                                    orientation="horizontal"
+                                    showTitle={true}
+                                />
+                            )}
+                        </div>
+
+                        {/* Right: Send button */}
+                        <button
+                            onClick={() => savePending()}
+                            className="btn btn-icon btn-icon-md"
+                        >
+                            <FiSend className="btn-icon-sm" />
+                        </button>
+                    </div>
                 </div>
-            </div>
+            </>
         );
     }
 );

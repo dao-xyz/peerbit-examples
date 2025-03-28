@@ -1,5 +1,6 @@
 import { field, variant } from '@dao-xyz/borsh';
 import { AbstractStaticContent } from './content.js';
+import { NATIVE_TEXT_APP_URL } from '../types.js';
 
 @variant(0)
 export class StaticMarkdownText extends AbstractStaticContent {
@@ -25,5 +26,9 @@ export class StaticMarkdownText extends AbstractStaticContent {
 
     equals(other: StaticMarkdownText): boolean {
         return this.text === other.text;
+    }
+
+    get nativeAddress() {
+        return NATIVE_TEXT_APP_URL
     }
 }

@@ -11,6 +11,15 @@ describe("index", () => {
         expect(response.length).to.be.greaterThan(3);
     });
 
+    it("one letter yields not reasults", async () => {
+        const { search } = getApps({
+            host: "www.host.com",
+            mode: "development",
+        });
+        const response = await search("h");
+        expect(response.length).to.be.equal(0);
+    });
+
     it("resolve 'imag' partial", async () => {
         const { search } = getApps({
             host: "www.host.com",

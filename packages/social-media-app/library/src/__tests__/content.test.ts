@@ -1,14 +1,28 @@
 import { TestSession } from "@peerbit/test-utils";
 import {
     Canvas,
-    getElementsQuery,
     getImmediateRepliesQuery,
+    getOwnedAndSubownedElementsQuery,
     getRepliesQuery,
+    getOwnedElementsQuery,
+    Element,
+    StaticContent,
+    Layout,
+    getTextElementsQuery,
+    getImagesQuery,
+    getSubownedElementsQuery,
 } from "../content.js";
-import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
+import {
+    SearchRequest,
+    Sort,
+    SortDirection,
+    StringMatch,
+} from "@peerbit/document";
 import { expect } from "chai";
-import { waitForResolved } from "@peerbit/time";
+import { delay, waitForResolved } from "@peerbit/time";
 import { Ed25519Keypair } from "@peerbit/crypto";
+import { StaticImage } from "../static/image.js";
+import { NATIVE_TEXT_APP_URL } from "../types.js";
 
 describe("content", () => {
     describe("canvas", () => {
@@ -196,6 +210,111 @@ describe("content", () => {
             });
         });
 
+        describe("elements", async () => {
+            it("can query by ownership", async () => {
+                const root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                const [a] = await root.getCreateRoomByPath(["a"]);
+                await root.getCreateRoomByPath(["a", "b1"]);
+                await root.getCreateRoomByPath(["a", "b2"]);
+
+                expect(await a.createTitle()).to.eq("a");
+
+                const allSubElements = await a.elements.index
+                    .iterate({
+                        query: getOwnedAndSubownedElementsQuery(a),
+                    })
+                    .all();
+                expect(allSubElements).to.have.length(3);
+
+                const ownedElements = await a.elements.index
+                    .iterate({
+                        query: getOwnedElementsQuery(a),
+                    })
+                    .all();
+
+                expect(ownedElements).to.have.length(1);
+
+                const subOwnedElements = await a.elements.index
+                    .iterate({
+                        query: getSubownedElementsQuery(a),
+                    })
+                    .all();
+
+                expect(subOwnedElements).to.have.length(2);
+            });
+
+            it("can query by type", async () => {
+                const root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                const [a] = await root.getCreateRoomByPath(["a"]);
+                await root.getCreateRoomByPath(["a", "b1"]);
+
+                const subcanvasWithImage = await session.peers[0].open(
+                    new Canvas({
+                        parent: a,
+                        publicKey: session.peers[0].identity.publicKey,
+                    })
+                );
+                await subcanvasWithImage.load();
+                await subcanvasWithImage.elements.put(
+                    new Element({
+                        content: new StaticContent({
+                            content: new StaticImage({
+                                data: new Uint8Array([1, 2, 3, 4]),
+                                height: 100,
+                                width: 100,
+                                mimeType: "image/png",
+                            }),
+                        }),
+                        parent: subcanvasWithImage,
+                        location: Layout.zero(),
+                        publicKey: session.peers[0].identity.publicKey,
+                    })
+                );
+
+                await a.load();
+                await a.replies.put(subcanvasWithImage);
+
+                const ownedElements = await a.elements.index
+                    .iterate({
+                        query: getOwnedAndSubownedElementsQuery(a),
+                    })
+                    .all();
+
+                expect(ownedElements).to.have.length(3); // self + (text reply + image reply)
+
+                const ownedTextElements = await a.elements.index
+                    .iterate({
+                        query: [
+                            ...getOwnedAndSubownedElementsQuery(a),
+                            getTextElementsQuery(),
+                        ],
+                    })
+                    .all();
+
+                expect(ownedTextElements).to.have.length(2); // self + text reply
+
+                const ownedImageElements = await a.elements.index
+                    .iterate({
+                        query: [
+                            ...getOwnedAndSubownedElementsQuery(a),
+                            getImagesQuery(),
+                        ],
+                    })
+                    .all();
+
+                expect(ownedImageElements).to.have.length(1); // image reply
+            });
+        });
         /*  it("determinstic with seed", async () => {
              let seed = new Uint8Array([0, 1, 2]);
              const rootA = await session.peers[0].open(

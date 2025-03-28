@@ -11,6 +11,9 @@ import { Header } from "./header/Header.js";
 import { Toolbar, ToolbarProvider } from "./toolbar/Toolbar.js";
 import { FullscreenEditor } from "./toolbar/FullscreenEditor.js";
 import pDefer from "p-defer";
+import { useReplyProgress } from "./useReplyProgress.js";
+import { ProfileButton } from "../profile/ProfileButton.js";
+import { TbBubbleText } from "react-icons/tb";
 
 export const CanvasAndReplies = () => {
     const { peer } = usePeer();
@@ -37,15 +40,26 @@ export const CanvasAndReplies = () => {
         CanvasDB | undefined
     >(undefined);
 
+    const { getReplying, registerCanvas } = useReplyProgress();
+
     useEffect(() => {
-        if (peer && lastCanvas)
+        if (peer && lastCanvas) {
             setPendingCanvasState(
                 new CanvasDB({
                     publicKey: peer.identity.publicKey,
                     parent: lastCanvas,
                 })
             );
+            console.log("register", lastCanvas);
+            registerCanvas(lastCanvas);
+        }
     }, [lastCanvas?.idString, peer?.identity.publicKey.hashcode()]);
+
+    // Get replying peers for the current canvas via global context.
+    const replyingPeers =
+        lastCanvas && lastCanvas.closed === false
+            ? getReplying(lastCanvas.address)
+            : [];
 
     const pendingCanvas = useProgram(pendingCanvasState, {
         id: pendingCanvasState?.idString,
@@ -127,6 +141,27 @@ export const CanvasAndReplies = () => {
                     </div>
                 </FullscreenEditor>
             </div>
+            {/* Replying peers indicator (placed above the toolbar) */}
+            {lastCanvas && replyingPeers.length > 0 && (
+                <div className="w-full h-0 mt-[-20px]  flex items-center gap-2 justify-center">
+                    <div className="ml-auto flex items-center space-x-1">
+                        {replyingPeers.slice(0, 3).map((peerKey) => (
+                            <ProfileButton
+                                key={peerKey.toString()}
+                                publicKey={peerKey}
+                                size={20}
+                                className="rounded-full overflow-hidden"
+                            />
+                        ))}
+                        {/* TODO show dots? {replyingPeers.length > 3 && <span className="text-xs text-gray-600">...</span>} */}
+                        <TbBubbleText
+                            className="ml-[-10px] mt-[-30px]"
+                            size={24}
+                        />
+                    </div>
+                </div>
+            )}
+
             <div className="sticky z-20 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950">
                 <Toolbar ref={toolbarRef} />
             </div>

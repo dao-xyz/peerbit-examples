@@ -1,6 +1,7 @@
 import { field, variant } from "@dao-xyz/borsh";
 import { AbstractStaticContent } from "./content.js";
 import { concat, equals } from "uint8arrays";
+import { NATIVE_IMAGE_APP_URL, NATIVE_PARTIAL_IMAGE_APP_URL, NATIVE_PREFIX } from "../types.js";
 
 /**
  * Full image data stored as raw binary (Uint8Array).
@@ -61,6 +62,11 @@ export class StaticImage extends AbstractStaticContent {
             this.caption === other.caption
         );
     }
+
+    get nativeAddress() {
+        return NATIVE_IMAGE_APP_URL;
+    }
+
 }
 
 /**
@@ -171,5 +177,9 @@ export class StaticPartialImage extends AbstractStaticContent {
             alt: meta.alt,
             caption: meta.caption,
         });
+    }
+
+    get nativeAddress() {
+        return NATIVE_PARTIAL_IMAGE_APP_URL;
     }
 }

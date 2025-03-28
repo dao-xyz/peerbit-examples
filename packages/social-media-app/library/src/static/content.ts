@@ -5,6 +5,8 @@ export abstract class AbstractStaticContent {
 
     abstract equals(other: AbstractStaticContent): boolean;
 
+    abstract get nativeAddress();
+
     // it should support an empty constructor
     constructor() { }
 }

@@ -201,6 +201,9 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             }),
             {
                 existing: "reuse",
+                args: {
+                    debug: true,
+                },
             }
         )
             .then(async (result) => {
@@ -218,7 +221,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                                 text: GIGA_ROOT_POST,
                             }),
                         }),
-                        canvas: result,
+                        parent: result,
                     })
                 );
                 loading.current = undefined;

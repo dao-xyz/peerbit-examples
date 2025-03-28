@@ -4,6 +4,8 @@ import {
     StaticImage,
     StaticMarkdownText,
     SimpleWebManifest,
+    NATIVE_TEXT_APP_URL,
+    NATIVE_IMAGE_APP_URL,
 } from "@dao-xyz/social";
 import {
     SearchRequest,
@@ -12,11 +14,6 @@ import {
     StringMatchMethod,
 } from "@peerbit/document";
 import { AppPreview } from "./remote";
-
-// ─────────────────────────────────────────────────────────────
-// Native app URL constants.
-export const NATIVE_TEXT_APP_URL = "native:text";
-export const NATIVE_IMAGE_APP_URL = "native:image";
 
 // External app URLs based on mode.
 const STREAMING_APP = (mode?: string) =>
@@ -196,7 +193,7 @@ export const curatedWebApps: (mode?: string) => CuratedWebApp[] = (
     // FigJam (Figma board)
     {
         type: "web",
-        match: ["https://www.figma.com/board/"],
+        match: ["https://www.figma.com/board/", "figma", "figjam"],
         transformer: (query: string) => {
             try {
                 const urlObj = new URL(query);
@@ -363,7 +360,11 @@ const getCurated = (properties: {
     host: string;
     mode: string;
 }): CuratedAppNative | CuratedWebApp | undefined => {
-    const lowerQuery = properties.rawInput.toLowerCase();
+    const lowerQuery = properties.rawInput.trim().toLowerCase();
+    if (lowerQuery.length < 2) {
+        // TODO do this better so we dont match https:// or www.
+        return undefined;
+    }
     return allCuratedApps(properties.mode).find((app) => {
         const matches = Array.isArray(app.match) ? app.match : [app.match];
         return matches.some((m) => {

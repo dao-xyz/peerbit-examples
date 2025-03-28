@@ -27,7 +27,6 @@ const ThemedIframe = (properties: {
         <iframe
             ref={properties.iframeRef}
             onLoad={(evt) => {
-                console.log("IFRAME LOAD EVENT", properties.src);
                 properties.onLoad(evt);
             }}
             style={{

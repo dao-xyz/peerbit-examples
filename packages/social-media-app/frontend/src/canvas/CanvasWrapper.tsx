@@ -15,10 +15,10 @@ import {
     ElementContent,
     StaticContent,
     StaticMarkdownText,
-    getElementsQuery,
     StaticPartialImage,
     StaticImage,
     SimpleWebManifest,
+    getOwnedElementsQuery,
 } from "@dao-xyz/social";
 import { fromBase64, sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
@@ -30,6 +30,8 @@ import {
     rectIsStaticMarkdownText,
     rectIsStaticPartialImage,
 } from "./utils/rect.js";
+import { useReplyProgress } from "./useReplyProgress.js";
+import { useAiReply } from "../ai/AiReplyProvider.js";
 
 interface CanvasContextType {
     editMode: boolean;
@@ -65,6 +67,9 @@ interface CanvasContextType {
         text: Element[];
         other: Element[];
     };
+    text: string;
+    setRequestAIReply: (boolean: boolean) => void;
+    requestAIReply: boolean;
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -102,12 +107,15 @@ export const CanvasWrapper = ({
         id: canvasDB?.idString,
         keepOpenOnUnmount: true,
     });
+    const { generateReply } = useAiReply();
+    const [requestAIReply, setRequestAIReply] = useState(false);
 
     const { getCuratedNativeApp: getNativeApp } = useApps();
     const { showError } = useErrorDialog();
 
     const [editMode, setEditMode] = useState(!!draft);
     const [isEmpty, setIsEmpty] = useState(true);
+    const { announceReply } = useReplyProgress();
 
     const resizeSizes = useRef(
         new Map<number, { width: number; height: number }>()
@@ -120,7 +128,7 @@ export const CanvasWrapper = ({
                 !canvas || canvas.closed
                     ? undefined
                     : {
-                          query: getElementsQuery(canvas.address),
+                          query: getOwnedElementsQuery(canvas),
                           sort: new Sort({ key: ["location", "y"] }),
                       },
         }
@@ -129,6 +137,7 @@ export const CanvasWrapper = ({
     const pendingCounter = useRef(0);
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
     const latestBreakpoint = useRef<"xxs" | "md">("md");
+    const [text, setText] = useState<string | undefined>(); // this is a variable that holds the aggregated available text in the canvas
 
     const getOptimalInsertLocation = (content: ElementContent) => {
         if (rectIsStaticMarkdownText({ content })) {
@@ -180,7 +189,6 @@ export const CanvasWrapper = ({
             equals(pending.id, rect.id)
         );
         const index = rects.findIndex((pending) => equals(pending.id, rect.id));
-        console.log("MUTATE START", { pending });
         if (pending) {
             await fn(pending, index);
             return;
@@ -234,7 +242,7 @@ export const CanvasWrapper = ({
         const yStrategy = options.y ?? "optimize";
         await canvas.load();
         const allCurrentRects = await canvas.elements.index.search({
-            query: getElementsQuery(canvas.address),
+            query: getOwnedElementsQuery(canvas),
         });
         const allPending = pendingRects;
         const all = [...allCurrentRects, ...allPending];
@@ -272,7 +280,7 @@ export const CanvasWrapper = ({
                     h: 1,
                 }),
                 content,
-                canvas,
+                parent: canvas,
             });
             if (options.pending) {
                 setPendingRects((prev) => {
@@ -451,7 +459,37 @@ export const CanvasWrapper = ({
             if (draft && onSave) {
                 await onSave();
             }
+
             console.log("savePending!", pendingToSave, draft, onSave);
+            if (requestAIReply) {
+                generateReply(canvas).then((cvs) => {
+                    console.log("AI Reply generated", cvs);
+                    peer.open(
+                        new CanvasDB({
+                            parent: canvas,
+                            publicKey: peer.identity.publicKey,
+                        }),
+                        { existing: "reuse" }
+                    ).then(async (newCanvas) => {
+                        await newCanvas.load();
+                        newCanvas.elements
+                            .put(
+                                new Element({
+                                    content: new StaticContent({
+                                        content: new StaticMarkdownText({
+                                            text: `**AI Thinks:**\n\n${cvs}`,
+                                        }),
+                                    }),
+                                    location: Layout.zero(),
+                                    publicKey: peer.identity.publicKey,
+                                    parent: newCanvas,
+                                })
+                            )
+                            .then(() => canvas.replies.put(newCanvas));
+                    });
+                });
+            }
+
             setIsEmpty(true);
             return pendingToSave;
         } catch (error) {
@@ -488,7 +526,21 @@ export const CanvasWrapper = ({
         !canvas || canvas?.closed ? undefined : canvas.address,
     ]);
 
-    const _onContentChange = (element: Element) => {
+    const _onContentChange = async (element: Element) => {
+        // we only have 1 element and the elemnt is a text element then set the aggregated text
+        if (
+            rects.length === 0 &&
+            pendingRects.length === 1 &&
+            rectIsStaticMarkdownText(element)
+        ) {
+            setText(element.content.content.text);
+        }
+
+        if (rectIsStaticMarkdownText(element)) {
+            const parent = await canvas.loadParent();
+            announceReply(parent);
+        }
+
         if (!element.content.isEmpty) {
             setIsEmpty(false);
         } else {
@@ -535,7 +587,7 @@ export const CanvasWrapper = ({
                     id: rep.id,
                     location: rep.location,
                     content: new StaticContent({ content: combinedImage }),
-                    canvas,
+                    parent: canvas,
                 });
                 finalRects.push(combinedRect);
             } else {
@@ -583,6 +635,9 @@ export const CanvasWrapper = ({
         mutate,
         groupPartialImages,
         separateAndSortRects,
+        text,
+        requestAIReply,
+        setRequestAIReply,
     };
 
     return (

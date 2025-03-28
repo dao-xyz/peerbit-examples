@@ -4,7 +4,7 @@ import { expect } from "chai";
 import { Profiles } from "../profile.js";
 import { Connection, Device, Identities } from "../identity.js";
 import { randomBytes } from "@peerbit/crypto";
-import { delay, waitForResolved } from "@peerbit/time";
+import { waitForResolved } from "@peerbit/time";
 
 describe("profile", () => {
     let session: TestSession;
@@ -99,6 +99,7 @@ describe("profile", () => {
             session.peers[1].identity.publicKey,
             identities2
         );
+
         expect(profileFromDevice2).to.not.be.undefined;
     });
 });

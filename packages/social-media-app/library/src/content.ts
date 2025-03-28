@@ -4,6 +4,7 @@ import {
     Documents,
     DocumentsChange,
     IntegerCompare,
+    Or,
     SearchRequest,
     StringMatch,
     StringMatchMethod,
@@ -18,6 +19,13 @@ import {
 import { Program, ProgramClient } from "@peerbit/program";
 import { AbstractStaticContent } from "./static/content";
 import { StaticMarkdownText } from "./static";
+import {
+    NATIVE_IMAGE_APP_URL,
+    NATIVE_PARTIAL_IMAGE_APP_URL,
+    NATIVE_TEXT_APP_URL,
+} from "./types";
+import { RPC } from "@peerbit/rpc";
+import { concat } from "uint8arrays";
 
 @variant(0)
 export class Layout {
@@ -81,6 +89,28 @@ abstract class CanvasReference {
     abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
 }
 
+const resolvePathFromProperties = (
+    properties: PathProperties
+): CanvasReference[] => {
+    if ("parent" in properties) {
+        return [
+            ...properties.parent.path,
+            new CanvasAddressReference({
+                canvas: properties.parent.address,
+            }),
+        ];
+    } else {
+        return properties["path"] ?? [];
+    }
+};
+
+type PathProperties =
+    | {
+          parent: Canvas;
+      }
+    | { path: CanvasReference[] }
+    | {};
+
 @variant(0)
 export class Element<T extends ElementContent = ElementContent> {
     @field({ type: fixedArray("u8", 32) })
@@ -89,8 +119,8 @@ export class Element<T extends ElementContent = ElementContent> {
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
-    @field({ type: CanvasReference })
-    canvas: CanvasReference;
+    @field({ type: vec(CanvasReference) })
+    path: CanvasReference[];
 
     @field({ type: Layout })
     location: Layout;
@@ -98,21 +128,19 @@ export class Element<T extends ElementContent = ElementContent> {
     @field({ type: ElementContent })
     content: T;
 
-    constructor(properties: {
-        id?: Uint8Array;
-        location: Layout;
-        publicKey: PublicSignKey;
-        canvas: CanvasReference | Canvas;
-        content: T;
-    }) {
+    constructor(
+        properties: {
+            id?: Uint8Array;
+            location: Layout;
+            publicKey: PublicSignKey;
+            content: T;
+        } & PathProperties
+    ) {
         this.location = properties.location;
         this.publicKey = properties.publicKey;
         this.content = properties.content;
         this.id = properties.id || randomBytes(32);
-        this.canvas =
-            properties.canvas instanceof Canvas
-                ? new CanvasAddressReference({ canvas: properties.canvas })
-                : properties.canvas;
+        this.path = resolvePathFromProperties(properties);
     }
 
     private _idString: string;
@@ -129,10 +157,13 @@ export class IndexableElement {
     publicKey: Uint8Array;
 
     @field({ type: "string" })
-    canvas: string;
-
-    @field({ type: "string" })
     type: string;
+
+    @field({ type: vec("string") })
+    path: string[]; // address path
+
+    @field({ type: "u32" })
+    pathDepth: number;
 
     @field({ type: "string" })
     content: string;
@@ -146,14 +177,15 @@ export class IndexableElement {
         type: string;
         content: string;
         location: Layout;
-        canvas: string;
+        path: string[];
     }) {
         this.id = properties.id;
         this.publicKey = properties.publicKey.bytes;
         this.content = properties.content;
         this.type = properties.type;
         this.location = properties.location;
-        this.canvas = properties.canvas;
+        this.path = properties.path;
+        this.pathDepth = properties.path.length;
     }
 
     private _idString: string;
@@ -250,16 +282,10 @@ export class CanvasAddressReference extends CanvasReference {
     }
 }
 
-export const getRepliesQuery = (to: Canvas) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-];
-
-export const getImmediateRepliesQuery = (to: Canvas) => [
+export const getImmediateRepliesQuery = (to: {
+    address: string;
+    path: any[];
+}) => [
     new StringMatch({
         key: "path",
         value: to.address,
@@ -273,22 +299,107 @@ export const getImmediateRepliesQuery = (to: Canvas) => [
     }),
 ];
 
-export const getElementsQuery = (address: string) => [
+export const getRepliesQuery = (to: { address: string }) => [
     new StringMatch({
-        key: "canvas",
-        value: address,
+        key: "path",
+        value: to.address,
         caseInsensitive: true,
         method: StringMatchMethod.exact,
     }),
 ];
 
+export const getOwnedElementsQuery = (to: { address: string; path: any[] }) => [
+    new StringMatch({
+        key: "path",
+        value: to.address,
+        caseInsensitive: true,
+        method: StringMatchMethod.exact,
+    }),
+    new IntegerCompare({
+        key: "pathDepth",
+        value: to.path.length + 1,
+        compare: Compare.Equal,
+    }),
+];
+
+export const getOwnedAndSubownedElementsQuery = (to: { address: string }) => [
+    new StringMatch({
+        key: "path",
+        value: to.address,
+        caseInsensitive: true,
+        method: StringMatchMethod.exact,
+    }),
+];
+
+export const getSubownedElementsQuery = (to: {
+    address: string;
+    path: any[];
+}) => [
+    new StringMatch({
+        key: "path",
+        value: to.address,
+        caseInsensitive: true,
+        method: StringMatchMethod.exact,
+    }),
+    new IntegerCompare({
+        key: "pathDepth",
+        value: to.path.length + 1,
+        compare: Compare.Greater,
+    }),
+];
+
+export const getTextElementsQuery = () =>
+    new StringMatch({
+        key: "type",
+        value: NATIVE_TEXT_APP_URL,
+        caseInsensitive: true,
+        method: StringMatchMethod.exact,
+    });
+
+export const getImagesQuery = () =>
+    new Or([
+        new StringMatch({
+            key: "type",
+            value: NATIVE_IMAGE_APP_URL,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+        new StringMatch({
+            key: "type",
+            value: NATIVE_PARTIAL_IMAGE_APP_URL,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+    ]);
+
+export abstract class CanvasMessage {}
+
+@variant(0)
+export class ReplyingInProgresss extends CanvasMessage {
+    @field({ type: CanvasReference })
+    reference: CanvasReference;
+
+    constructor(properties: { reference: CanvasReference | Canvas }) {
+        super();
+        this.reference =
+            properties.reference instanceof CanvasReference
+                ? properties.reference
+                : new CanvasAddressReference({
+                      canvas: properties.reference,
+                  });
+    }
+}
+type CanvasArgs = { debug?: boolean };
 @variant("canvas")
-export class Canvas extends Program {
+export class Canvas extends Program<CanvasArgs> {
     @field({ type: Documents })
     private _elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
 
     @field({ type: Documents })
     private _replies: Documents<Canvas, IndexableCanvas>; // Replies or Sub Replies
+
+    @field({ type: RPC })
+    private _messages: RPC<CanvasMessage, CanvasMessage>;
 
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
@@ -300,28 +411,16 @@ export class Canvas extends Program {
     replyTo: CanvasReference[];
 
     constructor(
-        properties: (
-            | { path: CanvasReference[] }
-            | { parent: Canvas }
-            | { seed: Uint8Array }
-        ) & {
+        properties: { seed?: Uint8Array } & {
             publicKey: PublicSignKey;
         } & { replyTo?: CanvasReference[] } & {
             topMostCanvasWithSameACL?: Canvas | null;
-        }
+        } & PathProperties
     ) {
         super();
         this.publicKey = properties.publicKey;
-        if ("parent" in properties) {
-            this.path = [
-                ...properties.parent.path,
-                new CanvasAddressReference({
-                    canvas: properties.parent.address,
-                }),
-            ];
-        } else {
-            this.path = properties["path"] ?? [];
-        }
+        this.path = resolvePathFromProperties(properties);
+
         this.replyTo = properties["replyTo"] ?? [];
         const elementsId = (properties as { seed: Uint8Array }).seed
             ? sha256Sync((properties as { seed: Uint8Array }).seed)
@@ -329,6 +428,7 @@ export class Canvas extends Program {
         this._elements = new Documents({ id: elementsId });
         this._replies = new Documents({ id: sha256Sync(elementsId) });
         this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
+        this._messages = new RPC();
     }
 
     get id(): Uint8Array {
@@ -344,7 +444,13 @@ export class Canvas extends Program {
         evt: CustomEvent<DocumentsChange<Canvas>>
     ) => void;
 
-    async open(): Promise<void> {
+    private getValueWithContext(value: string) {
+        return this.address + ":" + value;
+    }
+    public debug: boolean = false;
+    async open(args?: CanvasArgs): Promise<void> {
+        this.debug = !!args?.debug;
+        this.debug && console.time(this.getValueWithContext("openElements"));
         await this._elements.open({
             type: Element,
             replicate: { factor: 1 }, // TODO choose better
@@ -376,12 +482,14 @@ export class Canvas extends Program {
                         type: indexable.type,
                         content: indexable.content,
                         location: arg.location,
-                        canvas: arg.canvas.address,
+                        path: arg.path.map((x) => x.address),
                     });
                 },
             },
         });
+        this.debug && console.timeEnd(this.getValueWithContext("openElements"));
 
+        this.debug && console.time(this.getValueWithContext("openReplies"));
         await this._replies.open({
             type: Canvas,
             replicate: { factor: 1 }, // TODO choose better
@@ -400,6 +508,17 @@ export class Canvas extends Program {
                 },
             },
         });
+        this.debug && console.timeEnd(this.getValueWithContext("openReplies"));
+
+        await this._messages.open({
+            responseType: CanvasMessage,
+            queryType: CanvasMessage,
+            topic: sha256Base64Sync(
+                concat([this.id, new TextEncoder().encode("messages")])
+            ),
+            responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
+        });
+
         this._repliesChangeListener = async (
             evt: CustomEvent<DocumentsChange<Canvas>>
         ) => {
@@ -435,7 +554,9 @@ export class Canvas extends Program {
             "change",
             this._repliesChangeListener
         );
+        this.debug && console.time(this.getValueWithContext("countReplies"));
         await this.countReplies();
+        this.debug && console.timeEnd(this.getValueWithContext("countReplies"));
     }
 
     close(from?: Program): Promise<boolean> {
@@ -459,6 +580,14 @@ export class Canvas extends Program {
             path.push(this);
         }
         return path;
+    }
+
+    loadParent() {
+        let parent = this.path[this.path.length - 1];
+        if (!parent) {
+            throw new Error("Missing parent");
+        }
+        return parent.load(this.node);
     }
 
     get repliesCount(): bigint {
@@ -533,7 +662,7 @@ export class Canvas extends Program {
                         }),
                         location: Layout.zero(),
                         publicKey: this.node.identity.publicKey,
-                        canvas: nextCanvas,
+                        parent: nextCanvas,
                     })
                 );
                 await currentCanvas.replies.put(nextCanvas);
@@ -592,7 +721,7 @@ export class Canvas extends Program {
             await this.load();
         }
         const elements = await this.elements.index.index
-            .iterate({ query: getElementsQuery(this.address) })
+            .iterate({ query: getOwnedElementsQuery(this) })
             .all();
         let concat = "";
         for (const element of elements) {
@@ -645,6 +774,10 @@ export class Canvas extends Program {
         const root: Canvas = this.topMostCanvasWithSameACLLoaded ?? this;
         return root._elements;
     }
+
+    get messages(): RPC<CanvasMessage, CanvasMessage> {
+        return this._messages;
+    }
 }
 
 /*
@@ -694,8 +827,8 @@ export class IFrameContent extends ElementContent {
 
     toIndex() {
         return {
-            type: "app",
-            content: this.src,
+            type: this.src,
+            content: this.src, // TODO actually index the content
         };
     }
 
@@ -722,7 +855,7 @@ export class StaticContent<
 
     toIndex() {
         return {
-            type: "static",
+            type: this.content.nativeAddress,
             content: this.content.toString(),
         };
     }

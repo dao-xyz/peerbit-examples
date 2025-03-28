@@ -1,13 +1,15 @@
-import { useState } from "react";
+import React, { useState } from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
+import { FaSpinner } from "react-icons/fa";
 import { usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
-import { Canvas, getElementsQuery, IFrameContent } from "@dao-xyz/social";
+import { Canvas, getOwnedElementsQuery, IFrameContent } from "@dao-xyz/social";
 import RelativeTimestamp from "./RelativeTimestamp";
 import { WithContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
+import { useAiReply } from "../../ai/AiReplyProvider";
 
 export const Header = ({
     canvas,
@@ -27,8 +29,12 @@ export const Header = ({
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
     const { profiles } = useProfiles();
+    const { loadingMap } = useAiReply();
 
-    // State for controlling the More Info dialog and its content
+    // We assume canvas has a unique id as a string.
+    const canvasId = canvas.closed ? undefined : canvas.address.toString();
+
+    // State for controlling the More Info dialog and its content.
     const [moreInfoOpen, setMoreInfoOpen] = useState(false);
     const [elementsInfo, setElementsInfo] = useState<
         Array<{ type: string; url?: string }>
@@ -39,7 +45,7 @@ export const Header = ({
         if (!canvas) return;
         try {
             const elements = await canvas.elements.index
-                .iterate({ query: getElementsQuery(canvas.address) })
+                .iterate({ query: getOwnedElementsQuery(canvas) })
                 .all();
             const info = elements.map((x) => {
                 if (x.content instanceof IFrameContent) {
@@ -115,6 +121,19 @@ export const Header = ({
                             }
                             onClick={onClick}
                         />
+                    )}
+
+                    {/* Show AI reply loading indicator if applicable */}
+                    {canvasId && loadingMap[canvasId] && (
+                        <div className="ml-2 flex items-center gap-1">
+                            <FaSpinner
+                                className="animate-spin text-blue-500"
+                                size={16}
+                            />
+                            <span className="text-xs text-blue-500">
+                                Replying…
+                            </span>
+                        </div>
                     )}
 
                     {/* Dropdown menu always available */}

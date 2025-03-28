@@ -125,7 +125,10 @@ export const ImageContent = ({
                     />
                 </div>
                 <Dialog.Close asChild>
-                    <button className="absolute top-4 right-4 p-2 text-white text-2xl">
+                    <button
+                        className="absolute btn top-0 right-0 w-10 h-10  text-white bg-black opacity-60 text-2xl"
+                        style={{ borderRadius: "0 0 0 0" }}
+                    >
                         <FiX />
                     </button>
                 </Dialog.Close>
