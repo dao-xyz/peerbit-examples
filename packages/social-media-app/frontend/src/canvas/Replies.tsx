@@ -7,6 +7,7 @@ import {
     useState,
 } from "react";
 import debounce from "lodash.debounce";
+import throttle from "lodash.throttle";
 import {
     Canvas,
     Canvas as CanvasDB,
@@ -22,6 +23,7 @@ import { Reply } from "./Reply";
 import { useView } from "../view/View";
 import { tw } from "../utils/tailwind";
 import { OnlineProfilesDropdown } from "../profile/OnlinePeersButton";
+import { useError } from "react-use";
 
 type SortCriteria = "new" | "old" | "best" | "chat";
 
@@ -81,12 +83,23 @@ export const StickyHeader = ({ children }) => {
     );
 };
 
-function getScrollBottomOffset() {
-    return Math.abs(
-        window.innerHeight +
-            window.scrollY -
-            document.documentElement.scrollHeight
+function getScrollBottomOffset(scrollPosition: number) {
+    return (
+        document.documentElement.scrollHeight -
+        (scrollPosition + window.innerHeight)
     );
+}
+
+function getMaxScrollTop() {
+    const documentHeight = Math.max(
+        document.body.scrollHeight,
+        document.body.offsetHeight,
+        document.documentElement.clientHeight,
+        document.documentElement.scrollHeight,
+        document.documentElement.offsetHeight
+    );
+    const windowHeight = window.innerHeight;
+    return documentHeight - window.innerHeight;
 }
 
 function getScrollTop() {
@@ -101,7 +114,6 @@ export const Replies = (props: RepliesProps) => {
     >(undefined);
     const { setView, view } = useView();
     const { peers } = useOnline(canvas);
-    const [userManuallyScrolled, setUserManuallyScrolled] = useState(false);
 
     useEffect(() => {
         if (!canvas) {
@@ -180,6 +192,74 @@ export const Replies = (props: RepliesProps) => {
         query
     );
 
+    const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
+    // How close in pixels does the bottom have to be to consider a user as "he scrolled all the way down"
+    const bottomRegionSize = 100;
+    // Scroll adjustments due to window resize events
+    // On mobile the retracting scroll bar will trigger this!
+    useEffect(() => {
+        // Only apply this in chat view
+        if (view !== "chat") return;
+
+        // Store scroll position at leading edge
+        const cycleLength = 100;
+        // Create throttled resize handler
+        const handleResizeThrottled = throttle(
+            () => {
+                const scrollTop = getScrollTop();
+                const maxScrollTop = getMaxScrollTop();
+                // Get the former scroll position (from leading edge)
+                const scrollBottom = resizeScrollBottomRef.current;
+
+                // Check if user was within reach of the bottom when resize started
+                if (scrollBottom <= bottomRegionSize) {
+                    // If they were near bottom, scroll to bottom
+                    window.scrollTo({
+                        top: document.documentElement.scrollHeight,
+                        left: 0,
+                        behavior: "instant",
+                    });
+                }
+                // set to new scroll position
+                resizeScrollBottomRef.current = getScrollBottomOffset(
+                    scrollBottom <= bottomRegionSize ? maxScrollTop : scrollTop
+                );
+            },
+            cycleLength,
+            { leading: true, trailing: true }
+        ); // Execute on trailing edge only
+
+        // Setup the scroll position only on the very first execution
+        const setup = debounce(
+            () => {
+                resizeScrollBottomRef.current = getScrollBottomOffset(
+                    getScrollTop()
+                );
+            },
+            cycleLength,
+            { leading: true, trailing: false }
+        );
+
+        // The actual resize handler captures the position at leading edge
+        const handleResize = () => {
+            // Store the current scroll position at the beginning of resize
+            setup();
+            handleResizeThrottled();
+        };
+
+        // Add event listener
+        window.addEventListener("resize", handleResize);
+
+        // Clean up
+        return () => {
+            window.removeEventListener("resize", handleResize);
+            handleResizeThrottled.cancel();
+        };
+    }, [view]);
+
+    // Add document body resize scroll position ref
+    const bodyResizeScrollPositionRef = useRef(getScrollTop());
+
     // track first visit to chat view
     useEffect(() => {
         window.scrollTo({
@@ -187,94 +267,92 @@ export const Replies = (props: RepliesProps) => {
             left: 0,
             behavior: "instant",
         });
-        setUserManuallyScrolled(false);
+        bodyResizeScrollPositionRef.current = getMaxScrollTop();
     }, [view]);
 
-    const lastWindowHeight = useRef<number>(window.innerHeight);
-    const lastBodyHeight = useRef<number>(document.body.clientHeight);
-    const lastScrollTop = useRef<number>(getScrollTop());
-    const lastInvocationTime = useRef<number>(Date.now());
-    const lastRepliesLength = useRef<number>(sortedReplies.length);
-    const rafId = useRef<number>();
+    const oldLatestReplyRef = useRef(
+        sortedReplies.length > 0 && sortedReplies[sortedReplies.length - 1]
+    );
+    const latestReplyRef = useRef(
+        sortedReplies.length > 0 && sortedReplies[sortedReplies.length - 1]
+    );
 
+    const repliesContainerRef = useRef<HTMLDivElement>(null);
+
+    // Update latestReplyRef and scroll position on the first sign of a change on sortedReplies
+    // even before layout changes (so before body resize triggers) - thats why useLayoutEffect.
+    useLayoutEffect(() => {
+        if (sortedReplies.length > 0) {
+            latestReplyRef.current = sortedReplies[sortedReplies.length - 1];
+        }
+        bodyResizeScrollPositionRef.current = getScrollTop();
+    }, [sortedReplies]);
+
+    // Scroll adjustments on the body resize (batched by debounce)
+    // triggers ONLY! due to new replies inserted.
+    // so this neglects pure body resize events which were not triggerd through an inserted reply.
     useEffect(() => {
-        const throttleDelay = 50;
-        const checkSize = () => {
-            const now = Date.now();
+        // Only apply this in chat view
+        if (view !== "chat") return;
 
-            if (now - lastInvocationTime.current >= throttleDelay) {
-                const currentWindowHeight = window.innerHeight;
-                const currentBodyHeight = document.documentElement.scrollHeight;
-                const currentScrollTop = getScrollTop();
+        const cycleLength = 100;
+        const handleBodyResizeDebounced = debounce(
+            () => {
+                // Get the former scroll position (from leading edge)
+                const scrollPosition = resizeScrollBottomRef.current;
 
-                // user resized the browser
-                if (lastWindowHeight.current !== currentWindowHeight) {
-                    if (
-                        view === "chat" &&
-                        sortedReplies.length > 0 &&
-                        !userManuallyScrolled
-                    ) {
+                // Check if user was within reach of the bottom when body size change started
+                const wasNearBottom =
+                    getScrollBottomOffset(scrollPosition) <= bottomRegionSize;
+
+                // Check if the latest reply is from the current user or if there's a new reply
+                const lastReplyIsFromUser =
+                    oldLatestReplyRef.current.publicKey ===
+                    peer.identity.publicKey;
+
+                const isNewReply =
+                    oldLatestReplyRef.current.idString !==
+                    latestReplyRef.current.idString;
+
+                // Scroll to bottom if:
+                // 1. User was near bottom when resize started OR
+                // 2. The latest reply is from the current user OR
+                // 3. There's a new reply
+                if (isNewReply) {
+                    if (wasNearBottom || lastReplyIsFromUser) {
                         window.scrollTo({
-                            top: document.body.scrollHeight,
+                            top: document.documentElement.scrollHeight,
                             left: 0,
                             behavior: "instant",
                         });
-                        if (getScrollBottomOffset() < 10) {
-                            setUserManuallyScrolled(false);
-                        }
                     }
-                    lastWindowHeight.current = currentWindowHeight;
                 }
-                // body height changed
-                else if (lastBodyHeight.current !== currentBodyHeight) {
-                    if (
-                        view === "chat" &&
-                        sortedReplies.length > 0 &&
-                        (!userManuallyScrolled ||
-                            (sortedReplies[sortedReplies.length - 1]
-                                .publicKey === peer.identity.publicKey &&
-                                sortedReplies.length !==
-                                    lastRepliesLength.current))
-                    ) {
-                        window.scrollTo({
-                            top: document.body.scrollHeight,
-                            left: 0,
-                            behavior: "smooth",
-                        });
-                        if (getScrollBottomOffset() < 10) {
-                            setUserManuallyScrolled(false);
-                        }
-                    }
-                    lastBodyHeight.current = currentBodyHeight;
-                }
-                // on scroll set that the user scrolled.
-                else if (lastScrollTop.current !== currentScrollTop) {
-                    if (getScrollBottomOffset() >= 10)
-                        setUserManuallyScrolled(true);
-                    lastScrollTop.current = currentScrollTop;
-                }
+                bodyResizeScrollPositionRef.current = getMaxScrollTop();
 
-                if (sortedReplies.length !== lastRepliesLength.current) {
-                    lastRepliesLength.current = sortedReplies.length;
-                }
+                // Update the latest reply reference
+                oldLatestReplyRef.current = latestReplyRef.current;
+            },
+            cycleLength,
+            { leading: false, trailing: true }
+        );
 
-                lastInvocationTime.current = now;
-            }
+        // Create a ResizeObserver for the document body
+        const resizeObserver = new ResizeObserver(() => {
+            handleBodyResizeDebounced();
+        });
 
-            // Continue requesting frames
-            rafId.current = requestAnimationFrame(checkSize);
-        };
+        // Only observe if the ref is available
+        if (repliesContainerRef.current) {
+            // Start observing the replies container
+            resizeObserver.observe(repliesContainerRef.current);
+        }
 
-        // Start the loop
-        rafId.current = requestAnimationFrame(checkSize);
-
-        // Cleanup on unmount
+        // Clean up
         return () => {
-            if (rafId.current !== undefined) {
-                cancelAnimationFrame(rafId.current);
-            }
+            resizeObserver.disconnect();
+            handleBodyResizeDebounced.cancel();
         };
-    }, [view, sortedReplies, userManuallyScrolled, peer.identity.publicKey]);
+    }, [view, peer.identity.publicKey]);
 
     return (
         <div className="flex flex-col mt-10 ">
@@ -315,6 +393,7 @@ export const Replies = (props: RepliesProps) => {
             </StickyHeader>
             {sortedReplies.length > 0 ? (
                 <div
+                    ref={repliesContainerRef}
                     className={tw(
                         "mt-5 max-w-[876px] w-full mx-auto grid",
                         view === "chat"
