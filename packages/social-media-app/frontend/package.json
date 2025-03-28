@@ -14,14 +14,16 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
+        "@dao-xyz/social": "^0",
         "@giga-app/app-service": "^0",
         "@giga-app/sdk": "^0",
-        "@dao-xyz/social": "^0",
         "@headlessui/react": "^2.2.0",
         "@peerbit/peer-names": "^0.0.1",
         "@peerbit/react": "*",
         "@radix-ui/react-toggle": "^1.0.3",
         "axios": "^1.4.0",
+        "lodash.debounce": "^4.0.8",
+        "lodash.throttle": "^4.1.1",
         "mdast-util-from-markdown": "^2.0.2",
         "mdast-util-to-string": "^4.0.0",
         "peerbit": "^4",
@@ -37,6 +39,9 @@
     "devDependencies": {
         "@peerbit/vite": "^1",
         "@tailwindcss/vite": "^4.0.14",
+        "@types/lodash": "^4.17.16",
+        "@types/lodash.debounce": "^4.0.9",
+        "@types/lodash.throttle": "^4.1.9",
         "@types/react": "^18.2.46",
         "@types/react-dom": "^18.2.18",
         "@vitejs/plugin-react": "^4",
