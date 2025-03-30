@@ -3,7 +3,7 @@ import { useCanvases } from "./useCanvas.js";
 import { useState, useEffect, useRef } from "react";
 import { Canvas as Canvas } from "./Canvas.js";
 import { CanvasWrapper } from "./CanvasWrapper.js";
-import { Canvas as CanvasDB, CanvasAddressReference } from "@dao-xyz/social";
+import { Canvas as CanvasDB } from "@dao-xyz/social";
 import { Replies } from "./Replies.js";
 import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";
@@ -143,8 +143,8 @@ export const CanvasAndReplies = () => {
             </div>
             {/* Replying peers indicator (placed above the toolbar) */}
             {lastCanvas && replyingPeers.length > 0 && (
-                <div className="w-full h-0 mt-[-20px]  flex items-center gap-2 justify-center">
-                    <div className="ml-auto flex items-center space-x-1">
+                <div className="w-full h-0  mt-[-20px]  flex items-center gap-2 justify-center">
+                    <div className="max-w-[876px]  w-full flex items-center space-x-1">
                         {replyingPeers.slice(0, 3).map((peerKey) => (
                             <ProfileButton
                                 key={peerKey.toString()}
@@ -155,7 +155,7 @@ export const CanvasAndReplies = () => {
                         ))}
                         {/* TODO show dots? {replyingPeers.length > 3 && <span className="text-xs text-gray-600">...</span>} */}
                         <TbBubbleText
-                            className="ml-[-10px] mt-[-30px]"
+                            className="bounce ml-[-10px] mt-[-30px]"
                             size={24}
                         />
                     </div>

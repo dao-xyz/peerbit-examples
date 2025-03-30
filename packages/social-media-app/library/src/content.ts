@@ -269,12 +269,11 @@ export class CanvasAddressReference extends CanvasReference {
 
     // TODO add args
     async load(node: ProgramClient) {
-        return (
-            this._reference ||
-            (this._reference = await node.open<Canvas>(this.canvas, {
-                existing: "reuse",
-            }))
-        );
+        return this._reference && !this._reference.closed
+            ? this._reference
+            : (this._reference = await node.open<Canvas>(this.canvas, {
+                  existing: "reuse",
+              }));
     }
 
     get address() {
@@ -526,14 +525,28 @@ export class Canvas extends Program<CanvasArgs> {
 
             const reIndex = async (canvas: Canvas, parent: Canvas) => {
                 await parent.load();
+                if (this.closed || parent.closed) {
+                    console.error("Canvas closed, skipping re-index");
+                    return;
+                }
                 let indexedCanvas = await parent.replies.index.get(canvas.id, {
                     resolve: false,
                 });
-                await parent.replies.index.putWithContext(
-                    canvas,
-                    toId(canvas.id),
-                    indexedCanvas.__context
-                );
+                try {
+                    await parent.replies.index.putWithContext(
+                        canvas,
+                        toId(canvas.id),
+                        indexedCanvas.__context
+                    );
+                } catch (error) {
+                    if (parent.replies.index.closed) {
+                        console.warn(
+                            `Index ${parent.replies.address} closed, skipping re-index"`
+                        );
+                        return;
+                    }
+                    throw error;
+                }
             };
 
             for (const added of evt.detail.added) {
@@ -554,9 +567,11 @@ export class Canvas extends Program<CanvasArgs> {
             "change",
             this._repliesChangeListener
         );
-        this.debug && console.time(this.getValueWithContext("countReplies"));
-        await this.countReplies();
-        this.debug && console.timeEnd(this.getValueWithContext("countReplies"));
+
+        // Dont await this one!!! because this.load might load self
+        this.load().then(() => {
+            this.countReplies();
+        });
     }
 
     close(from?: Program): Promise<boolean> {
@@ -594,15 +609,21 @@ export class Canvas extends Program<CanvasArgs> {
         return this._repliesCount || 0n;
     }
 
+    getCountQuery(options?: {
+        onlyImmediate: boolean;
+    }): (StringMatch | IntegerCompare)[] {
+        return options?.onlyImmediate
+            ? getImmediateRepliesQuery(this)
+            : getRepliesQuery(this);
+    }
+
     async countReplies(options?: { onlyImmediate: boolean }): Promise<bigint> {
         try {
             const replies = this.replies.index.closed
                 ? 0n
                 : BigInt(
                       await this.replies.count({
-                          query: options?.onlyImmediate
-                              ? getImmediateRepliesQuery(this)
-                              : getRepliesQuery(this),
+                          query: this.getCountQuery(options),
                           approximate: true,
                       })
                   );
@@ -736,7 +757,10 @@ export class Canvas extends Program<CanvasArgs> {
     }
     private _topMostCanvasWithSameACL: Canvas | null | undefined = null;
     async load() {
-        if (this._topMostCanvasWithSameACL) {
+        if (
+            this._topMostCanvasWithSameACL &&
+            !this._topMostCanvasWithSameACL.closed
+        ) {
             return this._topMostCanvasWithSameACL;
         }
 

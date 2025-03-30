@@ -131,6 +131,7 @@ export const CanvasWrapper = ({
                           query: getOwnedElementsQuery(canvas),
                           sort: new Sort({ key: ["location", "y"] }),
                       },
+            debug: canvas && canvas.path.length > 0,
         }
     );
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
@@ -477,7 +478,10 @@ export const CanvasWrapper = ({
                                 new Element({
                                     content: new StaticContent({
                                         content: new StaticMarkdownText({
-                                            text: `**AI Thinks:**\n\n${cvs}`,
+                                            text:
+                                                cvs.trim().length === 0
+                                                    ? `**AI could not respond**`
+                                                    : `**AI Thinks:**\n\n${cvs}`,
                                         }),
                                     }),
                                     location: Layout.zero(),

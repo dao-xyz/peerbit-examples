@@ -12,22 +12,6 @@ import { LuMessageSquare } from "react-icons/lu";
 import { useView, ViewType } from "../view/View";
 import { tw } from "../utils/tailwind";
 
-// Debounce helper that triggers on the leading edge and then ignores calls for the next delay ms.
-function debounceLeading(func: (...args: any[]) => void, delay: number) {
-    let timeoutId: ReturnType<typeof setTimeout> | null;
-    return function (...args: any[]) {
-        if (!timeoutId) {
-            func.apply(this, args);
-        }
-        if (timeoutId) {
-            clearTimeout(timeoutId);
-        }
-        timeoutId = setTimeout(() => {
-            timeoutId = null;
-        }, delay);
-    };
-}
-
 const ReplyButton = ({
     children,
     ...rest
@@ -91,7 +75,6 @@ export const Reply = ({
     onClick?: () => void;
     hideHeader?: boolean;
 }) => {
-    const [replyCount, setReplyCount] = useState(0);
     const [showMore, setShowMore] = useState(false);
     const { peer } = usePeer();
     const navigate = useNavigate();
@@ -101,47 +84,8 @@ export const Reply = ({
 
     const isExpandedBreadcrumb = variant === "expanded-breadcrumb";
 
-    useEffect(() => {
-        const listener = async () => {
-            await canvas.countReplies().then(async (count) => {
-                setReplyCount(Number(count));
-            });
-        };
-
-        // Create a debounced version of the listener that triggers immediately and then
-        // won't trigger again until 3000ms have passed.
-        const debouncedListener = debounceLeading(listener, 3000);
-
-        // Call listener immediately for the first event (leading edge)
-        let openPromise: Promise<any>;
-        if (canvas.closed) {
-            openPromise = (async () =>
-                peer.open(canvas, { existing: "reuse" }))();
-        } else {
-            openPromise = Promise.resolve();
-        }
-        openPromise.then(() =>
-            canvas.load().then(() => {
-                canvas.replies.events.addEventListener(
-                    "change",
-                    debouncedListener
-                );
-                listener();
-            })
-        );
-        return () => {
-            try {
-                canvas.replies.events.removeEventListener(
-                    "change",
-                    debouncedListener
-                );
-            } catch (error) {
-                // TODO handle error when we can not resolve replies
-            }
-        };
-    }, [canvas, canvas.closed]);
-
     const handleCanvasClick = () => {
+        console.log("Clicked on canvas", canvas.publicKey.toString());
         navigate(getCanvasPath(canvas), {});
         onClick && onClick();
     };
@@ -179,7 +123,7 @@ export const Reply = ({
                             }
                             canvas={canvas}
                             direction="row"
-                            onClick={onClick}
+                            open={handleCanvasClick}
                             reverseLayout={
                                 variant === "chat" && align === "right"
                             }
@@ -223,7 +167,7 @@ export const Reply = ({
                 {variant === "thread" && !isExpandedBreadcrumb && (
                     <div className={"col-start-2 col-span-1 flex gap-2.5 mt-4"}>
                         <ReplyButton
-                            className="btn btn-secondary btn-xs h-full"
+                            className="ml-auto btn btn-xs h-full"
                             onClick={() => {
                                 setShowMore((showMore) => !showMore);
                                 onClick && onClick();
@@ -231,12 +175,12 @@ export const Reply = ({
                         >
                             {showMore ? "Show less" : "Show more"}
                         </ReplyButton>
-                        <ReplyButton
-                            className="ml-auto btn btn-secondary btn-xs h-full"
+                        {/*   <ReplyButton
+                            className="ml-auto btn btn-xs h-full"
                             onClick={handleCanvasClick}
                         >
                             {`Open ${replyCount > 0 ? `(${replyCount})` : ""}`}
-                        </ReplyButton>
+                        </ReplyButton> */}
                     </div>
                 )}
             </div>

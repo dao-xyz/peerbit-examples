@@ -1,5 +1,5 @@
-import React, { createContext, useContext, ReactNode } from "react";
-import { AIResponseProgram } from "@giga-app/llm";
+import React, { createContext, useContext, ReactNode, useEffect } from "react";
+import { AIResponseProgram, DEEP_SEEK_R1 } from "@giga-app/llm";
 import { useProgram } from "@peerbit/react";
 
 export type LLMContextType = {
@@ -7,6 +7,11 @@ export type LLMContextType = {
      * Sends a prompt to the AI and returns the assistant's response.
      */
     query: (prompt: string, timeout?: number) => Promise<string>;
+
+    /**
+     * Indicates whether the LLM program is ready to accept queries.
+     */
+    isReady: boolean;
 };
 
 // Create a context with undefined default.
@@ -22,6 +27,23 @@ export const LLMProvider = ({ children }: LLMProviderProps) => {
         existing: "reuse",
     });
 
+    const [isReady, setIsReady] = React.useState(false);
+
+    useEffect(() => {
+        if (!program || program.closed) {
+            return;
+        }
+        program
+            .waitForModel(DEEP_SEEK_R1)
+            .then(() => {
+                setIsReady(true);
+            })
+            .catch((error) => {
+                console.log("Model not available", error);
+                setIsReady(false);
+            });
+    }, [!program || program?.closed ? undefined : program.address]);
+
     // Define the query function that calls the program's query method.
     const query = async (prompt: string, timeout = 10000): Promise<string> => {
         if (!program) {
@@ -34,7 +56,9 @@ export const LLMProvider = ({ children }: LLMProviderProps) => {
     // You might want to handle loading/error state here in your provider.
     // For simplicity, we assume program is ready.
     return (
-        <LLMContext.Provider value={{ query }}>{children}</LLMContext.Provider>
+        <LLMContext.Provider value={{ query, isReady }}>
+            {children}
+        </LLMContext.Provider>
     );
 };
 

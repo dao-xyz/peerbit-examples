@@ -3,27 +3,28 @@ import { ProfileButton } from "../../profile/ProfileButton";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
 import { FaSpinner } from "react-icons/fa";
-import { usePeer } from "@peerbit/react";
+import { useCount, usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
 import { Canvas, getOwnedElementsQuery, IFrameContent } from "@dao-xyz/social";
 import RelativeTimestamp from "./RelativeTimestamp";
 import { WithContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useAiReply } from "../../ai/AiReplyProvider";
+import { FaRegComment } from "react-icons/fa";
 
 export const Header = ({
     canvas,
     direction,
     className,
     variant,
-    onClick,
+    open: open,
     reverseLayout,
 }: {
     canvas?: Canvas | WithContext<Canvas>;
     direction?: "row" | "col";
     className?: string;
     variant: "tiny" | "large" | "medium";
-    onClick?: () => void;
+    open?: () => void;
     reverseLayout?: boolean;
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
@@ -31,8 +32,19 @@ export const Header = ({
     const { profiles } = useProfiles();
     const { loadingMap } = useAiReply();
 
+    const replyCount = useCount(
+        canvas?.loadedReplies ? canvas.replies : undefined,
+        canvas.closed
+            ? undefined
+            : {
+                  id: canvas.address.toString(),
+                  query: canvas.getCountQuery(),
+              }
+    );
+
     // We assume canvas has a unique id as a string.
-    const canvasId = canvas.closed ? undefined : canvas.address.toString();
+    const canvasId =
+        !canvas || canvas.closed ? undefined : canvas.address.toString();
 
     // State for controlling the More Info dialog and its content.
     const [moreInfoOpen, setMoreInfoOpen] = useState(false);
@@ -75,7 +87,7 @@ export const Header = ({
                             : "gap-1.5"
                     } ${direction === "col" ? "flex-col" : "flex-row"} ${
                         className ?? ""
-                    }`}
+                    } ${variant === "large" && "w-full"}`}
                     style={
                         {
                             "--bgcolor": bgColor
@@ -101,7 +113,7 @@ export const Header = ({
                                     ? 24
                                     : 16
                             }
-                            onClick={onClick}
+                            onClick={open}
                         />
                     </div>
                     {"__context" in canvas && (
@@ -119,21 +131,37 @@ export const Header = ({
                                     ? "text-sm"
                                     : "text-xs"
                             }
-                            onClick={onClick}
                         />
                     )}
 
-                    {/* Show AI reply loading indicator if applicable */}
-                    {canvasId && loadingMap[canvasId] && (
-                        <div className="ml-2 flex items-center gap-1">
-                            <FaSpinner
-                                className="animate-spin text-blue-500"
-                                size={16}
-                            />
-                            <span className="text-xs text-blue-500">
-                                Replying…
-                            </span>
-                        </div>
+                    {variant === "large" && (
+                        <>
+                            {/* Show AI reply loading indicator if applicable */}
+                            {canvasId && loadingMap[canvasId] && (
+                                <div className="ml-2 flex items-center gap-1">
+                                    <FaSpinner
+                                        className="animate-spin text-blue-500"
+                                        size={16}
+                                    />
+                                    <span className="text-xs text-blue-500">
+                                        Replying…
+                                    </span>
+                                </div>
+                            )}
+
+                            {/* Show comment icon with comment counts if applicable */}
+                            {canvasId && (
+                                <button
+                                    className="btn flex p-2 flex-row items-center gap-1"
+                                    onClick={open}
+                                >
+                                    <FaRegComment size={16} />
+                                    <span className="text-xs">
+                                        {replyCount}
+                                    </span>
+                                </button>
+                            )}
+                        </>
                     )}
 
                     {/* Dropdown menu always available */}

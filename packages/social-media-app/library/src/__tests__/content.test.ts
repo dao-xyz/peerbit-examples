@@ -12,17 +12,11 @@ import {
     getImagesQuery,
     getSubownedElementsQuery,
 } from "../content.js";
-import {
-    SearchRequest,
-    Sort,
-    SortDirection,
-    StringMatch,
-} from "@peerbit/document";
+import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
-import { delay, waitForResolved } from "@peerbit/time";
+import { waitForResolved } from "@peerbit/time";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { StaticImage } from "../static/image.js";
-import { NATIVE_TEXT_APP_URL } from "../types.js";
 
 describe("content", () => {
     describe("canvas", () => {
@@ -125,6 +119,45 @@ describe("content", () => {
                     )
                 ).to.deep.eq(["a", "b", "c"]);
             });
+        });
+
+        it("can reload", async () => {
+            let root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: session.peers[0].identity.publicKey,
+                    seed: new Uint8Array(),
+                })
+            );
+            let [a] = await root.getCreateRoomByPath(["a"]);
+            await root.getCreateRoomByPath(["a", "b"]);
+            await root.getCreateRoomByPath(["a", "c"]);
+
+            const allReplies = await a.replies.index
+                .iterate({ query: getImmediateRepliesQuery(a) })
+                .all();
+            expect(allReplies).to.have.length(2);
+
+            const elements = await a.elements.index
+                .iterate({ query: getOwnedElementsQuery(a) })
+                .all();
+            expect(elements).to.have.length(1);
+
+            await root.close();
+            root = await session.peers[0].open(root.clone());
+
+            const allRepliesAfterReload = await root.replies.index
+                .iterate({ query: getImmediateRepliesQuery(root) })
+                .all();
+
+            expect(allRepliesAfterReload).to.have.length(1);
+            const aReopen = await session.peers[0].open(a.clone(), {
+                existing: "reuse",
+            });
+            await aReopen.load();
+            const elementsAfterReload = await aReopen.elements.index
+                .iterate({ query: getOwnedElementsQuery(a) })
+                .all();
+            expect(elementsAfterReload).to.have.length(1);
         });
 
         describe("replies", () => {

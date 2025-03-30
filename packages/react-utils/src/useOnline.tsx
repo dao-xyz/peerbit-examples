@@ -1,12 +1,11 @@
 import { Program, OpenOptions, ProgramEvents } from "@peerbit/program";
 import { PublicSignKey } from "@peerbit/crypto";
 import { useEffect, useState } from "react";
-import { delay } from "@peerbit/time";
 const addressOrDefined = <A, B extends ProgramEvents, P extends Program<A, B>>(
     p?: P
 ) => {
     try {
-        return p?.address;
+        return p?.rootAddress;
     } catch (error) {
         return !!p;
     }

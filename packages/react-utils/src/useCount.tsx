@@ -3,31 +3,19 @@ import { useEffect, useRef, useState } from "react";
 import * as indexerTypes from "@peerbit/indexer-interface";
 import { debounceLeadingTrailing } from "./utils";
 
-type QueryLike = {
-    query?: indexerTypes.Query[] | indexerTypes.QueryLike;
-    sort?: indexerTypes.Sort[] | indexerTypes.Sort | indexerTypes.SortLike;
-};
 type QueryOptons = {
-    query: QueryLike;
+    query: indexerTypes.Query[] | indexerTypes.QueryLike;
     id: string;
 };
-
-export const useLocal = <
-    T extends Record<string, any>,
-    I extends Record<string, any>,
-    R extends boolean | undefined = true,
-    RT = R extends false ? WithContext<I> : WithContext<T>
->(
-    db?: Documents<T, I>,
+export const useCount = <T extends Record<string, any>>(
+    db?: Documents<T, any, any>,
     options?: {
-        resolve?: R;
-        onChanges?: (all: RT[]) => void;
         debounce?: number;
         debug?: boolean; // add debug option here
     } & QueryOptons
 ) => {
-    const [all, setAll] = useState<RT[]>([]);
-    const emptyResultsRef = useRef(false);
+    const [count, setCount] = useState<number>(0);
+    const countRef = useRef<number>(0);
 
     useEffect(() => {
         if (!db || db.closed) {
@@ -36,20 +24,12 @@ export const useLocal = <
 
         const _l = async (args?: any) => {
             try {
-                const iterator = db.index.iterate(options?.query ?? {}, {
-                    local: true,
-                    remote: false,
-                    resolve: options?.resolve as any,
+                const count = await db.count({
+                    query: options?.query,
+                    approximate: true,
                 });
-
-                const results: WithContext<RT>[] =
-                    (await iterator.all()) as any;
-
-                emptyResultsRef.current = results.length === 0;
-                setAll(() => {
-                    options?.onChanges?.(results);
-                    return results;
-                });
+                countRef.current = count;
+                setCount(count);
             } catch (error) {
                 if (error instanceof ClosedError) {
                     return;
@@ -63,18 +43,10 @@ export const useLocal = <
             options?.debounce ?? 1000
         );
 
-        let ts = setTimeout(() => {
-            _l();
-        }, 3000);
-
         const handleChange = () => {
-            if (options?.debug) {
-                console.log(
-                    "Event triggered: emptyResultsRef =",
-                    emptyResultsRef.current
-                );
-            }
-            if (emptyResultsRef.current) {
+            debounced();
+            /* TODO change count frequency when we have low counts
+             if (countRef.current === 0) {
                 debounced.cancel();
                 if (options?.debug) {
                     console.log(
@@ -87,7 +59,7 @@ export const useLocal = <
                     console.log("Non-empty results. Using debounced search.");
                 }
                 debounced();
-            }
+            } */
         };
 
         debounced();
@@ -96,14 +68,8 @@ export const useLocal = <
         return () => {
             db.events.removeEventListener("change", handleChange);
             debounced.cancel();
-            clearTimeout(ts);
         };
-    }, [
-        db?.closed ? undefined : db?.rootAddress,
-        options?.id,
-        options?.resolve,
-        options?.onChanges,
-    ]);
+    }, [db?.closed ? undefined : db?.rootAddress, options?.id]);
 
-    return all;
+    return count;
 };

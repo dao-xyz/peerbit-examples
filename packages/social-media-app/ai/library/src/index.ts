@@ -7,6 +7,7 @@ import { SilentDelivery } from "@peerbit/stream-interface";
 import { DEEP_SEEK_R1 } from "./model.js";
 import { delay } from "@peerbit/time";
 import { AbortError, TimeoutError } from "@peerbit/time";
+export * from "./model.js";
 
 const ignoreTimeoutandAbort = (error: Error) => {
     if (error instanceof TimeoutError) {

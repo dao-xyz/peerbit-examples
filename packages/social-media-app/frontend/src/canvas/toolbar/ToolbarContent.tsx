@@ -13,6 +13,7 @@ import { SimpleWebManifest } from "@dao-xyz/social";
 import * as Toggle from "@radix-ui/react-toggle";
 import { useAiReply } from "../../ai/AiReplyProvider";
 import VscRobot from "/vscrobot.svg";
+import { useLLM } from "../../ai/LLMContext";
 
 interface ToolbarContentProps {
     onToggleAppSelect: () => void;
@@ -35,6 +36,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
         const { search } = useApps();
         const [resolvedApp, setResolvedApp] =
             useState<null | SimpleWebManifest>(null);
+        const { isReady: isReadyLLM } = useLLM();
 
         // Try to resolve a matching app when the text changes.
         useEffect(() => {
@@ -117,8 +119,9 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                             onPressedChange={(e) => {
                                 setRequestAIReply(e);
                             }}
+                            disabled={!isReadyLLM}
                             pressed={requestAIReply}
-                            className="btn btn-toggle h-max flex flex-row pt-0 pb-0 px-2"
+                            className="btn btn-elevated btn-toggle h-max flex flex-row pt-0 pb-0 px-2"
                             aria-label="Toggle italic"
                         >
                             <div className="flex flex-row items-center gap-2">

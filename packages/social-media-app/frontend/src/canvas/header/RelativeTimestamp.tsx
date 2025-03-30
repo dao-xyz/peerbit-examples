@@ -55,9 +55,9 @@ const RelativeTimestamp: React.FC<RelativeTimestampProps> = ({
                 </button>
             </Popover.Trigger>
             <Popover.Portal>
-                <Popover.Content className="bg-white dark:bg-black p-2 rounded shadow-md border border-gray-200">
-                    <span className="text-sm text-gray-800">{exactText}</span>
-                    <Popover.Arrow className="fill-curren" />
+                <Popover.Content className="bg-neutral-100 dark:bg-neutral-900 p-2 rounded shadow-md  ">
+                    <span className="text-sm ">{exactText}</span>
+                    <Popover.Arrow className="fill-current" />
                 </Popover.Content>
             </Popover.Portal>
         </Popover.Root>

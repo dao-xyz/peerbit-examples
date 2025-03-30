@@ -106,7 +106,7 @@ export const DebugGeneratePostButton = () => {
         type PostContent = "image" | "text" | "twitch";
         const postsToCreate: (PostContent[] | PostContent)[] = [
             "image",
-            ["text", "twitch"],
+            ["text"], // ["twitch", "text"],
             ["image", "text"],
             ["image", "image"],
             "text",
@@ -177,7 +177,6 @@ export const DebugGeneratePostButton = () => {
             }
 
             // Last step – add this post as a reply to the parent.
-            console.log(leaf.closed);
             leaf.replies.put(openCanvas);
         }
     };
