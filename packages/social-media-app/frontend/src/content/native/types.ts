@@ -1,4 +1,4 @@
-import { StaticContent } from "@dao-xyz/social";
+import { StaticContent } from "@giga-app/interface";
 
 export type ChangeCallback = (
     newContent: StaticContent["content"],

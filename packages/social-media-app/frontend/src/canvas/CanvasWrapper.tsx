@@ -19,7 +19,7 @@ import {
     StaticImage,
     SimpleWebManifest,
     getOwnedElementsQuery,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 import { fromBase64, sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { useApps } from "../content/useApps.js";
@@ -31,7 +31,7 @@ import {
     rectIsStaticPartialImage,
 } from "./utils/rect.js";
 import { useReplyProgress } from "./useReplyProgress.js";
-import { useAiReply } from "../ai/AiReplyProvider.js";
+import { useAIReply } from "../ai/AIReployContext.js";
 
 interface CanvasContextType {
     editMode: boolean;
@@ -107,7 +107,7 @@ export const CanvasWrapper = ({
         id: canvasDB?.idString,
         keepOpenOnUnmount: true,
     });
-    const { generateReply } = useAiReply();
+    const { request: request } = useAIReply();
     const [requestAIReply, setRequestAIReply] = useState(false);
 
     const { getCuratedNativeApp: getNativeApp } = useApps();
@@ -463,34 +463,8 @@ export const CanvasWrapper = ({
 
             console.log("savePending!", pendingToSave, draft, onSave);
             if (requestAIReply) {
-                generateReply(canvas).then((cvs) => {
-                    console.log("AI Reply generated", cvs);
-                    peer.open(
-                        new CanvasDB({
-                            parent: canvas,
-                            publicKey: peer.identity.publicKey,
-                        }),
-                        { existing: "reuse" }
-                    ).then(async (newCanvas) => {
-                        await newCanvas.load();
-                        newCanvas.elements
-                            .put(
-                                new Element({
-                                    content: new StaticContent({
-                                        content: new StaticMarkdownText({
-                                            text:
-                                                cvs.trim().length === 0
-                                                    ? `**AI could not respond**`
-                                                    : `**AI Thinks:**\n\n${cvs}`,
-                                        }),
-                                    }),
-                                    location: Layout.zero(),
-                                    publicKey: peer.identity.publicKey,
-                                    parent: newCanvas,
-                                })
-                            )
-                            .then(() => canvas.replies.put(newCanvas));
-                    });
+                request(canvas).catch((e) => {
+                    console.error("Error requesting AI reply", e);
                 });
             }
 

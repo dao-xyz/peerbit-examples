@@ -4,7 +4,7 @@ import {
     ElementContent,
     StaticImage,
     StaticPartialImage,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 
 export const rectIsStaticMarkdownText = (rect: {
     content: ElementContent;

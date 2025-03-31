@@ -1,4 +1,4 @@
-import { Element, ElementContent, StaticContent } from "@dao-xyz/social";
+import { Element, ElementContent, StaticContent } from "@giga-app/interface";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";

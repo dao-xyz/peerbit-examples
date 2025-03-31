@@ -5,7 +5,7 @@ import {
     Element,
     ElementContent,
     StaticPartialImage,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 import { useMemo } from "react";
 import { Frame } from "../content/Frame";
 import {

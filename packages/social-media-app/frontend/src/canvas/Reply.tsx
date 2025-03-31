@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as CanvasDB } from "@giga-app/interface";
 import { Canvas as Canvas } from "./Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "./Preview";

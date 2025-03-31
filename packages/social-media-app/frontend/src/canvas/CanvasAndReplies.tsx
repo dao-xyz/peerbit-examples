@@ -3,7 +3,7 @@ import { useCanvases } from "./useCanvas.js";
 import { useState, useEffect, useRef } from "react";
 import { Canvas as Canvas } from "./Canvas.js";
 import { CanvasWrapper } from "./CanvasWrapper.js";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as CanvasDB } from "@giga-app/interface";
 import { Replies } from "./Replies.js";
 import { CreateNew } from "./CreateNew.js";
 import { Spinner } from "../utils/Spinner.js";

@@ -1,6 +1,10 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
-import { Canvas, CanvasMessage, ReplyingInProgresss } from "@dao-xyz/social";
+import {
+    Canvas,
+    CanvasMessage,
+    ReplyingInProgresss,
+} from "@giga-app/interface";
 import { type RequestEvent } from "@peerbit/rpc";
 
 // A single reply entry holds a timestamp, the public key, and the timeout id.

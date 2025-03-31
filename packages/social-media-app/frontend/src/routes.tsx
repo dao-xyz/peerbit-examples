@@ -3,7 +3,7 @@ import { Home } from "./Home";
 import { PublicSignKey } from "@peerbit/crypto";
 import { base64url } from "multiformats/bases/base64";
 import { serialize } from "@dao-xyz/borsh";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as CanvasDB } from "@giga-app/interface";
 import { CreateRoot } from "./canvas/CreateRoot";
 import { MissingProfile } from "./profile/MissingProfile";
 import { ConnectDevices } from "./identity/ConnectDevices";

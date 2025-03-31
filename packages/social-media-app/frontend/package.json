@@ -1,5 +1,5 @@
 {
-    "name": "@dao-xyz/social-frontend",
+    "name": "@giga-app/interface-frontend",
     "version": "0.0.1",
     "private": true,
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
@@ -14,7 +14,7 @@
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "@dao-xyz/social": "^0",
+        "@giga-app/interface": "^0",
         "@giga-app/app-service": "^0",
         "@giga-app/sdk": "^0",
         "@headlessui/react": "^2.2.0",

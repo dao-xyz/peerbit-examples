@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, Fragment, useLayoutEffect } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as CanvasDB } from "@giga-app/interface";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { CanvasPreview } from "../canvas/Preview";
 import { tw } from "../utils/tailwind";

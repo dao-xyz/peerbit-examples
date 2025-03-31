@@ -1,9 +1,10 @@
-import { Peerbit } from "peerbit";
-import { AIResponseProgram } from "@giga-app/llm";
 import inquirer from "inquirer";
+import { Peerbit } from "peerbit";
+import { CanvasAIReply } from "@giga-app/llm";
 import path from "path";
 import os from "os";
 import fs from "fs";
+import { Canvas } from "@giga-app/interface";
 
 export const start = async (directory?: string | null) => {
     // Use a default directory if one is not provided.
@@ -34,93 +35,126 @@ export const start = async (directory?: string | null) => {
         await client.bootstrap();
     }
 
-    // Global request counter.
-    let requestCount = 0;
+    // Determine LLM configuration based on command-line flags.
+    // Use "--chatgpt" to choose ChatGPT; otherwise defaults to Ollama.
+    const llm = process.argv.includes("--chatgpt") ? "chatgpt" : "ollama";
 
-    // Open the AIResponseProgram as a service (server mode) and pass the onRequest callback.
-    const service = await client.open<AIResponseProgram>(
-        new AIResponseProgram(),
-        {
-            args: {
-                server: true,
-                onRequest: (query, context) => {
-                    requestCount++;
-                },
-            },
-            existing: "reuse",
-        }
-    );
+    // Check if an API key is passed as a CLI argument using the flag "--api-key".
+    let chatgptApiKey: string | undefined;
+    const apiKeyIndex = process.argv.indexOf("--api-key");
+    if (apiKeyIndex > -1 && process.argv.length > apiKeyIndex + 1) {
+        chatgptApiKey = process.argv[apiKeyIndex + 1];
+    }
 
-    // Monitor mode: show the rate of incoming requests in real time.
-    const monitorMode = async () => {
-        console.log(
-            "Entering monitor mode. Type 'back' to return to interactive mode."
-        );
-        let lastCount = requestCount;
-        const interval = setInterval(() => {
-            const currentCount = requestCount;
-            const rate = currentCount - lastCount;
-            lastCount = currentCount;
-            console.log(`Requests in the last second: ${rate}`);
-        }, 1000);
-
-        // Stay in monitor mode until user types "back".
-        while (true) {
-            const answer = await inquirer.prompt([
-                {
-                    type: "input",
-                    name: "command",
-                    message: "Monitor mode (type 'back' to exit):",
-                },
-            ]);
-            if (answer.command.trim().toLowerCase() === "back") {
-                break;
-            }
-        }
-        clearInterval(interval);
-        console.log("Exiting monitor mode.");
+    const serviceArgs = {
+        server: true,
+        llm: llm as "chatgpt" | "ollama",
+        ...(llm === "chatgpt" && {
+            apiKey: chatgptApiKey || process.env.OPENAI_API_KEY,
+        }),
     };
 
-    // Main CLI loop: prompt the user for input and query the AI.
-    const promptLoop = async () => {
-        const answers = await inquirer.prompt([
+    // Open the CanvasAIReply service (server mode) with the proper LLM configuration.
+    const service = await client.open<CanvasAIReply>(new CanvasAIReply(), {
+        args: {
+            ...serviceArgs,
+            server: true,
+        },
+        existing: "reuse",
+    });
+
+    // Main interactive loop using inquirer.
+    while (true) {
+        const { mode } = await inquirer.prompt([
             {
-                type: "input",
-                name: "prompt",
-                message:
-                    "Enter your prompt (or type 'exit' to quit or 'monitor' to view request rate):",
+                type: "list",
+                name: "mode",
+                message: "Select a mode:",
+                choices: [
+                    {
+                        name: "Monitor Mode (periodically display the request rate)",
+                        value: "monitor",
+                    },
+                    {
+                        name: "Generate Reply (enter a Canvas address to generate a reply)",
+                        value: "reply",
+                    },
+                    {
+                        name: "Exit",
+                        value: "exit",
+                    },
+                ],
             },
         ]);
-        const userPrompt = answers.prompt.trim();
-        if (userPrompt.toLowerCase() === "exit") {
+
+        if (mode === "exit") {
             console.log("Exiting...");
             process.exit(0);
-        } else if (userPrompt.toLowerCase() === "monitor") {
-            await monitorMode();
-        } else {
-            // Open a client connection to the running service.
-            const clientInstance = await client.open<AIResponseProgram>(
-                service.address,
-                { existing: "reuse" }
+        } else if (mode === "monitor") {
+            console.log(
+                "Entering Monitor Mode. Press Enter to return to the main menu."
             );
-            await clientInstance.waitFor(service.node.identity.publicKey);
+            const monitorInterval = setInterval(() => {
+                const stats = service.getRequestStats();
+                console.log("Request Stats:");
+                console.log("  Requests:        " + stats.requestCount);
+                console.log(
+                    "  Average Latency: " +
+                        stats.averageLatency.toFixed(2) +
+                        " ms"
+                );
+                console.log("  Errors:          " + stats.errorCount);
+            }, 5000);
+
+            // Wait for user input to stop monitoring.
+            await inquirer.prompt([
+                {
+                    type: "input",
+                    name: "stop",
+                    message:
+                        "Press Enter to stop monitoring and return to the main menu.",
+                },
+            ]);
+            clearInterval(monitorInterval);
+        } else if (mode === "reply") {
+            // Prompt the user for a Canvas address.
+            const { canvasAddress } = await inquirer.prompt([
+                {
+                    type: "input",
+                    name: "canvasAddress",
+                    message: "Enter the Canvas address:",
+                },
+            ]);
+
+            if (canvasAddress.trim().length === 0) {
+                console.error("Invalid Canvas address");
+                continue;
+            }
+            console.log("Opening Canvas at address:", canvasAddress);
+            const canvas = await client.open<Canvas>(canvasAddress, {
+                existing: "reuse",
+            });
+            await canvas.load();
 
             console.log("Querying AI, please wait...");
             try {
-                // Increase the timeout if needed.
-                const response = await clientInstance.query(userPrompt, {
+                const response = await service.query(canvas, {
                     timeout: 10000,
                 });
                 console.log("\nAI Response:");
-                console.log(response?.response || "No response received");
+                console.log(response ? "Done!" : "No response received");
             } catch (error) {
                 console.error("Error querying AI:", error);
             }
-            console.log("");
-        }
-        // Continue the prompt loop.
-        await promptLoop();
-    };
 
-    await promptLoop();
+            // Wait for user to press Enter to return to the main menu.
+            await inquirer.prompt([
+                {
+                    type: "input",
+                    name: "continue",
+                    message: "Press Enter to return to the main menu.",
+                },
+            ]);
+        }
+    }
 };

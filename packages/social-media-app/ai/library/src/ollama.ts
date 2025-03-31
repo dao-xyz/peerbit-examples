@@ -14,7 +14,11 @@ export const queryOllama = async (prompt, model = DEEP_SEEK_R1) => {
             messages: [{ role: "user", content: prompt }],
             stream: false,
         });
-        return response.message.content;
+
+        // after the </think> tag the actual response starts
+        const thinkSplit = response.message.content.split("</think>");
+
+        return thinkSplit[thinkSplit.length - 1].trim();
     } catch (error) {
         console.error("Error querying Ollama:", error);
         throw error;

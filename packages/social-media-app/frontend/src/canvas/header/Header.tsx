@@ -5,11 +5,14 @@ import { HiDotsHorizontal } from "react-icons/hi";
 import { FaSpinner } from "react-icons/fa";
 import { useCount, usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
-import { Canvas, getOwnedElementsQuery, IFrameContent } from "@dao-xyz/social";
+import {
+    Canvas,
+    getOwnedElementsQuery,
+    IFrameContent,
+} from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
 import { WithContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
-import { useAiReply } from "../../ai/AiReplyProvider";
 import { FaRegComment } from "react-icons/fa";
 
 export const Header = ({
@@ -30,7 +33,6 @@ export const Header = ({
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
     const { profiles } = useProfiles();
-    const { loadingMap } = useAiReply();
 
     const replyCount = useCount(
         canvas?.loadedReplies ? canvas.replies : undefined,
@@ -136,19 +138,6 @@ export const Header = ({
 
                     {variant === "large" && (
                         <>
-                            {/* Show AI reply loading indicator if applicable */}
-                            {canvasId && loadingMap[canvasId] && (
-                                <div className="ml-2 flex items-center gap-1">
-                                    <FaSpinner
-                                        className="animate-spin text-blue-500"
-                                        size={16}
-                                    />
-                                    <span className="text-xs text-blue-500">
-                                        Replying…
-                                    </span>
-                                </div>
-                            )}
-
                             {/* Show comment icon with comment counts if applicable */}
                             {canvasId && (
                                 <button

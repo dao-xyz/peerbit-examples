@@ -12,10 +12,8 @@ import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
 import { HostRegistryProvider } from "@giga-app/sdk";
 import { useEffect } from "react";
 import { ThemeProvider } from "./theme/useTheme";
-import { AiReplyProvider } from "./ai/AiReplyProvider";
-import { OpenAIProvider } from "./ai/OpenAiProvider";
-import { LLMProvider } from "./ai/LLMContext";
 import { ReplyProgressProvider } from "./canvas/useReplyProgress";
+import { AIReplyProvider } from "./ai/AIReployContext";
 
 export const Content = () => {
     const { error: peerError } = usePeer();
@@ -80,13 +78,11 @@ export const App = () => {
                                 <CanvasProvider>
                                     <ReplyProgressProvider>
                                         <ProfileProvider>
-                                            <LLMProvider>
-                                                <AiReplyProvider>
-                                                    <HostRegistryProvider>
-                                                        <Content />
-                                                    </HostRegistryProvider>
-                                                </AiReplyProvider>
-                                            </LLMProvider>
+                                            <AIReplyProvider>
+                                                <HostRegistryProvider>
+                                                    <Content />
+                                                </HostRegistryProvider>
+                                            </AIReplyProvider>
                                         </ProfileProvider>
                                     </ReplyProgressProvider>
                                 </CanvasProvider>

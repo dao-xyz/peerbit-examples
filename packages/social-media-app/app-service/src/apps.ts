@@ -6,7 +6,7 @@ import {
     SimpleWebManifest,
     NATIVE_TEXT_APP_URL,
     NATIVE_IMAGE_APP_URL,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 import {
     SearchRequest,
     StringMatch,

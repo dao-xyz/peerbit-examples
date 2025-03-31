@@ -1,6 +1,6 @@
 import { forwardRef, useEffect, useState } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
-import { Profile as ProfileData } from "@dao-xyz/social";
+import { Profile as ProfileData } from "@giga-app/interface";
 import { useProfiles } from "./useProfiles";
 import { CanvasPreview } from "../canvas/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";

@@ -13,7 +13,7 @@ import {
     Canvas as CanvasDB,
     getImmediateRepliesQuery,
     getRepliesQuery,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 import { useLocal, useOnline, usePeer } from "@peerbit/react";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import { SearchRequest } from "@peerbit/document-interface";

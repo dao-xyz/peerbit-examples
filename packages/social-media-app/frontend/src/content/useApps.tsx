@@ -12,7 +12,7 @@ import {
     CuratedWebApp,
     getApps,
 } from "@giga-app/app-service";
-import { BrowsingHistory, SimpleWebManifest } from "@dao-xyz/social";
+import { BrowsingHistory, SimpleWebManifest } from "@giga-app/interface";
 import { ImageUploadTrigger } from "./native/image/ImageUploadToCanvas";
 
 interface IApps {

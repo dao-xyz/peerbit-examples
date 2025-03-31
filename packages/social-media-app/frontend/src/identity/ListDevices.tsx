@@ -1,6 +1,6 @@
 import { usePeer } from "@peerbit/react";
 import { useIdentities } from "./useIdentities";
-import { Connection } from "@dao-xyz/social";
+import { Connection } from "@giga-app/interface";
 import { CiCircleRemove } from "react-icons/ci";
 
 export const ListDevices = () => {
