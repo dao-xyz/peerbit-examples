@@ -3,7 +3,7 @@ import { Program } from "@peerbit/program";
 import { RPC } from "@peerbit/rpc";
 import { parse } from "parse5";
 import { RequestURL } from "./types.js";
-import { SimpleWebManifest } from "@dao-xyz/social";
+import { SimpleWebManifest } from "@giga-app/interface";
 
 export const resolveAppFromUrl = async (
     address: string

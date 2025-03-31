@@ -9,11 +9,11 @@ import { BsCamera, BsArrowsCollapse } from "react-icons/bs";
 import { useToolbar } from "./Toolbar";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
-import { SimpleWebManifest } from "@dao-xyz/social";
+import { SimpleWebManifest } from "@giga-app/interface";
 import * as Toggle from "@radix-ui/react-toggle";
-import { useAiReply } from "../../ai/AiReplyProvider";
+
 import VscRobot from "/vscrobot.svg";
-import { useLLM } from "../../ai/LLMContext";
+import { useAIReply } from "../../ai/AIReployContext";
 
 interface ToolbarContentProps {
     onToggleAppSelect: () => void;
@@ -36,7 +36,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
         const { search } = useApps();
         const [resolvedApp, setResolvedApp] =
             useState<null | SimpleWebManifest>(null);
-        const { isReady: isReadyLLM } = useLLM();
+        const { isReady: isReadyLLM } = useAIReply();
 
         // Try to resolve a matching app when the text changes.
         useEffect(() => {

@@ -17,13 +17,13 @@ import {
     sha256Sync,
 } from "@peerbit/crypto";
 import { Program, ProgramClient } from "@peerbit/program";
-import { AbstractStaticContent } from "./static/content";
-import { StaticMarkdownText } from "./static";
+import { AbstractStaticContent } from "./static/content.js";
+import { StaticMarkdownText } from "./static/text.js";
 import {
     NATIVE_IMAGE_APP_URL,
     NATIVE_PARTIAL_IMAGE_APP_URL,
     NATIVE_TEXT_APP_URL,
-} from "./types";
+} from "./types.js";
 import { RPC } from "@peerbit/rpc";
 import { concat } from "uint8arrays";
 
@@ -92,7 +92,7 @@ abstract class CanvasReference {
 const resolvePathFromProperties = (
     properties: PathProperties
 ): CanvasReference[] => {
-    if ("parent" in properties) {
+    if ("parent" in properties && properties.parent) {
         return [
             ...properties.parent.path,
             new CanvasAddressReference({
@@ -100,7 +100,7 @@ const resolvePathFromProperties = (
             }),
         ];
     } else {
-        return properties["path"] ?? [];
+        return properties?.["path"] ?? [];
     }
 };
 
@@ -388,6 +388,23 @@ export class ReplyingInProgresss extends CanvasMessage {
                   });
     }
 }
+
+@variant(1)
+export class ReplyingNoLongerInProgresss extends CanvasMessage {
+    @field({ type: CanvasReference })
+    reference: CanvasReference;
+
+    constructor(properties: { reference: CanvasReference | Canvas }) {
+        super();
+        this.reference =
+            properties.reference instanceof CanvasReference
+                ? properties.reference
+                : new CanvasAddressReference({
+                      canvas: properties.reference,
+                  });
+    }
+}
+
 type CanvasArgs = { debug?: boolean };
 @variant("canvas")
 export class Canvas extends Program<CanvasArgs> {
@@ -517,6 +534,9 @@ export class Canvas extends Program<CanvasArgs> {
             ),
             responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
         });
+    }
+    async afterOpen(): Promise<void> {
+        await super.afterOpen();
 
         this._repliesChangeListener = async (
             evt: CustomEvent<DocumentsChange<Canvas>>
@@ -549,18 +569,28 @@ export class Canvas extends Program<CanvasArgs> {
                 }
             };
 
-            for (const added of evt.detail.added) {
+            for (let added of evt.detail.added) {
+                if (added.closed) {
+                    added = await this.node.open(added, { existing: "reuse" });
+                }
                 const loadedPath = await added.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
                     await reIndex(loadedPath[i], loadedPath[i - 1]);
                 }
             }
 
-            for (const removed of evt.detail.removed) {
+            for (let removed of evt.detail.removed) {
+                if (removed.closed) {
+                    removed = await this.node.open(removed, {
+                        existing: "reuse",
+                    });
+                }
+
                 const loadedPath = await removed.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
                     await reIndex(loadedPath[i], loadedPath[i - 1]);
                 }
+                await removed.close();
             }
         };
         this._replies.events.addEventListener(
@@ -632,6 +662,27 @@ export class Canvas extends Program<CanvasArgs> {
             // TODO handle errors that arrise from the database being closed
             return 0n;
         }
+    }
+
+    async getText(): Promise<string> {
+        if (!this.loadedElements) {
+            await this.load();
+        }
+        const elements = await this.elements.index.index
+            .iterate({
+                query: [getTextElementsQuery(), ...getOwnedElementsQuery(this)],
+            })
+            .all();
+        let concat = "";
+        for (const element of elements) {
+            if (element.value.type !== "canvas") {
+                if (concat.length > 0) {
+                    concat += "\n";
+                }
+                concat += element.value.content;
+            }
+        }
+        return concat;
     }
 
     async getCreateRoomByPath(path: string[]): Promise<Canvas[]> {

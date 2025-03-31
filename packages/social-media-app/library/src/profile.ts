@@ -1,11 +1,11 @@
 import { field, option, variant } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
-import { Canvas, IndexableCanvas } from "./content";
+import { Canvas, IndexableCanvas } from "./content.js";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 import { Documents } from "@peerbit/document";
 import { ByteMatchQuery } from "@peerbit/indexer-interface";
-import { Identities } from "./identity";
+import { Identities } from "./identity.js";
 
 @variant(0)
 export class Profile {

@@ -5,7 +5,7 @@
 import React, { useRef, useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FiMaximize, FiX } from "react-icons/fi";
-import { StaticImage } from "@dao-xyz/social";
+import { StaticImage } from "@giga-app/interface";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
 

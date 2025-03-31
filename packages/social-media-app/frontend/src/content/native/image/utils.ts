@@ -1,4 +1,4 @@
-import { StaticImage } from "@dao-xyz/social";
+import { StaticImage } from "@giga-app/interface";
 import pDefer from "p-defer";
 
 export const readFileAsImage = (file: File): Promise<StaticImage> => {

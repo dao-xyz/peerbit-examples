@@ -11,7 +11,7 @@ import {
     StaticContent,
     StaticImage,
     StaticMarkdownText,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 import { Ed25519Keypair } from "@peerbit/crypto";
 
 const generateATextInMarkdown = (length: number = 100) => {

@@ -1,6 +1,6 @@
 import { useProgram } from "@peerbit/react";
 import React, { useContext } from "react";
-import { Profile, Profiles } from "@dao-xyz/social";
+import { Profile, Profiles } from "@giga-app/interface";
 import { useNavigate } from "react-router-dom";
 import { getCanvasPath, MISSING_PROFILE } from "../routes";
 

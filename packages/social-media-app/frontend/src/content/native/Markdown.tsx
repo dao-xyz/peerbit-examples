@@ -1,7 +1,7 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { StaticMarkdownText } from "@dao-xyz/social";
+import { StaticMarkdownText } from "@giga-app/interface";
 import { ChangeCallback } from "./types";
 
 export type MarkdownContentProps = {

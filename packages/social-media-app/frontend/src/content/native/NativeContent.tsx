@@ -2,7 +2,7 @@ import {
     StaticContent,
     StaticMarkdownText,
     StaticImage,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 import { MarkdownContent } from "./Markdown";
 import { ImageContent } from "./image/Image";
 import { ChangeCallback } from "./types";

@@ -1,5 +1,5 @@
 import React, { SyntheticEvent, useEffect, useRef, useState } from "react";
-import { IFrameContent, Element, StaticContent } from "@dao-xyz/social";
+import { IFrameContent, Element, StaticContent } from "@giga-app/interface";
 import { useNavigate } from "react-router-dom";
 import { EditableStaticContent } from "./native/NativeContent";
 import { useApps } from "./useApps";

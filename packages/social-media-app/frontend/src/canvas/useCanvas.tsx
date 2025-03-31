@@ -12,7 +12,7 @@ import {
     Layout,
     StaticContent,
     StaticMarkdownText,
-} from "@dao-xyz/social";
+} from "@giga-app/interface";
 import { useLocation } from "react-router-dom";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";

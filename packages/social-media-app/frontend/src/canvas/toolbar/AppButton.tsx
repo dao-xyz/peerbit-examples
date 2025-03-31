@@ -1,5 +1,5 @@
 import React from "react";
-import { SimpleWebManifest } from "@dao-xyz/social";
+import { SimpleWebManifest } from "@giga-app/interface";
 import { resolveTrigger } from "../../content/useApps";
 
 interface AppButtonProps {

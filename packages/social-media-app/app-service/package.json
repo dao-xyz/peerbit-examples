@@ -32,7 +32,7 @@
     },
     "devDependencies": {
         "@peerbit/test-utils": "^2",
-        "@dao-xyz/social": "^0",
+        "@giga-app/interface": "^0",
         "typescript": "^5.6.3"
     },
     "dependencies": {

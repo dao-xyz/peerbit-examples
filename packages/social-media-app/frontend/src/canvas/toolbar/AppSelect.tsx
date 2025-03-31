@@ -10,8 +10,8 @@ import {
 import { useApps } from "../../content/useApps";
 import { FaPlus } from "react-icons/fa6";
 import { AiOutlineQuestionCircle } from "react-icons/ai";
-import { SimpleWebManifest } from "@dao-xyz/social";
-import { InvalidAppError } from "@dao-xyz/social";
+import { SimpleWebManifest } from "@giga-app/interface";
+import { InvalidAppError } from "@giga-app/interface";
 
 const unknownApp = (url: string) => new SimpleWebManifest({ url });
 const isNative = (app: SimpleWebManifest) => app.url.startsWith("native:");

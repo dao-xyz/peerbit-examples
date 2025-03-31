@@ -7,11 +7,11 @@ import {
     ReactNode,
     useContext,
 } from "react";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as CanvasDB } from "@giga-app/interface";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import ToolbarContent from "./ToolbarContent";
 import { AppSelectPaneInline } from "./AppSelectPaneInline";
-import { SimpleWebManifest } from "@dao-xyz/social";
+import { SimpleWebManifest } from "@giga-app/interface";
 
 interface ToolbarContextType {
     fullscreenEditorActive: boolean;

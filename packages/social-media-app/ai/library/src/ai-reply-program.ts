@@ -1,0 +1,589 @@
+import { field, fixedArray, option, variant } from "@dao-xyz/borsh";
+import { Program } from "@peerbit/program";
+import { RPC } from "@peerbit/rpc";
+import { queryOllama } from "./ollama.js";
+import { queryChatGPT } from "./chatgpt.js";
+import { PublicSignKey, sha256Base64Sync } from "@peerbit/crypto";
+import { SilentDelivery } from "@peerbit/stream-interface";
+import { DEEP_SEEK_R1 } from "./model.js";
+import { delay } from "@peerbit/time";
+import { AbortError, TimeoutError } from "@peerbit/time";
+import {
+    Canvas,
+    Element,
+    getOwnedElementsQuery,
+    getSubownedElementsQuery,
+    getTextElementsQuery,
+    Layout,
+    ReplyingInProgresss,
+    ReplyingNoLongerInProgresss,
+    StaticContent,
+    StaticMarkdownText,
+} from "@giga-app/interface";
+import { Query, SearchRequest, Sort, WithContext } from "@peerbit/document";
+
+// Utility to ignore specific errors.
+const ignoreTimeoutandAbort = (error: Error) => {
+    if (error instanceof TimeoutError) {
+        // Ignore timeout errors
+    } else if (error instanceof AbortError) {
+        // Ignore abort errors
+    } else {
+        throw error;
+    }
+};
+
+// Type for collecting request statistics.
+export type RequestStats = {
+    requestCount: number;
+    totalLatency: number; // in milliseconds
+    errorCount: number;
+};
+
+export type Args = {
+    server?: boolean;
+    onRequest?: (query: ChatQuery | ModelRequest, context?: any) => void;
+} & (OpenAPIArgs | OLLamaArgs);
+
+type OpenAPIArgs = {
+    server: true;
+    llm: "chatgpt";
+    apiKey?: string;
+};
+
+type OLLamaArgs = {
+    server: true;
+    llm: "ollama";
+};
+
+@variant("canvas-ai-reply")
+export class CanvasAIReply extends Program<Args> {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: RPC })
+    rpc: RPC<ChatQuery | ModelRequest, AIResponse>;
+
+    // Map to store model information: key = model name, value = peer identifier.
+    private modelMap: Map<string, { peers: Set<string>; model: string }>;
+    // List of models supported by this server (if running in server mode).
+    public supportedModels: string[] = [];
+
+    // New configuration for LLM.
+    private llm: "ollama" | "chatgpt";
+    private apiKey?: string;
+
+    // New property for request statistics.
+    private stats: RequestStats;
+
+    constructor(
+        properties: { id: Uint8Array } = {
+            id: new Uint8Array([
+                38, 8, 228, 136, 247, 41, 32, 68, 122, 69, 86, 130, 235, 190,
+                83, 104, 253, 185, 197, 202, 247, 167, 188, 49, 90, 168, 248,
+                40, 213, 211, 174, 166,
+            ]),
+        }
+    ) {
+        super();
+        this.id = properties.id;
+        this.rpc = new RPC();
+        this.stats = { requestCount: 0, totalLatency: 0, errorCount: 0 };
+    }
+
+    /**
+     * Returns the current request statistics.
+     */
+    public getRequestStats() {
+        const averageLatency =
+            this.stats.requestCount > 0
+                ? this.stats.totalLatency / this.stats.requestCount
+                : 0;
+        return {
+            requestCount: this.stats.requestCount,
+            averageLatency,
+            errorCount: this.stats.errorCount,
+        };
+    }
+
+    /**
+     * Opens the RPC channel.
+     * In server mode:
+     *  - Registers a response handler that handles both chat and model requests.
+     *  - Initializes the supportedModels list with a default ("deepseek-r1:1.5b").
+     * In client mode:
+     *  - Requests model info from peers and stores it in a map.
+     */
+    async open(args?: Args): Promise<void> {
+        this.modelMap = new Map();
+
+        // Set LLM configuration (defaulting to "ollama").
+        this.llm = args?.llm || "ollama";
+
+        if (args?.server) {
+            // Initialize default supported model.
+            if (args.llm === "ollama") {
+                this.supportedModels = ["deepseek-r1:1.5b"];
+            } else if (args.llm === "chatgpt") {
+                this.supportedModels = ["gpt-4o"];
+                this.apiKey = args?.apiKey
+                    ? args.apiKey
+                    : process.env.OPENAI_API_KEY || undefined;
+                if (!this.apiKey) {
+                    throw new Error("Missing ChatGPT API Key");
+                }
+            } else {
+                throw new Error("Missing LLM Model source");
+            }
+        } else {
+            // Client mode: request model info from peers.
+            this.supportedModels = [];
+        }
+
+        await this.rpc.open({
+            responseType: AIResponse,
+            queryType: AIRequest,
+            topic: sha256Base64Sync(this.id),
+            responseHandler: args?.server
+                ? async (query, context) => {
+                      if (args?.onRequest) {
+                          args.onRequest(query, context);
+                      }
+                      if (query instanceof ChatQuery) {
+                          return this.handleChatQuery(query);
+                      } else if (query instanceof ModelRequest) {
+                          return new ModelResponse({
+                              model: this.supportedModels.join(", "),
+                              info: "Supported models by this peer",
+                          });
+                      }
+                  }
+                : undefined,
+        });
+
+        if (!args?.server) {
+            // Helper to request model info from peers.
+            const requestModels = async (toPeers?: PublicSignKey[]) => {
+                try {
+                    const responses = await this.rpc.request(
+                        new ModelRequest(),
+                        {
+                            mode: toPeers
+                                ? new SilentDelivery({
+                                      to: toPeers,
+                                      redundancy: 1,
+                                  })
+                                : undefined,
+                        }
+                    );
+                    for (const resp of responses) {
+                        const modelResp = resp.response as ModelResponse;
+                        const peerId = resp.from!;
+                        const set = this.modelMap.get(modelResp.model);
+                        if (set) {
+                            set.peers.add(peerId.hashcode());
+                        } else {
+                            this.modelMap.set(modelResp.model, {
+                                model: modelResp.model,
+                                peers: new Set([peerId.hashcode()]),
+                            });
+                        }
+                    }
+                } catch (error) {}
+            };
+
+            // On peer join, request its model info.
+            this.rpc.events.addEventListener("join", async (e: any) => {
+                await requestModels([e.detail]).catch(ignoreTimeoutandAbort);
+            });
+
+            // Broadcast a ModelRequest to all peers (non-blocking).
+            requestModels().catch(ignoreTimeoutandAbort);
+        }
+    }
+
+    private getPeersWithModel(model?: string) {
+        if (model) {
+            return this.modelMap.get(model);
+        } else {
+            const keys = [...this.modelMap.keys()];
+            if (keys.length > 0) {
+                return this.modelMap.get(keys[0]);
+            }
+        }
+    }
+
+    /**
+     * Sends a prompt to the AI model via an RPC request.
+     * If options.model is provided, the query is sent only to the peer supporting that model.
+     */
+    async query(
+        canvas: Canvas,
+        options?: {
+            elementsQuery?: Query;
+            canvasesQuery?: Query;
+            timeout?: number;
+            model?: string;
+        }
+    ): Promise<AIResponse | undefined> {
+        const { timeout = 2e4, model: maybeModel } = options || {};
+        const peers = this.getPeersWithModel(maybeModel);
+        const meInPeer = peers?.peers?.has(
+            this.node.identity.publicKey.hashcode()
+        );
+        if (meInPeer) {
+            return this.handleChatQuery({
+                canvas,
+                model: peers!.model,
+                elementsQuery: options?.elementsQuery,
+                canvasesQuery: options?.canvasesQuery,
+            });
+        }
+        if (!peers?.peers || peers.peers.size === 0) {
+            throw new Error(
+                `No peers available for model ${peers?.model ?? "NO_MODEL"}`
+            );
+        }
+        let toPeers = [
+            [...peers.peers][
+                Math.round(Math.random() * (peers.peers.size - 1))
+            ],
+        ];
+        const responses = await this.rpc.request(
+            new ChatQuery({
+                canvas,
+                model: peers.model,
+                canvasesQuery: options?.canvasesQuery,
+                elementsQuery: options?.elementsQuery,
+            }),
+            {
+                timeout,
+                mode:
+                    toPeers.length > 0
+                        ? new SilentDelivery({
+                              redundancy: 1,
+                              to: toPeers,
+                          })
+                        : undefined,
+            }
+        );
+        const response = responses[0]?.response as AIResponse;
+        if (response) {
+            console.log("Response received:", response);
+            return response;
+        }
+        throw new Error("No response received");
+    }
+
+    /**
+     * Handles a chat query by generating a reply using the appropriate LLM.
+     * This method also measures the processing time and updates the request statistics.
+     */
+    async handleChatQuery(properties: ChatQuery): Promise<AIResponse> {
+        const startTime = Date.now();
+        try {
+            const model = properties.model || DEEP_SEEK_R1;
+            if (model && !this.supportedModels.includes(model)) {
+                return new MissingModel({ model });
+            }
+            const canvasInstance = await this.node.open(properties.canvas, {
+                existing: "reuse",
+            });
+            // Choose the query function based on the LLM configuration.
+            const queryFunction =
+                this.llm === "chatgpt"
+                    ? (text: string) => queryChatGPT(text, this.apiKey)
+                    : (text: string) => queryOllama(text, model);
+            await generateReply({
+                canvas: canvasInstance,
+                canvasesQuery: properties.canvasesQuery,
+                elementsQuery: properties.elementsQuery,
+                generator: queryFunction,
+            });
+            const latency = Date.now() - startTime;
+            this.stats.requestCount++;
+            this.stats.totalLatency += latency;
+            return new QueryResponse();
+        } catch (error) {
+            this.stats.errorCount++;
+            throw error;
+        }
+    }
+
+    async waitForModel(options?: {
+        model?: string;
+        timeout?: number;
+    }): Promise<void> {
+        const start = Date.now();
+        while (Date.now() - start < (options?.timeout || 10000)) {
+            if (options?.model) {
+                if (
+                    this.supportedModels.includes(options?.model) ||
+                    this.modelMap.has(options?.model)
+                ) {
+                    return;
+                }
+            } else {
+                if (
+                    this.supportedModels.length > 0 ||
+                    [...this.modelMap.values()].filter((x) => x.peers.size > 0)
+                        .length > 0
+                ) {
+                    return;
+                }
+            }
+            await delay(100);
+        }
+        throw new Error(
+            `Timeout waiting for  ${
+                options?.model ? "model " + options.model : "any model"
+            }`
+        );
+    }
+}
+
+abstract class AIRequest {}
+
+@variant(0)
+export class ChatQuery extends AIRequest {
+    @field({ type: Canvas })
+    canvas: Canvas;
+
+    @field({ type: option(Query) })
+    canvasesQuery?: Query;
+
+    @field({ type: option(Query) })
+    elementsQuery?: Query;
+
+    @field({ type: option("string") })
+    model?: string;
+
+    constructor(properties: {
+        canvas: Canvas;
+        canvasesQuery?: Query;
+        elementsQuery?: Query;
+        model?: string;
+    }) {
+        super();
+        this.canvas = properties.canvas;
+        this.model = properties.model;
+        this.canvasesQuery = properties.canvasesQuery;
+        this.elementsQuery = properties.elementsQuery;
+    }
+}
+
+@variant(1)
+export class ModelRequest extends AIRequest {
+    constructor() {
+        super();
+    }
+}
+
+abstract class AIResponse {}
+
+@variant(0)
+export class ModelResponse extends AIResponse {
+    @field({ type: "string" })
+    model: string;
+
+    @field({ type: "string" })
+    info: string;
+
+    constructor(properties: { model: string; info: string }) {
+        super();
+        this.model = properties.model;
+        this.info = properties.info;
+    }
+}
+
+@variant(1)
+export class MissingModel extends AIResponse {
+    @field({ type: "string" })
+    model: string;
+
+    constructor(properties: { model: string }) {
+        super();
+        this.model = properties.model;
+    }
+}
+
+@variant(2)
+export class QueryResponse extends AIResponse {
+    @field({ type: "u8" })
+    status: number;
+
+    constructor() {
+        super();
+        this.status = 0;
+    }
+}
+
+const createContextFromElement = (
+    element: WithContext<Element<StaticContent<StaticMarkdownText>>>
+) => {
+    const text = element.content.content.text.replace(/"/g, '\\"');
+    return `{ owner: ${element.publicKey.hashcode()}, content: "${text}" }`;
+};
+
+export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
+    return parent.elements.put(
+        new Element({
+            content: new StaticContent({
+                content: new StaticMarkdownText({ text }),
+            }),
+            location: Layout.zero(),
+            publicKey: parent.node.identity.publicKey,
+            parent,
+        })
+    );
+};
+
+export const insertTextReply = async (text: string, parent: Canvas) => {
+    return parent.node
+        .open(
+            new Canvas({
+                parent: parent,
+                publicKey: parent.node.identity.publicKey,
+            }),
+            { existing: "reuse" }
+        )
+        .then(async (newCanvas) => {
+            await newCanvas.load();
+            await insertTextIntoCanvas(text, newCanvas);
+            return parent.replies.put(newCanvas);
+        });
+};
+
+const generateReply = async (properties: {
+    canvas: Canvas;
+    elementsQuery?: Query;
+    canvasesQuery?: Query;
+    generator: (text: string) => Promise<string>;
+}): Promise<void> => {
+    const { canvas, elementsQuery, canvasesQuery, generator } = properties;
+    try {
+        await canvas.messages.send(
+            new ReplyingInProgresss({ reference: canvas })
+        );
+
+        // Load the parent canvas (i.e. the previous post in the thread).
+        const parent = await canvas.loadParent();
+
+        // Retrieve the target post (the one to reply to) with owner info.
+        const replyToPostsElements = await canvas.elements.index
+            .iterate({
+                query: [
+                    ...getOwnedElementsQuery(canvas),
+                    getTextElementsQuery(),
+                    ...(elementsQuery ? [elementsQuery] : []),
+                ],
+            })
+            .all();
+        const replyToTexts = replyToPostsElements.map((x) => {
+            const element = x as WithContext<
+                Element<StaticContent<StaticMarkdownText>>
+            >;
+            return `{ owner: ${element.publicKey.hashcode()}, content: "${
+                element.content.content.text
+            }" }`;
+        });
+
+        // Retrieve sibling posts and include owner info in the text.
+        const siblingElements = await parent.elements.index
+            .iterate({
+                query: [
+                    ...getSubownedElementsQuery(parent),
+                    getTextElementsQuery(),
+                    ...(canvasesQuery ? [canvasesQuery] : []),
+                ],
+                sort: new Sort({ key: ["__context", "created"] }),
+            })
+            .all();
+
+        const siblingTexts = siblingElements
+            .filter(
+                (x) =>
+                    !replyToPostsElements.find((y) => y.idString === x.idString)
+            )
+            .map((x) => {
+                const element = x as WithContext<
+                    Element<StaticContent<StaticMarkdownText>>
+                >;
+                return `{ owner: ${element.publicKey.hashcode()}, content: "${
+                    element.content.content.text
+                }" }`;
+            });
+
+        // Retrieve the parent post's content including owner metadata.
+        let parentTexts: string[] = [];
+        if (parent) {
+            const parentElements = await parent.elements.index
+                .iterate({
+                    query: [
+                        ...getOwnedElementsQuery(parent),
+                        getTextElementsQuery(),
+                        ...(elementsQuery ? [elementsQuery] : []),
+                    ],
+                })
+                .all();
+            parentTexts = parentElements.map((x) => {
+                const element = x as WithContext<
+                    Element<StaticContent<StaticMarkdownText>>
+                >;
+                return `{ owner: ${parent.publicKey.hashcode()}, content: "${
+                    element.content.content.text
+                }" }`;
+            });
+        }
+
+        // Build the aggregated context with metadata.
+        let aggregatedContext = "Context for generating your reply. Note:\n";
+        aggregatedContext +=
+            "- 'Thread Parent Post' is the previous post in the conversation thread (metadata is provided only for speaker identification).\n";
+        aggregatedContext +=
+            "- 'Owned Post' refers to content created by the post's author (the owner field is provided solely for identification purposes).\n\n";
+
+        if (parentTexts.length > 0) {
+            aggregatedContext +=
+                "Thread Parent Post:\n" + parentTexts.join("\n") + "\n";
+        }
+
+        if (siblingTexts.length > 0) {
+            aggregatedContext +=
+                "\nSibling Posts (other responses in the conversation):\n" +
+                siblingTexts.join("\n") +
+                "\n";
+        }
+
+        aggregatedContext +=
+            "\nTarget Post (the post you should reply to):\n" +
+            (replyToTexts.length > 0
+                ? replyToTexts.join("\n")
+                : "_Missing Target Content_") +
+            "\n";
+
+        // Construct the prompt with clear instructions.
+        const promptText = `
+You are a social media assistant. Based on the conversation thread provided below, generate a thoughtful and engaging reply that continues the discussion appropriately. Keep your reply concise and directly address the target post's content. You will act as a different user in the conversation, like a friend or a colleague. For example, if someone asks, what is my name, you can say "I think your name is ...".
+
+Important:
+- Each post in the context is represented as { owner: <owner_id>, content: "<text>" }.
+- The owner field is provided for post creator identification.
+- Focus your reply on the text in the content field only.
+
+${aggregatedContext}
+
+Reply:
+        `.trim();
+
+        const aiResponse = await generator(promptText);
+        const thinkSplit = aiResponse.split("</think>");
+        await insertTextReply(thinkSplit[thinkSplit.length - 1].trim(), canvas);
+    } catch (error) {
+        await insertTextReply("Error generating AI reply :(", canvas);
+    } finally {
+        await canvas.messages.send(
+            new ReplyingNoLongerInProgresss({ reference: canvas })
+        );
+    }
+};
