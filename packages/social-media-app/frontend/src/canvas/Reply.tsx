@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Canvas as CanvasDB } from "@dao-xyz/social";
+import { Canvas as CanvasDB, Visit } from "@dao-xyz/social";
 import { Canvas as Canvas } from "./Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "./Preview";
@@ -50,6 +50,33 @@ const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
     );
 };
 
+// Define a base type for common props
+type BaseReplyPropsType = {
+    canvas: WithContext<CanvasDB>;
+    index?: number;
+    onClick?: () => void;
+    hideHeader?: boolean;
+    lineType?: "start" | "end" | "end-and-start" | "none" | "middle";
+};
+
+// Define specific types for different variants
+type ThreadReplyPropsType = BaseReplyPropsType & {
+    variant?: Exclude<ViewType, "chat"> | "expanded-breadcrumb";
+    isQuote?: undefined;
+};
+
+type ChatReplyPropsType = BaseReplyPropsType & {
+    variant: "chat";
+    isQuote?: boolean;
+};
+
+// Union type for all possible prop combinations
+type ReplyPropsType = BaseReplyPropsType & {
+    variant?: ViewType | "expanded-breadcrumb";
+    isQuote?: boolean;
+};
+//ThreadReplyPropsType | ChatReplyPropsType;
+
 /**
  * Reply component for displaying a Canvas reply.
  * @param props - Component props
@@ -61,6 +88,7 @@ const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
  * @param props.index - Optional index of the reply in a list
  * @param props.onClick - Optional click handler for the reply
  * @param props.hideHeader - Whether to hide the header section
+ * @param props.lineType - Only available on variant = "thread". Which lines to draw for relationships between messages.
  */
 export const Reply = ({
     canvas,
@@ -68,13 +96,9 @@ export const Reply = ({
     onClick,
     variant = "thread",
     hideHeader = false,
-}: {
-    canvas: WithContext<CanvasDB>;
-    variant?: ViewType | "expanded-breadcrumb";
-    index?: number;
-    onClick?: () => void;
-    hideHeader?: boolean;
-}) => {
+    lineType,
+    isQuote,
+}: ReplyPropsType) => {
     const [showMore, setShowMore] = useState(false);
     const { peer } = usePeer();
     const navigate = useNavigate();
@@ -130,6 +154,28 @@ export const Reply = ({
                         />
                     </div>
                 )}
+                {!hideHeader && variant === "chat" && (
+                    <div className={tw("col-span-1 row-start-1 relative")}>
+                        {(lineType === "middle" || lineType === "end") && (
+                            <div className="absolute right-0 w-4 h-full border-l-4 dark:border-neutral-600 border-neutral-300"></div>
+                        )}
+                    </div>
+                )}
+                <div
+                    className={tw(
+                        "col-span-1 col-start-1 row-start-2 row-span-1 relative"
+                    )}
+                >
+                    {lineType === "middle" && (
+                        <div className="absolute right-0 w-4 h-full border-l-4 dark:border-neutral-600 border-neutral-300"></div>
+                    )}
+                    {lineType === "end" && (
+                        <div className="absolute right-0 w-4 h-4 border-l-4 border-b-4 rounded-bl-full dark:border-neutral-600 border-neutral-300"></div>
+                    )}
+                    {lineType === "start" && (
+                        <div className="absolute right-0 bottom-0 w-4 h-4 border-l-4 border-t-4 rounded-tl-full dark:border-neutral-600 border-neutral-300"></div>
+                    )}
+                </div>
                 <div
                     className={tw(
                         "p-0 overflow-hidden grid grid-cols-subgrid gap-y-4 col-span-full row-start-2",
@@ -148,7 +194,7 @@ export const Reply = ({
                         ) : variant === "chat" ? (
                             <CanvasPreview
                                 onClick={handleCanvasClick}
-                                variant="chat-message"
+                                variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
                             />
                         ) : showMore ? (

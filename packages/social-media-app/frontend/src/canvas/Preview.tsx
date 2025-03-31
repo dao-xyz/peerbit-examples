@@ -17,12 +17,14 @@ import { fromMarkdown } from "mdast-util-from-markdown";
 import { toString } from "mdast-util-to-string";
 import { useCanvas } from "./CanvasWrapper";
 
+type AlignedVariantType = "quote" | "chat-message";
+
 type VariantType =
     | "tiny"
     | "post"
     | "breadcrumb"
     | "expanded-breadcrumb"
-    | "chat-message";
+    | AlignedVariantType;
 
 type BaseCanvasPreviewProps = {
     onClick?: () => void;
@@ -30,12 +32,12 @@ type BaseCanvasPreviewProps = {
 };
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
-    variant: Exclude<VariantType, "chat-message">;
+    variant: Exclude<VariantType, AlignedVariantType>;
     align?: never;
 };
 
 type ChatMessageVariantProps = BaseCanvasPreviewProps & {
-    variant: "chat-message";
+    variant: AlignedVariantType;
     align: "left" | "right";
 };
 
@@ -58,6 +60,7 @@ function getRectsForVariant<V extends VariantType>(
                 undefined) as any;
         case "post":
         case "expanded-breadcrumb":
+        case "quote":
         case "chat-message":
             return {
                 text: separatedRects.text[0],
@@ -232,6 +235,78 @@ const ExpandedBreadcrumbPreview = ({
     );
 };
 
+const PostQuotePreview = ({
+    rects,
+    onClick,
+    author,
+}: {
+    rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
+    onClick?: () => void;
+    author?: string;
+}) => {
+    const { other: apps, text } = rects;
+    return (
+        <div className="col-start-2 col-span-3 flex items-stretch w-fit max-w-prose rounded-lg border border-l-4 border-l-neutral-950 dark:border-l-neutral-50 border-neutral-700 dark:border-neutral-300 bg-neutral-200 dark:bg-neutral-800">
+            <svg
+                xmlns="https://www.w3.org/2000/svg"
+                className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
+                version="1.1"
+            >
+                <filter id="gaussianBlurCanvas">
+                    <feGaussianBlur stdDeviation="20" result="blur" />
+                </filter>
+            </svg>
+            {apps.slice(0, 2).map((app, i) => (
+                <div
+                    key={i}
+                    className={tw(
+                        "shrink-0 w-[3.625rem] h-[3.625rem] rounded-sm overflow-hidden outline outline-neutral-700 dark:outline-neutral-300 relative",
+                        i === 1 ? "-ml-10" : "z-10"
+                    )}
+                >
+                    <div
+                        className={tw(
+                            "w-full h-full",
+                            i === 1 &&
+                                apps.slice(1).length > 0 &&
+                                "[filter:url('#gaussianBlurCanvas')]"
+                        )}
+                    >
+                        <PreviewFrame
+                            element={app}
+                            fit="cover"
+                            maximizeHeight
+                            onClick={onClick}
+                        />
+                    </div>
+                    {i === 1 && apps.slice(2).length > 0 && (
+                        <div className="absolute inset-0 bg-neutral-50/80 dark:bg-neutral-950/80 flex items-center justify-center">
+                            +{apps.slice(2).length}
+                        </div>
+                    )}
+                </div>
+            ))}
+            <div className="px-2 py-2 flex flex-col justify-around gap-0.5">
+                <b className="leading-tight">{author?.substring(0, 7)}</b>
+                {text ? (
+                    <span className="leading-tight">
+                        <PreviewFrame
+                            element={text}
+                            previewLines={1}
+                            noPadding
+                            onClick={onClick}
+                        />
+                    </span>
+                ) : (
+                    <i className="leading-tight">
+                        {apps.length} {apps.length > 1 ? "Apps" : "App"}
+                    </i>
+                )}
+            </div>
+        </div>
+    );
+};
+
 const PostPreview = ({
     rects,
     onClick,
@@ -322,7 +397,7 @@ const ChatMessagePreview = ({
 };
 
 export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
-    const { rects, pendingRects, separateAndSortRects } = useCanvas();
+    const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
     const variantRects = useMemo(
         () =>
@@ -360,6 +435,19 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                         }
                     }
                     onClick={onClick}
+                />
+            );
+        case "quote":
+            return (
+                <PostQuotePreview
+                    rects={
+                        variantRects as {
+                            text?: Element<ElementContent>;
+                            other: Element<ElementContent>[];
+                        }
+                    }
+                    onClick={onClick}
+                    author={canvas?.publicKey.hashcode()}
                 />
             );
         case "post":

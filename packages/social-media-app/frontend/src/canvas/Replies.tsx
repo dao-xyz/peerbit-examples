@@ -14,6 +14,7 @@ import {
     getImmediateRepliesQuery,
     getRepliesQuery,
 } from "@dao-xyz/social";
+import { type WithContext } from "@peerbit/document";
 import { useLocal, useOnline, usePeer } from "@peerbit/react";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import { SearchRequest } from "@peerbit/document-interface";
@@ -106,6 +107,138 @@ function getScrollTop() {
     return window.scrollY || document.documentElement.scrollTop;
 }
 
+// Chat view message categories:
+//
+// Chat view message types:
+// 1. Regular chat message
+// 2. quote - insert quote next, if Neither last element of this path nor this element is the last element of next path
+//
+// Line types:
+// 1. if No Line - last element in path is the view parent
+// else
+//    1. if Start of line - either quote or next element ([A, B, F, H], I) in sortedReplies has same path as this ([A, B, F], H)
+//    2. if End of line - next element ([A, B, F, H], I) or ([A, B], J) does not share the same base of path as this ([A, B, F], H)
+// 3. else if Middle line - neither start of line, nor end of line, nor no line.
+
+function replyLineTypes({
+    current,
+    next,
+    context,
+}: {
+    current: WithContext<Canvas>;
+    next?: WithContext<Canvas>;
+    context: Canvas;
+}) {
+    const parents = {
+        next:
+            next?.path.length > 0
+                ? next?.path[next.path.length - 1]
+                : undefined,
+        current:
+            current.path.length > 0
+                ? current.path[current.path.length - 1]
+                : undefined,
+    };
+    // No line if it is
+    // A an immediate child of the current context
+    // AND B next el parent is not this el
+    if (
+        context.address === parents.current?.address &&
+        parents.next?.address !== current.address
+    )
+        return "none";
+    // next elements parent is current element
+    const startOfLine = current.address === parents.next?.address;
+    let [endOfLine, middleOfLine] = [false, false, false];
+
+    middleOfLine = parents.current?.address === parents.next?.address;
+    endOfLine =
+        parents.next?.address !== parents.current.address &&
+        parents.next?.address !== current?.address;
+
+    return startOfLine
+        ? endOfLine
+            ? "end-and-start"
+            : "start"
+        : endOfLine
+        ? "end"
+        : middleOfLine
+        ? "middle"
+        : "none";
+}
+
+// should a quote be inserted between this and the next reply?
+function quotesToInsert({
+    replies,
+    current,
+    next,
+}: {
+    replies: WithContext<Canvas>[];
+    current: WithContext<Canvas>;
+    next?: Canvas;
+}) {
+    // the next element is a root element (path length 0) - insert no quote
+    if (next === undefined || next.path.length === 0) return [];
+    const lastElements = {
+        next: next.path[next.path.length - 1],
+        current:
+            current.path.length > 0
+                ? current.path[current.path.length - 1]
+                : undefined,
+    };
+    // Neither last element of this path
+    // nor this element
+    // is the last element of next path
+    return lastElements.next.address !== lastElements.current.address &&
+        current.address !== lastElements.next.address
+        ? replies.filter((reply) => reply.address === lastElements.next.address)
+        : [];
+}
+
+function insertQuotes(replies: WithContext<Canvas>[], context: Canvas) {
+    // Create a copy to avoid modifying the original during iteration
+    const repliesAndQuotes: {
+        reply: WithContext<Canvas>;
+        type: "reply" | "quote";
+    }[] = [...replies].map((reply) => ({
+        reply,
+        type: "reply",
+    }));
+
+    // Use a for loop with an index that we can manipulate
+    for (let i = 0; i < repliesAndQuotes.length - 1; i++) {
+        const current = repliesAndQuotes[i];
+        const next = repliesAndQuotes[i + 1];
+        const quotes = quotesToInsert({
+            current: current.reply,
+            next: next.reply,
+            replies,
+        });
+        if (quotes.length > 0) {
+            repliesAndQuotes.splice(
+                i + 1,
+                0,
+                ...quotes.map(
+                    (quote) => ({ type: "quote", reply: quote } as const)
+                )
+            );
+            i += quotes.length;
+        }
+    }
+
+    return repliesAndQuotes.map((reply, i) => {
+        const current = repliesAndQuotes[i].reply;
+        const next =
+            i < repliesAndQuotes.length - 1
+                ? repliesAndQuotes[i + 1].reply
+                : undefined;
+        return {
+            ...reply,
+            lineType: replyLineTypes({ current, next, context }),
+        } as const;
+    });
+}
+
 export const Replies = (props: RepliesProps) => {
     const { peer } = usePeer();
     const { canvas: canvas, sortCriteria, setSortCriteria } = props;
@@ -114,6 +247,9 @@ export const Replies = (props: RepliesProps) => {
     >(undefined);
     const { setView, view } = useView();
     const { peers } = useOnline(canvas);
+    const [repliesAndQuotes, setRepliesAndQuotes] = useState<
+        ReturnType<typeof insertQuotes>
+    >([]);
 
     useEffect(() => {
         if (!canvas) {
@@ -191,6 +327,24 @@ export const Replies = (props: RepliesProps) => {
         canvas?.loadedReplies ? canvas?.replies : undefined,
         query
     );
+
+    // Process sortedReplies to include quotes in chat view
+    useEffect(() => {
+        // Only process for chat view
+        if (view === "chat" && sortedReplies.length > 0) {
+            const processed = insertQuotes(sortedReplies, canvas);
+            setRepliesAndQuotes(processed);
+        } else {
+            // For other views, just convert each reply to the expected format
+            setRepliesAndQuotes(
+                sortedReplies.map((reply) => ({
+                    reply,
+                    type: "reply" as const,
+                    lineType: "none",
+                }))
+            );
+        }
+    }, [sortedReplies, view]);
 
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
     // How close in pixels does the bottom have to be to consider a user as "he scrolled all the way down"
@@ -401,26 +555,40 @@ export const Replies = (props: RepliesProps) => {
                             : "grid-cols-[1rem_1fr_1rem]"
                     )}
                 >
-                    {sortedReplies.map((reply, i) => (
+                    {repliesAndQuotes.map((item, i) => (
                         <Fragment key={i}>
                             <div
                                 className={tw(
-                                    "col-span-full",
+                                    "col-span-full grid grid-cols-subgrid",
                                     view === "chat"
                                         ? "h-4"
                                         : i === 0
                                         ? "h-6"
                                         : "h-10"
                                 )}
-                            ></div>
+                            >
+                                <div
+                                    className={tw(
+                                        "col-span-1 col-start-1 row-start-1 row-span-1 relative"
+                                    )}
+                                >
+                                    {(item.lineType === "middle" ||
+                                        item.lineType === "end") && (
+                                        <div className="absolute right-0 w-4 h-full border-l-4 dark:border-neutral-600 border-neutral-300"></div>
+                                    )}
+                                </div>
+                            </div>
                             <Reply
-                                key={reply.idString}
-                                canvas={reply}
+                                key={item.reply.idString}
+                                canvas={item.reply}
                                 variant={view}
+                                isQuote={item.type === "quote"}
+                                lineType={item.lineType}
                                 hideHeader={
                                     view === "chat" &&
-                                    sortedReplies[i - 1]?.publicKey ===
-                                        reply.publicKey
+                                    i > 0 &&
+                                    repliesAndQuotes[i - 1]?.reply.publicKey ===
+                                        item.reply.publicKey
                                 }
                             />
                         </Fragment>
