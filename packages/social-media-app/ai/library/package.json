@@ -23,8 +23,8 @@
         "LICENSE"
     ],
     "browser": {
-        "./src/ollama.js": "./src/query.ollama.js",
-        "./lib/esm/ollama.js": "./lib/esm/query.ollama.js"
+        "./src/ollama.js": "./src/ollama.browser.js",
+        "./lib/esm/ollama.js": "./lib/esm/ollama.browser.js"
     },
     "engines": {
         "node": ">=16.15.1"
