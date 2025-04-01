@@ -42,7 +42,6 @@
     "dependencies": {
         "ollama": "^0.5.14",
         "@peerbit/document": "^9",
-        "parse5": "^7.1.2",
         "peerbit": "^4",
         "uuid": "^10.0.0"
     }
