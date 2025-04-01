@@ -201,16 +201,10 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             }),
             {
                 existing: "reuse",
-                args: {
-                    debug: true,
-                },
             }
         )
             .then(async (result) => {
-                console.log("CREATED ROOT!", result);
                 setRoot(result);
-
-                console.log("SET ROOT", result?.address);
                 await result.elements.put(
                     new Element({
                         location: Layout.zero(),

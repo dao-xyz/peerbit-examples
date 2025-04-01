@@ -12,7 +12,7 @@ import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
 import { HostRegistryProvider } from "@giga-app/sdk";
 import { useEffect } from "react";
 import { ThemeProvider } from "./theme/useTheme";
-import { ReplyProgressProvider } from "./canvas/useReplyProgress";
+import { ReplyProgressProvider } from "./canvas/reply/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
 
 export const Content = () => {

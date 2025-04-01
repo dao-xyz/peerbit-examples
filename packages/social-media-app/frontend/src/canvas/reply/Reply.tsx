@@ -1,16 +1,15 @@
 import { useEffect, useState } from "react";
 import { Canvas as CanvasDB } from "@giga-app/interface";
-import { Canvas as Canvas } from "./Canvas.js";
+import { Canvas as Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
-import { CanvasPreview } from "./Preview";
+import { CanvasPreview } from "../Preview.js";
 import { WithContext } from "@peerbit/document";
 import { useNavigate } from "react-router-dom";
-import { getCanvasPath } from "../routes";
-import { Header } from "./header/Header";
-import { CanvasWrapper } from "./CanvasWrapper";
-import { LuMessageSquare } from "react-icons/lu";
-import { useView, ViewType } from "../view/View";
-import { tw } from "../utils/tailwind";
+import { getCanvasPath } from "../../routes.js";
+import { Header } from "../header/Header.js";
+import { CanvasWrapper } from "../CanvasWrapper.js";
+import { ViewType } from "../../view/View.js";
+import { tw } from "../../utils/tailwind.js";
 
 const ReplyButton = ({
     children,
@@ -213,7 +212,7 @@ export const Reply = ({
                 {variant === "thread" && !isExpandedBreadcrumb && (
                     <div className={"col-start-2 col-span-1 flex gap-2.5 mt-4"}>
                         <ReplyButton
-                            className="ml-auto btn btn-xs h-full"
+                            className="ml-auto btn btn-xs h-full ganja-font text-lg leading-3  "
                             onClick={() => {
                                 setShowMore((showMore) => !showMore);
                                 onClick && onClick();

@@ -7,7 +7,7 @@ import {
     QueryResponse,
 } from "../ai-reply-program";
 import { expect } from "chai";
-import { DEEP_SEEK_R1 } from "../model.js";
+import { DEEP_SEEK_R1_7b } from "../model.js";
 import { Canvas } from "@giga-app/interface";
 import { waitForResolved } from "@peerbit/time";
 
@@ -22,7 +22,7 @@ describe("AIResponseProgram", () => {
         await session.stop();
     });
 
-    const createDefaultCanvas = async (text = "what is 1+1") => {
+    const createDefaultCanvas = async (text = "Hey! what is 1+1") => {
         const root = await createReply();
         await insertTextIntoCanvas(text, root);
         return root;
@@ -48,7 +48,7 @@ describe("AIResponseProgram", () => {
         const client = await session.peers[1].open<CanvasAIReply>(
             server.address
         );
-        await client.waitForModel({ model: DEEP_SEEK_R1 });
+        await client.waitForModel({ model: DEEP_SEEK_R1_7b });
 
         // Query with a valid prompt.
         const response = await client.query(canvas);
@@ -78,7 +78,7 @@ describe("AIResponseProgram", () => {
         const client = await session.peers[1].open<CanvasAIReply>(
             server.address
         );
-        await client.waitForModel({ model: DEEP_SEEK_R1 });
+        await client.waitForModel({ model: DEEP_SEEK_R1_7b });
 
         // Query with a valid prompt.
         const response = await client.query(reply2);
@@ -127,7 +127,7 @@ describe("AIResponseProgram", () => {
         const client = await session.peers[1].open<CanvasAIReply>(
             server.address
         );
-        await client.waitForModel({ model: DEEP_SEEK_R1 });
+        await client.waitForModel({ model: DEEP_SEEK_R1_7b });
 
         const start = Date.now();
         try {
@@ -161,6 +161,6 @@ describe("AIResponseProgram", () => {
         expect(responses).to.not.be.empty;
         const modelResp = responses[0]?.response as ModelResponse;
         expect(modelResp).to.be.instanceof(ModelResponse);
-        expect(modelResp.model).to.include("deepseek-r1:1.5b");
+        expect(modelResp.model).to.include(DEEP_SEEK_R1_7b);
     });
 });

@@ -11,6 +11,7 @@ import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
 import { SimpleWebManifest } from "@giga-app/interface";
 import * as Toggle from "@radix-ui/react-toggle";
+import * as Switch from "@radix-ui/react-switch";
 
 import VscRobot from "/vscrobot.svg";
 import { useAIReply } from "../../ai/AIReployContext";
@@ -70,6 +71,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                     <div className="flex flex-col h-full">
                         <div className="flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-950 p-4">
                             {AddButton()}
+
                             <button
                                 className="btn btn-icon btn-icon-md ml-auto"
                                 onClick={() => setFullscreenEditorActive(false)}
@@ -100,7 +102,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                     className="flex flex-col z-20 w-full left-0 rounded bg-neutral-100 dark:bg-neutral-900"
                 >
                     {/* First row: Input field */}
-                    <div className="pt-2">
+                    <div className="pt-1">
                         <Canvas
                             fitWidth
                             draft={true}
@@ -110,12 +112,33 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                     </div>
 
                     {/* Second row: Toolbar buttons */}
-                    <div className="flex items-center p-1 h-full">
+                    <div className="flex items-center p-1 pt-0 h-full gap-1">
                         {/* Left: Plus button */}
                         {AddButton()}
-
+                        {/* AI reply slider */}
+                        <form>
+                            <div className="flex items-center ">
+                                <label
+                                    className="ganja-font"
+                                    htmlFor="airplane-mode"
+                                    style={{ paddingRight: 15 }}
+                                >
+                                    AI Reply
+                                </label>
+                                <Switch.Root
+                                    className="switch-root"
+                                    id="use-ai"
+                                    checked={requestAIReply}
+                                    onCheckedChange={(e) => {
+                                        setRequestAIReply(e);
+                                    }}
+                                >
+                                    <Switch.Thumb className="switch-thumb" />
+                                </Switch.Root>
+                            </div>
+                        </form>
                         {/* AI reply button */}
-                        <Toggle.Root
+                        {/*  <Toggle.Root
                             onPressedChange={(e) => {
                                 setRequestAIReply(e);
                             }}
@@ -132,7 +155,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 />
                                 <span className="ganja-font">AI reply</span>
                             </div>
-                        </Toggle.Root>
+                        </Toggle.Root> */}
 
                         {/* Center: Space for additional buttons */}
                         <div className="flex justify-center ml-auto">

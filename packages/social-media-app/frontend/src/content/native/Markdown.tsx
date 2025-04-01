@@ -19,20 +19,6 @@ const textHasOneOrMoreLines = (text: string) => {
     return text.split("\n").length > 1;
 };
 
-/**
- * Component for rendering markdown content with various display options.
- *
- * @param props - Component props
- * @param props.content - The markdown content to display
- * @param props.onResize - Callback when the content resizes, provides dimensions {width, height}
- * @param props.editable - Whether the content can be edited by the user (default: false)
- * @param props.onChange - Callback when content is changed during editing
- * @param props.thumbnail - Whether the content is displayed as a thumbnail
- * @param props.previewLines - Number of lines to show in preview mode, content will be truncated
- * @param props.noPadding - Whether to remove padding from the container
- *
- * @returns Rendered markdown content
- */
 export const MarkdownContent = ({
     content,
     onResize,
@@ -51,9 +37,7 @@ export const MarkdownContent = ({
     // Local state for the markdown text.
     const [text, setText] = useState(content.text);
 
-    // this statement is used to update the text when the content changes
-    // without this, the text will not update when the content changes, for example if we are emitting a change with the "save" flag
-    // which will make content.text to be set to ''
+    // Update text when content changes.
     useEffect(() => {
         setText(content.text);
     }, [content.text]);
@@ -86,17 +70,11 @@ export const MarkdownContent = ({
         return () => observer.disconnect();
     }, [onResize, threshold]);
 
-    // Auto-resize the textarea and emit its scrollHeight as the new height.
+    // Auto-resize the textarea.
     const autoResize = useCallback(() => {
         if (textareaRef.current) {
             textareaRef.current.style.height = "auto";
-            const padding = 0;
-            const newHeight = textareaRef.current.scrollHeight + padding;
-            if (textHasOneOrMoreLines(textareaRef.current.value) === false) {
-                textareaRef.current.style.lineHeight = "40px";
-            } else {
-                textareaRef.current.style.lineHeight = "unset";
-            }
+            const newHeight = textareaRef.current.scrollHeight;
             textareaRef.current.style.height = `${newHeight}px`;
             const newWidth = containerRef.current
                 ? containerRef.current.clientWidth
@@ -105,7 +83,7 @@ export const MarkdownContent = ({
         }
     }, [onResize]);
 
-    // Whenever text changes in editing mode, trigger autoResize.
+    // Auto-resize on text change.
     useEffect(() => {
         if (isEditing) {
             autoResize();
@@ -115,13 +93,18 @@ export const MarkdownContent = ({
     // When the user clicks the container (and we're editable), start editing.
     const handleStartEditing = () => {
         setIsEditing(true);
-        // Focus the textarea after a short delay.
         setTimeout(() => {
             textareaRef.current?.focus();
         }, 0);
     };
 
-    useEffect(handleStartEditing, [textareaRef.current]);
+    useEffect(() => {
+        if (editable && containerRef.current) {
+            if (content.text.length === 0) {
+                handleStartEditing();
+            }
+        }
+    }, [editable, content.text]);
 
     // Handle key presses in the textarea.
     const handleKeyDown = async (
@@ -132,7 +115,6 @@ export const MarkdownContent = ({
                 const currentValue = e.currentTarget.value;
                 if (!currentValue.includes("\n")) {
                     e.preventDefault();
-                    // Send the current text
                     try {
                         saving.current = true;
                         await onChange?.(
@@ -144,11 +126,8 @@ export const MarkdownContent = ({
                     } finally {
                         saving.current = false;
                     }
-
                     setText("");
                     autoResize();
-
-                    // focus the container
                     containerRef.current?.focus();
                 }
             }
@@ -166,10 +145,16 @@ export const MarkdownContent = ({
         if (text.length > 0) setIsEditing(false);
     };
 
+    // Common Tailwind classes for consistent padding, font size, and line-height.
+    // If noPadding is true, we remove the padding.
+    const commonClasses = noPadding
+        ? "text-base leading-6"
+        : "p-1 pt-0.5 text-base leading-6";
+
     return (
         <div
             ref={containerRef}
-            className={`${noPadding ? "" : "px-2.5"} w-full text-left ${
+            className={`${commonClasses} w-full text-left ${
                 editable ? "cursor-text" : ""
             }`}
             onClick={editable && !isEditing ? handleStartEditing : undefined}
@@ -182,7 +167,7 @@ export const MarkdownContent = ({
                     onBlur={handleBlur}
                     onKeyDown={handleKeyDown}
                     onInput={autoResize}
-                    className="w-full border-none outline-none resize-none block dark:bg-black px-2"
+                    className={`${commonClasses} w-full border-none outline-none resize-none block dark:bg-black`}
                     rows={1}
                     placeholder="Type here..."
                     style={{ overflow: "hidden" }}
@@ -190,7 +175,7 @@ export const MarkdownContent = ({
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={`${
+                    className={`${commonClasses} ${
                         previewLines ? "line-clamp-[var(--preview-lines)]" : ""
                     } ${previewLines === 1 ? "break-all" : ""}`}
                 >

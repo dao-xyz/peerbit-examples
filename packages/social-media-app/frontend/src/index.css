@@ -365,6 +365,8 @@ code {
         @apply outline-none ring-2 ring-primary-300 dark:ring-primary-500;
     }
 
+
+
     /* Sample menu item style */
     .menu-item {
         @apply flex items-center w-full p-2 text-neutral-800 dark:text-neutral-200;
@@ -388,6 +390,43 @@ code {
         @apply text-neutral-400 dark:text-neutral-600 cursor-not-allowed;
     }
 
+    .switch-root {
+        width: 42px;
+        height: 25px;
+        background-color: var(--black-a9);
+        border-radius: 9999px;
+        position: relative;
+        box-shadow: 0 2px 10px var(--black-a7);
+        -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+        box-shadow: 0 0 0 2px black;
+
+
+        &:focus {
+            box-shadow: 0 0 0 2px black;
+        }
+
+        &[data-state="checked"] {
+            @apply bg-primary-400 dark:bg-primary-600;
+        }
+    }
+
+    .switch-thumb {
+        display: block;
+        width: 21px;
+        height: 21px;
+        @apply bg-black dark:bg-white;
+        border-radius: 9999px;
+        box-shadow: 0 2px 2px var(--black-a7);
+        transition: transform 100ms;
+        transform: translateX(2px);
+        will-change: transform;
+
+        &[data-state="checked"] {
+            transform: translateX(19px);
+        }
+    }
+
+
     /* Example for a dropdown menu with animation */
     .dropdown-menu-responsive {
         animation-duration: 0.6s;
@@ -405,11 +444,11 @@ code {
 
 
     .pulse {
-        animation: pulseAnimate 1.5s infinite ease-in-out;
+        animation: pulseAnimate 1s infinite ease-in-out;
     }
 
     .bounce {
-        animation: bounceAnimate 1.5s infinite ease-in-out;
+        animation: bounceAnimate 1s infinite ease-in-out;
     }
 
 }

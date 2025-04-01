@@ -1,18 +1,19 @@
-import { field, fixedArray, option, variant } from "@dao-xyz/borsh";
+import { field, fixedArray, option, variant, vec } from "@dao-xyz/borsh";
 import { Program } from "@peerbit/program";
 import { RPC } from "@peerbit/rpc";
 import { queryOllama } from "./ollama.js";
 import { queryChatGPT } from "./chatgpt.js";
 import { PublicSignKey, sha256Base64Sync } from "@peerbit/crypto";
 import { SilentDelivery } from "@peerbit/stream-interface";
-import { DEEP_SEEK_R1 } from "./model.js";
+import { DEEP_SEEK_R1_7b } from "./model.js";
 import { delay } from "@peerbit/time";
 import { AbortError, TimeoutError } from "@peerbit/time";
 import {
     Canvas,
+    CanvasReference,
+    CanvasValueReference,
     Element,
-    getOwnedElementsQuery,
-    getSubownedElementsQuery,
+    getOwnedAndSubownedElementsQuery,
     getTextElementsQuery,
     Layout,
     ReplyingInProgresss,
@@ -20,7 +21,7 @@ import {
     StaticContent,
     StaticMarkdownText,
 } from "@giga-app/interface";
-import { Query, SearchRequest, Sort, WithContext } from "@peerbit/document";
+import { Query, Sort, WithContext } from "@peerbit/document";
 
 // Utility to ignore specific errors.
 const ignoreTimeoutandAbort = (error: Error) => {
@@ -110,7 +111,7 @@ export class CanvasAIReply extends Program<Args> {
      * Opens the RPC channel.
      * In server mode:
      *  - Registers a response handler that handles both chat and model requests.
-     *  - Initializes the supportedModels list with a default ("deepseek-r1:1.5b").
+     *  - Initializes the supportedModels list with a default ("deepseek-r1:7b").
      * In client mode:
      *  - Requests model info from peers and stores it in a map.
      */
@@ -123,7 +124,7 @@ export class CanvasAIReply extends Program<Args> {
         if (args?.server) {
             // Initialize default supported model.
             if (args.llm === "ollama") {
-                this.supportedModels = ["deepseek-r1:1.5b"];
+                this.supportedModels = [DEEP_SEEK_R1_7b];
             } else if (args.llm === "chatgpt") {
                 this.supportedModels = ["gpt-4o"];
                 this.apiKey = args?.apiKey
@@ -218,8 +219,9 @@ export class CanvasAIReply extends Program<Args> {
      * If options.model is provided, the query is sent only to the peer supporting that model.
      */
     async query(
-        canvas: Canvas,
+        to: CanvasReference | Canvas,
         options?: {
+            context?: CanvasReference[];
             elementsQuery?: Query;
             canvasesQuery?: Query;
             timeout?: number;
@@ -233,7 +235,8 @@ export class CanvasAIReply extends Program<Args> {
         );
         if (meInPeer) {
             return this.handleChatQuery({
-                canvas,
+                to,
+                context: options?.context || [],
                 model: peers!.model,
                 elementsQuery: options?.elementsQuery,
                 canvasesQuery: options?.canvasesQuery,
@@ -251,7 +254,8 @@ export class CanvasAIReply extends Program<Args> {
         ];
         const responses = await this.rpc.request(
             new ChatQuery({
-                canvas,
+                to,
+                context: options?.context || [],
                 model: peers.model,
                 canvasesQuery: options?.canvasesQuery,
                 elementsQuery: options?.elementsQuery,
@@ -279,23 +283,44 @@ export class CanvasAIReply extends Program<Args> {
      * Handles a chat query by generating a reply using the appropriate LLM.
      * This method also measures the processing time and updates the request statistics.
      */
-    async handleChatQuery(properties: ChatQuery): Promise<AIResponse> {
+    async handleChatQuery(properties: {
+        to: CanvasReference | Canvas;
+        context: CanvasReference[] | Canvas[];
+        canvasesQuery?: Query;
+        elementsQuery?: Query;
+        model?: string;
+    }): Promise<AIResponse> {
         const startTime = Date.now();
         try {
-            const model = properties.model || DEEP_SEEK_R1;
+            const model = properties.model || DEEP_SEEK_R1_7b;
             if (model && !this.supportedModels.includes(model)) {
                 return new MissingModel({ model });
             }
-            const canvasInstance = await this.node.open(properties.canvas, {
+            let canvasInstance =
+                properties.to instanceof Canvas
+                    ? properties.to
+                    : await properties.to.load(this.node);
+            canvasInstance = await this.node.open(canvasInstance, {
                 existing: "reuse",
             });
+
+            let contextInstances: Canvas[] = [];
+            for (const context of properties.context) {
+                let canvas =
+                    context instanceof Canvas
+                        ? context
+                        : await context.load(this.node);
+                canvas = await this.node.open(canvas, { existing: "reuse" });
+                contextInstances.push(canvas);
+            }
             // Choose the query function based on the LLM configuration.
             const queryFunction =
                 this.llm === "chatgpt"
                     ? (text: string) => queryChatGPT(text, this.apiKey)
                     : (text: string) => queryOllama(text, model);
             await generateReply({
-                canvas: canvasInstance,
+                to: canvasInstance,
+                context: contextInstances,
                 canvasesQuery: properties.canvasesQuery,
                 elementsQuery: properties.elementsQuery,
                 generator: queryFunction,
@@ -346,8 +371,11 @@ abstract class AIRequest {}
 
 @variant(0)
 export class ChatQuery extends AIRequest {
-    @field({ type: Canvas })
-    canvas: Canvas;
+    @field({ type: CanvasReference })
+    to: CanvasReference;
+
+    @field({ type: vec(CanvasReference) })
+    context: CanvasReference[];
 
     @field({ type: option(Query) })
     canvasesQuery?: Query;
@@ -359,13 +387,20 @@ export class ChatQuery extends AIRequest {
     model?: string;
 
     constructor(properties: {
-        canvas: Canvas;
+        to: CanvasReference | Canvas;
+        context?: CanvasReference[] | Canvas[];
         canvasesQuery?: Query;
         elementsQuery?: Query;
         model?: string;
     }) {
         super();
-        this.canvas = properties.canvas;
+        this.to =
+            properties.to instanceof Canvas
+                ? new CanvasValueReference({ canvas: properties.to })
+                : properties.to;
+        this.context = (properties.context || []).map((c) =>
+            c instanceof Canvas ? new CanvasValueReference({ canvas: c }) : c
+        );
         this.model = properties.model;
         this.canvasesQuery = properties.canvasesQuery;
         this.elementsQuery = properties.elementsQuery;
@@ -422,7 +457,7 @@ const createContextFromElement = (
     element: WithContext<Element<StaticContent<StaticMarkdownText>>>
 ) => {
     const text = element.content.content.text.replace(/"/g, '\\"');
-    return `{ owner: ${element.publicKey.hashcode()}, content: "${text}" }`;
+    return `{ from: ${element.publicKey.hashcode()}, message: "${text}" }`;
 };
 
 export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
@@ -454,104 +489,99 @@ export const insertTextReply = async (text: string, parent: Canvas) => {
         });
 };
 
-const generateReply = async (properties: {
+type ReplyContext = string;
+
+const generateTextContext = async (properties: {
     canvas: Canvas;
+    elementsQuery?: Query;
+    visited: Set<string>;
+}): Promise<ReplyContext[]> => {
+    const { canvas, visited } = properties;
+    await canvas.load();
+    const elements = await canvas.elements.index
+        .iterate({
+            query: [
+                ...getOwnedAndSubownedElementsQuery(canvas),
+                getTextElementsQuery(),
+                ...(properties.elementsQuery ? [properties.elementsQuery] : []),
+            ],
+            sort: new Sort({ key: ["__context", "created"] }),
+        })
+        .all();
+
+    const replyContext: ReplyContext[] = [];
+    const createContextFromElement = (
+        element: WithContext<Element<StaticContent<StaticMarkdownText>>>
+    ) => {
+        return `{ from: ${element.publicKey.hashcode()}, message: "${
+            element.content.content.text
+        }" }`;
+    };
+    for (const element of elements) {
+        const el = element as WithContext<
+            Element<StaticContent<StaticMarkdownText>>
+        >;
+        if (!visited.has(el.idString)) {
+            visited.add(el.idString);
+            replyContext.push(createContextFromElement(el));
+        }
+    }
+    return replyContext;
+};
+
+const generateReply = async (properties: {
+    to: Canvas;
+    context: Canvas[];
     elementsQuery?: Query;
     canvasesQuery?: Query;
     generator: (text: string) => Promise<string>;
 }): Promise<void> => {
-    const { canvas, elementsQuery, canvasesQuery, generator } = properties;
+    const {
+        to,
+        context: maybeContext,
+        elementsQuery,
+        canvasesQuery,
+        generator,
+    } = properties;
     try {
-        await canvas.messages.send(
-            new ReplyingInProgresss({ reference: canvas })
-        );
+        await to.load();
+        await to.messages.send(new ReplyingInProgresss({ reference: to }));
 
-        // Load the parent canvas (i.e. the previous post in the thread).
-        const parent = await canvas.loadParent();
-
-        // Retrieve the target post (the one to reply to) with owner info.
-        const replyToPostsElements = await canvas.elements.index
-            .iterate({
-                query: [
-                    ...getOwnedElementsQuery(canvas),
-                    getTextElementsQuery(),
-                    ...(elementsQuery ? [elementsQuery] : []),
-                ],
-            })
-            .all();
-        const replyToTexts = replyToPostsElements.map((x) => {
-            const element = x as WithContext<
-                Element<StaticContent<StaticMarkdownText>>
-            >;
-            return `{ owner: ${element.publicKey.hashcode()}, content: "${
-                element.content.content.text
-            }" }`;
-        });
-
-        // Retrieve sibling posts and include owner info in the text.
-        const siblingElements = await parent.elements.index
-            .iterate({
-                query: [
-                    ...getSubownedElementsQuery(parent),
-                    getTextElementsQuery(),
-                    ...(canvasesQuery ? [canvasesQuery] : []),
-                ],
-                sort: new Sort({ key: ["__context", "created"] }),
-            })
-            .all();
-
-        const siblingTexts = siblingElements
-            .filter(
-                (x) =>
-                    !replyToPostsElements.find((y) => y.idString === x.idString)
-            )
-            .map((x) => {
-                const element = x as WithContext<
-                    Element<StaticContent<StaticMarkdownText>>
-                >;
-                return `{ owner: ${element.publicKey.hashcode()}, content: "${
-                    element.content.content.text
-                }" }`;
-            });
-
-        // Retrieve the parent post's content including owner metadata.
-        let parentTexts: string[] = [];
-        if (parent) {
-            const parentElements = await parent.elements.index
-                .iterate({
-                    query: [
-                        ...getOwnedElementsQuery(parent),
-                        getTextElementsQuery(),
-                        ...(elementsQuery ? [elementsQuery] : []),
-                    ],
-                })
-                .all();
-            parentTexts = parentElements.map((x) => {
-                const element = x as WithContext<
-                    Element<StaticContent<StaticMarkdownText>>
-                >;
-                return `{ owner: ${parent.publicKey.hashcode()}, content: "${
-                    element.content.content.text
-                }" }`;
-            });
+        let context = maybeContext;
+        if (!context || context.length === 0) {
+            context = to.path.length > 0 ? [await to.loadParent()] : [];
         }
+
+        let visited = new Set<string>();
+        const replyToTexts = await generateTextContext({
+            canvas: to,
+            visited,
+            elementsQuery,
+        });
+        const contextTexts = (
+            await Promise.all(
+                context.map((x) =>
+                    generateTextContext({ canvas: x, visited, elementsQuery })
+                )
+            )
+        ).flat();
 
         // Build the aggregated context with metadata.
         let aggregatedContext = "Context for generating your reply. Note:\n";
+        /* aggregatedContext +=
+            "- 'Thread Parent Post' is the previous post in the conversation thread (metadata is provided only for speaker identification).\n"; */
         aggregatedContext +=
-            "- 'Thread Parent Post' is the previous post in the conversation thread (metadata is provided only for speaker identification).\n";
-        aggregatedContext +=
-            "- 'Owned Post' refers to content created by the post's author (the owner field is provided solely for identification purposes).\n\n";
+            "- 'from' refers to content created by the post's author (the from field is provided solely for identification purposes).\n\n";
 
-        if (parentTexts.length > 0) {
-            aggregatedContext +=
-                "Thread Parent Post:\n" + parentTexts.join("\n") + "\n";
-        }
+        /*  if (parentTexts.length > 0) {
+             aggregatedContext +=
+                 "Thread Parent Post:\n" + parentTexts.join("\n") + "\n";
+         } */
 
-        if (siblingTexts.length > 0) {
+        if (contextTexts.length > 0) {
             aggregatedContext +=
-                "\nSibling Posts (other responses in the conversation):\n" +
-                siblingTexts.join("\n") +
+                "\nRelated Posts (other responses in the conversation):\n" +
+                contextTexts.join("\n") +
                 "\n";
         }
 
@@ -564,26 +594,26 @@ const generateReply = async (properties: {
 
         // Construct the prompt with clear instructions.
         const promptText = `
-You are a social media assistant. Based on the conversation thread provided below, generate a thoughtful and engaging reply that continues the discussion appropriately. Keep your reply concise and directly address the target post's content. You will act as a different user in the conversation, like a friend or a colleague. For example, if someone asks, what is my name, you can say "I think your name is ...".
+You are a social media assistant and an user, answering questions for users, acting as an another user on the platform. It is very important that you act as another identity, hence answer questions with "you" instead of "I" or "me". You are just trying to answer question the best as you can given a target post and some context, which are other posts. Generate a thoughtful and engaging reply that continues the discussion appropriately. Keep your reply concise and directly address the target post's content. You will act as a different user in the conversation, like a friend or a colleague. For example, if someone asks, what is my name, you can say "I think your name is ...". Important you are referencing the person you are replying to as "you", and not "me" or "they". Reply in the same tone, or vibe as the target post and context.
 
 Important:
-- Each post in the context is represented as { owner: <owner_id>, content: "<text>" }.
-- The owner field is provided for post creator identification.
-- Focus your reply on the text in the content field only.
+- Each post in the context is represented as { from: <hash>, message: "<text>" } where "from" will be a hash of the users identity, and message will be the actual message content.
+- The Target Post is the last one in the context. But you use the context too, to find information. Don't mention the word "Target post" or any other meta data related terms. Your goal is answering the question as best as you can and also bringing the discussion forward. If someone asks "How many days does a week have?" you should respond with "7" and not with the question again.
 
 ${aggregatedContext}
 
-Reply:
-        `.trim();
+Your reply to the last, Target Post:\n
+        `;
 
         const aiResponse = await generator(promptText);
         const thinkSplit = aiResponse.split("</think>");
-        await insertTextReply(thinkSplit[thinkSplit.length - 1].trim(), canvas);
+        await insertTextReply(thinkSplit[thinkSplit.length - 1].trim(), to);
     } catch (error) {
-        await insertTextReply("Error generating AI reply :(", canvas);
+        await insertTextReply("Error generating AI reply :(", to);
+        console.error("Error generating AI reply:", error);
     } finally {
-        await canvas.messages.send(
-            new ReplyingNoLongerInProgresss({ reference: canvas })
+        await to.messages.send(
+            new ReplyingNoLongerInProgresss({ reference: to })
         );
     }
 };

@@ -21,9 +21,9 @@ import { SearchRequest } from "@peerbit/document-interface";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Reply } from "./Reply";
-import { useView } from "../view/View";
-import { tw } from "../utils/tailwind";
-import { OnlineProfilesDropdown } from "../profile/OnlinePeersButton";
+import { useView } from "../../view/View";
+import { tw } from "../../utils/tailwind";
+import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
 import { useError } from "react-use";
 
 type SortCriteria = "new" | "old" | "best" | "chat";

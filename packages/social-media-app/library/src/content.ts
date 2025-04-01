@@ -84,7 +84,7 @@ export abstract class ElementContent {
     abstract equals(other: ElementContent): boolean;
 }
 
-abstract class CanvasReference {
+export abstract class CanvasReference {
     abstract get address(): string;
     abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
 }
@@ -552,6 +552,10 @@ export class Canvas extends Program<CanvasArgs> {
                 let indexedCanvas = await parent.replies.index.get(canvas.id, {
                     resolve: false,
                 });
+                if (!indexedCanvas) {
+                    console.warn("Missing indexed canvas, skipping re-index");
+                    return;
+                }
                 try {
                     await parent.replies.index.putWithContext(
                         canvas,
@@ -714,8 +718,7 @@ export class Canvas extends Program<CanvasArgs> {
                             })
                     ),
                     publicKey: this.node.identity.publicKey,
-                    topMostCanvasWithSameACL:
-                        currentCanvas.topMostCanvasWithSameACLLoaded,
+                    topMostCanvasWithSameACL: currentCanvas.origin,
                 });
 
                 const nextCanvas = await this.node.open(canvas, {
@@ -833,7 +836,7 @@ export class Canvas extends Program<CanvasArgs> {
         return this._topMostCanvasWithSameACL != null || this.path.length === 0;
     }
 
-    private get topMostCanvasWithSameACLLoaded() {
+    get origin() {
         if (!this._topMostCanvasWithSameACL && this.path.length > 0) {
             throw new Error("Root not found or loaded");
         }
@@ -841,17 +844,18 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     get replies(): Documents<Canvas, IndexableCanvas, any> {
-        const root: Canvas = this.topMostCanvasWithSameACLLoaded ?? this;
+        const root: Canvas = this.origin ?? this;
         return root._replies;
     }
 
     get elements(): Documents<Element, IndexableElement, any> {
-        const root: Canvas = this.topMostCanvasWithSameACLLoaded ?? this;
+        const root: Canvas = this.origin ?? this;
         return root._elements;
     }
 
     get messages(): RPC<CanvasMessage, CanvasMessage> {
-        return this._messages;
+        const root: Canvas = this.origin ?? this;
+        return root._messages;
     }
 }
 
@@ -861,26 +865,25 @@ export class Canvas extends Program<CanvasArgs> {
  does not correctly respect cirdcular references
  */
 
-/*
 @variant(1)
 export class CanvasValueReference extends CanvasReference {
-   @field({ type: Canvas })
-   canvas: Canvas;
+    @field({ type: Canvas })
+    canvas: Canvas;
 
-   constructor(properties: { canvas: Canvas }) {
+    constructor(properties: { canvas: Canvas }) {
+        super();
+        this.canvas = properties.canvas;
+    }
 
-       super();
-       this.canvas = properties.canvas;
+    // TODO add args
+    async load(_node: ProgramClient) {
+        return this.canvas;
+    }
 
-   }
-
-   // TODO add args
-   async load(_node: ProgramClient) {
-       return this.canvas
-   }
+    get address(): string {
+        return this.canvas.address;
+    }
 }
-
-*/
 
 @variant(0)
 export class IFrameContent extends ElementContent {

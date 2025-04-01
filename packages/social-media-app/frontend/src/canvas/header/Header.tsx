@@ -36,7 +36,7 @@ export const Header = ({
 
     const replyCount = useCount(
         canvas?.loadedReplies ? canvas.replies : undefined,
-        canvas.closed
+        !canvas || canvas.closed
             ? undefined
             : {
                   id: canvas.address.toString(),

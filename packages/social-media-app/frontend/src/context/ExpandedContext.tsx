@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { useCanvases } from "../canvas/useCanvas";
-import { Reply } from "../canvas/Reply";
+import { Reply } from "../canvas/reply/Reply";
 import { tw } from "../utils/tailwind";
 
 interface ExpandedContextProps {

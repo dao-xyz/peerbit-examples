@@ -30,7 +30,7 @@ import {
     rectIsStaticMarkdownText,
     rectIsStaticPartialImage,
 } from "./utils/rect.js";
-import { useReplyProgress } from "./useReplyProgress.js";
+import { useReplyProgress } from "./reply/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
 
 interface CanvasContextType {
@@ -461,7 +461,6 @@ export const CanvasWrapper = ({
                 await onSave();
             }
 
-            console.log("savePending!", pendingToSave, draft, onSave);
             if (requestAIReply) {
                 request(canvas).catch((e) => {
                     console.error("Error requesting AI reply", e);
