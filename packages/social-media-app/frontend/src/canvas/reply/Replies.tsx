@@ -336,15 +336,16 @@ export const Replies = () => {
                                 variant={view === "chat" ? "chat" : "thread"}
                                 isQuote={item.type === "quote"}
                                 lineType={item.lineType}
-                                hideHeader={
-                                    view === "chat" &&
-                                    i > 0 &&
-                                    processedReplies[
-                                        i - 1
-                                    ]?.reply.publicKey.equals(
-                                        item.reply.publicKey
-                                    )
-                                }
+                                /* TODO?
+                             hideHeader={
+                                view === "chat" &&
+                                i > 0 &&
+                                processedReplies[
+                                    i - 1
+                                ]?.reply.publicKey.equals(
+                                    item.reply.publicKey
+                                )
+                            } */
                             />
                         </Fragment>
                     ))}
