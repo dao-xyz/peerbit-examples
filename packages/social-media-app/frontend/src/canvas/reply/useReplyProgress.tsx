@@ -24,7 +24,7 @@ interface GlobalReplyEntry {
 // Global map: key is canvas ID.
 type GlobalReplyMap = Map<string, GlobalReplyEntry>;
 
-const ASSUME_DONE_TIMEOUT = 2000e3;
+const ASSUME_DONE_TIMEOUT = 2000;
 
 export interface ReplyProgressContextType {
     // Registers a canvas's program (which exposes a messages EventTarget) to listen for reply progress events.
