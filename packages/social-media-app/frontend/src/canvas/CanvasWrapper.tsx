@@ -442,7 +442,6 @@ export const CanvasWrapper = ({
     };
 
     const savePending = async () => {
-        console.log("savePending?", pendingRects);
         if (!pendingRects) return;
         try {
             const pendingToSave = pendingRects.filter(

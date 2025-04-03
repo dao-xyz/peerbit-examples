@@ -10,10 +10,8 @@ import { useToolbar } from "./Toolbar";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
 import { SimpleWebManifest } from "@giga-app/interface";
-import * as Toggle from "@radix-ui/react-toggle";
 import * as Switch from "@radix-ui/react-switch";
-
-import VscRobot from "/vscrobot.svg";
+import { useView } from "../../view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
 
 interface ToolbarContentProps {
@@ -32,12 +30,14 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             requestAIReply,
         } = useCanvas();
 
+        const { view } = useView();
         const { fullscreenEditorActive, setFullscreenEditorActive } =
             useToolbar();
+
+        const { isReady } = useAIReply();
         const { search } = useApps();
         const [resolvedApp, setResolvedApp] =
             useState<null | SimpleWebManifest>(null);
-        const { isReady: isReadyLLM } = useAIReply();
 
         // Try to resolve a matching app when the text changes.
         useEffect(() => {
@@ -119,8 +119,10 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                         <form>
                             <div className="flex items-center ">
                                 <label
-                                    className="ganja-font"
-                                    htmlFor="airplane-mode"
+                                    className={`ganja-font ${
+                                        !isReady ? "text-neutral-500" : ""
+                                    }`}
+                                    htmlFor="use-ai"
                                     style={{ paddingRight: 15 }}
                                 >
                                     AI Reply
@@ -128,6 +130,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 <Switch.Root
                                     className="switch-root"
                                     id="use-ai"
+                                    disabled={!isReady}
                                     checked={requestAIReply}
                                     onCheckedChange={(e) => {
                                         setRequestAIReply(e);
@@ -174,6 +177,14 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 />
                             )}
                         </div>
+                        {view === "chat" && (
+                            <button
+                                className="btn ganja-font h-full p-2"
+                                /*  onClick={() => toggleReplyLogic()} */
+                            >
+                                {"< New topic >"}
+                            </button>
+                        )}
 
                         {/* Right: Send button */}
                         <button

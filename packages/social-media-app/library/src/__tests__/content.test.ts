@@ -41,12 +41,14 @@ describe("content", () => {
             expect(abc).to.have.length(1);
             expect(await abc[0].createTitle()).to.eq("c");
             expect((await abc[0].loadPath(true)).length).to.eq(4);
+
             expect((await abc[0].loadPath(true))[3]).to.eq(abc[0]);
 
             const abd = await root.getCreateRoomByPath(["a", "b", "d"]);
             expect(abd).to.have.length(1);
             expect(await abd[0].createTitle()).to.eq("d");
             expect((await abd[0].loadPath(true)).length).to.eq(4);
+
             expect((await abd[0].loadPath(true))[3]).to.eq(abd[0]);
 
             const childrenFromRoot = await root.replies.index.index
@@ -78,19 +80,18 @@ describe("content", () => {
             );
 
             // the root will contain all posts eventually because of the flattening
-            await waitForResolved(() =>
-                expect(rootFromAnotherNode.replies.log.log.length).to.eq(4)
-            );
+            await waitForResolved(async () => {
+                expect(rootFromAnotherNode.replies.log.log.length).to.eq(4);
 
-            // try to fetch the content
-            const allReplies = await rootFromAnotherNode.replies.index
-                .iterate({ query: [] }, { local: true })
-                .all();
-            expect(allReplies).to.have.length(4);
-            for (const x of allReplies) {
-                const title = await x.createTitle();
-                expect(title.length > 0).to.be.true;
-            }
+                const allReplies = await rootFromAnotherNode.replies.index
+                    .iterate({ query: [] }, { local: true })
+                    .all();
+                expect(allReplies).to.have.length(4);
+                for (const x of allReplies) {
+                    const title = await x.createTitle();
+                    expect(title.length > 0).to.be.true;
+                }
+            });
         });
 
         it("can sort by replies", async () => {

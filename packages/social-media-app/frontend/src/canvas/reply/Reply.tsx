@@ -8,8 +8,8 @@ import { useNavigate } from "react-router-dom";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
-import { ViewType } from "../../view/View.js";
 import { tw } from "../../utils/tailwind.js";
+import { ViewType } from "../../view/ViewContex.js";
 
 const ReplyButton = ({
     children,
@@ -58,20 +58,9 @@ type BaseReplyPropsType = {
     lineType?: "start" | "end" | "end-and-start" | "none" | "middle";
 };
 
-// Define specific types for different variants
-type ThreadReplyPropsType = BaseReplyPropsType & {
-    variant?: Exclude<ViewType, "chat"> | "expanded-breadcrumb";
-    isQuote?: undefined;
-};
-
-type ChatReplyPropsType = BaseReplyPropsType & {
-    variant: "chat";
-    isQuote?: boolean;
-};
-
 // Union type for all possible prop combinations
 type ReplyPropsType = BaseReplyPropsType & {
-    variant?: ViewType | "expanded-breadcrumb";
+    variant?: "chat" | "thread" | "expanded-breadcrumb";
     isQuote?: boolean;
 };
 //ThreadReplyPropsType | ChatReplyPropsType;
@@ -102,10 +91,13 @@ export const Reply = ({
     const { peer } = usePeer();
     const navigate = useNavigate();
 
-    const align =
-        canvas.publicKey === peer.identity.publicKey ? "right" : "left";
+    const align = canvas.publicKey.equals(peer.identity.publicKey)
+        ? "right"
+        : "left";
 
     const isExpandedBreadcrumb = variant === "expanded-breadcrumb";
+    const isChat = variant === "chat";
+    const isThread = variant === "thread";
 
     const handleCanvasClick = () => {
         console.log("Clicked on canvas", canvas.publicKey.toString());
@@ -122,12 +114,12 @@ export const Reply = ({
                         className={tw(
                             "flex items-end px-1",
                             isExpandedBreadcrumb ? "mb-1" : "mb-2.5",
-                            variant === "chat"
+                            isChat
                                 ? "col-start-2 col-span-3"
-                                : variant === "thread"
+                                : isThread
                                 ? "col-start-2 col-span-1"
                                 : "col-span-full",
-                            variant === "chat" &&
+                            isChat &&
                                 (align === "left"
                                     ? "justify-self-start"
                                     : "justify-self-end")
@@ -138,7 +130,7 @@ export const Reply = ({
                         />
                         <Header
                             variant={
-                                variant === "chat"
+                                isChat
                                     ? "medium"
                                     : isExpandedBreadcrumb
                                     ? "tiny"
@@ -147,13 +139,11 @@ export const Reply = ({
                             canvas={canvas}
                             direction="row"
                             open={handleCanvasClick}
-                            reverseLayout={
-                                variant === "chat" && align === "right"
-                            }
+                            reverseLayout={isChat && align === "right"}
                         />
                     </div>
                 )}
-                {!hideHeader && variant === "chat" && (
+                {!hideHeader && isChat && (
                     <div className={tw("col-span-1 row-start-1 relative")}>
                         {(lineType === "middle" || lineType === "end") && (
                             <div className="absolute right-0 w-4 h-full border-l-4 dark:border-neutral-600 border-neutral-300"></div>
@@ -178,7 +168,7 @@ export const Reply = ({
                 <div
                     className={tw(
                         "p-0 overflow-hidden grid grid-cols-subgrid gap-y-4 col-span-full row-start-2",
-                        variant === "chat" &&
+                        isChat &&
                             (align === "left"
                                 ? "justify-items-start"
                                 : "justify-items-end")
@@ -190,7 +180,7 @@ export const Reply = ({
                                 variant="expanded-breadcrumb"
                                 onClick={handleCanvasClick}
                             />
-                        ) : variant === "chat" ? (
+                        ) : isChat ? (
                             <CanvasPreview
                                 onClick={handleCanvasClick}
                                 variant={isQuote ? "quote" : "chat-message"}
@@ -209,7 +199,7 @@ export const Reply = ({
                     </CanvasWrapper>
                 </div>
                 {/* Gap between header and reply content */}
-                {variant === "thread" && !isExpandedBreadcrumb && (
+                {isThread && !isExpandedBreadcrumb && (
                     <div className={"col-start-2 col-span-1 flex gap-2.5 mt-4"}>
                         <ReplyButton
                             className="ml-auto btn btn-xs h-full ganja-font text-lg leading-3  "

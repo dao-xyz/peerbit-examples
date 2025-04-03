@@ -1,5 +1,5 @@
 import { CanvasAndReplies } from "./canvas/reply/CanvasAndReplies";
-import { ViewProvider } from "./view/View";
+import { ViewProvider } from "./view/ViewContex";
 
 export const Home = () => {
     return (

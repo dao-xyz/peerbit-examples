@@ -3,6 +3,7 @@ import {
     Compare,
     Documents,
     DocumentsChange,
+    id,
     IntegerCompare,
     Or,
     SearchRequest,
@@ -408,6 +409,9 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
 type CanvasArgs = { debug?: boolean };
 @variant("canvas")
 export class Canvas extends Program<CanvasArgs> {
+    @id({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
     @field({ type: Documents })
     private _elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
 
@@ -441,14 +445,11 @@ export class Canvas extends Program<CanvasArgs> {
         const elementsId = (properties as { seed: Uint8Array }).seed
             ? sha256Sync((properties as { seed: Uint8Array }).seed)
             : randomBytes(32);
+        this.id = elementsId;
         this._elements = new Documents({ id: elementsId });
         this._replies = new Documents({ id: sha256Sync(elementsId) });
         this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
         this._messages = new RPC();
-    }
-
-    get id(): Uint8Array {
-        return this._elements.log.log.id;
     }
 
     private _idString: string;
@@ -466,74 +467,88 @@ export class Canvas extends Program<CanvasArgs> {
     public debug: boolean = false;
     async open(args?: CanvasArgs): Promise<void> {
         this.debug = !!args?.debug;
-        this.debug && console.time(this.getValueWithContext("openElements"));
-        await this._elements.open({
-            type: Element,
-            replicate: { factor: 1 }, // TODO choose better
-            canPerform: async (operation) => {
-                /**
-                 * Only allow updates if we created it
-                 *  or from myself (this allows us to modifying someone elsecanvas locally)
-                 */
-                // TODO
-                return true;
-                /* 
-                (
-                    !this.publicKey ||
-                    operation.entry.signatures.find(
-                        (x) =>
-                            x.publicKey.equals(this.publicKey!) ||
-                            x.publicKey.equals(this.node.identity.publicKey)
-                    ) != null
-                );
-                */
-            },
-            index: {
-                type: IndexableElement,
-                transform: async (arg, _context) => {
-                    const indexable = await arg.content.toIndex();
-                    return new IndexableElement({
-                        id: arg.id,
-                        publicKey: arg.publicKey,
-                        type: indexable.type,
-                        content: indexable.content,
-                        location: arg.location,
-                        path: arg.path.map((x) => x.address),
-                    });
+        if (!this.isOrigin) {
+            // dont open if we are not the origin, TODO unless we want private canvases
+            this._replies.closed = true;
+            this._replies.allPrograms.map((x) => (x.closed = true));
+            this._elements.closed = true;
+            this._elements.allPrograms.map((x) => (x.closed = true));
+            this._messages.closed = true;
+            this._messages.allPrograms.map((x) => (x.closed = true));
+            return;
+        } else {
+            this.debug &&
+                console.time(this.getValueWithContext("openElements"));
+            await this._elements.open({
+                type: Element,
+                replicate: { factor: 1 }, // TODO choose better
+                canPerform: async (operation) => {
+                    /**
+                     * Only allow updates if we created it
+                     *  or from myself (this allows us to modifying someone elsecanvas locally)
+                     */
+                    // TODO
+                    return true;
+                    /* 
+                    (
+                        !this.publicKey ||
+                        operation.entry.signatures.find(
+                            (x) =>
+                                x.publicKey.equals(this.publicKey!) ||
+                                x.publicKey.equals(this.node.identity.publicKey)
+                        ) != null
+                    );
+                    */
                 },
-            },
-        });
-        this.debug && console.timeEnd(this.getValueWithContext("openElements"));
-
-        this.debug && console.time(this.getValueWithContext("openReplies"));
-        await this._replies.open({
-            type: Canvas,
-            replicate: { factor: 1 }, // TODO choose better
-            canOpen: () => false,
-            canPerform: async (_operation) => {
-                /**
-                 *  TODOD Only allow updates if we created it
-                 *  or from myself (this allows us to modifying someone elsecanvas locally)
-                 */
-                return true;
-            },
-            index: {
-                type: IndexableCanvas,
-                transform: async (arg, _context) => {
-                    return IndexableCanvas.from(arg, this.node);
+                index: {
+                    type: IndexableElement,
+                    transform: async (arg, _context) => {
+                        const indexable = await arg.content.toIndex();
+                        return new IndexableElement({
+                            id: arg.id,
+                            publicKey: arg.publicKey,
+                            type: indexable.type,
+                            content: indexable.content,
+                            location: arg.location,
+                            path: arg.path.map((x) => x.address),
+                        });
+                    },
                 },
-            },
-        });
-        this.debug && console.timeEnd(this.getValueWithContext("openReplies"));
+            });
+            this.debug &&
+                console.timeEnd(this.getValueWithContext("openElements"));
+            this.debug && console.time(this.getValueWithContext("openReplies"));
 
-        await this._messages.open({
-            responseType: CanvasMessage,
-            queryType: CanvasMessage,
-            topic: sha256Base64Sync(
-                concat([this.id, new TextEncoder().encode("messages")])
-            ),
-            responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
-        });
+            await this._replies.open({
+                type: Canvas,
+                replicate: { factor: 1 }, // TODO choose better
+                canOpen: () => false,
+                canPerform: async (_operation) => {
+                    /**
+                     *  TODOD Only allow updates if we created it
+                     *  or from myself (this allows us to modifying someone elsecanvas locally)
+                     */
+                    return true;
+                },
+                index: {
+                    type: IndexableCanvas,
+                    transform: async (arg, _context) => {
+                        return IndexableCanvas.from(arg, this.node);
+                    },
+                },
+            });
+            this.debug &&
+                console.timeEnd(this.getValueWithContext("openReplies"));
+
+            await this._messages.open({
+                responseType: CanvasMessage,
+                queryType: CanvasMessage,
+                topic: sha256Base64Sync(
+                    concat([this.id, new TextEncoder().encode("messages")])
+                ),
+                responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
+            });
+        }
     }
     async afterOpen(): Promise<void> {
         await super.afterOpen();
@@ -597,7 +612,7 @@ export class Canvas extends Program<CanvasArgs> {
                 await removed.close();
             }
         };
-        this._replies.events.addEventListener(
+        this._replies?.events.addEventListener(
             "change",
             this._repliesChangeListener
         );
@@ -836,7 +851,15 @@ export class Canvas extends Program<CanvasArgs> {
         return this._topMostCanvasWithSameACL != null || this.path.length === 0;
     }
 
+    get isOrigin(): boolean {
+        return this.path.length === 0;
+    }
+
     get origin() {
+        if (this.isOrigin) {
+            return this;
+        }
+
         if (!this._topMostCanvasWithSameACL && this.path.length > 0) {
             throw new Error("Root not found or loaded");
         }

@@ -12,6 +12,7 @@ import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import ToolbarContent from "./ToolbarContent";
 import { AppSelectPaneInline } from "./AppSelectPaneInline";
 import { SimpleWebManifest } from "@giga-app/interface";
+import { usePendingCanvas } from "../PendingCanvasContext";
 
 interface ToolbarContextType {
     fullscreenEditorActive: boolean;
@@ -24,22 +25,14 @@ const ToolbarContext = createContext<ToolbarContextType>({
     setFullscreenEditorActive: () => {},
 });
 
-type ToolbarContainerProps = {
-    pendingCanvas: CanvasDB;
-    onSavePending: () => void;
-};
-
 // Create a provider component
 type ToolbarProviderProps = {
     children: ReactNode;
-} & ToolbarContainerProps;
+};
 
-export const ToolbarProvider = ({
-    children,
-    pendingCanvas,
-    onSavePending,
-}: ToolbarProviderProps) => {
+export const ToolbarProvider = ({ children }: ToolbarProviderProps) => {
     const [fullscreenEditor, setFullscreenEditor] = useState(false);
+    const { pendingCanvas, onSavePending } = usePendingCanvas();
 
     return (
         <ToolbarContext.Provider

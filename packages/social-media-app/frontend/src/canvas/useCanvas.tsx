@@ -40,11 +40,13 @@ export const getCanvasAdressFromUrl = (): string | undefined => {
     }
     const pathname = window.location.hash.split("#")[1];
     const path = pathname.split("/").map((x) => decodeURIComponent(x));
-    path.splice(0, 2); // remove '' and 'root path'
+    path.splice(0, 2); // remove '' and 'c'
     if (path[0] === "") {
         path.splice(0, 1);
     }
-    return path[0];
+    // Remove query parameters (e.g. ?view=new) if present
+    const canvasAddress = path[0]?.split("?")[0];
+    return canvasAddress;
 };
 
 const getCanvasesPathFromURL = async (
@@ -59,11 +61,10 @@ const getCanvasesPathFromURL = async (
     const current = await peer.open<Canvas>(canvasAddress, {
         existing: "reuse",
     });
-    console.log({ current });
     return current.loadPath(true);
 };
 
-export const CanvasContext = React.createContext<ICanvasContext>({} as any);
+const CanvasContext = React.createContext<ICanvasContext>({} as any);
 export const useCanvases = () => useContext(CanvasContext);
 const ROOM_ID_SEED = new TextEncoder().encode("giga | place");
 
@@ -94,9 +95,8 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const [leaf, setLeaf] = useState<Canvas>(undefined);
 
     const [canvases, setCanvases] = useState<Canvas[]>([]);
-    const loading = useRef<Promise<void>>();
-    const [isLoading, setIsLoading] = useState(false);
-    const [update, forceUpdate] = useReducer((x) => x + 1, 0);
+    const loadingPromise = useRef<Promise<void>>();
+    const [isLoading, setIsLoading] = useState(true);
     const rlocation = useLocation();
 
     const setRoot = (canvas: Canvas) => {
@@ -127,13 +127,13 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                                 peer.open(room, { existing: "reuse" })
                             )
                         ).then((openRooms) => {
+                            console.log("OPEN ROOMS", openRooms);
                             setCanvases(openRooms);
                             return openRooms;
                         });
                     })
                     .finally(() => {
                         setIsLoading(false);
-                        forceUpdate();
                     });
             },
         }),
@@ -141,7 +141,6 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             root?.id.toString(),
             canvases.length,
             canvases[canvases.length - 1]?.idString,
-            update,
             rlocation,
             isLoading,
             leaf,
@@ -151,9 +150,10 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
 
     const updateCanvasPath = async (reset = true) => {
         let startLocation = window.location.hash;
-        const maybeSetCanvases = (rooms: Canvas[]) => {
+        const maybeSetCanvases = (canvases: Canvas[]) => {
             if (startLocation === window.location.hash) {
-                setCanvases(rooms);
+                setCanvases(canvases);
+                setIsLoading(false);
             } else {
                 console.log("SKIP SET", startLocation, window.location.hash);
             }
@@ -161,7 +161,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         /* setCanvasPath(newRoomPath);
         document.title = newRoomPath.join(" / ") || "Giga"; */
         if (reset) {
-            maybeSetCanvases([]);
+            maybeSetCanvases(null);
             setIsLoading(true);
         }
 
@@ -177,20 +177,18 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             })
             .finally(() => {
                 setIsLoading(false);
-                forceUpdate();
             });
     };
 
     useEffect(() => {
         if (!root) {
-            forceUpdate();
             return;
         }
         updateCanvasPath(false);
     }, [root?.address, rlocation]);
 
     useEffect(() => {
-        if (root || !peer || loading.current) {
+        if (root || !peer || loadingPromise.current) {
             return;
         }
 
@@ -218,7 +216,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                         parent: result,
                     })
                 );
-                loading.current = undefined;
+                loadingPromise.current = undefined;
             })
             .catch((e) => {
                 console.error("Failed to create root canvas", e);

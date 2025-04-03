@@ -387,7 +387,7 @@ const ChatMessagePreview = ({
             {text && (
                 <button
                     onClick={onClick}
-                    className="max-w-prose col-span-3 col-start-2 border border-neutral-500 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
+                    className="max-w-prose col-span-3 col-start-2 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
                 >
                     <PreviewFrame element={text} previewLines={3} noPadding />
                 </button>

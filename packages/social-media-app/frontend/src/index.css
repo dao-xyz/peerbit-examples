@@ -410,6 +410,9 @@ code {
         }
     }
 
+
+
+
     .switch-thumb {
         display: block;
         width: 21px;
@@ -423,6 +426,11 @@ code {
 
         &[data-state="checked"] {
             transform: translateX(19px);
+        }
+
+
+        &[data-disabled] {
+            @apply opacity-50 cursor-not-allowed;
         }
     }
 
@@ -451,6 +459,55 @@ code {
         animation: bounceAnimate 1s infinite ease-in-out;
     }
 
+
+    /* Added new styles for the typing indicator and animated circles */
+    .typing {
+        display: block;
+        width: 60px;
+        height: 30px;
+        border-radius: 20px;
+        margin: 0;
+        display: flex;
+        justify-content: center;
+        z-index: 1;
+        align-items: center;
+        @apply bg-neutral-100 dark:bg-neutral-900;
+    }
+
+    .typing-circle {
+        display: block;
+        border-radius: 50%;
+        @apply bg-neutral-400 dark:bg-neutral-600;
+        margin: 3px;
+    }
+
+    .typing-circle.scaling {
+        animation: typing 1000ms ease-in-out infinite;
+        animation-delay: 3600ms;
+    }
+
+    .typing-circle.scaling-demure {
+        animation: typing-demure 1000ms ease-in-out infinite;
+        animation-delay: 3600ms;
+    }
+
+    .typing-circle.bouncing {
+        animation: bounce 1000ms ease-in-out infinite;
+        animation-delay: 3600ms;
+    }
+
+    .typing-circle:nth-child(1) {
+        animation-delay: 0ms;
+    }
+
+    .typing-circle:nth-child(2) {
+        animation-delay: 333ms;
+    }
+
+    .typing-circle:nth-child(3) {
+        animation-delay: 666ms;
+    }
+
 }
 
 @keyframes slideUp {
@@ -474,6 +531,43 @@ code {
     to {
         opacity: 1;
         transform: translateY(0);
+    }
+}
+
+
+@keyframes typing {
+    0% {
+        transform: scale(1);
+    }
+
+    33% {
+        transform: scale(1);
+    }
+
+    50% {
+        transform: scale(1.4);
+    }
+
+    100% {
+        transform: scale(1);
+    }
+}
+
+@keyframes typing-demure {
+    0% {
+        transform: scale(1);
+    }
+
+    33% {
+        transform: scale(1);
+    }
+
+    50% {
+        transform: scale(1.2);
+    }
+
+    100% {
+        transform: scale(1);
     }
 }
 

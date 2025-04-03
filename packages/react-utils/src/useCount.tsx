@@ -45,21 +45,6 @@ export const useCount = <T extends Record<string, any>>(
 
         const handleChange = () => {
             debounced();
-            /* TODO change count frequency when we have low counts
-             if (countRef.current === 0) {
-                debounced.cancel();
-                if (options?.debug) {
-                    console.log(
-                        "Empty results detected. Bypassing debounce for immediate search."
-                    );
-                }
-                _l();
-            } else {
-                if (options?.debug) {
-                    console.log("Non-empty results. Using debounced search.");
-                }
-                debounced();
-            } */
         };
 
         debounced();

@@ -57,12 +57,14 @@ export const CanvasPath = ({
     setIsBreadcrumbExpanded: React.Dispatch<React.SetStateAction<boolean>>;
 }) => {
     const navigate = useNavigate();
-    const location = useLocation();
     const [focus, setFocus] = useState(false);
     const { path, root } = useCanvases();
+    console.log({ path });
 
     // Maintain controlled tags state (each tag is an address string)
-    const [tags, setTags] = useState(() => path.slice(1).map((x) => x.address));
+    const [tags, setTags] = useState(() =>
+        (path || [])?.slice(1).map((x) => x.address)
+    );
 
     useEffect(() => {
         // Update tags when the path changes externally.

@@ -21,6 +21,7 @@ export const useLocal = <
     db?: Documents<T, I>,
     options?: {
         resolve?: R;
+        transform?: (result: RT) => Promise<RT>;
         onChanges?: (all: RT[]) => void;
         debounce?: number;
         debug?: boolean; // add debug option here
@@ -42,9 +43,13 @@ export const useLocal = <
                     resolve: options?.resolve as any,
                 });
 
-                const results: WithContext<RT>[] =
-                    (await iterator.all()) as any;
+                let results: RT[] = (await iterator.all()) as any;
 
+                if (options?.transform) {
+                    results = await Promise.all(
+                        results.map((x) => options.transform!(x))
+                    );
+                }
                 emptyResultsRef.current = results.length === 0;
                 setAll(() => {
                     options?.onChanges?.(results);
@@ -68,12 +73,6 @@ export const useLocal = <
         }, 3000);
 
         const handleChange = () => {
-            if (options?.debug) {
-                console.log(
-                    "Event triggered: emptyResultsRef =",
-                    emptyResultsRef.current
-                );
-            }
             if (emptyResultsRef.current) {
                 debounced.cancel();
                 if (options?.debug) {
@@ -83,9 +82,6 @@ export const useLocal = <
                 }
                 _l();
             } else {
-                if (options?.debug) {
-                    console.log("Non-empty results. Using debounced search.");
-                }
                 debounced();
             }
         };
@@ -103,6 +99,7 @@ export const useLocal = <
         options?.id,
         options?.resolve,
         options?.onChanges,
+        options?.transform,
     ]);
 
     return all;
