@@ -662,6 +662,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         if (
             videoLoadedOnce.current ||
             !mediaStreamDB ||
+            mediaStreamDB?.closed ||
             !mediaStreamDBs ||
             mediaStreamDBs?.closed
         ) {
@@ -680,6 +681,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     }, [
         videoRef.current,
         mediaStreamDB?.address,
+        mediaStreamDB?.closed,
         mediaStreamDBs?.address,
         mediaStreamDBs?.closed,
     ]);
