@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/llm-service-cli",
-    "version": "0.0.2",
+    "version": "0.0.3",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -40,7 +40,7 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@giga-app/llm": "^0.0.2",
+        "@giga-app/llm": "^0.0.3",
         "@inquirer/editor": "^2",
         "@inquirer/input": "^2",
         "@inquirer/select": "^2"
