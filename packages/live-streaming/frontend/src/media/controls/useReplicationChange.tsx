@@ -10,7 +10,7 @@ export const useReplicationChange = (props: {
     >(new Map());
 
     useEffect(() => {
-        if (!props.mediaStreams) {
+        if (!props.mediaStreams || props.mediaStreams.closed) {
             return;
         }
         const changeListener = async (ev: { detail: { track: Track } }) => {
@@ -50,7 +50,7 @@ export const useReplicationChange = (props: {
                 changeListener
             );
         };
-    }, [props.mediaStreams?.address]);
+    }, [props.mediaStreams?.address, props.mediaStreams?.closed]);
 
     return replicationRanges;
 };
