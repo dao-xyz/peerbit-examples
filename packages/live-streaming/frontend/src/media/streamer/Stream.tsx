@@ -1,8 +1,5 @@
-import { useLocal } from "@peerbit/react";
-import { Tracks } from "../controls/Tracks";
 import { MediaStreamDB } from "@peerbit/video-lib";
 import { Renderer } from "./Renderer";
-import { Share } from "../controls/Share";
 
 export const Editor = (props: { stream: MediaStreamDB }) => {
     return (
