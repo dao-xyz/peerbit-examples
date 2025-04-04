@@ -9,6 +9,10 @@ import events from "events";
 events.setMaxListeners(102);
 
 export const start = async (directory?: string | null) => {
+    process.on("uncaughtException", (err) => {
+        console.error("Uncaught exception", err);
+    });
+
     // if directoy is not provided open in a default directory
     if (directory === undefined) {
         // if directory is null we dont want to use persistance
@@ -31,6 +35,7 @@ export const start = async (directory?: string | null) => {
     // if local env arg then bootstrap to local node, else global
 
     if (process.argv.includes("--local")) {
+        console.log("Bootstrapping to local node");
         await client.dial(
             "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
                 (await (await fetch("http://localhost:8082/peer/id")).text())
