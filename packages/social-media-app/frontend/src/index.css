@@ -5,10 +5,10 @@ body {
 
 body {
     margin: 0;
-    /* font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
         'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-        sans-serif; */
-    font-family: math;
+        sans-serif;
+
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 }
@@ -188,6 +188,22 @@ code {
     ::-webkit-scrollbar-thumb:hover {
         background-color: rgba(136, 136, 136, 0.8);
         /* 80% opacity */
+    }
+}
+
+@property --bg-angle {
+    inherits: false;
+    initial-value: 0deg;
+    syntax: "<angle>";
+}
+
+/**
+   * To animate the gradient, we set the custom property to 1 full
+   * rotation. The animation starts at the default value of `0deg`.
+   */
+@keyframes spin {
+    to {
+        --bg-angle: 360deg;
     }
 }
 
@@ -508,7 +524,58 @@ code {
         animation-delay: 666ms;
     }
 
+
+    /* Ensure the content stays above the animated border */
+    .animated-border {
+        /* add the animation, but pause it by default */
+        animation: spinx 7.5s infinite linear running;
+        --inner-bg: white;
+
+        /**
+        * Using `background-origin` we can create a “border” using two gradients. And to
+        * make the gradients better-looking, we use OKLCH.
+        *
+        * @see https://developer.mozilla.org/en-US/docs/Web/CSS/background-origin
+        * @see https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl
+        */
+        background:
+            /* Background colors don’t work with `background-origin`, so use a gradient. */
+            linear-gradient(to bottom, var(--inner-bg), var(--inner-bg)) padding-box,
+
+            /* ends at inner border edges */
+            conic-gradient(from var(--bg-angle), var(--inner-bg), var(--inner-bg), #0077ff) border-box;
+
+        /*  conic-gradient(from var(--bg-angle), #0077ff, #00ffcc, #0077ff) border-box; */
+
+        /* extends to outer border edges */
+        /* a clear border lets the background gradient shine through */
+        border: 2px solid transparent;
+        border-radius: 0px;
+
+    }
+
+    .animated-bg-btn {
+        --bg-angle: 0deg;
+        animation: spinx 2.5s infinite linear;
+        --inner-bg: white;
+
+        background: conic-gradient(from var(--bg-angle), var(--inner-bg), #0077ff, var(--inner-bg));
+        background-size: 200% 200%;
+        border: none;
+        border-radius: 0.375rem;
+        /* Matches Tailwind's rounded-md */
+        color: white;
+
+    }
 }
+
+@keyframes spinx {
+    to {
+        --bg-angle: 360deg;
+    }
+}
+
+
 
 @keyframes slideUp {
     from {

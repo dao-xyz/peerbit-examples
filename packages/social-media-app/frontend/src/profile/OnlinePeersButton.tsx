@@ -32,18 +32,20 @@ export const OnlineProfilesDropdown = (props: { peers: PublicSignKey[] }) => {
 
             {/* Dropdown content: a scrollable list of profiles */}
             <DropdownMenu.Content
-                className="flex flex-col gap-2"
+                className=" bg-neutral-200 dark:bg-neutral-800 max-h-30 overflow-y-auto  "
                 sideOffset={5}
             >
-                {props.peers.map((peer) => (
-                    <DropdownMenu.Item asChild key={peer.toString()}>
-                        <ProfileButton
-                            publicKey={peer}
-                            size={32}
-                            direction="row"
-                        />
-                    </DropdownMenu.Item>
-                ))}
+                <div className="p-2 flex flex-col gap-2">
+                    {props.peers.map((peer) => (
+                        <DropdownMenu.Item asChild key={peer.toString()}>
+                            <ProfileButton
+                                publicKey={peer}
+                                size={32}
+                                direction="row"
+                            />
+                        </DropdownMenu.Item>
+                    ))}
+                </div>
             </DropdownMenu.Content>
         </DropdownMenu.Root>
     );

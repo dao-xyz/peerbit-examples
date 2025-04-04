@@ -1,4 +1,11 @@
-import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+    Fragment,
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
 import debounce from "lodash.debounce";
 import throttle from "lodash.throttle";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
@@ -6,8 +13,8 @@ import { ChevronDownIcon } from "@radix-ui/react-icons";
 import { Reply } from "./Reply";
 import { tw } from "../../utils/tailwind";
 import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
-import { useView } from "../../view/ViewContex"; // adjust path as needed
-import { useOnline, usePeer } from "@peerbit/react";
+import { useView, ViewType } from "../../view/ViewContex"; // adjust path as needed
+import { useLocal, useOnline, usePeer } from "@peerbit/react";
 
 export const StickyHeader = ({ children }) => {
     const headerRef = useRef<HTMLDivElement>(null);
@@ -71,9 +78,31 @@ function getScrollTop() {
     return window.scrollY || document.documentElement.scrollTop;
 }
 const DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED = 100;
+
+const readableView = (view: ViewType) => {
+    if (view === "chat") {
+        return "Chat view";
+    }
+
+    if (view === "new") {
+        return "New stuff";
+    }
+
+    if (view === "old") {
+        return "Old stuff";
+    }
+
+    if (view === "best") {
+        return "Popular";
+    }
+};
+
 export const Replies = () => {
     // Get view state and processed replies from our context.
     const { view, setView, processedReplies, viewRoot } = useView();
+
+    const viewAsReadable = useMemo(() => readableView(view), [view]);
+
     const { peers } = useOnline(viewRoot);
     const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
@@ -139,10 +168,6 @@ export const Replies = () => {
                 const scrollBottom = resizeScrollBottomRef.current;
                 if (scrollBottom <= bottomRegionSize) {
                     scrollToBottom();
-                    console.log(
-                        "scroll to bottom ",
-                        document.documentElement.scrollHeight
-                    );
                 }
                 resizeScrollBottomRef.current = getScrollBottomOffset(
                     scrollBottom <= bottomRegionSize ? maxScrollTop : scrollTop
@@ -231,21 +256,6 @@ export const Replies = () => {
         const cycleLength = 100;
         const handleBodyResizeDebounced = debounce(
             () => {
-                /*   const scrollPosition = resizeScrollBottomRef.current;
-              const wasNearBottom =   getScrollBottomOffset(scrollPosition) <= bottomRegionSize;
-              const lastReplyIsFromUser =
-                  oldLatestReplyRef.current && peer && oldLatestReplyRef.current.reply.publicKey === peer.identity.publicKey;
-              const isNewReply =
-                  oldLatestReplyRef.current &&
-                  latestReplyRef.current &&
-                  oldLatestReplyRef.current.reply.idString !== latestReplyRef.current.reply.idString;
-  
-              console.log("SCROLL?", isNewReply, wasNearBottom || lastReplyIsFromUser, repliesContainerRef.current.getBoundingClientRect().height) */
-                console.log(
-                    "SCROLL?",
-                    scrollMode.current,
-                    repliesContainerRef.current.getBoundingClientRect().height
-                );
                 if (scrollMode.current === "automatic") {
                     scrollToBottom();
                 }
@@ -275,6 +285,16 @@ export const Replies = () => {
             handleBodyResizeDebounced.cancel();
         };
     }, [view, peer, repliesContainerRef.current]);
+    console.log(processedReplies.map((x) => x.lineType));
+
+    /*  const allCanvases = useLocal(
+         viewRoot?.loadedReplies ? viewRoot.replies : null
+     );
+     const allElements = useLocal(
+         viewRoot?.loadedElements ? viewRoot.elements : null
+     );
+     console.log("all canvases", allCanvases);
+     console.log("all elements", allElements); */
 
     // Scroll to bottom when first entering chat view.
     useEffect(() => {
@@ -292,7 +312,7 @@ export const Replies = () => {
                 <div className="w-full max-w-[876px] mx-auto flex flex-row">
                     <DropdownMenu.Root>
                         <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
-                            <span>Replies sorted by {view}</span>
+                            <span>{viewAsReadable}</span>
                             <ChevronDownIcon className="ml-2" />
                         </DropdownMenu.Trigger>
                         <DropdownMenu.Content
@@ -304,11 +324,10 @@ export const Replies = () => {
                                 (sortType) => (
                                     <DropdownMenu.Item
                                         key={sortType}
-                                        className="menu-item"
+                                        className="menu-item text-sm"
                                         onSelect={() => setView(sortType)}
                                     >
-                                        {sortType.charAt(0).toUpperCase() +
-                                            sortType.slice(1)}
+                                        {readableView(sortType)}
                                     </DropdownMenu.Item>
                                 )
                             )}
@@ -337,15 +356,15 @@ export const Replies = () => {
                                 isQuote={item.type === "quote"}
                                 lineType={item.lineType}
                                 /* TODO?
-                             hideHeader={
-                                view === "chat" &&
-                                i > 0 &&
-                                processedReplies[
-                                    i - 1
-                                ]?.reply.publicKey.equals(
-                                    item.reply.publicKey
-                                )
-                            } */
+                     hideHeader={
+                        view === "chat" &&
+                        i > 0 &&
+                        processedReplies[
+                            i - 1
+                        ]?.reply.publicKey.equals(
+                            item.reply.publicKey
+                        )
+                    } */
                             />
                         </Fragment>
                     ))}

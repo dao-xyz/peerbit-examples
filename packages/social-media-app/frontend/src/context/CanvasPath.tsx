@@ -23,27 +23,33 @@ const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
 
     return (
         <div className="grid grid-flow-col auto-cols-max justify-start items-center overflow-x-auto w-full shrink-0 no-scrollbar p-1 pr-0">
-            {path.map((x, ix) => (
-                <Fragment key={ix}>
-                    <span
-                        className={tw(
-                            ix < 2 && "w-0 overflow-hidden invisible"
-                        )}
-                    >
-                        <span className="px-1">/</span>
-                    </span>
-                    <span
-                        className={tw(
-                            ix === 0 && "w-0 overflow-hidden invisible"
-                        )}
-                        key={ix}
-                    >
-                        <CanvasWrapper canvas={x}>
-                            <CanvasPreview variant="breadcrumb" />
-                        </CanvasWrapper>
-                    </span>
-                </Fragment>
-            ))}
+            {path.length > 1 ? (
+                path.map((x, ix) => (
+                    <Fragment key={ix}>
+                        <span
+                            className={tw(
+                                ix < 2 && "w-0 overflow-hidden invisible"
+                            )}
+                        >
+                            <span className="px-1">/</span>
+                        </span>
+                        <span
+                            className={tw(
+                                ix === 0 && "w-0 overflow-hidden invisible"
+                            )}
+                            key={ix}
+                        >
+                            <CanvasWrapper canvas={x}>
+                                <CanvasPreview variant="breadcrumb" />
+                            </CanvasWrapper>
+                        </span>
+                    </Fragment>
+                ))
+            ) : (
+                <span className="text-neutral-400 dark:text-neutral-600">
+                    {"Home"}
+                </span>
+            )}
             <span ref={endMarkerRef} className="h-full w-1 flex-none block" />
         </div>
     );
@@ -57,9 +63,7 @@ export const CanvasPath = ({
     setIsBreadcrumbExpanded: React.Dispatch<React.SetStateAction<boolean>>;
 }) => {
     const navigate = useNavigate();
-    const [focus, setFocus] = useState(false);
     const { path, root } = useCanvases();
-    console.log({ path });
 
     // Maintain controlled tags state (each tag is an address string)
     const [tags, setTags] = useState(() =>
@@ -101,7 +105,7 @@ export const CanvasPath = ({
         <div className="flex flex-row gap-2 h-full items-center overflow-hidden">
             {path && path.length > 0 && (
                 <button
-                    className="rounded-lg hover:bg-neutral-200 dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-950 dark:border-neutral-50 overflow-hidden"
+                    className="rounded hover:bg-neutral-200  dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-400 dark:border-neutral-600 inset-shadow-xs   inset-shadow-neutral-400/30 dark:inset-shadow-neutral-800/30 i overflow-hidden"
                     onClick={() =>
                         setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
                     }

@@ -95,6 +95,8 @@ export const MarkdownContent = ({
         setIsEditing(true);
         setTimeout(() => {
             textareaRef.current?.focus();
+            // set the cursor to the end of the text
+            textareaRef.current?.setSelectionRange(text.length, text.length);
         }, 0);
     };
 

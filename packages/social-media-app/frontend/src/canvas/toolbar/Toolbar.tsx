@@ -13,6 +13,8 @@ import ToolbarContent from "./ToolbarContent";
 import { AppSelectPaneInline } from "./AppSelectPaneInline";
 import { SimpleWebManifest } from "@giga-app/interface";
 import { usePendingCanvas } from "../PendingCanvasContext";
+import { useView } from "../../view/ViewContex";
+import { AutoReplyProvider, useAutoReply } from "../AutoReplyContext";
 
 interface ToolbarContextType {
     fullscreenEditorActive: boolean;
@@ -47,7 +49,7 @@ export const ToolbarProvider = ({ children }: ToolbarProviderProps) => {
                 multiCanvas
                 onSave={onSavePending}
             >
-                {children}
+                <AutoReplyProvider>{children}</AutoReplyProvider>
             </CanvasWrapper>
         </ToolbarContext.Provider>
     );

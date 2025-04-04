@@ -28,6 +28,10 @@ export type LineType = "start" | "end" | "end-and-start" | "none" | "middle";
  * including query management and fetching of replies.
  */
 
+function getParentAddress(msg: WithContext<Canvas>): string | undefined {
+    return msg.path.length ? msg.path[msg.path.length - 1].address : undefined;
+}
+
 const calculateAddress = async (p: WithContext<Canvas>) => {
     await p.calculateAddress();
     return p;
@@ -65,7 +69,7 @@ function useViewContextHook() {
         const urlView = searchParams.get("view");
         if (urlView && ["new", "old", "best", "chat"].includes(urlView)) {
             setView(urlView as ViewType);
-        } else {
+        } else if (!view) {
             setView("new");
         }
     }, [searchParams]);
@@ -143,46 +147,59 @@ function useViewContextHook() {
 
     // --- Reply Processing for "chat" view (inserting quotes) ---
     function replyLineTypes({
+        prev,
         current,
         next,
         context,
     }: {
+        prev?: WithContext<Canvas>;
         current: WithContext<Canvas>;
         next?: WithContext<Canvas>;
         context: CanvasDB;
     }): LineType {
-        const parents = {
-            next:
-                next?.path.length > 0
-                    ? next.path[next.path.length - 1]
-                    : undefined,
-            current:
-                current.path.length > 0
-                    ? current.path[current.path.length - 1]
-                    : undefined,
-        };
-        if (
-            context.address === parents.current?.address &&
-            parents.next?.address !== current.address
-        ) {
+        // Get parent addresses.
+        const currentParent = getParentAddress(current);
+        const nextParent = next ? getParentAddress(next) : undefined;
+        const prevParent = prev ? getParentAddress(prev) : undefined;
+
+        // Determine whether the current reply is the first in its chain.
+        // (If there is no previous reply or if the previous reply’s parent is different, current is first.)
+        const isFirstInChain = !prev || (prev && prevParent !== currentParent);
+
+        // Check whether the next reply is a direct child of current.
+        const nextIsDirectChild = nextParent === current.address;
+
+        // Also, check if the next reply is a sibling (same parent as current).
+        const nextIsSibling =
+            nextParent && currentParent && nextParent === currentParent;
+
+        // If there is no next reply:
+        if (!next) {
+            // If current is nested (its parent is not the context) and is not the first in its chain,
+            // we mark it as the end of a chain.
+            return currentParent &&
+                currentParent !== context.address &&
+                !isFirstInChain
+                ? "end"
+                : "none";
+        }
+
+        // If the next reply is a direct child of current, then we are in a parent–child chain.
+        if (nextIsDirectChild) {
+            return isFirstInChain ? "start" : "end-and-start";
+        }
+
+        // If the next reply is a sibling (i.e. both share the same parent) then no vertical line should be drawn.
+        if (nextIsSibling) {
             return "none";
         }
 
-        const startOfLine = current.address === parents.next?.address;
-        let [endOfLine, middleOfLine] = [false, false];
-        middleOfLine = parents.current?.address === parents.next?.address;
-        endOfLine =
-            parents.next?.address !== parents.current?.address &&
-            parents.next?.address !== current?.address;
-        return startOfLine
-            ? endOfLine
-                ? "end-and-start"
-                : "start"
-            : endOfLine
-            ? "end"
-            : middleOfLine
-            ? "middle"
-            : "none";
+        // Otherwise, if current was in a chain (direct child of its parent) but the next reply does not continue the chain, mark current as ending the chain.
+        if (currentParent && currentParent !== context.address) {
+            return "end";
+        }
+
+        return "none";
     }
 
     function quotesToInsert({

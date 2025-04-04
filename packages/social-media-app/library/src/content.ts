@@ -86,6 +86,12 @@ export abstract class ElementContent {
 }
 
 export abstract class CanvasReference {
+    reference: Canvas | null = null;
+    constructor(properties?: { reference?: Canvas | null }) {
+        if (properties?.reference) {
+            this.reference = properties.reference;
+        }
+    }
     abstract get address(): string;
     abstract load(node: ProgramClient): Promise<Canvas> | Canvas;
 }
@@ -142,6 +148,15 @@ export class Element<T extends ElementContent = ElementContent> {
         this.content = properties.content;
         this.id = properties.id || randomBytes(32);
         this.path = resolvePathFromProperties(properties);
+    }
+
+    set parent(canvas: Canvas) {
+        this.path = [
+            ...canvas.path,
+            new CanvasAddressReference({
+                canvas,
+            }),
+        ];
     }
 
     private _idString: string;
@@ -257,22 +272,22 @@ export class CanvasAddressReference extends CanvasReference {
     @field({ type: "string" })
     canvas: string;
 
-    private _reference: Canvas | null;
     constructor(properties: { canvas: Canvas | string }) {
-        super();
+        super({
+            reference:
+                properties.canvas instanceof Canvas ? properties.canvas : null,
+        });
         this.canvas =
             typeof properties.canvas === "string"
                 ? properties.canvas
                 : properties.canvas.address;
-        this._reference =
-            typeof properties.canvas === "string" ? null : properties.canvas;
     }
 
     // TODO add args
     async load(node: ProgramClient) {
-        return this._reference && !this._reference.closed
-            ? this._reference
-            : (this._reference = await node.open<Canvas>(this.canvas, {
+        return this.reference && !this.reference.closed
+            ? this.reference
+            : (this.reference = await node.open<Canvas>(this.canvas, {
                   existing: "reuse",
               }));
     }
@@ -435,21 +450,33 @@ export class Canvas extends Program<CanvasArgs> {
             publicKey: PublicSignKey;
         } & { replyTo?: CanvasReference[] } & {
             topMostCanvasWithSameACL?: Canvas | null;
-        } & PathProperties
+        } & PathProperties & { id?: Uint8Array }
     ) {
         super();
         this.publicKey = properties.publicKey;
         this.path = resolvePathFromProperties(properties);
 
         this.replyTo = properties["replyTo"] ?? [];
-        const elementsId = (properties as { seed: Uint8Array }).seed
-            ? sha256Sync((properties as { seed: Uint8Array }).seed)
-            : randomBytes(32);
+        const elementsId =
+            properties.id ||
+            ((properties as { seed: Uint8Array }).seed
+                ? sha256Sync((properties as { seed: Uint8Array }).seed)
+                : randomBytes(32));
         this.id = elementsId;
         this._elements = new Documents({ id: elementsId });
         this._replies = new Documents({ id: sha256Sync(elementsId) });
         this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
         this._messages = new RPC();
+    }
+
+    async setParent(canvas: Canvas) {
+        this.path = [
+            ...canvas.path,
+            new CanvasAddressReference({
+                canvas,
+            }),
+        ];
+        await this.calculateAddress({ reset: true });
     }
 
     private _idString: string;

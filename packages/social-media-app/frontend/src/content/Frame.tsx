@@ -157,12 +157,19 @@ export const Frame = (properties: {
                                 className="btn btn-secondary"
                                 onClick={async () => {
                                     await mutate(
-                                        properties.element,
                                         (element) => {
                                             (
                                                 element.content as IFrameContent
                                             ).src = newUrl;
                                             return true;
+                                        },
+                                        {
+                                            filter(rect) {
+                                                return (
+                                                    rect.idString ===
+                                                    properties.element.idString
+                                                );
+                                            },
                                         }
                                     );
                                 }}
@@ -202,16 +209,26 @@ export const Frame = (properties: {
                 <HostProvider
                     iframeOriginalSource={properties.element.content.orgSrc}
                     onNavigate={async (evt) => {
-                        await mutate(properties.element, (element) => {
-                            const currentUrl = (
-                                element.content as IFrameContent
-                            ).src;
-                            if (currentUrl === evt.to) {
-                                return false;
+                        await mutate(
+                            (element) => {
+                                const currentUrl = (
+                                    element.content as IFrameContent
+                                ).src;
+                                if (currentUrl === evt.to) {
+                                    return false;
+                                }
+                                (element.content as IFrameContent).src = evt.to;
+                                return true;
+                            },
+                            {
+                                filter(rect) {
+                                    return (
+                                        rect.idString ===
+                                        properties.element.idString
+                                    );
+                                },
                             }
-                            (element.content as IFrameContent).src = evt.to;
-                            return true;
-                        });
+                        );
                     }}
                 >
                     {(iframeRef) => (
@@ -239,11 +256,21 @@ export const Frame = (properties: {
                             content: newContent,
                         });
 
-                        await mutate(properties.element, (element) => {
-                            element.content = content;
-                            onContentChangeContextTrigger(element);
-                            return true;
-                        });
+                        await mutate(
+                            (element) => {
+                                element.content = content;
+                                onContentChangeContextTrigger(element);
+                                return true;
+                            },
+                            {
+                                filter(rect) {
+                                    return (
+                                        rect.idString ===
+                                        properties.element.idString
+                                    );
+                                },
+                            }
+                        );
                         if (options?.save /* && properties.draft */) {
                             await savePending();
                         }

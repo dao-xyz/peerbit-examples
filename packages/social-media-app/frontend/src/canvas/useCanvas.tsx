@@ -69,13 +69,8 @@ export const useCanvases = () => useContext(CanvasContext);
 const ROOM_ID_SEED = new TextEncoder().encode("giga | place");
 
 const GIGA_ROOT_POST = `
-# Welcome to giga.place 
-
-**A public and private experience**
-
-
-Your space to share, explore, and connect in a totally decentralized, secure world. Dive into a fresh, dynamic feed that's as innovative as you are.
-Ready to redefine social? Your journey starts here.
+# Welcome to Giga
+**A *public* and *private* media platform owned by you**
 `;
 
 const ROOT_IDENTITY_DEVELOPMENT = deserialize(

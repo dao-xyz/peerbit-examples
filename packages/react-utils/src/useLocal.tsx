@@ -75,11 +75,6 @@ export const useLocal = <
         const handleChange = () => {
             if (emptyResultsRef.current) {
                 debounced.cancel();
-                if (options?.debug) {
-                    console.log(
-                        "Empty results detected. Bypassing debounce for immediate search."
-                    );
-                }
                 _l();
             } else {
                 debounced();

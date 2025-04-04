@@ -125,24 +125,27 @@ export const Canvas = (
                                         disabled={ix === 0}
                                         onClick={() => {
                                             return mutate(
-                                                rect,
                                                 (element, ix) => {
                                                     const prev =
                                                         filteredRects[ix - 1];
                                                     element.location.y -= 1;
                                                     return mutate(
-                                                        prev,
                                                         (element) => {
                                                             element.location.y += 1;
                                                             forceUpdate();
                                                             return true;
+                                                        },
+                                                        {
+                                                            filter: (el) =>
+                                                                el.idString ===
+                                                                prev.idString,
                                                         }
-                                                    )
-                                                        .then(() => true)
-                                                        .catch((e) => {
-                                                            console.error(e);
-                                                            return false;
-                                                        });
+                                                    );
+                                                },
+                                                {
+                                                    filter: (el) =>
+                                                        el.idString ===
+                                                        rect.idString,
                                                 }
                                             );
                                         }}
@@ -162,26 +165,26 @@ export const Canvas = (
                                         }
                                         onClick={() => {
                                             return mutate(
-                                                rect,
                                                 (element, ix) => {
                                                     const next =
                                                         filteredRects[ix + 1];
                                                     element.location.y += 1;
                                                     return mutate(
-                                                        next,
                                                         (element) => {
                                                             element.location.y -= 1;
                                                             return true;
+                                                        },
+                                                        {
+                                                            filter: (el) =>
+                                                                el.idString ===
+                                                                next.idString,
                                                         }
-                                                    )
-                                                        .then(() => {
-                                                            forceUpdate();
-                                                            return true;
-                                                        })
-                                                        .catch((e) => {
-                                                            console.error(e);
-                                                            return false;
-                                                        });
+                                                    );
+                                                },
+                                                {
+                                                    filter: (el) =>
+                                                        el.idString ===
+                                                        rect.idString,
                                                 }
                                             );
                                         }}

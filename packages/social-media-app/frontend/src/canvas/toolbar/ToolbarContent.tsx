@@ -2,7 +2,7 @@ import React, { forwardRef, useEffect, useState } from "react";
 import { useCanvas } from "../CanvasWrapper";
 import { Canvas } from "../Canvas";
 import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
-import { MdAdd as FaPlus } from "react-icons/md";
+import { MdAdd as FaPlus, MdClear } from "react-icons/md";
 import { SaveButton } from "../SaveCanvasButton";
 import { FiSend } from "react-icons/fi";
 import { BsCamera, BsArrowsCollapse } from "react-icons/bs";
@@ -13,6 +13,7 @@ import { SimpleWebManifest } from "@giga-app/interface";
 import * as Switch from "@radix-ui/react-switch";
 import { useView } from "../../view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
+import { useAutoReply } from "../AutoReplyContext";
 
 interface ToolbarContentProps {
     onToggleAppSelect: () => void;
@@ -30,10 +31,11 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             requestAIReply,
         } = useCanvas();
 
-        const { view } = useView();
+        const { replyTo, disable: disableAutoReply } = useAutoReply();
         const { fullscreenEditorActive, setFullscreenEditorActive } =
             useToolbar();
 
+        const { view, viewRoot } = useView();
         const { isReady } = useAIReply();
         const { search } = useApps();
         const [resolvedApp, setResolvedApp] =
@@ -112,12 +114,12 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                     </div>
 
                     {/* Second row: Toolbar buttons */}
-                    <div className="flex items-center p-1 pt-0 h-full gap-1">
+                    <div className="flex items-center p-1 pt-0 h-full">
                         {/* Left: Plus button */}
                         {AddButton()}
                         {/* AI reply slider */}
                         <form>
-                            <div className="flex items-center ">
+                            <div className="flex items-center px-1">
                                 <label
                                     className={`ganja-font ${
                                         !isReady ? "text-neutral-500" : ""
@@ -177,16 +179,20 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 />
                             )}
                         </div>
-                        {view === "chat" && (
-                            <button
-                                className="btn ganja-font h-full p-2"
-                                /*  onClick={() => toggleReplyLogic()} */
-                            >
-                                {"< New topic >"}
-                            </button>
-                        )}
 
                         {/* Right: Send button */}
+                        {view === "chat" &&
+                            replyTo &&
+                            replyTo.idString !== viewRoot.idString && (
+                                <button
+                                    className="btn btn-icon btn-icon-md "
+                                    onClick={() => {
+                                        disableAutoReply();
+                                    }}
+                                >
+                                    <MdClear className="animated-bg-btn [--inner-bg:theme('colors.primary.900')] dark:[--inner-bg:theme('colors.primary.200')] text-white  dark:text-black " />
+                                </button>
+                            )}
                         <button
                             onClick={() => savePending()}
                             className="btn btn-icon btn-icon-md"

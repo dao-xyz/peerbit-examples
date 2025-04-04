@@ -178,7 +178,7 @@ const BreadcrumbPreview = ({
                         : "w-fit"
                     : "w-6",
                 isText && "px-1",
-                "flex-none h-6 rounded-md overflow-hidden border border-neutral-950 dark:border-neutral-50"
+                "flex-none h-6 rounded overflow-hidden border border-neutral-400 dark:border-neutral-600 "
             )}
         >
             <PreviewFrame

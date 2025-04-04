@@ -1,10 +1,10 @@
-import {
+// CanvasWrapper.tsx
+import React, {
     useState,
     useEffect,
     useRef,
     useContext,
     createContext,
-    useReducer,
 } from "react";
 import { usePeer, useProgram, useLocal } from "@peerbit/react";
 import {
@@ -32,17 +32,24 @@ import {
 } from "./utils/rect.js";
 import { useReplyProgress } from "./reply/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
+import { serialize, deserialize } from "@dao-xyz/borsh";
 
-interface CanvasContextType {
+// Extend the context type to include a subscription function.
+export interface CanvasContextType {
     editMode: boolean;
     setEditMode: (value: boolean) => void;
     active: Set<Uint8Array>;
     setActive: (value: Set<Uint8Array>) => void;
     pendingRects: Element[];
+    setPendingRects: React.Dispatch<
+        React.SetStateAction<Element<ElementContent>[]>
+    >;
     rects: Element[];
     insertDefault: (options?: {
         app?: SimpleWebManifest;
         increment?: boolean;
+        pending?: boolean;
+        y?: number | "optimize" | "max";
     }) => Promise<Element | Element[]>;
     removePending: (id: Uint8Array) => void;
     savePending: () => Promise<Element[] | undefined>;
@@ -54,14 +61,14 @@ interface CanvasContextType {
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
     ) => Promise<void>;
     mutate: (
-        rect: { id: Uint8Array },
         fn: (
             element: Element<ElementContent>,
             ix: number
-        ) => Promise<boolean> | boolean
-    ) => Promise<void>;
-
-    // NEW: Grouping & filtering functions
+        ) => Promise<boolean> | boolean,
+        options?: {
+            filter: (rect: Element) => boolean;
+        }
+    ) => boolean;
     groupPartialImages: (rects: Element[]) => Element[];
     separateAndSortRects: (rects: Element[]) => {
         text: Element[];
@@ -70,6 +77,10 @@ interface CanvasContextType {
     text: string;
     setRequestAIReply: (boolean: boolean) => void;
     requestAIReply: boolean;
+    // <-- New subscription function!
+    subscribeContentChange: (
+        callback: (element: Element) => void
+    ) => () => void;
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -90,7 +101,7 @@ interface CanvasWrapperProps {
     draft?: boolean;
     onSave?: () => void | Promise<void>;
     multiCanvas?: boolean;
-    onContentChange?: (element: Element[]) => void;
+    onContentChange?: (elements: Element[]) => void;
 }
 
 export const CanvasWrapper = ({
@@ -101,25 +112,21 @@ export const CanvasWrapper = ({
     multiCanvas,
     onContentChange,
 }: CanvasWrapperProps) => {
+    // Standard hooks & context from your existing code.
     const { peer } = usePeer();
     const { program: canvas } = useProgram(canvasDB, {
         existing: "reuse",
         id: canvasDB?.idString,
         keepOpenOnUnmount: true,
     });
-    const { request: request } = useAIReply();
+    const setupForCanvasIdDone = useRef<string | undefined>(undefined);
+    const { request } = useAIReply();
     const [requestAIReply, setRequestAIReply] = useState(false);
-
     const { getCuratedNativeApp: getNativeApp } = useApps();
     const { showError } = useErrorDialog();
-
     const [editMode, setEditMode] = useState(!!draft);
     const [isEmpty, setIsEmpty] = useState(true);
     const { announceReply } = useReplyProgress();
-
-    const resizeSizes = useRef(
-        new Map<number, { width: number; height: number }>()
-    );
     const rects = useLocal(
         canvas?.loadedElements ? canvas?.elements : undefined,
         {
@@ -138,8 +145,22 @@ export const CanvasWrapper = ({
     const pendingCounter = useRef(0);
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
     const latestBreakpoint = useRef<"xxs" | "md">("md");
-    const [text, setText] = useState<string | undefined>(); // this is a variable that holds the aggregated available text in the canvas
+    const [text, setText] = useState<string>("");
 
+    // --- New: Set up a subscription mechanism for content changes ---
+    const contentChangeSubscribers = useRef(
+        new Set<(element: Element) => void>()
+    );
+
+    const subscribeContentChange = (callback: (element: Element) => void) => {
+        contentChangeSubscribers.current.add(callback);
+        // Return an unsubscribe function.
+        return () => {
+            contentChangeSubscribers.current.delete(callback);
+        };
+    };
+
+    // --- The rest of your functions remain unchanged ---
     const getOptimalInsertLocation = (content: ElementContent) => {
         if (rectIsStaticMarkdownText({ content })) {
             return 0;
@@ -149,7 +170,6 @@ export const CanvasWrapper = ({
                 .filter((x) => rectIsStaticMarkdownText(x))
                 .sort((x, y) => x.location.y - y.location.y)[0]?.location.y;
         };
-
         let insertionLocation = locationOfTopMostText();
         if (insertionLocation == null || insertionLocation < 0) {
             insertionLocation = 0;
@@ -176,40 +196,58 @@ export const CanvasWrapper = ({
         }
     };
 
-    const mutate = async (
-        rect: { id: Uint8Array },
-        fn: (
-            element: Element<ElementContent>,
-            ix: number
-        ) => Promise<boolean> | boolean
-    ) => {
+    const mutate = (
+        fn: (element: Element<ElementContent>, ix: number) => boolean,
+        options?: { filter: (rect: Element) => boolean }
+    ): boolean => {
         if (!canvas?.publicKey.equals(peer?.identity.publicKey)) {
-            return;
+            return false;
         }
-        const pending = pendingRects.find((pending) =>
-            equals(pending.id, rect.id)
-        );
-        const index = rects.findIndex((pending) => equals(pending.id, rect.id));
-        if (pending) {
-            await fn(pending, index);
-            return;
+        let mutatedOnce = false;
+
+        // Create a new array for pending mutations.
+        let updatedPending = [...pendingRects];
+
+        // Process already pending elements.
+        for (let i = 0; i < updatedPending.length; i++) {
+            const element = updatedPending[i];
+            if (options?.filter && !options.filter(element)) {
+                continue;
+            }
+            const mutated = fn(element, i);
+            if (mutated) {
+                // The element has been mutated; update it in the pending array.
+                updatedPending[i] = element;
+                mutatedOnce = true;
+            }
         }
-        const existing = rects[index];
-        if (!existing) {
-            throw new Error(
-                "Missing rects in existing and pending. Index: " +
-                    index +
-                    ". Rects: " +
-                    rects.length
-            );
+
+        // Process elements from rects that are not yet in pending.
+        for (let i = 0; i < rects.length; i++) {
+            const element = rects[i];
+            // Skip if already in pending.
+            if (updatedPending.some((e) => e.idString === element.idString)) {
+                continue;
+            }
+            if (options?.filter && !options.filter(element)) {
+                continue;
+            }
+            const mutated = fn(element, i);
+            if (mutated) {
+                // Add the mutated element to pending.
+                updatedPending.push(element);
+                mutatedOnce = true;
+            }
         }
-        const mutated = await fn(existing, index);
-        if (mutated) {
-            await canvas.elements.put(existing);
+        // Update the state so that any useEffect dependent on pendingRects is notified.
+        if (mutatedOnce) {
+            console.log("Mutated pending rects", updatedPending);
+            setPendingRects(updatedPending);
         }
+        return mutatedOnce;
     };
 
-    // Overloaded addRect function:
+    // Overloaded addRect function.
     async function addRect(
         content: ElementContent,
         options?: {
@@ -239,7 +277,6 @@ export const CanvasWrapper = ({
         if (options?.id && Array.isArray(contentOrContents)) {
             throw new Error("Cannot set id when adding multiple elements");
         }
-
         const yStrategy = options.y ?? "optimize";
         await canvas.load();
         const allCurrentRects = await canvas.elements.index.search({
@@ -285,8 +322,8 @@ export const CanvasWrapper = ({
             });
             if (options.pending) {
                 setPendingRects((prev) => {
-                    const prevElement = prev.find((x) =>
-                        equals(x.id, element.id)
+                    const prevElement = prev.find(
+                        (x) => x.idString === element.idString
                     );
                     if (prevElement) {
                         if (
@@ -301,6 +338,7 @@ export const CanvasWrapper = ({
                     return [...prev, element];
                 });
             } else {
+                console.log("Save pending into", canvas.elements);
                 canvas.elements.put(element);
             }
             results.push(element);
@@ -308,7 +346,6 @@ export const CanvasWrapper = ({
         return Array.isArray(contentOrContents) ? results : results[0];
     }
 
-    // New function: Inserts an image element into the canvas using Uint8Array data.
     const insertImage = async (
         file: File,
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
@@ -340,7 +377,7 @@ export const CanvasWrapper = ({
                             groupKey,
                         })
                 );
-                const newElements: Element<ElementContent>[] = await addRect(
+                const newElements: Element[] = await addRect(
                     partialImages.map((x) => new StaticContent({ content: x })),
                     options
                 );
@@ -381,6 +418,7 @@ export const CanvasWrapper = ({
         pending?: boolean;
         y?: number | "optimize" | "max";
     }) => {
+        console.log("INSERT DEFAULT", options);
         if (options?.increment) {
             const last = pendingRects[pendingRects.length - 1];
             if (
@@ -455,17 +493,38 @@ export const CanvasWrapper = ({
             }
             setPendingRects([]);
             pendingCounter.current += pendingToSave.length;
+            console.log(
+                "ASAVE PENDING",
+                pendingToSave.map((x) =>
+                    x.path.map((y) => y.reference?.path.length)
+                )
+            );
+            console.log(
+                "BSAVE PENDING",
+                pendingToSave.map((x) =>
+                    x.path.map(
+                        (y) =>
+                            y.reference?.path.length +
+                            "/" +
+                            y.reference?.address
+                    )
+                )
+            );
+            console.log(
+                "CSAVE PENDING",
+                pendingToSave,
+                pendingToSave.map((x) => x.idString),
+                pendingToSave.map((y) => deserialize(serialize(y), Element))
+            );
             await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
             if (draft && onSave) {
                 await onSave();
             }
-
             if (requestAIReply) {
                 request(canvas).catch((e) => {
                     console.error("Error requesting AI reply", e);
                 });
             }
-
             setIsEmpty(true);
             return pendingToSave;
         } catch (error) {
@@ -475,7 +534,6 @@ export const CanvasWrapper = ({
 
     const reset = () => {
         setPendingRects([]);
-        resizeSizes.current = new Map();
     };
 
     useEffect(() => {
@@ -489,21 +547,25 @@ export const CanvasWrapper = ({
     }, []);
 
     useEffect(() => {
-        if (!peer || !canvas) return;
+        if (!peer || !canvas || canvas.closed) return;
+
+        if (canvas.idString === setupForCanvasIdDone.current) {
+            return;
+        }
+        setupForCanvasIdDone.current = canvas.idString;
+        console.log("RESET PENDING CANVAS", canvas?.idString, pendingRects);
         reset();
+
         if (canvas?.closed) {
             throw new Error("Expecting canvas to be open");
         }
         if (draft) {
             insertDefault();
         }
-    }, [
-        peer?.identity.publicKey.hashcode(),
-        !canvas || canvas?.closed ? undefined : canvas.address,
-    ]);
+    }, [peer?.identity.publicKey.hashcode(), canvas?.idString]);
 
+    // Modified content change handler that notifies subscribers.
     const _onContentChange = async (element: Element) => {
-        // we only have 1 element and the elemnt is a text element then set the aggregated text
         if (
             rects.length === 0 &&
             pendingRects.length === 1 &&
@@ -511,12 +573,10 @@ export const CanvasWrapper = ({
         ) {
             setText(element.content.content.text);
         }
-
         if (rectIsStaticMarkdownText(element)) {
             const parent = await canvas.loadParent();
             announceReply(parent);
         }
-
         if (!element.content.isEmpty) {
             setIsEmpty(false);
         } else {
@@ -528,9 +588,12 @@ export const CanvasWrapper = ({
         if (onContentChange) {
             onContentChange([element]);
         }
+        // Notify all subscribers about the change.
+        contentChangeSubscribers.current.forEach((callback) =>
+            callback(element)
+        );
     };
 
-    // Group partial images: if all parts are present, combine them.
     const groupPartialImages = (rects: Element[]): Element[] => {
         const grouped = new Map<
             string,
@@ -574,7 +637,6 @@ export const CanvasWrapper = ({
         return finalRects;
     };
 
-    // Separate rects into text and non‑text groups, and sort each by y.
     const separateAndSortRects = (
         rects: Element[]
     ): { text: Element[]; other: Element[] } => {
@@ -592,8 +654,6 @@ export const CanvasWrapper = ({
         return separated;
     };
 
-    const [update, forceUpdate] = useReducer((x) => x + 1, 0); // For triggering re‑renders if needed
-
     const contextValue: CanvasContextType = {
         editMode,
         setEditMode,
@@ -601,6 +661,7 @@ export const CanvasWrapper = ({
         isEmpty,
         setActive,
         pendingRects,
+        setPendingRects,
         rects,
         insertDefault,
         removePending,
@@ -614,6 +675,7 @@ export const CanvasWrapper = ({
         text,
         requestAIReply,
         setRequestAIReply,
+        subscribeContentChange,
     };
 
     return (
