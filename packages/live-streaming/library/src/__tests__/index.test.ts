@@ -2846,7 +2846,9 @@ describe("MediaStream", () => {
                 iterator = await viewerStreams.iterate(0, {
                     onProgress: (ev) => {
                         chunks.push(ev);
-                        chunks.length === frames / 2 && iterator.pause(); // pause after half of the frames
+                        if (chunks.length === frames / 2) {
+                            iterator.pause(); // pause after half of the frames
+                        }
                     },
                 });
 
