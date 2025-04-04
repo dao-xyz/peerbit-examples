@@ -91,15 +91,17 @@ export const useProgram = <
                                 "leave",
                                 changeListener
                             );
-
-                            if (programLoadingRef.current === startRef) {
-                                setProgram(undefined);
-                                programLoadingRef.current = undefined;
-                            }
                         };
                         if (options?.keepOpenOnUnmount) {
-                            return unsubscribe();
+                            unsubscribe();
                         }
+
+                        if (programLoadingRef.current === startRef) {
+                            setProgram(undefined);
+                            programLoadingRef.current = undefined;
+                            return;
+                        }
+
                         return p.close().then(unsubscribe);
                     }) || Promise.resolve();
             }
