@@ -1,4 +1,3 @@
-import path from "path";
 import React, { useEffect, useState } from "react";
 
 type Point = { x: number; y: number };
@@ -10,6 +9,16 @@ export type SmoothReplyLineProps = {
     containerRef: React.RefObject<HTMLDivElement>;
     lineTypes: LineType[];
 };
+
+// Helper: Dampens the x–coordinate of points toward the group's average x.
+// factor of 0.5 pulls each point halfway toward the average.
+function dampenPoints(points: Point[], factor: number): Point[] {
+    const avgX = points.reduce((sum, p) => sum + p.x, 0) / points.length;
+    return points.map((p) => ({
+        ...p,
+        x: avgX + (p.x - avgX) * factor,
+    }));
+}
 
 // Helper function to compute smooth path segments using Catmull-Rom-to-Bezier conversion.
 // Returns an array of segment objects with a path string and an approximate length.
@@ -46,7 +55,9 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
     containerRef,
     lineTypes,
 }) => {
-    const [paths, setPaths] = useState<string[]>([]);
+    const [segments, setSegments] = useState<{ d: string; length: number }[]>(
+        []
+    );
     const [viewBox, setViewBox] = useState("");
 
     useEffect(() => {
@@ -55,18 +66,13 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
         setViewBox(`0 0 ${containerRect.width} ${containerRect.height}`);
 
         // Compute center points for each reply relative to the container.
-        let pathCounter = 0;
-        const points: (Point | null)[] = replyRefs.map((ref, ix) => {
+        const points: (Point | null)[] = replyRefs.map((ref) => {
             const el = ref.current;
             if (el) {
-                pathCounter++;
                 const rect = el.getBoundingClientRect();
                 return {
                     x: rect.left + rect.width / 2 - containerRect.left,
-                    y:
-                        pathCounter === 1
-                            ? 0
-                            : rect.top + rect.height / 2 - containerRect.top,
+                    y: rect.top + rect.height / 2 - containerRect.top,
                 };
             }
             return null;
@@ -74,8 +80,8 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
         const validPoints = points.filter((p): p is Point => p !== null);
 
         // Ensure we have a matching number of lineTypes.
-        if (validPoints.length < 2) {
-            setPaths([]);
+        if (validPoints.length < 2 || validPoints.length !== lineTypes.length) {
+            setSegments([]);
             return;
         }
 
@@ -97,12 +103,18 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             groups.push(currentGroup);
         }
 
-        // For each group, generate the smooth path string.
-        const groupPaths = groups.map((group) => {
-            const segs = createSmoothPathSegments(group, 0.7);
-            return segs.map((seg) => seg.d).join(" ");
-        });
-        setPaths(groupPaths);
+        // Dampening factor: lower values pull points closer to the group average.
+        const dampeningFactor = 0.3;
+        const dampenedGroups = groups.map((group) =>
+            dampenPoints(group, dampeningFactor)
+        );
+
+        // For each group, compute the smooth segments.
+        const groupSegments = dampenedGroups.map((group) =>
+            createSmoothPathSegments(group, 1.3)
+        );
+        const flatSegments = groupSegments.flat();
+        setSegments(flatSegments);
     }, [replyRefs, containerRef, lineTypes]);
 
     if (!viewBox) return null;
@@ -131,22 +143,28 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
                     />
                 </filter>
             </defs>
-            {paths.map((pathData, index) => (
-                <path
-                    key={index}
-                    d={pathData}
-                    strokeWidth="4"
-                    fill="none"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                    stroke="black"
-                    style={{
-                        filter: "url(#sketchyFilter)",
-                        strokeDasharray: "45, 45",
-                    }}
-                    className="dark:stroke-neutral-800 stroke-neutral-200 stroke-da"
-                />
-            ))}
+            {segments.map((seg, index) => {
+                // Use a threshold for length to determine dash pattern and stroke thickness.
+                const lengthThreshold = 400;
+                const strokeDasharray = seg.length > 100 ? "35,35" : "15,15";
+                const strokeWidth = seg.length > lengthThreshold ? 1 : 1;
+                return (
+                    <path
+                        key={index}
+                        d={seg.d}
+                        strokeWidth={strokeWidth}
+                        fill="none"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        stroke="black"
+                        style={{
+                            strokeDasharray,
+                            filter: "url(#sketchyFilter)",
+                        }}
+                        className="dark:stroke-neutral-800 stroke-neutral-400/50"
+                    />
+                );
+            })}
         </svg>
     );
 };
