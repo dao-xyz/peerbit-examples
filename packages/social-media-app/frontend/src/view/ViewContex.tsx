@@ -43,6 +43,7 @@ function useViewContextHook() {
 
     // View root state: latest canvas from the list of canvases
     const [viewRoot, setViewRoot] = useState<CanvasDB | undefined>(undefined);
+
     useEffect(() => {
         if (canvases && canvases.length > 0) {
             setViewRoot(canvases[canvases.length - 1]);
@@ -93,10 +94,6 @@ function useViewContextHook() {
                     query: getRepliesQuery(viewRoot),
                     sort: [
                         new Sort({
-                            key: ["replies"],
-                            direction: SortDirection.DESC,
-                        }),
-                        new Sort({
                             key: ["__context", "created"],
                             direction: SortDirection.ASC,
                         }),
@@ -145,61 +142,35 @@ function useViewContextHook() {
         { ...query, transform: calculateAddress } // for some reason if we set the transform function in the setQuery it does not work, propagate to useLocal?
     );
 
+    const lastReply = useMemo(() => {
+        if (sortedReplies && sortedReplies.length > 0) {
+            return sortedReplies[sortedReplies.length - 1];
+        }
+        return undefined;
+    }, [sortedReplies]);
+
     // --- Reply Processing for "chat" view (inserting quotes) ---
     function replyLineTypes({
-        prev,
         current,
         next,
         context,
     }: {
-        prev?: WithContext<Canvas>;
         current: WithContext<Canvas>;
         next?: WithContext<Canvas>;
         context: CanvasDB;
     }): LineType {
-        // Get parent addresses.
         const currentParent = getParentAddress(current);
         const nextParent = next ? getParentAddress(next) : undefined;
-        const prevParent = prev ? getParentAddress(prev) : undefined;
+        // A direct child relationship means that the next post's parent is the current post.
+        const directChild = !!(next && nextParent === current.address);
 
-        // Determine whether the current reply is the first in its chain.
-        // (If there is no previous reply or if the previous reply’s parent is different, current is first.)
-        const isFirstInChain = !prev || (prev && prevParent !== currentParent);
-
-        // Check whether the next reply is a direct child of current.
-        const nextIsDirectChild = nextParent === current.address;
-
-        // Also, check if the next reply is a sibling (same parent as current).
-        const nextIsSibling =
-            nextParent && currentParent && nextParent === currentParent;
-
-        // If there is no next reply:
-        if (!next) {
-            // If current is nested (its parent is not the context) and is not the first in its chain,
-            // we mark it as the end of a chain.
-            return currentParent &&
-                currentParent !== context.address &&
-                !isFirstInChain
-                ? "end"
-                : "none";
+        if (currentParent === context.address) {
+            // Current is a top-level post.
+            return directChild ? "start" : "none";
+        } else {
+            // Current is a reply.
+            return directChild ? "middle" : "end";
         }
-
-        // If the next reply is a direct child of current, then we are in a parent–child chain.
-        if (nextIsDirectChild) {
-            return isFirstInChain ? "start" : "end-and-start";
-        }
-
-        // If the next reply is a sibling (i.e. both share the same parent) then no vertical line should be drawn.
-        if (nextIsSibling) {
-            return "none";
-        }
-
-        // Otherwise, if current was in a chain (direct child of its parent) but the next reply does not continue the chain, mark current as ending the chain.
-        if (currentParent && currentParent !== context.address) {
-            return "end";
-        }
-
-        return "none";
     }
 
     function quotesToInsert({
@@ -298,6 +269,7 @@ function useViewContextHook() {
         view,
         setView,
         query,
+        lastReply,
         sortedReplies,
         processedReplies,
         loading,

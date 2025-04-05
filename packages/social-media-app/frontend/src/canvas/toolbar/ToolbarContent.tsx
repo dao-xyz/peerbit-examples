@@ -103,6 +103,18 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                     ref={ref}
                     className="flex flex-col z-20 w-full left-0 rounded bg-neutral-100 dark:bg-neutral-900"
                 >
+                    {/* Top area: pending images canvas positioned above the toolbar */}
+                    <div
+                        className="absolute left-0 flex justify-center"
+                        style={{ top: "0", transform: "translateY(-100%)" }}
+                    >
+                        <Canvas appearance="chat-view-images">
+                            <ImageUploadTrigger className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white">
+                                <FaPlus className="btn-icon-md" />
+                            </ImageUploadTrigger>
+                        </Canvas>
+                    </div>
+
                     {/* First row: Input field */}
                     <div className="pt-1">
                         <Canvas

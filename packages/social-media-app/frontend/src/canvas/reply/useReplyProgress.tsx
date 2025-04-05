@@ -125,6 +125,13 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
                     lastUpdated: Date.now(),
                     timeoutId,
                 });
+                console.log("SET INNER", {
+                    address,
+                    publicKey,
+                    inner,
+                    timeoutId,
+                });
+
                 newMap.set(address, { ...entry, peerToReply: inner });
                 return newMap;
             });
@@ -158,12 +165,27 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
 
             // Shared event listener for request events.
             const listener = (e: { detail: RequestEvent<CanvasMessage> }) => {
+                console.log("RECEIVED REQUEST", {
+                    address: canvas.address,
+                    publicKey: e.detail.from,
+                    request: e.detail.request,
+                });
                 if (
                     e.detail &&
                     e.detail.request instanceof ReplyingInProgresss
                 ) {
                     const refAddress = e.detail.request.reference.address;
                     // Listen for events coming from either the main canvas or its origin.
+
+                    console.log("CONDITION", {
+                        refAddress,
+                        canvas: canvas.address,
+                        origin: canvas.origin?.address,
+                        ok:
+                            refAddress === canvas.address ||
+                            (canvas.origin &&
+                                refAddress === canvas.origin.address),
+                    });
                     if (
                         refAddress === canvas.address ||
                         (canvas.origin && refAddress === canvas.origin.address)

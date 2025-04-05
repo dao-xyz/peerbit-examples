@@ -6,7 +6,7 @@ import {
     ElementContent,
     StaticPartialImage,
 } from "@giga-app/interface";
-import { useMemo } from "react";
+import { forwardRef, useMemo } from "react";
 import { Frame } from "../content/Frame";
 import {
     rectIsStaticMarkdownText,
@@ -29,6 +29,8 @@ type VariantType =
 type BaseCanvasPreviewProps = {
     onClick?: () => void;
     variant: VariantType;
+    // forward ref
+    forwardRef?: React.Ref<any>;
 };
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
@@ -196,13 +198,18 @@ const BreadcrumbPreview = ({
 const ExpandedBreadcrumbPreview = ({
     rects,
     onClick,
+    forwardedRef,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
+    forwardedRef?: React.Ref<HTMLDivElement>;
 }) => {
     const { other: apps, text } = rects;
     return (
-        <div className="col-span-full flex gap-1.5 items-start w-full rounded-lg">
+        <div
+            className="col-span-full flex gap-1.5 items-start w-full rounded-lg"
+            ref={forwardedRef}
+        >
             {apps.slice(0, 2).map((app, i) => (
                 <div
                     key={i}
@@ -239,14 +246,19 @@ const PostQuotePreview = ({
     rects,
     onClick,
     author,
+    forwardedRef,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
     author?: string;
+    forwardedRef?: React.Ref<HTMLDivElement>;
 }) => {
     const { other: apps, text } = rects;
     return (
-        <div className="col-start-2 col-span-3 flex items-stretch w-fit max-w-prose rounded-lg border border-l-4 border-l-neutral-950 dark:border-l-neutral-50 border-neutral-700 dark:border-neutral-300 bg-neutral-200 dark:bg-neutral-800">
+        <div
+            ref={forwardedRef}
+            className="col-start-2 col-span-3 flex items-stretch w-fit max-w-prose rounded-lg border border-l-4 border-l-neutral-950 dark:border-l-neutral-50 border-neutral-700 dark:border-neutral-300 bg-neutral-200 dark:bg-neutral-800"
+        >
             <svg
                 xmlns="https://www.w3.org/2000/svg"
                 className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
@@ -310,9 +322,11 @@ const PostQuotePreview = ({
 const PostPreview = ({
     rects,
     onClick,
+    forwardRef,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
+    forwardRef?: React.Ref<any>;
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
     const { text } = rects;
@@ -322,6 +336,7 @@ const PostPreview = ({
                 <button
                     onClick={onClick}
                     className="col-span-full max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative"
+                    ref={forwardRef}
                 >
                     <PreviewFrame
                         bgBlur
@@ -332,7 +347,10 @@ const PostPreview = ({
                 </button>
             )}
             {secondaryApps.length > 0 && (
-                <div className="col-span-full flex overflow-x-scroll no-scrollbar px-2.5">
+                <div
+                    className="col-span-full flex overflow-x-scroll no-scrollbar px-2.5"
+                    ref={forwardRef}
+                >
                     {secondaryApps.map((app, i) => (
                         <button
                             onClick={onClick}
@@ -352,6 +370,7 @@ const PostPreview = ({
                 <button
                     onClick={onClick}
                     className="col-start-2 col-span-1 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
+                    ref={forwardRef}
                 >
                     <PreviewFrame element={text} previewLines={3} noPadding />
                 </button>
@@ -363,18 +382,20 @@ const PostPreview = ({
 const ChatMessagePreview = ({
     rects,
     onClick,
+    forwardRef,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
+    forwardRef?: React.Ref<any>;
 }) => {
     const { other: apps, text } = rects;
     return (
-        <>
+        <div className="col-start-2 col-span-3" ref={forwardRef}>
             {apps.map((app) => (
                 <button
                     key={app.id.toString()}
                     onClick={onClick}
-                    className="col-start-2 col-span-3 w-fit max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative"
+                    className="w-fit max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative"
                 >
                     <PreviewFrame
                         bgBlur
@@ -387,16 +408,20 @@ const ChatMessagePreview = ({
             {text && (
                 <button
                     onClick={onClick}
-                    className="max-w-prose col-span-3 col-start-2 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
+                    className="max-w-prose bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
                 >
                     <PreviewFrame element={text} previewLines={3} noPadding />
                 </button>
             )}
-        </>
+        </div>
     );
 };
 
-export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
+export const CanvasPreview = ({
+    variant,
+    onClick,
+    forwardRef,
+}: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
     const variantRects = useMemo(
@@ -472,6 +497,7 @@ export const CanvasPreview = ({ variant, onClick }: CanvasPreviewProps) => {
                         }
                     }
                     onClick={onClick}
+                    forwardRef={forwardRef}
                 />
             );
         default:

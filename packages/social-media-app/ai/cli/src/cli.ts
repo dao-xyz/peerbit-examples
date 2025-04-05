@@ -1,6 +1,6 @@
 import inquirer from "inquirer";
 import { Peerbit } from "peerbit";
-import { CanvasAIReply, createProfile } from "@giga-app/llm";
+import { CanvasAIReply } from "@giga-app/llm";
 import path from "path";
 import os from "os";
 import fs from "fs";
@@ -38,8 +38,6 @@ export const start = async (directory?: string | null) => {
     } else {
         await client.bootstrap();
     }
-
-    await createProfile(client);
 
     // Determine LLM configuration based on command-line flags.
     // Use "--chatgpt" to choose ChatGPT; otherwise defaults to Ollama.

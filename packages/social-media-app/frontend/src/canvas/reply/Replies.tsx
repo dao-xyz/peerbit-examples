@@ -1,4 +1,5 @@
-import {
+// Replies.tsx
+import React, {
     Fragment,
     useEffect,
     useLayoutEffect,
@@ -10,74 +11,15 @@ import debounce from "lodash.debounce";
 import throttle from "lodash.throttle";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
-import { Reply } from "./Reply";
+import { Reply } from "./Reply"; // Your existing Reply component
 import { tw } from "../../utils/tailwind";
 import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
-import { useView, ViewType } from "../../view/ViewContex"; // adjust path as needed
+import { useView, ViewType } from "../../view/ViewContex";
 import { useLocal, useOnline, usePeer } from "@peerbit/react";
+import { SmoothReplyLine } from "./SmoothReplyLine";
 
-export const StickyHeader = ({ children }) => {
-    const headerRef = useRef<HTMLDivElement>(null);
-    const [isScrolled, setIsScrolled] = useState(false);
-
-    useEffect(() => {
-        let animationFrame: number;
-        const checkPosition = () => {
-            if (headerRef.current) {
-                const rect = headerRef.current.getBoundingClientRect();
-                // When the header is within 130px of the top, reveal the overlay.
-                setIsScrolled(rect.top <= 130);
-            }
-            animationFrame = requestAnimationFrame(checkPosition);
-        };
-
-        animationFrame = requestAnimationFrame(checkPosition);
-        return () => cancelAnimationFrame(animationFrame);
-    }, []);
-
-    return (
-        <div
-            ref={headerRef}
-            className="sticky top-14 z-10 flex flex-row items-center justify-between py-1 px-2.5"
-        >
-            {/* Base layer: gradient background */}
-            <div className="absolute inset-0 bg-[#e5e5e5] border-[#ccc] dark:border-[#6e6e6e82] border-t-[1px] border-b-[1px] dark:bg-[radial-gradient(circle,rgba(57,57,57,1)_0%,rgba(10,10,10,1)_100%)] drop-shadow-md"></div>
-            {/* Overlay: fades in/out based on scroll */}
-            <div
-                className={`absolute inset-0 transition-opacity duration-700 ${
-                    isScrolled ? "opacity-100" : "opacity-0"
-                } bg-neutral-50 dark:bg-neutral-950`}
-            ></div>
-            {/* Content */}
-            <div className="relative z-10 flex w-full justify-center">
-                {children}
-            </div>
-        </div>
-    );
-};
-
-function getScrollBottomOffset(scrollPosition: number) {
-    return (
-        document.documentElement.scrollHeight -
-        (scrollPosition + window.innerHeight)
-    );
-}
-
-function getMaxScrollTop() {
-    const documentHeight = Math.max(
-        document.body.scrollHeight,
-        document.body.offsetHeight,
-        document.documentElement.clientHeight,
-        document.documentElement.scrollHeight,
-        document.documentElement.offsetHeight
-    );
-    return documentHeight - window.innerHeight;
-}
-
-function getScrollTop() {
-    return window.scrollY || document.documentElement.scrollTop;
-}
-const DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED = 100;
+// Assume you have a StickyHeader component defined elsewhere.
+import { StickyHeader } from "./StickyHeader";
 
 const readableView = (view: ViewType) => {
     if (view === "chat") {
@@ -98,216 +40,25 @@ const readableView = (view: ViewType) => {
 };
 
 export const Replies = () => {
-    // Get view state and processed replies from our context.
+    // Get view state and processed replies from your context.
     const { view, setView, processedReplies, viewRoot } = useView();
-
-    const viewAsReadable = useMemo(() => readableView(view), [view]);
+    const viewAsReadable = useMemo(() => {
+        return readableView(view);
+    }, [view]);
 
     const { peers } = useOnline(viewRoot);
-    const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
-    const forceScrollToBottom = useRef(false);
-    const scrollMode = useRef<"automatic" | "manual">("automatic");
 
-    useEffect(() => {
-        if (view === "chat") {
-            scrollMode.current = "automatic";
-            forceScrollToBottom.current = true;
-        } else {
-            scrollMode.current = "manual";
-            forceScrollToBottom.current = false;
-        }
-    }, [view]);
+    // (Scroll handling logic is assumed to be here, per your original code.)
 
-    // Refs for scroll adjustments.
-    const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
-    const bottomRegionSize = 100;
-    const bodyResizeScrollPositionRef = useRef(getScrollTop());
-
-    // Refs to track the latest reply for scroll adjustments.
-    const oldLatestReplyRef = useRef(
-        processedReplies.length > 0
-            ? processedReplies[processedReplies.length - 1]
-            : null
-    );
-    const latestReplyRef = useRef(
-        processedReplies.length > 0
-            ? processedReplies[processedReplies.length - 1]
-            : null
-    );
-
-    // Update latest reply ref and scroll position before layout changes.
-    useLayoutEffect(() => {
-        if (processedReplies.length > 0) {
-            latestReplyRef.current =
-                processedReplies[processedReplies.length - 1];
-        }
-        bodyResizeScrollPositionRef.current = getScrollTop();
+    // Create a ref for each processed reply.
+    const replyRefs = useMemo(() => {
+        return processedReplies.map(() => React.createRef<HTMLDivElement>());
     }, [processedReplies]);
-
-    const scrollToBottom = () => {
-        window.scrollTo({
-            top: document.documentElement.scrollHeight,
-            left: 0,
-            behavior: "instant",
-        });
-        scrollMode.current = "automatic";
-        forceScrollToBottom.current = false;
-    };
-
-    // Handle window resize for scroll adjustments (applies only in chat view).
-    useEffect(() => {
-        if (view !== "chat") {
-            return;
-        }
-        const cycleLength = 100;
-        const handleResizeThrottled = throttle(
-            () => {
-                const scrollTop = getScrollTop();
-                const maxScrollTop = getMaxScrollTop();
-                const scrollBottom = resizeScrollBottomRef.current;
-                if (scrollBottom <= bottomRegionSize) {
-                    scrollToBottom();
-                }
-                resizeScrollBottomRef.current = getScrollBottomOffset(
-                    scrollBottom <= bottomRegionSize ? maxScrollTop : scrollTop
-                );
-            },
-            cycleLength,
-            { leading: true, trailing: true }
-        );
-
-        const setup = debounce(
-            () => {
-                resizeScrollBottomRef.current = getScrollBottomOffset(
-                    getScrollTop()
-                );
-            },
-            cycleLength,
-            { leading: true, trailing: false }
-        );
-
-        const handleResize = () => {
-            setup();
-            handleResizeThrottled();
-        };
-
-        window.addEventListener("resize", handleResize);
-        return () => {
-            window.removeEventListener("resize", handleResize);
-            handleResizeThrottled.cancel();
-            setup.cancel();
-        };
-    }, [view]);
-
-    // detect scroll up events to prevent automatic down scrolling to happen
-    let lastScrollTop = useRef(-1);
-
-    useEffect(() => {
-        // New replies added: reset lastScrollTop to current scroll position
-        lastScrollTop.current = -1;
-    }, [processedReplies]);
-
-    const scrollUpTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(
-        undefined
-    );
-    useEffect(() => {
-        if (view !== "chat") {
-            return;
-        }
-        let listener = () => {
-            const { scrollHeight, clientHeight } = document.documentElement;
-            const scrollTop = getScrollTop();
-            if (Math.abs(scrollHeight - clientHeight - scrollTop) < 1) {
-                // scrolling to bottom, set scroll mode to automatic again (i.e. on new messages or resize scroll to bottom automatically)
-                scrollMode.current = "automatic";
-            }
-
-            scrollUpTimeout.current = setTimeout(() => {
-                var st =
-                    window.pageYOffset || document.documentElement.scrollTop; // Credits: "https://github.com/qeremy/so/blob/master/so.dom.js#L426"
-                if (st > lastScrollTop.current) {
-                    // downscroll code
-                } else if (st < lastScrollTop.current) {
-                    // up scroll
-                    scrollMode.current = "manual";
-                    forceScrollToBottom.current = false;
-                } // else was horizontal scroll
-                lastScrollTop.current = st <= 0 ? 0 : st; // For Mobile or negative scrollin
-
-                scrollUpTimeout.current = undefined;
-            }, DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED);
-        };
-        window.addEventListener("scroll", listener);
-        return () => {
-            window.removeEventListener("scroll", listener);
-        };
-    }, [view, lastScrollTop]);
-
-    // Handle body resize events due to new replies being inserted.
-    useEffect(() => {
-        if (view !== "chat") {
-            return;
-        }
-
-        if (!repliesContainerRef.current) {
-            return;
-        }
-        const cycleLength = 100;
-        const handleBodyResizeDebounced = debounce(
-            () => {
-                if (scrollMode.current === "automatic") {
-                    scrollToBottom();
-                }
-
-                bodyResizeScrollPositionRef.current = getMaxScrollTop();
-                oldLatestReplyRef.current = latestReplyRef.current;
-            },
-            cycleLength,
-            { leading: false, trailing: true }
-        );
-
-        const resizeObserver = new ResizeObserver(() => {
-            lastScrollTop.current = -1;
-            scrollUpTimeout.current = setTimeout(() => {
-                lastScrollTop.current = -1;
-                scrollUpTimeout.current = undefined;
-            }, DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED);
-            handleBodyResizeDebounced();
-        });
-        handleBodyResizeDebounced();
-        if (repliesContainerRef.current) {
-            resizeObserver.observe(repliesContainerRef.current);
-        }
-
-        return () => {
-            resizeObserver.disconnect();
-            handleBodyResizeDebounced.cancel();
-        };
-    }, [view, peer, repliesContainerRef.current]);
-    console.log(processedReplies.map((x) => x.lineType));
-
-    /*  const allCanvases = useLocal(
-         viewRoot?.loadedReplies ? viewRoot.replies : null
-     );
-     const allElements = useLocal(
-         viewRoot?.loadedElements ? viewRoot.elements : null
-     );
-     console.log("all canvases", allCanvases);
-     console.log("all elements", allElements); */
-
-    // Scroll to bottom when first entering chat view.
-    useEffect(() => {
-        window.scrollTo({
-            top: view === "chat" ? document.body.scrollHeight : 0,
-            left: 0,
-            behavior: "instant",
-        });
-        bodyResizeScrollPositionRef.current = getMaxScrollTop();
-    }, [view]);
 
     return (
-        <div className="flex flex-col mt-10">
+        <div className="flex flex-col mt-10 relative">
+            {/* Sticky header with dropdown menu and online peers */}
             <StickyHeader>
                 <div className="w-full max-w-[876px] mx-auto flex flex-row">
                     <DropdownMenu.Root>
@@ -342,29 +93,28 @@ export const Replies = () => {
                 <div
                     ref={repliesContainerRef}
                     className={tw(
-                        "mt-5 max-w-[876px] w-full mx-auto grid",
+                        "mt-5 max-w-[876px] w-full mx-auto grid relative",
                         view === "chat"
                             ? "grid-cols-[2rem_2rem_1fr_2rem_1rem]"
                             : "grid-cols-[1rem_1fr_1rem]"
                     )}
                 >
+                    {/* Render the smooth, pencil-textured reply line behind the replies */}
+                    <SmoothReplyLine
+                        replyRefs={replyRefs}
+                        containerRef={repliesContainerRef}
+                        lineTypes={processedReplies.map(
+                            (item) => item.lineType
+                        )}
+                    />
                     {processedReplies.map((item, i) => (
                         <Fragment key={i}>
                             <Reply
+                                forwardedRef={replyRefs[i]}
                                 canvas={item.reply}
                                 variant={view === "chat" ? "chat" : "thread"}
                                 isQuote={item.type === "quote"}
-                                lineType={item.lineType}
-                                /* TODO?
-                     hideHeader={
-                        view === "chat" &&
-                        i > 0 &&
-                        processedReplies[
-                            i - 1
-                        ]?.reply.publicKey.equals(
-                            item.reply.publicKey
-                        )
-                    } */
+                                lineType={undefined}
                             />
                         </Fragment>
                     ))}

@@ -553,7 +553,6 @@ export const CanvasWrapper = ({
             return;
         }
         setupForCanvasIdDone.current = canvas.idString;
-        console.log("RESET PENDING CANVAS", canvas?.idString, pendingRects);
         reset();
 
         if (canvas?.closed) {

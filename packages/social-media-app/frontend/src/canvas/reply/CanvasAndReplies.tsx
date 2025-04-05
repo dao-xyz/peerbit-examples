@@ -60,7 +60,7 @@ export const CanvasAndReplies = () => {
     const scrollContainerRef = useRef(null);
 
     // Use the custom hook to get view-related state and actions
-    const { loading, canvases, viewRoot } = useView();
+    const { loading, canvases, viewRoot, lastReply } = useView();
 
     if (!canvases || canvases.length === 0) {
         return (
@@ -110,7 +110,7 @@ export const CanvasAndReplies = () => {
                         </div>
                     </FullscreenEditor>
                 </div>
-                <ReplyingInProgress canvas={viewRoot} />
+                <ReplyingInProgress canvas={lastReply} />
 
                 <div className="sticky z-20 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950">
                     <Toolbar ref={toolbarRef} />

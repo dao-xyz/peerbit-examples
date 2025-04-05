@@ -122,7 +122,9 @@ export class CanvasAIReply extends Program<Args> {
         // Set LLM configuration (defaulting to "ollama").
         this.llm = args?.llm || "ollama";
 
-        await createProfile(this.node);
+        if (args?.server) {
+            await createProfile(this.node);
+        }
 
         if (args?.server) {
             // Initialize default supported model.

@@ -13,7 +13,7 @@ import { fileURLToPath } from "url";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const createProfile = async (client: ProgramClient) => {
-    const profiles = await client.open(new Profiles());
+    const profiles = await client.open(new Profiles(), { existing: "reuse" });
     const profile = await profiles.get(client.identity.publicKey);
     if (!profile) {
         // create a profile!

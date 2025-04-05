@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { Canvas as CanvasDB } from "@giga-app/interface";
 import { Canvas as Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
@@ -54,6 +54,9 @@ type BaseReplyPropsType = {
     onClick?: () => void;
     hideHeader?: boolean;
     lineType?: "start" | "middle" | "end" | "end-and-start" | "none";
+
+    // forward ref
+    forwardedRef?: React.Ref<HTMLDivElement>;
 };
 
 type ReplyPropsType = BaseReplyPropsType & {
@@ -69,6 +72,7 @@ export const Reply = ({
     hideHeader = false,
     lineType,
     isQuote,
+    forwardedRef,
 }: ReplyPropsType) => {
     const [showMore, setShowMore] = useState(false);
     const { peer } = usePeer();
@@ -133,6 +137,7 @@ export const Reply = ({
                         hidden={!isExpandedBreadcrumb || index === 0}
                     />
                     <Header
+                        className="bg-neutral-50 dark:bg-neutral-950"
                         variant={
                             isChat
                                 ? "medium"
@@ -161,21 +166,24 @@ export const Reply = ({
                 <CanvasWrapper canvas={canvas}>
                     {isExpandedBreadcrumb ? (
                         <CanvasPreview
+                            forwardRef={forwardedRef}
                             variant="expanded-breadcrumb"
                             onClick={handleCanvasClick}
                         />
                     ) : isChat ? (
                         <CanvasPreview
+                            forwardRef={forwardedRef}
                             onClick={handleCanvasClick}
                             variant={isQuote ? "quote" : "chat-message"}
                             align={align}
                         />
                     ) : showMore ? (
-                        <div className="col-span-full">
+                        <div className="col-span-full" ref={forwardedRef}>
                             <Canvas bgBlur fitWidth draft={false} />
                         </div>
                     ) : (
                         <CanvasPreview
+                            forwardRef={forwardedRef}
                             onClick={handleCanvasClick}
                             variant="post"
                         />
