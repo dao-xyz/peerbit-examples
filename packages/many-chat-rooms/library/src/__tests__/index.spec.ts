@@ -2,7 +2,6 @@ import { Peerbit } from "peerbit";
 import { waitFor, waitForResolved } from "@peerbit/time";
 import { Lobby, Post, Room } from "..";
 import { expect } from "chai";
-import exp from "constants";
 
 const loobyConfig = {
     id: new Uint8Array([
@@ -11,7 +10,7 @@ const loobyConfig = {
     ]),
 };
 
-describe("Peerbit test", () => {
+describe("many-chat-rooms", () => {
     let globalPeer: Peerbit;
     let user1: Peerbit | undefined;
     let user2: Peerbit | undefined;
