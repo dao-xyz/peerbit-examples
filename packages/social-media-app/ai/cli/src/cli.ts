@@ -1,19 +1,10 @@
 import inquirer from "inquirer";
 import { Peerbit } from "peerbit";
-import { CanvasAIReply } from "@giga-app/llm";
-import path, { dirname } from "path";
+import { CanvasAIReply, createProfile } from "@giga-app/llm";
+import path from "path";
 import os from "os";
 import fs from "fs";
-import {
-    Canvas,
-    Element,
-    Layout,
-    StaticContent,
-    StaticImage,
-} from "@giga-app/interface";
-import { Profile, Profiles } from "@giga-app/interface";
-import { fileURLToPath } from "url";
-const __dirname = dirname(fileURLToPath(import.meta.url));
+import { Canvas } from "@giga-app/interface";
 
 export const start = async (directory?: string | null) => {
     process.on("uncaughtException", (err) => {
@@ -48,48 +39,7 @@ export const start = async (directory?: string | null) => {
         await client.bootstrap();
     }
 
-    const profiles = await client.open(new Profiles());
-    const profile = await profiles.get(client.identity.publicKey);
-    if (!profile) {
-        // create a profile!
-        const canvas = await client.open(
-            new Canvas({
-                parent: undefined,
-                publicKey: client.identity.publicKey,
-            })
-        );
-
-        // in the project folder we have AIIcon1.jpg to AIIcon13.jpg
-        // randomly select one
-        const icon = path.join(
-            __dirname,
-            "resources",
-            "AIIcon" + Math.floor(Math.random() * 13 + 1) + ".jpg"
-        );
-        const image = fs.readFileSync(icon);
-        await canvas.elements.put(
-            new Element({
-                location: Layout.zero(),
-                content: new StaticContent({
-                    content: new StaticImage({
-                        data: image,
-                        mimeType: "image/jpeg",
-                        width: 100,
-                        height: 100,
-                    }),
-                }),
-                parent: canvas,
-                publicKey: client.identity.publicKey,
-            })
-        );
-
-        await profiles.profiles.put(
-            new Profile({
-                publicKey: client.identity.publicKey,
-                profile: canvas,
-            })
-        );
-    }
+    await createProfile(client);
 
     // Determine LLM configuration based on command-line flags.
     // Use "--chatgpt" to choose ChatGPT; otherwise defaults to Ollama.

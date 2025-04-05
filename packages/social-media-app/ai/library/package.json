@@ -24,14 +24,17 @@
     ],
     "browser": {
         "./src/ollama.js": "./src/ollama.browser.js",
-        "./lib/esm/ollama.js": "./lib/esm/ollama.browser.js"
+        "./lib/esm/ollama.js": "./lib/esm/ollama.browser.js",
+        "./src/profile.js": "./src/profile.browser.js",
+        "./lib/esm/profile.js": "./lib/esm/profile.browser.js"
     },
     "engines": {
         "node": ">=16.15.1"
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
-        "build": "yarn clean && tsc -p tsconfig.json",
+        "build": "yarn clean && tsc -p tsconfig.json && yarn cp-images",
+        "cp-images": "shx cp -r ./resources ./lib/esm/",
         "test": "mocha"
     },
     "devDependencies": {

@@ -22,6 +22,7 @@ import {
     StaticMarkdownText,
 } from "@giga-app/interface";
 import { Query, Sort, WithContext } from "@peerbit/document";
+import { createProfile } from "./profile.js";
 
 // Utility to ignore specific errors.
 const ignoreTimeoutandAbort = (error: Error) => {
@@ -120,6 +121,8 @@ export class CanvasAIReply extends Program<Args> {
 
         // Set LLM configuration (defaulting to "ollama").
         this.llm = args?.llm || "ollama";
+
+        await createProfile(this.node);
 
         if (args?.server) {
             // Initialize default supported model.
