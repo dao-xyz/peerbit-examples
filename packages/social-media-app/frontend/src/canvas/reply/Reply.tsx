@@ -93,15 +93,16 @@ export const Reply = ({
         navigate(getCanvasPath(canvas), {});
         onClick && onClick();
     };
+    const focusedStyle =
+        replyTo?.idString === canvas.idString
+            ? "animated-border [--inner-bg:theme('colors.neutral.50')] dark:[--inner-bg:black]"
+            : "";
 
     return (
         <div
-            className={tw(
-                "col-span-full grid grid-cols-subgrid group",
-                replyTo?.idString === canvas.idString
-                    ? "animated-border [--inner-bg:theme('colors.neutral.50')] dark:[--inner-bg:black]"
-                    : ""
-            )}
+            className={
+                "col-span-full grid grid-cols-subgrid group " + focusedStyle
+            }
         >
             {/*
         Insert a dedicated grid cell in the first column that spans from

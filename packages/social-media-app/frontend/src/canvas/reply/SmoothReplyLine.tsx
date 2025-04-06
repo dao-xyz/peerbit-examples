@@ -111,7 +111,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
 
         // For each group, compute the smooth segments.
         const groupSegments = dampenedGroups.map((group) =>
-            createSmoothPathSegments(group, 1.3)
+            createSmoothPathSegments(group, 1.4)
         );
         const flatSegments = groupSegments.flat();
         setSegments(flatSegments);
@@ -147,7 +147,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
                 // Use a threshold for length to determine dash pattern and stroke thickness.
                 const lengthThreshold = 400;
                 const strokeDasharray = seg.length > 100 ? "35,35" : "15,15";
-                const strokeWidth = seg.length > lengthThreshold ? 1 : 1;
+                const strokeWidth = seg.length > lengthThreshold ? 3 : 3;
                 return (
                     <path
                         key={index}
@@ -161,7 +161,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
                             strokeDasharray,
                             filter: "url(#sketchyFilter)",
                         }}
-                        className="dark:stroke-neutral-800 stroke-neutral-400/50"
+                        className="dark:stroke-neutral-700 stroke-neutral-500/30"
                     />
                 );
             })}
