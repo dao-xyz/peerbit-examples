@@ -58,6 +58,7 @@ type OLLamaArgs = {
     llm: "ollama";
 };
 
+type ServerConfig = OpenAPIArgs | OLLamaArgs;
 @variant("canvas-ai-reply")
 export class CanvasAIReply extends Program<Args> {
     @field({ type: fixedArray("u8", 32) })
@@ -72,8 +73,7 @@ export class CanvasAIReply extends Program<Args> {
     public supportedModels: string[] = [];
 
     // New configuration for LLM.
-    private llm: "ollama" | "chatgpt";
-    private apiKey?: string;
+    private serverConfig: ServerConfig | undefined;
 
     // New property for request statistics.
     private stats: RequestStats;
@@ -120,27 +120,39 @@ export class CanvasAIReply extends Program<Args> {
         this.modelMap = new Map();
 
         // Set LLM configuration (defaulting to "ollama").
-        this.llm = args?.llm || "ollama";
-
-        if (args?.server) {
-            await createProfile(this.node);
+        if (!args?.server && args) {
+            if ("llm" in args) {
+                // in case of that the user passed server args without the server flag
+                // we defined the serverConfig anywayis if llm is defined
+                this.serverConfig = {
+                    server: true,
+                    llm: args.llm,
+                    apiKey: "apiKey" in args ? args.apiKey : undefined,
+                };
+            }
         }
 
         if (args?.server) {
+            await createProfile(this.node);
+
+            const llm = args?.llm || "ollama";
+            let apiKey: string | undefined = undefined;
+
             // Initialize default supported model.
             if (args.llm === "ollama") {
                 this.supportedModels = [DEEP_SEEK_R1_7b];
             } else if (args.llm === "chatgpt") {
                 this.supportedModels = ["gpt-4o"];
-                this.apiKey = args?.apiKey
+                apiKey = args?.apiKey
                     ? args.apiKey
                     : process.env.OPENAI_API_KEY || undefined;
-                if (!this.apiKey) {
+                if (!apiKey) {
                     throw new Error("Missing ChatGPT API Key");
                 }
             } else {
                 throw new Error("Missing LLM Model source");
             }
+            this.serverConfig = { server: true, llm, apiKey };
         } else {
             // Client mode: request model info from peers.
             this.supportedModels = [];
@@ -318,11 +330,25 @@ export class CanvasAIReply extends Program<Args> {
                 canvas = await this.node.open(canvas, { existing: "reuse" });
                 contextInstances.push(canvas);
             }
+
             // Choose the query function based on the LLM configuration.
-            const queryFunction =
-                this.llm === "chatgpt"
-                    ? (text: string) => queryChatGPT(text, this.apiKey)
-                    : (text: string) => queryOllama(text, model);
+            let queryFunction: (text: string) => Promise<string>;
+            if (
+                this.serverConfig!.llm === "ollama" ||
+                !this.serverConfig!.llm
+            ) {
+                queryFunction = (text: string) =>
+                    queryOllama(text, model || DEEP_SEEK_R1_7b);
+            } else if (this.serverConfig?.llm === "chatgpt") {
+                if (!this.serverConfig.apiKey) {
+                    throw new Error("Missing ChatGPT API Key");
+                }
+                let key = this.serverConfig.apiKey;
+                queryFunction = (text: string) => queryChatGPT(text, key);
+            } else {
+                throw new Error("Missing LLM Model source");
+            }
+
             await generateReply({
                 to: canvasInstance,
                 context: contextInstances,
