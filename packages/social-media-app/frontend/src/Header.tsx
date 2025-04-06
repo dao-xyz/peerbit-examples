@@ -176,7 +176,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
             {isBreadcrumbExpanded && (
                 <div
                     onClick={() => setIsBreadcrumbExpanded(false)}
-                    className="absolute inset-0 z-30 backdrop-blur-3xl sm:bg-neutral-50/50 dark:sm:bg-neutral-950/50 bg-neutral-50/95 dark:bg-neutral-950/95"
+                    className="absolute inset-0 z-30 backdrop-blur-lg sm:bg-neutral-50/50 dark:sm:bg-neutral-950/50 bg-neutral-50/95 dark:bg-neutral-950/95"
                 ></div>
             )}
             {props.children}

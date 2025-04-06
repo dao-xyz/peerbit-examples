@@ -125,12 +125,6 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
                     lastUpdated: Date.now(),
                     timeoutId,
                 });
-                console.log("SET INNER", {
-                    address,
-                    publicKey,
-                    inner,
-                    timeoutId,
-                });
 
                 newMap.set(address, { ...entry, peerToReply: inner });
                 return newMap;
@@ -177,15 +171,6 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
                     const refAddress = e.detail.request.reference.address;
                     // Listen for events coming from either the main canvas or its origin.
 
-                    console.log("CONDITION", {
-                        refAddress,
-                        canvas: canvas.address,
-                        origin: canvas.origin?.address,
-                        ok:
-                            refAddress === canvas.address ||
-                            (canvas.origin &&
-                                refAddress === canvas.origin.address),
-                    });
                     if (
                         refAddress === canvas.address ||
                         (canvas.origin && refAddress === canvas.origin.address)

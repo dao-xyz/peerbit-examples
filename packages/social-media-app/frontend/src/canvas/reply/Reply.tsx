@@ -1,6 +1,6 @@
-import { Fragment, useEffect, useState } from "react";
+import { useState } from "react";
 import { Canvas as CanvasDB } from "@giga-app/interface";
-import { Canvas as Canvas } from "../Canvas.js";
+import { Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "../Preview.js";
 import { WithContext } from "@peerbit/document";
@@ -10,6 +10,7 @@ import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
 import { tw } from "../../utils/tailwind.js";
 import { useAutoReply } from "../AutoReplyContext.js";
+import { useView, ViewType } from "../../view/ViewContex.js";
 
 const ReplyButton = ({
     children,
@@ -25,10 +26,7 @@ const ReplyButton = ({
     );
 };
 
-/**
- * Arrow svg for expanded breadcrumb view.
- */
-const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
+/* const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
     return (
         <svg
             width="16"
@@ -36,27 +34,22 @@ const SvgArrowExpandedBreadcrumb = ({ hidden }: { hidden?: boolean }) => {
             viewBox="0 0 16 28"
             fill="none"
             xmlns="http://www.w3.org/2000/svg"
-            className={tw(
-                hidden ? "hidden" : "",
-                "stroke-black dark:stroke-white"
-            )}
+            className={tw(hidden ? "hidden" : "", "stroke-black dark:stroke-white")}
         >
             <path d="M4 0V15.5C4 19.9211 6.5 20 9.5 20" strokeWidth="0.75" />
             <path d="M8 18L9.5 20L8 22" strokeWidth="0.75" />
         </svg>
     );
-};
+}; */
 
-// Define a base type for common props.
 type BaseReplyPropsType = {
     canvas: WithContext<CanvasDB>;
     index?: number;
     onClick?: () => void;
     hideHeader?: boolean;
     lineType?: "start" | "middle" | "end" | "end-and-start" | "none";
-
-    // forward ref
     forwardedRef?: React.Ref<HTMLDivElement>;
+    isHighlighted?: boolean;
 };
 
 type ReplyPropsType = BaseReplyPropsType & {
@@ -73,11 +66,12 @@ export const Reply = ({
     lineType,
     isQuote,
     forwardedRef,
+    isHighlighted,
 }: ReplyPropsType) => {
     const [showMore, setShowMore] = useState(false);
     const { peer } = usePeer();
     const navigate = useNavigate();
-    const { replyTo } = useAutoReply();
+    const { view } = useView();
 
     // Determine alignment for chat messages.
     const align = canvas.publicKey.equals(peer.identity.publicKey)
@@ -89,109 +83,111 @@ export const Reply = ({
     const isThread = variant === "thread";
 
     const handleCanvasClick = () => {
-        console.log("Clicked on canvas", canvas.publicKey.toString());
-        navigate(getCanvasPath(canvas), {});
+        console.log(
+            "Clicked on canvas",
+            canvas.publicKey.toString(),
+            "view",
+            view
+        );
+        navigate(getCanvasPath(canvas, view), {}); // navigate with the same view
         onClick && onClick();
     };
-    const focusedStyle =
-        replyTo?.idString === canvas.idString
-            ? "animated-border [--inner-bg:theme('colors.neutral.50')] dark:[--inner-bg:black]"
-            : "";
+
+    const highlightStyle = isHighlighted
+        ? "animated-border  border-3 p-0 [--inner-bg:theme('colors.neutral.50')] dark:[--inner-bg:black]"
+        : "";
+
+    // Determine grid classes for the content container based on the variant.
+    let contentClasses = "";
+    if (isChat) {
+        // For chat, also adjust alignment: right for your posts, left for others.
+        contentClasses =
+            align === "right" ? "justify-self-end" : "justify-self-start";
+    }
 
     return (
-        <div
-            className={
-                "col-span-full grid grid-cols-subgrid group " + focusedStyle
-            }
-        >
-            {/*
-        Insert a dedicated grid cell in the first column that spans from
-        row 1 (header) through row 2 (preview). This cell renders the vertical
-        line behind everything. Its positioning uses a negative z-index so that
-        the header and preview stay in front.
-      */}
+        // Outer wrapper: remains a grid item so that replies align in a column.
+        <div className="col-span-full relative">
+            {/* Optional vertical line in the background */}
             {lineType && lineType !== "none" && (
-                <div className="col-start-1 row-start-1 row-end-[3] relative pointer-events-none z-[-1]">
-                    <div className="absolute right-0 w-px h-full bg-neutral-300 dark:bg-neutral-600" />
+                <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">
+                    <div className="w-px h-full bg-neutral-300 dark:bg-neutral-600" />
                 </div>
             )}
-
-            {/* Header section */}
-            {!hideHeader && (
+            {/* Content container: placed in the proper grid cell */}
+            <div className={contentClasses}>
+                {/* Inline-flex container that shrink-wraps the visible content */}
                 <div
-                    className={tw(
-                        "flex items-end px-1",
-                        isExpandedBreadcrumb ? "mb-1" : "mb-2.5",
-                        isChat
-                            ? "col-start-2 col-span-3"
-                            : isThread
-                            ? "col-start-2 col-span-1"
-                            : "col-span-full",
-                        // Preserve alignment for chat messages.
-                        isChat &&
-                            (align === "left"
-                                ? "justify-self-start"
-                                : "justify-self-end")
-                    )}
+                    className={`inline-flex flex-col  border-transparent hover:border-black dark:hover:border-white rounded-md p-2  ${highlightStyle}  ${
+                        isThread ? "w-full" : ""
+                    }`}
                 >
-                    <SvgArrowExpandedBreadcrumb
-                        hidden={!isExpandedBreadcrumb || index === 0}
-                    />
-                    <Header
-                        className="bg-neutral-50 dark:bg-neutral-950"
-                        variant={
-                            isChat
-                                ? "medium"
-                                : isExpandedBreadcrumb
-                                ? "tiny"
-                                : "large"
-                        }
-                        canvas={canvas}
-                        direction="row"
-                        open={handleCanvasClick}
-                        reverseLayout={isChat && align === "right"}
-                    />
-                </div>
-            )}
-
-            {/* Preview / Canvas section */}
-            <div
-                className={tw(
-                    "p-0 overflow-hidden grid grid-cols-subgrid gap-y-4 col-span-full row-start-2",
-                    isChat &&
-                        (align === "left"
-                            ? "justify-items-start"
-                            : "justify-items-end")
-                )}
-            >
-                <CanvasWrapper canvas={canvas}>
-                    {isExpandedBreadcrumb ? (
-                        <CanvasPreview
-                            forwardRef={forwardedRef}
-                            variant="expanded-breadcrumb"
-                            onClick={handleCanvasClick}
-                        />
-                    ) : isChat ? (
-                        <CanvasPreview
-                            forwardRef={forwardedRef}
-                            onClick={handleCanvasClick}
-                            variant={isQuote ? "quote" : "chat-message"}
-                            align={align}
-                        />
-                    ) : showMore ? (
-                        <div className="col-span-full" ref={forwardedRef}>
-                            <Canvas bgBlur fitWidth draft={false} />
+                    {/* Header Section */}
+                    {!hideHeader && (
+                        <div
+                            className={
+                                "flex items-center mb-2 " + align === "right"
+                                    ? "justify-end"
+                                    : "justify-start"
+                            }
+                        >
+                            {/*  {isExpandedBreadcrumb && index !== 0 && (
+                                <SvgArrowExpandedBreadcrumb hidden={false} />
+                            )} */}
+                            <Header
+                                /*   className={"bg-neutral-50 dark:bg-neutral-950 "} */
+                                variant={
+                                    isChat
+                                        ? "medium"
+                                        : isExpandedBreadcrumb
+                                        ? "tiny"
+                                        : "large"
+                                }
+                                canvas={canvas}
+                                direction="row"
+                                open={handleCanvasClick}
+                                reverseLayout={isChat && align === "right"}
+                            />
                         </div>
-                    ) : (
-                        <CanvasPreview
-                            forwardRef={forwardedRef}
-                            onClick={handleCanvasClick}
-                            variant="post"
-                        />
                     )}
-                </CanvasWrapper>
+                    {/* Preview / Canvas Section */}
+                    <div /* className="overflow-hidden" */>
+                        <CanvasWrapper canvas={canvas}>
+                            {isExpandedBreadcrumb ? (
+                                <CanvasPreview
+                                    forwardRef={forwardedRef}
+                                    variant="expanded-breadcrumb"
+                                    onClick={handleCanvasClick}
+                                />
+                            ) : isChat ? (
+                                <CanvasPreview
+                                    forwardRef={forwardedRef}
+                                    onClick={handleCanvasClick}
+                                    variant={isQuote ? "quote" : "chat-message"}
+                                    align={align}
+                                    className={
+                                        "flex flex-col gap-2" +
+                                        (align === "right"
+                                            ? "flex flex-col justify-end items-end"
+                                            : "")
+                                    }
+                                />
+                            ) : showMore ? (
+                                <div ref={forwardedRef}>
+                                    <Canvas bgBlur fitWidth draft={false} />
+                                </div>
+                            ) : (
+                                <CanvasPreview
+                                    forwardRef={forwardedRef}
+                                    onClick={handleCanvasClick}
+                                    variant="post"
+                                    className="w-full"
+                                />
+                            )}
+                        </CanvasWrapper>
+                    </div>
+                </div>
             </div>
-
             {/* Reply button for thread variant */}
             {isThread && !isExpandedBreadcrumb && (
                 <div className="col-start-2 col-span-1 flex gap-2.5 mt-4">

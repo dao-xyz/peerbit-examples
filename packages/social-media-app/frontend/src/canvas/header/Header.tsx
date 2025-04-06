@@ -115,7 +115,6 @@ export const Header = ({
                                     ? 24
                                     : 16
                             }
-                            onClick={open}
                         />
                     </div>
                     {"__context" in canvas && (
@@ -158,10 +157,10 @@ export const Header = ({
                         <DropdownMenu.Trigger asChild>
                             <button
                                 className={
-                                    "btn btn-icon btn-icon-sm " +
+                                    "btn btn-icon btn-icon-sm " /* +
                                     (direction === "col"
                                         ? "mt-auto"
-                                        : "ml-auto")
+                                        : "ml-auto") */
                                 }
                             >
                                 <HiDotsHorizontal size={20} />

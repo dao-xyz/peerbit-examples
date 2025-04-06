@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { useCanvases } from "../canvas/useCanvas";
-import { Reply } from "../canvas/reply/Reply";
+import { Reply } from "../canvas/reply/Reply"; // Uses the updated Reply component
 import { tw } from "../utils/tailwind";
 
 interface ExpandedContextProps {
@@ -8,13 +8,13 @@ interface ExpandedContextProps {
     onClick?: () => void;
 }
 
-const ExpandedContext = ({ children, onClick }: ExpandedContextProps) => {
+const ExpandedContext = ({ onClick }: ExpandedContextProps) => {
     const { path } = useCanvases();
     if (path.length === 1)
         return (
             <div>
-                You are at the root of giga. You will see you're context here
-                when you navigate somewhere!
+                You are at the root of giga. You will see your context here when
+                you navigate somewhere!
             </div>
         );
     return (

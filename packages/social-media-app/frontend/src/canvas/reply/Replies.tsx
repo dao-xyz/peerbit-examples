@@ -1,64 +1,37 @@
-// Replies.tsx
-import React, {
-    Fragment,
-    useEffect,
-    useLayoutEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
-import debounce from "lodash.debounce";
-import throttle from "lodash.throttle";
+import React, { Fragment, useMemo, useRef } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { ChevronDownIcon } from "@radix-ui/react-icons";
-import { Reply } from "./Reply"; // Your existing Reply component
+import { Reply } from "./Reply"; // Uses the updated Reply component
 import { tw } from "../../utils/tailwind";
 import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
 import { useView, ViewType } from "../../view/ViewContex";
-import { useLocal, useOnline, usePeer } from "@peerbit/react";
+import { useOnline, usePeer } from "@peerbit/react";
 import { SmoothReplyLine } from "./SmoothReplyLine";
-
-// Assume you have a StickyHeader component defined elsewhere.
 import { StickyHeader } from "./StickyHeader";
+import { useAutoReply } from "../AutoReplyContext";
 
 const readableView = (view: ViewType) => {
-    if (view === "chat") {
-        return "Chat view";
-    }
-
-    if (view === "new") {
-        return "New stuff";
-    }
-
-    if (view === "old") {
-        return "Old stuff";
-    }
-
-    if (view === "best") {
-        return "Popular";
-    }
+    if (view === "chat") return "Chat view";
+    if (view === "new") return "New stuff";
+    if (view === "old") return "Old stuff";
+    if (view === "best") return "Popular";
 };
 
 export const Replies = () => {
-    // Get view state and processed replies from your context.
     const { view, setView, processedReplies, viewRoot } = useView();
-    const viewAsReadable = useMemo(() => {
-        return readableView(view);
-    }, [view]);
-
+    const viewAsReadable = useMemo(() => readableView(view), [view]);
     const { peers } = useOnline(viewRoot);
+    const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
+    const { replyTo } = useAutoReply();
 
-    // (Scroll handling logic is assumed to be here, per your original code.)
-
-    // Create a ref for each processed reply.
-    const replyRefs = useMemo(() => {
-        return processedReplies.map(() => React.createRef<HTMLDivElement>());
-    }, [processedReplies]);
+    const replyRefs = useMemo(
+        () => processedReplies.map(() => React.createRef<HTMLDivElement>()),
+        [processedReplies]
+    );
 
     return (
         <div className="flex flex-col mt-10 relative">
-            {/* Sticky header with dropdown menu and online peers */}
             <StickyHeader>
                 <div className="w-full max-w-[876px] mx-auto flex flex-row">
                     <DropdownMenu.Root>
@@ -93,18 +66,19 @@ export const Replies = () => {
                 <div
                     ref={repliesContainerRef}
                     className={tw(
-                        "mt-5 max-w-[876px] w-full mx-auto grid relative",
-                        view === "chat"
-                            ? "grid-cols-[2rem_2rem_1fr_2rem_1rem]"
-                            : "grid-cols-[1rem_1fr_1rem]"
+                        "mt-5 max-w-[876px] w-full mx-auto grid relative"
                     )}
                 >
-                    {/* Render the smooth, pencil-textured reply line behind the replies */}
                     <SmoothReplyLine
                         replyRefs={replyRefs}
                         containerRef={repliesContainerRef}
                         lineTypes={processedReplies.map(
                             (item) => item.lineType
+                        )}
+                        anchorPoints={processedReplies.map((item) =>
+                            item.reply.publicKey.equals(peer.identity.publicKey)
+                                ? "left"
+                                : "right"
                         )}
                     />
                     {processedReplies.map((item, i) => (
@@ -114,7 +88,9 @@ export const Replies = () => {
                                 canvas={item.reply}
                                 variant={view === "chat" ? "chat" : "thread"}
                                 isQuote={item.type === "quote"}
-                                lineType={undefined}
+                                isHighlighted={
+                                    replyTo?.idString === item.reply.idString
+                                }
                             />
                         </Fragment>
                     ))}

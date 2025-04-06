@@ -241,7 +241,6 @@ export const CanvasWrapper = ({
         }
         // Update the state so that any useEffect dependent on pendingRects is notified.
         if (mutatedOnce) {
-            console.log("Mutated pending rects", updatedPending);
             setPendingRects(updatedPending);
         }
         return mutatedOnce;
@@ -418,7 +417,6 @@ export const CanvasWrapper = ({
         pending?: boolean;
         y?: number | "optimize" | "max";
     }) => {
-        console.log("INSERT DEFAULT", options);
         if (options?.increment) {
             const last = pendingRects[pendingRects.length - 1];
             if (

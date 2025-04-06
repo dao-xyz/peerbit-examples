@@ -92,10 +92,6 @@ export const CanvasPath = ({
             }
         }
         if (!eq) {
-            console.log(
-                "nEW CANVAS PATH",
-                getCanvasPath(newPath[newPath.length - 1])
-            );
             navigate(getCanvasPath(newPath[newPath.length - 1]), {});
             setTags(newPath.slice(1).map((x) => x.address));
         }

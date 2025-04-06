@@ -7,6 +7,7 @@ import { Canvas as CanvasDB } from "@giga-app/interface";
 import { CreateRoot } from "./canvas/CreateRoot";
 import { MissingProfile } from "./profile/MissingProfile";
 import { ConnectDevices } from "./identity/ConnectDevices";
+import { ViewType } from "./view/ViewContex";
 
 const textDecoder = new TextDecoder();
 export const getStreamPath = (node: PublicSignKey) =>
@@ -20,7 +21,14 @@ export const getAdressFromKey = (key: string) =>
 
 export const getNameFromPath = (name: string) => decodeURIComponent(name);
 
-export const getCanvasPath = (canvas: CanvasDB) => "/c/" + canvas.address;
+export const getCanvasPath = (canvas: CanvasDB, view?: ViewType) => {
+    const base = "/c/" + canvas.address;
+    let searchParams = "";
+    if (view) {
+        searchParams = `?view=${view}`;
+    }
+    return base + searchParams;
+};
 export const getCanvasAddressByPath = (path: string) => path.split("/")[2];
 
 export const USER_BY_KEY_NAME = "/k/:key";

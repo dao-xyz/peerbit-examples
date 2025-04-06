@@ -58,11 +58,6 @@ export const PendingCanvasProvider: React.FC<{
         }
         if (pendingCanvasState) {
             await pendingCanvasState.setParent(replyTo || viewRoot);
-            console.log(
-                "update parent of pending canvas: " +
-                    pendingCanvasState.address.toString(),
-                pendingCanvasState.path.length
-            );
         }
 
         setPendingCanvasState(pendingCanvasState);

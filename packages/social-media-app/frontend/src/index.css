@@ -531,6 +531,16 @@ code {
         animation: spinx 7.5s infinite linear running;
         --inner-bg: white;
 
+        /* in ligth mode theme eutral 300 in dark mode theme neutral 900 */
+        --bg-border: theme('colors.neutral.300');
+
+        .dark & {
+            --bg-border: theme('colors.neutral.900');
+        }
+
+
+
+
         /**
         * Using `background-origin` we can create a “border” using two gradients. And to
         * make the gradients better-looking, we use OKLCH.
@@ -539,17 +549,17 @@ code {
         * @see https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl
         */
         background:
-            /* Background colors don’t work with `background-origin`, so use a gradient. */
-            linear-gradient(to bottom, var(--inner-bg), var(--inner-bg)) padding-box,
+        /* Background colors don’t work with `background-origin`, so use a gradient. */
+        linear-gradient(to bottom, var(--inner-bg), var(--inner-bg)) padding-box,
 
-            /* ends at inner border edges */
-            conic-gradient(from var(--bg-angle), var(--inner-bg), var(--inner-bg), #0077ff) border-box;
+        /* ends at inner border edges */
+        conic-gradient(from var(--bg-angle), var(--bg-border), var(--bg-border), #0077ff) border-box;
 
         /*  conic-gradient(from var(--bg-angle), #0077ff, #00ffcc, #0077ff) border-box; */
 
         /* extends to outer border edges */
         /* a clear border lets the background gradient shine through */
-        border: 2px solid transparent;
+        border: 1rem solid transparent;
         border-radius: 0px;
 
     }

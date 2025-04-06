@@ -83,12 +83,19 @@ export const ProfileButton = forwardRef<
     };
 
     const content = getContent();
-
+    console.log({ onClick });
     return (
         <button
             ref={ref}
             className="btn p-0 hover:filter hover:invert"
-            onClick={onClick ? onClick : () => navigateTo(profile)}
+            onClick={
+                onClick
+                    ? onClick
+                    : (e) => {
+                          e.stopPropagation();
+                          navigateTo(profile);
+                      }
+            }
             {...rest}
         >
             {content}

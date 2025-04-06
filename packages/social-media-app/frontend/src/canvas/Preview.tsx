@@ -31,6 +31,7 @@ type BaseCanvasPreviewProps = {
     variant: VariantType;
     // forward ref
     forwardRef?: React.Ref<any>;
+    className?: string;
 };
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
@@ -213,7 +214,7 @@ const ExpandedBreadcrumbPreview = ({
             {apps.slice(0, 2).map((app, i) => (
                 <div
                     key={i}
-                    className="shrink-0 w-[3.625rem] h-[3.625rem] rounded-sm overflow-hidden border border-neutral-950 dark:border-neutral-50 relative"
+                    className="shrink-0 w-[3.625rem] h-[3.625rem] rounded-sm overflow-hidden  relative"
                 >
                     <PreviewFrame
                         element={app}
@@ -229,7 +230,7 @@ const ExpandedBreadcrumbPreview = ({
                 </div>
             ))}
             {text && (
-                <div className="border border-neutral-950 dark:border-neutral-50 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1">
+                <div className=" bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1">
                     <PreviewFrame
                         element={text}
                         previewLines={2}
@@ -323,10 +324,12 @@ const PostPreview = ({
     rects,
     onClick,
     forwardRef,
+    className,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
     forwardRef?: React.Ref<any>;
+    className?: string;
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
     const { text } = rects;
@@ -335,7 +338,10 @@ const PostPreview = ({
             {firstApp && (
                 <button
                     onClick={onClick}
-                    className="col-span-full max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative"
+                    className={
+                        "col-span-full max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative " +
+                        className
+                    }
                     ref={forwardRef}
                 >
                     <PreviewFrame
@@ -348,7 +354,10 @@ const PostPreview = ({
             )}
             {secondaryApps.length > 0 && (
                 <div
-                    className="col-span-full flex overflow-x-scroll no-scrollbar px-2.5"
+                    className={
+                        "col-span-full flex overflow-x-scroll no-scrollbar gap-2 pt-2 " +
+                        className
+                    }
                     ref={forwardRef}
                 >
                     {secondaryApps.map((app, i) => (
@@ -383,14 +392,16 @@ const ChatMessagePreview = ({
     rects,
     onClick,
     forwardRef,
+    className,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
     forwardRef?: React.Ref<any>;
+    className?: string;
 }) => {
     const { other: apps, text } = rects;
     return (
-        <div className="col-start-2 col-span-3" ref={forwardRef}>
+        <div className={className} ref={forwardRef}>
             {apps.map((app) => (
                 <button
                     key={app.id.toString()}
@@ -421,6 +432,7 @@ export const CanvasPreview = ({
     variant,
     onClick,
     forwardRef,
+    className,
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
@@ -485,6 +497,7 @@ export const CanvasPreview = ({
                         }
                     }
                     onClick={onClick}
+                    className={className}
                 />
             );
         case "chat-message":
@@ -497,6 +510,7 @@ export const CanvasPreview = ({
                         }
                     }
                     onClick={onClick}
+                    className={className}
                     forwardRef={forwardRef}
                 />
             );

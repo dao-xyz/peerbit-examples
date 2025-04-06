@@ -14,6 +14,7 @@ import { useEffect } from "react";
 import { ThemeProvider } from "./theme/useTheme";
 import { ReplyProgressProvider } from "./canvas/reply/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
+import { ViewProvider } from "./view/ViewContex";
 
 export const Content = () => {
     const { error: peerError } = usePeer();
@@ -43,9 +44,11 @@ export const Content = () => {
     }, [peerError]);
     return (
         <>
-            <Header fullscreen={inIframe()}>
-                <BaseRoutes />
-            </Header>
+            <ViewProvider>
+                <Header fullscreen={inIframe()}>
+                    <BaseRoutes />
+                </Header>
+            </ViewProvider>
         </>
     );
 };
