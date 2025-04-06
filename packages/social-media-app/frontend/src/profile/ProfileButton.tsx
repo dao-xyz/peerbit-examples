@@ -83,7 +83,6 @@ export const ProfileButton = forwardRef<
     };
 
     const content = getContent();
-    console.log({ onClick });
     return (
         <button
             ref={ref}
