@@ -1,4 +1,4 @@
-import { useState, forwardRef, ReactNode } from "react";
+import { useState, forwardRef, ReactNode, useEffect } from "react";
 import { MdOutlineDarkMode, MdOutlineLightMode } from "react-icons/md";
 import { CanvasPath } from "./context/CanvasPath";
 import { ProfileButton } from "./profile/ProfileButton";
@@ -12,6 +12,7 @@ import { useCanvases } from "./canvas/useCanvas";
 import { IoIosArrowBack } from "react-icons/io";
 import ExpandedContext from "./context/ExpandedContext";
 import { useThemeContext } from "./theme/useTheme";
+import { useHeaderVisibilityContext } from "./HeaderVisibilitiyProvider";
 
 // Define props interface
 interface HeaderProps {
@@ -29,6 +30,13 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
     const { peer } = usePeer();
     const { path } = useCanvases();
     const navigate = useNavigate();
+    const headerIsVisible = useHeaderVisibilityContext();
+
+    useEffect(() => {
+        if (!headerIsVisible) {
+            setIsBreadcrumbExpanded(false);
+        }
+    }, [headerIsVisible]);
 
     return (
         <div
@@ -81,7 +89,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                                 maxHeight: `calc(100vh - ${EXPANDED_BREADCRUMB_PADDING})`,
                                             }}
                                         >
-                                            <div className="w-full h-full p-5">
+                                            <div className="w-full h-full p-5 bg-neutral-50 dark:bg-neutral-950 border-b-1">
                                                 <ExpandedContext />
                                             </div>
                                         </div>
@@ -182,7 +190,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
             {isBreadcrumbExpanded && (
                 <div
                     onClick={() => setIsBreadcrumbExpanded(false)}
-                    className="absolute inset-0 z-30 backdrop-blur-lg sm:bg-neutral-50/50 dark:sm:bg-neutral-950/50 bg-neutral-50/95 dark:bg-neutral-950/95"
+                    className="absolute h-screen  inset-0 z-30 transparent"
                 ></div>
             )}
             {props.children}
