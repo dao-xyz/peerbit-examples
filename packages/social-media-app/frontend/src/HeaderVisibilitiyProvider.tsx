@@ -25,7 +25,7 @@ const useHeaderVisibility = (
     threshold = 50,
     deltaThreshold = 200,
     slowScrollDelay = 100,
-    bottomBounceTolerance = 50 // if within 50px of the bottom, consider it bounce
+    bottomBounceTolerance = 50 // tolerance for bounce near bottom
 ) => {
     const [visible, setVisible] = useState(true);
     const prevScrollTopRef = useRef(getScrollTop());
@@ -36,14 +36,26 @@ const useHeaderVisibility = (
             const currentScrollTop = getScrollTop();
             const maxScrollTop = getMaxScrollTop();
 
-            // If we're within the bounce tolerance at the bottom, ignore bounce and hide header.
-            if (maxScrollTop - currentScrollTop < bottomBounceTolerance) {
-                setVisible(false);
-                prevScrollTopRef.current = currentScrollTop;
+            // If content is not scrollable (maxScrollTop is very small),
+            // always show the header.
+            if (maxScrollTop < bottomBounceTolerance) {
+                setVisible(true);
                 if (scrollUpTimeout.current) {
                     clearTimeout(scrollUpTimeout.current);
                     scrollUpTimeout.current = null;
                 }
+                prevScrollTopRef.current = currentScrollTop;
+                return;
+            }
+
+            // If we're near the bottom (i.e. in the bounce zone), hide the header.
+            if (maxScrollTop - currentScrollTop < bottomBounceTolerance) {
+                setVisible(false);
+                if (scrollUpTimeout.current) {
+                    clearTimeout(scrollUpTimeout.current);
+                    scrollUpTimeout.current = null;
+                }
+                prevScrollTopRef.current = currentScrollTop;
                 return;
             }
 
@@ -51,7 +63,7 @@ const useHeaderVisibility = (
             const delta = prevScrollTopRef.current - currentScrollTop;
 
             if (isAtTop) {
-                // Always show the header when near the top.
+                // Always show header when near the top.
                 setVisible(true);
                 if (scrollUpTimeout.current) {
                     clearTimeout(scrollUpTimeout.current);
@@ -65,7 +77,7 @@ const useHeaderVisibility = (
                     scrollUpTimeout.current = null;
                 }
             } else if (delta > 0) {
-                // Slow upward scroll: schedule showing header after a short delay.
+                // Slow upward scroll: schedule header showing after a short delay.
                 if (!scrollUpTimeout.current) {
                     scrollUpTimeout.current = window.setTimeout(() => {
                         setVisible(true);
@@ -73,7 +85,7 @@ const useHeaderVisibility = (
                     }, slowScrollDelay);
                 }
             } else {
-                // Scrolling down: cancel any pending upward detection and hide header.
+                // Scrolling down: cancel any pending timeout and hide header.
                 if (scrollUpTimeout.current) {
                     clearTimeout(scrollUpTimeout.current);
                     scrollUpTimeout.current = null;
