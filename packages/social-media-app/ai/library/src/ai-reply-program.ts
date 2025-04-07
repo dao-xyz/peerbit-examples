@@ -574,9 +574,13 @@ const generateReply = async (properties: {
         canvasesQuery,
         generator,
     } = properties;
+
+    let writingInProgressInterval: ReturnType<typeof setInterval> | undefined;
     try {
         await to.load();
-        await to.messages.send(new ReplyingInProgresss({ reference: to }));
+        writingInProgressInterval = setInterval(async () => {
+            await to.messages.send(new ReplyingInProgresss({ reference: to }));
+        }, 1000);
 
         let context = maybeContext;
         if (!context || context.length === 0) {
@@ -643,6 +647,10 @@ Your reply to the last, Target Post:\n
         await insertTextReply("Error generating AI reply :(", to);
         console.error("Error generating AI reply:", error);
     } finally {
+        if (writingInProgressInterval) {
+            clearInterval(writingInProgressInterval);
+        }
+
         await to.messages.send(
             new ReplyingNoLongerInProgresss({ reference: to })
         );
