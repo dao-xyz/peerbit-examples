@@ -74,6 +74,14 @@ export const useScrollToBottom = (properties: {
         if (processedReplies.length > 0) {
             latestReplyRef.current =
                 processedReplies[processedReplies.length - 1];
+
+            if (
+                latestReplyRef.current.reply.publicKey.equals(
+                    peer.identity.publicKey
+                )
+            ) {
+                scrollToBottom();
+            }
         }
         bodyResizeScrollPositionRef.current = getScrollTop();
     }, [processedReplies]);

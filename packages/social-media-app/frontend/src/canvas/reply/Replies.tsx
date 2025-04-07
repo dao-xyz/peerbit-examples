@@ -36,7 +36,10 @@ export const Replies = () => {
         if (
             shouldShowToastFromView &&
             processedReplies.length > prevRepliesCountRef.current &&
-            !isAtBottom
+            !isAtBottom &&
+            !processedReplies[
+                processedReplies.length - 1
+            ].reply.publicKey.equals(peer.identity.publicKey) // only show messages from other users
         ) {
             setShowNewMessagesToast(true);
         }

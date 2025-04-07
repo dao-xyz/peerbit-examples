@@ -23,20 +23,6 @@ export const StickyHeader = ({
                 let isClose = rect.top <= 100;
                 setIsScrolled(isClose);
                 const shouldMoveUpSubHeader = isClose && !headerVisible;
-                /*    console.log({
-                       rect,
-                       isClose,
-                       headerVisible,
-                       shouldMoveUpSubHeader
-                   }) */
-                if (!headerVisible) {
-                    console.log({
-                        rect,
-                        isClose,
-                        headerVisible,
-                        shouldMoveUpSubHeader,
-                    });
-                }
                 setShouldOffsetSubheader(shouldMoveUpSubHeader);
             }
             animationFrame = requestAnimationFrame(checkPosition);
