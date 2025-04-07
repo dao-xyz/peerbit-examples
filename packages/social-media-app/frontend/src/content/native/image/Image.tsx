@@ -8,7 +8,7 @@ import { FiMaximize, FiX } from "react-icons/fi";
 import { StaticImage } from "@giga-app/interface";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
-
+import { sha256Base64Sync } from "@peerbit/crypto";
 export type ImageContentProps = {
     content: StaticImage;
     onResize: (dims: { width: number; height: number }) => void;
@@ -33,15 +33,56 @@ export const ImageContent = ({
     const [isDragOver, setIsDragOver] = useState(false);
     const [imgUrl, setImgUrl] = useState("");
     const [dialogOpen, setDialogOpen] = useState(false);
+    const lastImageHash = useRef<string | null>(null);
 
     // Create a Blob URL from the raw binary data stored in content.data.
     useEffect(() => {
         if (!content.data || !content.mimeType) return;
-        const blob = new Blob([content.data], { type: content.mimeType });
-        const url = URL.createObjectURL(blob);
-        setImgUrl(url);
+        // Create a blob from the raw image data.
+        let hash = sha256Base64Sync(content.data);
+        if (lastImageHash.current === hash) {
+            return;
+        }
+        lastImageHash.current = hash;
+
+        const originalBlob = new Blob([content.data], {
+            type: content.mimeType,
+        });
+        const originalUrl = URL.createObjectURL(originalBlob);
+
+        // Create an Image object to load the blob.
+        const img = new Image();
+        img.onload = () => {
+            // Create an offscreen canvas.
+            const canvas = document.createElement("canvas");
+            canvas.width = img.width;
+            canvas.height = img.height;
+            const ctx = canvas.getContext("2d");
+            if (ctx) {
+                // Draw the image onto the canvas.
+                ctx.drawImage(img, 0, 0, img.width, img.height);
+                // Convert the canvas back to a blob.
+                canvas.toBlob(
+                    (convertedBlob) => {
+                        if (convertedBlob) {
+                            // Create a new URL from the converted blob.
+                            const newUrl = URL.createObjectURL(convertedBlob);
+                            setImgUrl(newUrl);
+                            // Clean up the original URL.
+                            URL.revokeObjectURL(originalUrl);
+                        }
+                    },
+                    content.mimeType,
+                    1
+                );
+            }
+        };
+        console.log("BLOB URL", content.data, content.mimeType);
+        img.src = originalUrl;
+
         return () => {
-            URL.revokeObjectURL(url);
+            lastImageHash.current = null;
+            URL.revokeObjectURL(originalUrl);
         };
     }, [content.data, content.mimeType]);
 

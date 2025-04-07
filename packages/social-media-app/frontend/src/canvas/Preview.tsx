@@ -6,7 +6,7 @@ import {
     ElementContent,
     StaticPartialImage,
 } from "@giga-app/interface";
-import { forwardRef, useMemo } from "react";
+import { forwardRef, useEffect, useMemo } from "react";
 import { Frame } from "../content/Frame";
 import {
     rectIsStaticMarkdownText,
@@ -339,7 +339,7 @@ const PostPreview = ({
                 <button
                     onClick={onClick}
                     className={
-                        "col-span-full max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative " +
+                        "col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full rounded-md relative " +
                         className
                     }
                     ref={forwardRef}
@@ -442,8 +442,12 @@ export const CanvasPreview = ({
                 separateAndSortRects([...rects, ...pendingRects]),
                 variant
             ),
-        [rects, pendingRects, variant, separateAndSortRects]
+        [rects, pendingRects, variant]
     );
+
+    useEffect(() => {
+        console.log("PENDING RECYTS CHANGES", pendingRects);
+    }, [pendingRects]);
 
     if (!variantRects) return null;
 
