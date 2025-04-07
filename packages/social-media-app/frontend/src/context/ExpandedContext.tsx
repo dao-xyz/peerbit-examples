@@ -1,8 +1,6 @@
 import { type ReactNode } from "react";
 import { useCanvases } from "../canvas/useCanvas";
 import { Reply } from "../canvas/reply/Reply"; // Uses the updated Reply component
-import { useNavigate } from "react-router-dom";
-import { getCanvasPath } from "../routes";
 import { Canvas } from "@giga-app/interface";
 
 interface ExpandedContextProps {
@@ -20,7 +18,7 @@ const ExpandedContext = ({ onClick: onClickMaybe }: ExpandedContextProps) => {
             </div>
         );
     return (
-        <div className="grid grid-cols-[1rem_1fr_1rem]">
+        <div className="flex flex-col">
             {path.slice(1).map((p, i) => (
                 <Reply
                     onClick={onClickMaybe ? () => onClickMaybe?.(p) : undefined}
