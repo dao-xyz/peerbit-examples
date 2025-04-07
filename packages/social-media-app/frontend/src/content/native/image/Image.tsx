@@ -1,7 +1,3 @@
-/**
- * @fileoverview React component for displaying and editing images with drag-and-drop functionality.
- */
-
 import React, { useRef, useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FiMaximize, FiX } from "react-icons/fi";
@@ -9,6 +5,7 @@ import { StaticImage } from "@giga-app/interface";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
 import { sha256Base64Sync } from "@peerbit/crypto";
+
 export type ImageContentProps = {
     content: StaticImage;
     onResize: (dims: { width: number; height: number }) => void;
@@ -35,10 +32,15 @@ export const ImageContent = ({
     const [dialogOpen, setDialogOpen] = useState(false);
     const lastImageHash = useRef<string | null>(null);
 
+    // States for swipe animation.
+    const [translateY, setTranslateY] = useState(0);
+    const [isDragging, setIsDragging] = useState(false);
+    const touchStartYRef = useRef<number | null>(null);
+    const swipeThreshold = 100; // pixels
+
     // Create a Blob URL from the raw binary data stored in content.data.
     useEffect(() => {
         if (!content.data || !content.mimeType) return;
-        // Create a blob from the raw image data.
         let hash = sha256Base64Sync(content.data);
         if (lastImageHash.current === hash) {
             return;
@@ -50,25 +52,20 @@ export const ImageContent = ({
         });
         const originalUrl = URL.createObjectURL(originalBlob);
 
-        // Create an Image object to load the blob.
         const img = new Image();
         img.onload = () => {
-            // Create an offscreen canvas.
             const canvas = document.createElement("canvas");
             canvas.width = img.width;
             canvas.height = img.height;
             const ctx = canvas.getContext("2d");
             if (ctx) {
-                // Draw the image onto the canvas.
+                console.log("CONVERTING IMAGE", img.width, img.height);
                 ctx.drawImage(img, 0, 0, img.width, img.height);
-                // Convert the canvas back to a blob.
                 canvas.toBlob(
                     (convertedBlob) => {
                         if (convertedBlob) {
-                            // Create a new URL from the converted blob.
                             const newUrl = URL.createObjectURL(convertedBlob);
                             setImgUrl(newUrl);
-                            // Clean up the original URL.
                             URL.revokeObjectURL(originalUrl);
                         }
                     },
@@ -142,37 +139,91 @@ export const ImageContent = ({
             ? "object-contain"
             : "";
 
+    // --- SWIPE HANDLERS WITH UP & DOWN SUPPORT AND BACKGROUND FADE ---
+    const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
+        touchStartYRef.current = e.touches[0].clientY;
+        setIsDragging(true);
+    };
+
+    const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
+        if (touchStartYRef.current !== null) {
+            const deltaY = e.touches[0].clientY - touchStartYRef.current;
+            setTranslateY(deltaY);
+        }
+    };
+
+    const handleTouchEnd = () => {
+        setIsDragging(false);
+        if (Math.abs(translateY) >= swipeThreshold) {
+            // Animate offscreen in the swipe direction.
+            if (translateY > 0) {
+                setTranslateY(window.innerHeight);
+            } else {
+                setTranslateY(-window.innerHeight);
+            }
+        } else {
+            // Animate back to original position.
+            setTranslateY(0);
+        }
+        touchStartYRef.current = null;
+    };
+
+    const handleTransitionEnd = () => {
+        if (Math.abs(translateY) >= window.innerHeight) {
+            // If the image has animated offscreen, close the dialog.
+            setDialogOpen(false);
+            // Reset the position for next time.
+            setTranslateY(0);
+        }
+    };
+
+    // Calculate overlay opacity: fades out as the image is swiped away.
+    const overlayOpacity =
+        1 * (1 - Math.min(Math.abs(translateY) / window.innerHeight, 1));
+
     // Fullscreen preview container.
-    // Clicking on the overlay (outside the content) closes the dialog.
     const FullscreenPreview = (
         <Dialog.Portal>
             <Dialog.Overlay
-                className="fixed inset-0 z-[10000] bg-black bg-opacity-80"
-                onClick={() => {
-                    console.log("CLOSE!");
-                    setDialogOpen(false);
+                onClick={() => setDialogOpen(false)}
+                style={{
+                    backgroundColor: `rgba(0, 0, 0, ${overlayOpacity})`,
+                    transition: isDragging
+                        ? "none"
+                        : "background-color 0.3s ease",
                 }}
+                className="fixed inset-0 z-[10000]"
             />
             <Dialog.Content
                 className="fixed inset-0 z-[10001] flex items-center justify-center"
-                onClick={(e) => e.stopPropagation()} // prevent clicks inside content from bubbling to overlay
+                onClick={(e) => e.stopPropagation()}
+                onTouchStart={handleTouchStart}
+                onTouchMove={handleTouchMove}
+                onTouchEnd={handleTouchEnd}
+                onTransitionEnd={handleTransitionEnd}
+                style={{
+                    transform: `translateY(${translateY}px)`,
+                    transition: isDragging ? "none" : "transform 0.3s ease",
+                }}
             >
                 <Dialog.Title className="sr-only">Image Preview</Dialog.Title>
                 <div className="w-full h-full max-w-4xl max-h-[100vh]">
                     <img
                         src={imgUrl}
-                        alt={content.alt}
+                        alt={content.alt ?? ""}
                         className="w-full h-full object-contain"
                     />
                 </div>
-                <Dialog.Close asChild>
-                    <button
-                        className="absolute btn top-0 right-0 w-10 h-10  text-white bg-black opacity-60 text-2xl"
-                        style={{ borderRadius: "0 0 0 0" }}
-                    >
-                        <FiX />
-                    </button>
-                </Dialog.Close>
+                {translateY === 0 && (
+                    <Dialog.Close asChild>
+                        <button
+                            className="absolute btn top-0 right-0 w-10 h-10 text-white bg-black opacity-60 text-2xl"
+                            style={{ borderRadius: "0" }}
+                        >
+                            <FiX />
+                        </button>
+                    </Dialog.Close>
+                )}
             </Dialog.Content>
         </Dialog.Portal>
     );

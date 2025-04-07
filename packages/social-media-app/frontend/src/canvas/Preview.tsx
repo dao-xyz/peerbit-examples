@@ -445,10 +445,6 @@ export const CanvasPreview = ({
         [rects, pendingRects, variant]
     );
 
-    useEffect(() => {
-        console.log("PENDING RECYTS CHANGES", pendingRects);
-    }, [pendingRects]);
-
     if (!variantRects) return null;
 
     switch (variant) {
