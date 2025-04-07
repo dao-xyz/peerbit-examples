@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
@@ -33,6 +33,17 @@ export const Header = ({
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
     const { profiles } = useProfiles();
+
+    useEffect(() => {
+        if (!canvas) return;
+        if (canvas.isOrigin) {
+            return;
+        }
+        if (canvas.context) {
+            return;
+        }
+        canvas.loadContext();
+    }, [canvas]);
 
     const replyCount = useCount(
         canvas?.loadedReplies ? canvas.replies : undefined,
@@ -117,13 +128,12 @@ export const Header = ({
                             }
                         />
                     </div>
-                    {"__context" in canvas && (
+                    {canvas.loadedContext && (
                         <RelativeTimestamp
                             timestamp={
                                 new Date(
                                     Number(
-                                        canvas.__context.created /
-                                            BigInt(1000000)
+                                        canvas.context.created / BigInt(1000000)
                                     )
                                 )
                             }

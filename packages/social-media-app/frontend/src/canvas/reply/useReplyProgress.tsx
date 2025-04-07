@@ -159,11 +159,11 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
 
             // Shared event listener for request events.
             const listener = (e: { detail: RequestEvent<CanvasMessage> }) => {
-                console.log("RECEIVED REQUEST", {
+                /* console.log("RECEIVED REQUEST", {
                     address: canvas.address,
                     publicKey: e.detail.from,
                     request: e.detail.request,
-                });
+                }); */
                 if (
                     e.detail &&
                     e.detail.request instanceof ReplyingInProgresss

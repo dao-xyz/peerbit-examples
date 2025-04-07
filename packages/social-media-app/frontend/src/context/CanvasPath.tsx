@@ -1,48 +1,44 @@
-import { useEffect, useState, useRef, Fragment, useLayoutEffect } from "react";
+import {
+    useEffect,
+    useState,
+    useRef,
+    Fragment,
+    useLayoutEffect,
+    useMemo,
+} from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
 import { Canvas as CanvasDB } from "@giga-app/interface";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { CanvasPreview } from "../canvas/Preview";
-import { tw } from "../utils/tailwind";
-
 const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
     const endMarkerRef = useRef<HTMLSpanElement>(null);
 
     // scroll to last element in breadcrumb bar
     useLayoutEffect(() => {
         if (endMarkerRef.current) {
-            endMarkerRef.current.scrollIntoView({
-                behavior: "smooth",
-                block: "nearest",
-                inline: "end",
-            });
+            setTimeout(() => {
+                endMarkerRef.current.scrollIntoView({
+                    behavior: "instant",
+                    block: "nearest",
+                    inline: "end",
+                });
+            }, 300); // TODO make work without timeout
         }
     }, [path]);
 
     return (
-        <div className="grid grid-flow-col auto-cols-max justify-start items-center overflow-x-auto w-full shrink-0 no-scrollbar p-1 pr-0">
+        <div className="flex flex-row justify-start items-center overflow-x-auto w-full  no-scrollbar p-1 pr-0">
             {path.length > 1 ? (
                 path.map((x, ix) => (
                     <Fragment key={ix}>
-                        <span
-                            className={tw(
-                                ix < 2 && "w-0 overflow-hidden invisible"
-                            )}
-                        >
-                            <span className="px-1">/</span>
-                        </span>
-                        <span
-                            className={tw(
-                                ix === 0 && "w-0 overflow-hidden invisible"
-                            )}
-                            key={ix}
-                        >
+                        {ix > 1 && <span className="px-1">/</span>}
+                        {ix > 0 && (
                             <CanvasWrapper canvas={x}>
                                 <CanvasPreview variant="breadcrumb" />
                             </CanvasWrapper>
-                        </span>
+                        )}
                     </Fragment>
                 ))
             ) : (
@@ -97,23 +93,30 @@ export const CanvasPath = ({
         }
     };
 
+    // get last 3 elements in path excluding the root
+    /*   const lastThreeElements = useMemo(() => {
+          const start = Math.max(path.length - 3, 1);
+          return path.slice(start);
+      }
+          , [path]);
+   */
+    /*   const shouldShowDots = path.length > 3; */
+
     return (
         <div className="flex flex-row gap-2 h-full items-center overflow-hidden">
-            {path && path.length > 0 && (
-                <button
-                    className="rounded hover:bg-neutral-200  dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-400 dark:border-neutral-600 inset-shadow-xs   inset-shadow-neutral-400/30 dark:inset-shadow-neutral-800/30 i overflow-hidden"
-                    onClick={() =>
-                        setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
-                    }
-                >
-                    <BreadCrumb path={path} />
-                    {isBreadcrumbExpanded && (
-                        <span className="text-sm bg-neutral-50 dark:bg-neutral-950 align-middle flex items-center outline outline-neutral-950 dark:outline-neutral-50 rounded-l-lg px-2 sm:px-5">
-                            Close
-                        </span>
-                    )}
-                </button>
-            )}
+            {/*  {lastThreeElements && lastThreeElements.length > 0 && */}
+            <button
+                className="rounded hover:bg-neutral-200  dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-400 dark:border-neutral-600 inset-shadow-xs   inset-shadow-neutral-400/30 dark:inset-shadow-neutral-800/30 i overflow-hidden"
+                onClick={() =>
+                    setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
+                }
+            >
+                {/* {shouldShowDots && (
+                    <span className="p-1 pr-0 h-full whitespace-nowrap">...  /</span>)} */}
+
+                <BreadCrumb path={path} />
+            </button>
+            {/* } */}
         </div>
     );
 };

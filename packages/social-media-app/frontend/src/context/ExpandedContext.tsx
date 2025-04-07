@@ -1,14 +1,16 @@
 import { type ReactNode } from "react";
 import { useCanvases } from "../canvas/useCanvas";
 import { Reply } from "../canvas/reply/Reply"; // Uses the updated Reply component
-import { tw } from "../utils/tailwind";
+import { useNavigate } from "react-router-dom";
+import { getCanvasPath } from "../routes";
+import { Canvas } from "@giga-app/interface";
 
 interface ExpandedContextProps {
     children?: ReactNode;
-    onClick?: () => void;
+    onClick?: (path: Canvas) => void;
 }
 
-const ExpandedContext = ({ onClick }: ExpandedContextProps) => {
+const ExpandedContext = ({ onClick: onClickMaybe }: ExpandedContextProps) => {
     const { path } = useCanvases();
     if (path.length === 1)
         return (
@@ -21,11 +23,12 @@ const ExpandedContext = ({ onClick }: ExpandedContextProps) => {
         <div className="grid grid-cols-[1rem_1fr_1rem]">
             {path.slice(1).map((p, i) => (
                 <Reply
-                    onClick={onClick}
+                    onClick={onClickMaybe ? () => onClickMaybe?.(p) : undefined}
                     key={i}
                     index={i}
                     canvas={p as any}
                     variant="expanded-breadcrumb"
+                    className=" hover:border-2 border-primary-200 dark:border-primary-800  hover:dark:border-primary-500 cursor-pointer"
                 />
             ))}
         </div>

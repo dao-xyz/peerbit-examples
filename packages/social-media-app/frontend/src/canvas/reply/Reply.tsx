@@ -50,6 +50,7 @@ type BaseReplyPropsType = {
     lineType?: "start" | "middle" | "end" | "end-and-start" | "none";
     forwardedRef?: React.Ref<HTMLDivElement>;
     isHighlighted?: boolean;
+    className?: string;
 };
 
 type ReplyPropsType = BaseReplyPropsType & {
@@ -67,6 +68,7 @@ export const Reply = ({
     isQuote,
     forwardedRef,
     isHighlighted,
+    className,
 }: ReplyPropsType) => {
     const [showMore, setShowMore] = useState(false);
     const { peer } = usePeer();
@@ -98,94 +100,90 @@ export const Reply = ({
         : "";
 
     // Determine grid classes for the content container based on the variant.
-    let contentClasses = "";
+    let flexAlign = "";
     if (isChat) {
         // For chat, also adjust alignment: right for your posts, left for others.
-        contentClasses =
-            align === "right" ? "justify-self-end" : "justify-self-start";
+        flexAlign = align === "right" ? "items-end" : "items-start";
     }
 
     return (
         // Outer wrapper: remains a grid item so that replies align in a column.
-        <div className="col-span-full relative">
+        <div className={"flex flex-col " + flexAlign + " " + className}>
             {/* Optional vertical line in the background */}
             {lineType && lineType !== "none" && (
                 <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">
                     <div className="w-px h-full bg-neutral-300 dark:bg-neutral-600" />
                 </div>
             )}
-            {/* Content container: placed in the proper grid cell */}
-            <div className={contentClasses}>
-                {/* Inline-flex container that shrink-wraps the visible content */}
-                <div
-                    className={`inline-flex flex-col  border-transparent hover:border-black dark:hover:border-white rounded-md p-2  ${highlightStyle}  ${
-                        isThread ? "w-full" : ""
-                    }`}
-                >
-                    {/* Header Section */}
-                    {!hideHeader && (
-                        <div
-                            className={
-                                "flex items-center mb-2 " + align === "right"
-                                    ? "justify-end"
-                                    : "justify-start"
-                            }
-                        >
-                            {/*  {isExpandedBreadcrumb && index !== 0 && (
+            {/* Inline-flex container that shrink-wraps the visible content */}
+            <div
+                className={`inline-flex flex-col  border-transparent hover:border-black dark:hover:border-white rounded-md p-2  ${highlightStyle}  ${
+                    isThread ? "w-full" : ""
+                }`}
+            >
+                {/* Header Section */}
+                {!hideHeader && (
+                    <div
+                        className={
+                            "flex items-center mb-2 " + align === "right"
+                                ? "justify-end"
+                                : "justify-start"
+                        }
+                    >
+                        {/*  {isExpandedBreadcrumb && index !== 0 && (
                                 <SvgArrowExpandedBreadcrumb hidden={false} />
                             )} */}
-                            <Header
-                                /*   className={"bg-neutral-50 dark:bg-neutral-950 "} */
-                                variant={
-                                    isChat
-                                        ? "medium"
-                                        : isExpandedBreadcrumb
-                                        ? "tiny"
-                                        : "large"
-                                }
-                                canvas={canvas}
-                                direction="row"
-                                open={handleCanvasClick}
-                                reverseLayout={isChat && align === "right"}
-                            />
-                        </div>
-                    )}
-                    {/* Preview / Canvas Section */}
-                    <div /* className="overflow-hidden" */>
-                        <CanvasWrapper canvas={canvas}>
-                            {isExpandedBreadcrumb ? (
-                                <CanvasPreview
-                                    forwardRef={forwardedRef}
-                                    variant="expanded-breadcrumb"
-                                    onClick={handleCanvasClick}
-                                />
-                            ) : isChat ? (
-                                <CanvasPreview
-                                    forwardRef={forwardedRef}
-                                    onClick={handleCanvasClick}
-                                    variant={isQuote ? "quote" : "chat-message"}
-                                    align={align}
-                                    className={
-                                        "flex flex-col gap-2" +
-                                        (align === "right"
-                                            ? "flex flex-col justify-end items-end"
-                                            : "")
-                                    }
-                                />
-                            ) : showMore ? (
-                                <div ref={forwardedRef}>
-                                    <Canvas bgBlur fitWidth draft={false} />
-                                </div>
-                            ) : (
-                                <CanvasPreview
-                                    forwardRef={forwardedRef}
-                                    onClick={handleCanvasClick}
-                                    variant="post"
-                                    className="w-full"
-                                />
-                            )}
-                        </CanvasWrapper>
+                        <Header
+                            /*   className={"bg-neutral-50 dark:bg-neutral-950 "} */
+                            variant={
+                                isChat
+                                    ? "medium"
+                                    : isExpandedBreadcrumb
+                                    ? "tiny"
+                                    : "large"
+                            }
+                            canvas={canvas}
+                            direction="row"
+                            open={handleCanvasClick}
+                            reverseLayout={isChat && align === "right"}
+                        />
                     </div>
+                )}
+                {/* Preview / Canvas Section */}
+                <div /* className="overflow-hidden" */>
+                    <CanvasWrapper canvas={canvas}>
+                        {isExpandedBreadcrumb ? (
+                            <CanvasPreview
+                                forwardRef={forwardedRef}
+                                variant="expanded-breadcrumb"
+                                onClick={handleCanvasClick}
+                            />
+                        ) : isChat ? (
+                            <CanvasPreview
+                                forwardRef={forwardedRef}
+                                onClick={handleCanvasClick}
+                                variant={isQuote ? "quote" : "chat-message"}
+                                align={align}
+                                className={
+                                    "flex flex-col gap-2" +
+                                    (align === "right"
+                                        ? "flex flex-col justify-end items-end"
+                                        : "")
+                                }
+                            />
+                        ) : showMore ? (
+                            <div ref={forwardedRef}>
+                                <Canvas bgBlur fitWidth draft={false} />
+                            </div>
+                        ) : (
+                            <CanvasPreview
+                                forwardRef={forwardedRef}
+                                onClick={handleCanvasClick}
+                                variant="post"
+                                className="w-full"
+                            />
+                        )}
+                    </CanvasWrapper>
                 </div>
             </div>
             {/* Reply button for thread variant */}

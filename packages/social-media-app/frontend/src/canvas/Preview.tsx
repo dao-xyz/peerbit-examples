@@ -411,7 +411,7 @@ const ChatMessagePreview = ({
                     <PreviewFrame
                         bgBlur
                         element={app}
-                        fit="cover"
+                        fit="contain"
                         maximizeHeight
                     />
                 </button>

@@ -105,9 +105,10 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             if (el) {
                 const rect = el.getBoundingClientRect();
                 let anchor = anchorPoints?.[index] ?? "center";
-                if (lineTypes[index] === "end") {
-                    anchor = "center";
-                }
+                /*  if (lineTypes[index] === "end") {
+                     anchor = "center";
+                 } */
+
                 let x: number;
                 // never make the line cross middle of the screen for left and right
                 if (anchor === "left") {
@@ -138,7 +139,10 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
         });
         const validPoints = points.filter((p): p is Point => p !== null);
 
-        if (validPoints.length < 2 || validPoints.length !== lineTypes.length) {
+        if (
+            validPoints.length <
+            2 /* || validPoints.length !== lineTypes.length */
+        ) {
             setSegments([]);
             return;
         }
@@ -159,14 +163,14 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             groups.push(currentGroup);
         }
 
-        const windowSize = 2; // Look at 2 neighbors on each side
-        const smoothingFactor = 0.7; // Blend 50% with local average
+        const windowSize = 10; // Look at 2 neighbors on each side
+        const smoothingFactor = 0.3; // Blend 50% with local average
         const smoothedGroups = groups.map((group) =>
             smoothPoints(group, windowSize, smoothingFactor)
         );
 
         const groupSegments = smoothedGroups.map((group) =>
-            createSmoothPathSegments(group, 1.4)
+            createSmoothPathSegments(group, 3)
         );
         const flatSegments = groupSegments.flat();
         setSegments(flatSegments);
@@ -200,7 +204,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             {segments.map((seg, index) => {
                 const lengthThreshold = 400;
                 const strokeDasharray =
-                    seg.length > 100 ? "35,35" : undefined; /* "15,15" */
+                    seg.length > 100 ? "35,35" : "35,35"; /* "15,15" */
                 const strokeWidth = seg.length > lengthThreshold ? 3 : 3;
                 return (
                     <path

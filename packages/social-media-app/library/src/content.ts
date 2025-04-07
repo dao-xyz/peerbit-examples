@@ -1,6 +1,7 @@
 import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
     Compare,
+    Context,
     Documents,
     DocumentsChange,
     id,
@@ -10,6 +11,7 @@ import {
     StringMatch,
     StringMatchMethod,
     toId,
+    WithContext,
 } from "@peerbit/document";
 import {
     PublicSignKey,
@@ -882,7 +884,7 @@ export class Canvas extends Program<CanvasArgs> {
         return this.path.length === 0;
     }
 
-    get origin() {
+    get origin(): Canvas | null | undefined {
         if (this.isOrigin) {
             return this;
         }
@@ -906,6 +908,41 @@ export class Canvas extends Program<CanvasArgs> {
     get messages(): RPC<CanvasMessage, CanvasMessage> {
         const root: Canvas = this.origin ?? this;
         return root._messages;
+    }
+
+    async loadContext(options?: { reload?: boolean }): Promise<Context> {
+        if ((this as WithContext<any>).__context && !options?.reload) {
+            return (this as WithContext<any>).__context;
+        }
+
+        await this.load();
+        const withContext = await this.origin?.replies.index.index.get(
+            toId(this.id),
+            {
+                shape: {
+                    id: true,
+                    __context: true,
+                },
+            }
+        );
+
+        if (!withContext) {
+            throw new Error("No context found");
+        }
+        return ((this as WithContext<any>).__context = (
+            withContext.value as WithContext<{ id: Uint8Array }>
+        ).__context);
+    }
+
+    get loadedContext(): boolean {
+        return (this as WithContext<any>).__context != null;
+    }
+
+    get context(): Context | null {
+        if ((this as WithContext<any>).__context) {
+            return (this as WithContext<any>).__context;
+        }
+        return null;
     }
 }
 

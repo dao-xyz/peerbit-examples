@@ -80,12 +80,6 @@ export const PendingCanvasProvider: React.FC<{
                                 prev.idString +
                                 " and creating a new one"
                         );
-                        viewRoot.replies.index
-                            .iterate({})
-                            .all()
-                            .then((all) => {
-                                console.log("ALL AFTER SAVE REPLIES", all);
-                            });
                     });
                 //  setReplyTo(null);
 

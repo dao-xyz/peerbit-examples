@@ -7,13 +7,11 @@ import {
     ReactNode,
     useContext,
 } from "react";
-import { Canvas as CanvasDB } from "@giga-app/interface";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import ToolbarContent from "./ToolbarContent";
 import { AppSelectPaneInline } from "./AppSelectPaneInline";
 import { SimpleWebManifest } from "@giga-app/interface";
 import { usePendingCanvas } from "../PendingCanvasContext";
-import { useView } from "../../view/ViewContex";
 import { AutoReplyProvider, useAutoReply } from "../AutoReplyContext";
 
 interface ToolbarContextType {
@@ -78,11 +76,15 @@ function useMediaQuery(query: string) {
 }
 
 // Wrap ToolbarContainer with forwardRef so that if a parent passes a ref, it is forwarded.
-export const Toolbar = forwardRef<HTMLDivElement>((props, ref) => {
-    return <ToolbarInner ref={ref} />;
-});
+export const Toolbar = forwardRef<HTMLDivElement, { className?: string }>(
+    (props, ref) => {
+        return <ToolbarInner ref={ref} className={props.className} />;
+    }
+);
 
-interface ToolbarInnerProps {}
+interface ToolbarInnerProps {
+    className?: string;
+}
 
 const ToolbarInner = forwardRef<HTMLDivElement, ToolbarInnerProps>(
     (_props, ref) => {
@@ -114,7 +116,10 @@ const ToolbarInner = forwardRef<HTMLDivElement, ToolbarInnerProps>(
         /*  const isDesktop = useMediaQuery("(min-width: 640px)"); */
 
         return (
-            <div ref={ref} className="w-full flex justify-center">
+            <div
+                ref={ref}
+                className={"w-full flex justify-center " + _props.className}
+            >
                 <div className="flex flex-col w-full items-center max-w-[876px]">
                     <ToolbarContent
                         onToggleAppSelect={() => setAppSelectOpen(true)}

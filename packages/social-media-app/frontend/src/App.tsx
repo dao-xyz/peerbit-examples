@@ -1,4 +1,5 @@
-import { ClientBusyError, releaseKey, usePeer } from "@peerbit/react";
+// Content.tsx
+import { ClientBusyError, usePeer } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
 import { HashRouter } from "react-router-dom";
 import { Header } from "./Header";
@@ -15,10 +16,15 @@ import { ThemeProvider } from "./theme/useTheme";
 import { ReplyProgressProvider } from "./canvas/reply/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
 import { ViewProvider } from "./view/ViewContex";
+import {
+    HeaderVisibilityProvider,
+    useHeaderVisibilityContext,
+} from "./HeaderVisibilitiyProvider";
 
 export const Content = () => {
     const { error: peerError } = usePeer();
     const { showError } = useErrorDialog();
+
     useEffect(() => {
         if (peerError) {
             if (peerError instanceof ClientBusyError) {
@@ -41,17 +47,37 @@ export const Content = () => {
                 });
             }
         }
-    }, [peerError]);
+    }, [peerError, showError]);
+
+    // Use our new hook to control header visibility.
+    const headerVisible = useHeaderVisibilityContext();
+    console.log({
+        headerVisible: headerVisible,
+    });
     return (
         <>
             <ViewProvider>
-                <Header fullscreen={inIframe()}>
+                {/* Main header with transform animation */}
+                <div
+                    className={`fixed top-0 inset-x-0 z-30 transition-transform duration-300 ease-in-out`}
+                    style={{
+                        transform: headerVisible
+                            ? "translateY(0)"
+                            : "translateY(-100%)",
+                    }}
+                >
+                    <Header fullscreen={inIframe()} />
+                </div>
+
+                {/* Add padding so content isn’t hidden by the fixed header */}
+                <div className="pt-16 h-full">
                     <BaseRoutes />
-                </Header>
+                </div>
             </ViewProvider>
         </>
     );
 };
+
 export const App = () => {
     return (
         <HashRouter basename="/">
@@ -78,17 +104,19 @@ export const App = () => {
                     >
                         <IdentitiesProvider>
                             <AppProvider>
-                                <CanvasProvider>
-                                    <ReplyProgressProvider>
-                                        <ProfileProvider>
-                                            <AIReplyProvider>
-                                                <HostRegistryProvider>
-                                                    <Content />
-                                                </HostRegistryProvider>
-                                            </AIReplyProvider>
-                                        </ProfileProvider>
-                                    </ReplyProgressProvider>
-                                </CanvasProvider>
+                                <HeaderVisibilityProvider>
+                                    <CanvasProvider>
+                                        <ReplyProgressProvider>
+                                            <ProfileProvider>
+                                                <AIReplyProvider>
+                                                    <HostRegistryProvider>
+                                                        <Content />
+                                                    </HostRegistryProvider>
+                                                </AIReplyProvider>
+                                            </ProfileProvider>
+                                        </ReplyProgressProvider>
+                                    </CanvasProvider>
+                                </HeaderVisibilityProvider>
                             </AppProvider>
                         </IdentitiesProvider>
                     </PeerProvider>

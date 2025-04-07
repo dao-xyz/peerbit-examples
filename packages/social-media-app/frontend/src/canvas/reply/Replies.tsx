@@ -1,26 +1,17 @@
-import React, { Fragment, useMemo, useRef } from "react";
+import React, { Fragment, useMemo, useRef, useState, useEffect } from "react";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { ChevronDownIcon } from "@radix-ui/react-icons";
+import * as Toast from "@radix-ui/react-toast";
 import { Reply } from "./Reply"; // Uses the updated Reply component
 import { tw } from "../../utils/tailwind";
-import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
 import { useView, ViewType } from "../../view/ViewContex";
 import { useOnline, usePeer } from "@peerbit/react";
 import { SmoothReplyLine } from "./SmoothReplyLine";
-import { StickyHeader } from "./StickyHeader";
 import { useAutoReply } from "../AutoReplyContext";
-
-const readableView = (view: ViewType) => {
-    if (view === "chat") return "Chat view";
-    if (view === "new") return "New stuff";
-    if (view === "old") return "Old stuff";
-    if (view === "best") return "Popular";
-};
+import { useScrollToBottom } from "./useScrollToBottom";
+import { IoIosArrowDown } from "react-icons/io";
 
 export const Replies = () => {
-    const { view, setView, processedReplies, viewRoot } = useView();
-    const viewAsReadable = useMemo(() => readableView(view), [view]);
-    const { peers } = useOnline(viewRoot);
+    const { view, processedReplies } = useView();
     const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
     const { replyTo } = useAutoReply();
@@ -30,38 +21,30 @@ export const Replies = () => {
         [processedReplies]
     );
 
+    const { isAtBottom, scrollToBottom } = useScrollToBottom({
+        replies: processedReplies,
+        repliesContainerRef,
+    });
+
+    // State for managing the Radix Toast notification.
+    const [showNewMessagesToast, setShowNewMessagesToast] = useState(false);
+    const prevRepliesCountRef = useRef(processedReplies.length);
+
+    useEffect(() => {
+        // When new messages are added and the user isn't at the bottom, show the toast.
+        const shouldShowToastFromView = view === "chat" || view === "new";
+        if (
+            shouldShowToastFromView &&
+            processedReplies.length > prevRepliesCountRef.current &&
+            !isAtBottom
+        ) {
+            setShowNewMessagesToast(true);
+        }
+        prevRepliesCountRef.current = processedReplies.length;
+    }, [processedReplies, isAtBottom]);
+
     return (
-        <div className="flex flex-col mt-10 relative">
-            <StickyHeader>
-                <div className="w-full max-w-[876px] mx-auto flex flex-row">
-                    <DropdownMenu.Root>
-                        <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
-                            <span>{viewAsReadable}</span>
-                            <ChevronDownIcon className="ml-2" />
-                        </DropdownMenu.Trigger>
-                        <DropdownMenu.Content
-                            sideOffset={5}
-                            style={{ padding: "0.5rem", minWidth: "150px" }}
-                            className="bg-neutral-50 dark:bg-neutral-950 rounded-md shadow-lg"
-                        >
-                            {(["new", "old", "best", "chat"] as const).map(
-                                (sortType) => (
-                                    <DropdownMenu.Item
-                                        key={sortType}
-                                        className="menu-item text-sm"
-                                        onSelect={() => setView(sortType)}
-                                    >
-                                        {readableView(sortType)}
-                                    </DropdownMenu.Item>
-                                )
-                            )}
-                        </DropdownMenu.Content>
-                    </DropdownMenu.Root>
-                    <div className="ml-auto">
-                        <OnlineProfilesDropdown peers={peers} />
-                    </div>
-                </div>
-            </StickyHeader>
+        <div className="flex flex-col mt-10 relative w-full">
             {processedReplies && processedReplies.length > 0 ? (
                 <div
                     ref={repliesContainerRef}
@@ -101,6 +84,25 @@ export const Replies = () => {
                     No replies yet
                 </div>
             )}
+
+            {/* Radix Toast for new messages */}
+            <Toast.Provider swipeDirection="right">
+                <Toast.Root
+                    open={showNewMessagesToast}
+                    onOpenChange={setShowNewMessagesToast}
+                    duration={3000}
+                    className="bg-primary-200 dark:bg-primary-800 hover:bg-primary-500  text-black dark:text-white rounded-full px-4 py-2 shadow cursor-pointer"
+                    onClick={() => {
+                        scrollToBottom();
+                        setShowNewMessagesToast(false);
+                    }}
+                >
+                    <Toast.Title className="flex flex-row justify-center items-center gap-2">
+                        <span>New Messages</span> <IoIosArrowDown />
+                    </Toast.Title>
+                </Toast.Root>
+                <Toast.Viewport className="fixed bottom-[90px] left-1/2 transform -translate-x-1/2 flex flex-col p-2 gap-2 m-0 z-50 outline-none" />
+            </Toast.Provider>
         </div>
     );
 };

@@ -71,7 +71,7 @@ function useViewContextHook() {
         if (urlView && ["new", "old", "best", "chat"].includes(urlView)) {
             setView(urlView as ViewType);
         } else if (!view) {
-            setView("new");
+            setView("best");
         }
     }, [searchParams]);
 

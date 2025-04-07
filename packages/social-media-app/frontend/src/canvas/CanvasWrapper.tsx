@@ -491,29 +491,7 @@ export const CanvasWrapper = ({
             }
             setPendingRects([]);
             pendingCounter.current += pendingToSave.length;
-            console.log(
-                "ASAVE PENDING",
-                pendingToSave.map((x) =>
-                    x.path.map((y) => y.reference?.path.length)
-                )
-            );
-            console.log(
-                "BSAVE PENDING",
-                pendingToSave.map((x) =>
-                    x.path.map(
-                        (y) =>
-                            y.reference?.path.length +
-                            "/" +
-                            y.reference?.address
-                    )
-                )
-            );
-            console.log(
-                "CSAVE PENDING",
-                pendingToSave,
-                pendingToSave.map((x) => x.idString),
-                pendingToSave.map((y) => deserialize(serialize(y), Element))
-            );
+
             await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
             if (draft && onSave) {
                 await onSave();

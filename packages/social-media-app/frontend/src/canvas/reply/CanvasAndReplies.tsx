@@ -2,14 +2,15 @@ import React, { useRef, useState } from "react";
 import { ToolbarProvider } from "../toolbar/Toolbar.js";
 import { FullscreenEditor } from "../toolbar/FullscreenEditor.js";
 import { Spinner } from "../../utils/Spinner.js";
-import { Header } from "../header/Header.js";
-import { CanvasWrapper } from "../CanvasWrapper.js";
-import { Canvas } from "../Canvas.js";
 import { Replies } from "./Replies.js";
 import { ReplyingInProgress } from "./ReplyingInProgress.js";
 import { Toolbar } from "../toolbar/Toolbar.js";
 import { useView } from "../../view/ViewContex.js";
 import { PendingCanvasProvider } from "../PendingCanvasContext.js";
+import { useToolbarVisibility } from "./useToolbarVisibility.js";
+import { DetailedView } from "../detailed/DetailedView.js";
+import { SubHeader } from "./SubHeader.js";
+import { AnimatedStickyToolbar } from "./AnimatedStickyToolbar.js";
 
 const loadingTexts: string[] = [
     "Just a moment, we're getting things ready…",
@@ -55,12 +56,16 @@ const loadingTexts: string[] = [
 ];
 const textToLoad =
     loadingTexts[Math.floor(Math.random() * loadingTexts.length)];
-export const CanvasAndReplies = () => {
-    const toolbarRef = useRef(null);
-    const scrollContainerRef = useRef(null);
 
-    // Use the custom hook to get view-related state and actions
+export const CanvasAndReplies = () => {
+    const scrollContainerRef = useRef(null);
+    // This state will hold the measured toolbar height.
+    const [toolbarHeight, setToolbarHeight] = useState(0);
+
+    // Use the custom hook to get view-related state and actions.
     const { loading, canvases, viewRoot, lastReply } = useView();
+    // Pass the scrollContainerRef if your hook uses it.
+    const toolbarVisible = useToolbarVisibility(scrollContainerRef);
 
     if (!canvases || canvases.length === 0) {
         return (
@@ -68,15 +73,13 @@ export const CanvasAndReplies = () => {
                 <div className="flex flex-col gap-4 items-center">
                     {loading ? (
                         <div className="flex flex-row gap-2">
-                            <>{textToLoad}</>
+                            {textToLoad}
                             <Spinner />
                         </div>
                     ) : (
-                        canvases.length === 0 && (
-                            <div className="flex flex-row gap-2">
-                                Space not found
-                            </div>
-                        )
+                        <div className="flex flex-row gap-2">
+                            Space not found
+                        </div>
                     )}
                 </div>
             </div>
@@ -86,35 +89,28 @@ export const CanvasAndReplies = () => {
     return (
         <PendingCanvasProvider viewRoot={viewRoot}>
             <ToolbarProvider>
+                {/* Reserve space at the bottom equal to the toolbar height */}
                 <div
-                    className="h-fit flex flex-col relative grow shrink-0"
                     ref={scrollContainerRef}
+                    className="h-fit min-h-full flex flex-col relative grow shrink-0"
+                    style={{ paddingBottom: toolbarHeight }}
                 >
                     <FullscreenEditor>
-                        <div className="gap-2.5 w-full flex flex-col items-center">
-                            <div className="mt-6 w-full h-full">
-                                <div className="max-w-[876px] mx-auto w-full">
-                                    {canvases.length > 1 && (
-                                        <Header
-                                            variant="large"
-                                            canvas={viewRoot}
-                                            className="mb-2 px-4"
-                                        />
-                                    )}
-                                    <CanvasWrapper canvas={viewRoot}>
-                                        <Canvas bgBlur fitWidth draft={false} />
-                                    </CanvasWrapper>
-                                </div>
-                                <Replies />
-                            </div>
+                        <div className="mt-6 max-w-[876px] mx-auto w-full">
+                            <DetailedView />
                         </div>
+                        <SubHeader />
+                        <Replies />
                     </FullscreenEditor>
                 </div>
                 <ReplyingInProgress canvas={lastReply} />
-
-                <div className="sticky z-20 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950">
-                    <Toolbar ref={toolbarRef} />
-                </div>
+                {/* AnimatedStickyToolbar receives toolbarVisible and calls onHeightChange when its height changes */}
+                <AnimatedStickyToolbar
+                    toolbarVisible={toolbarVisible}
+                    onHeightChange={setToolbarHeight}
+                >
+                    <Toolbar />
+                </AnimatedStickyToolbar>
             </ToolbarProvider>
         </PendingCanvasProvider>
     );

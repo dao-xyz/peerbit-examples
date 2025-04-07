@@ -20,6 +20,7 @@ interface HeaderProps {
 }
 
 export const HEIGHT = "40px";
+const EXPANDED_BREADCRUMB_PADDING = "100px";
 
 export const Header = forwardRef((props: HeaderProps, ref) => {
     // Read initial theme from localStorage or default to "light"
@@ -36,7 +37,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
         >
             {!props.fullscreen && (
                 <>
-                    <div className="sticky top-0 inset-x-0 grid grid-cols-[0.5rem_auto_0.5rem_1fr_min-content_0.5rem_minmax(0%,var(--container-xl))_1fr_0.5rem_auto_0.5rem] grid-rows-[0.5rem_auto_0.5rem] z-40 bg-neutral-50 dark:bg-neutral-950">
+                    <div className="sticky  top-0 inset-x-0 grid grid-cols-[0.5rem_auto_0.5rem_1fr_min-content_0.5rem_minmax(0,var(--container-xl))_1fr_0.5rem_auto_0.5rem] grid-rows-[0.5rem_auto_0.5rem] z-40 bg-neutral-50 dark:bg-neutral-950">
                         <div className="col-span-full row-start-1 bg-neutral-50 dark:bg-neutral-950"></div>
                         <div className="col-start-2 flex items-center">
                             <HeaderLogo
@@ -72,10 +73,15 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                         onClick={() => {
                                             setIsBreadcrumbExpanded(false);
                                         }}
-                                        className="fixed inset-x-0 top-14 sm:absolute sm:top-full z-40 sm:pb-10"
+                                        className="fixed inset-x-0   h-full sm:absolute sm:top-full z-40 sm:pb-10"
                                     >
-                                        <div className="w-full h-full sm:h-fit sm:max-h-full overflow-y-auto sm:border-x sm:border-b sm:rounded-b-md sm:bg-neutral-50 dark:sm:bg-neutral-950">
-                                            <div className="w-full p-5">
+                                        <div
+                                            className="w-full  sm:h-fit overflow-y-auto sm:border-x sm:border-b sm:rounded-b-md sm:bg-neutral-50 dark:sm:bg-neutral-950"
+                                            style={{
+                                                maxHeight: `calc(100vh - ${EXPANDED_BREADCRUMB_PADDING})`,
+                                            }}
+                                        >
+                                            <div className="w-full h-full p-5">
                                                 <ExpandedContext />
                                             </div>
                                         </div>
