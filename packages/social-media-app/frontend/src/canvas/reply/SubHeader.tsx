@@ -31,7 +31,7 @@ export const SubHeader = () => {
                         style={{ padding: "0.5rem", minWidth: "150px" }}
                         className="bg-neutral-50 dark:bg-neutral-950 rounded-md shadow-lg"
                     >
-                        {(["new", "old", "best", "chat"] as const).map(
+                        {(["best", "chat", "new", "old"] as const).map(
                             (sortType) => (
                                 <DropdownMenu.Item
                                     key={sortType}
