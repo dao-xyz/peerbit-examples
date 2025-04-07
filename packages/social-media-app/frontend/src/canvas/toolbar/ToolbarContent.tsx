@@ -14,6 +14,7 @@ import * as Switch from "@radix-ui/react-switch";
 import { useView } from "../../view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
 import { useAutoReply } from "../AutoReplyContext";
+import { FaMagic } from "react-icons/fa";
 
 interface ToolbarContentProps {
     onToggleAppSelect: () => void;
@@ -105,7 +106,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                 >
                     {/* Top area: pending images canvas positioned above the toolbar */}
                     <div
-                        className="absolute left-0 flex justify-center"
+                        className="absolute flex justify-center"
                         style={{ top: "0", transform: "translateY(-100%)" }}
                     >
                         <Canvas appearance="chat-view-images">
@@ -154,6 +155,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 </Switch.Root>
                             </div>
                         </form>
+
                         {/* AI reply button */}
                         {/*  <Toggle.Root
                             onPressedChange={(e) => {
