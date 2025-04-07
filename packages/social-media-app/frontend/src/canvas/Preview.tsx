@@ -378,7 +378,7 @@ const PostPreview = ({
             {text && (
                 <button
                     onClick={onClick}
-                    className="col-start-2 col-span-1 bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
+                    className="col-start-2 col-span-1 bg-neutral-50 dark:bg-neutral-950 rounded-md  py-1"
                     ref={forwardRef}
                 >
                     <PreviewFrame element={text} previewLines={3} noPadding />
