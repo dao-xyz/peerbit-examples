@@ -55,7 +55,7 @@ export const AnimatedStickyToolbar = ({
             {/* The inner toolbar is animated with transform */}
             <div
                 ref={innerRef}
-                className="w-full bg-neutral-50 dark:bg-neutral-950 transition-transform duration-300"
+                className="w-full bg-neutral-50 dark:bg-neutral-950 duration-800 ease-in-out"
                 style={{ transform: `translateY(${translateY})` }}
             >
                 {children}

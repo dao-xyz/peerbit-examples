@@ -11,7 +11,7 @@ import { ProfileProvider } from "./profile/useProfiles";
 import { IdentitiesProvider } from "./identity/useIdentities";
 import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
 import { HostRegistryProvider } from "@giga-app/sdk";
-import { useEffect } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ThemeProvider } from "./theme/useTheme";
 import { ReplyProgressProvider } from "./canvas/reply/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
@@ -54,16 +54,28 @@ export const Content = () => {
     console.log({
         headerVisible: headerVisible,
     });
+    const [headerHeight, setHeaderHeight] = useState(0);
+    const headerRef = useRef<HTMLDivElement>(null);
+
+    useLayoutEffect(() => {
+        if (headerRef.current) {
+            setHeaderHeight(headerRef.current.offsetHeight);
+        }
+    }, []);
+
     return (
         <>
             <ViewProvider>
                 {/* Main header with transform animation */}
                 <div
-                    className={`fixed top-0 inset-x-0 z-30 transition-transform duration-300 ease-in-out`}
+                    ref={headerRef}
+                    className={`fixed top-0 inset-x-0 z-30 transition-transform duration-800 ease-in-out`}
                     style={{
                         transform: headerVisible
                             ? "translateY(0)"
-                            : "translateY(-100%)",
+                            : `translateY(-${headerHeight}px)`,
+                        willChange: "transform",
+                        backfaceVisibility: "hidden",
                     }}
                 >
                     <Header fullscreen={inIframe()} />

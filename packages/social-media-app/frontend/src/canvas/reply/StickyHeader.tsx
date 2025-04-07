@@ -40,7 +40,7 @@ export const StickyHeader = ({
         <div
             ref={ref}
             className={
-                `sticky top-14 z-10 transition-transform duration-300 ease-in-out flex flex-row items-center justify-between py-1 px-2.5 ` +
+                `sticky top-14 z-10 transition-transform duration-800 ease-in-out flex flex-row items-center justify-between py-1 px-2.5 ` +
                 (className ?? "")
             }
             style={{
