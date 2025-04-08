@@ -73,6 +73,7 @@ export const ImageContent = ({
                     1
                 );
             }
+            canvas.remove();
         };
         console.log("BLOB URL", content.data, content.mimeType);
         img.src = originalUrl;

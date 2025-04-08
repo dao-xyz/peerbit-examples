@@ -10,6 +10,7 @@ import {
     Canvas,
     Element,
     Layout,
+    LOWEST_QUALITY,
     StaticContent,
     StaticMarkdownText,
 } from "@giga-app/interface";
@@ -207,6 +208,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                             content: new StaticMarkdownText({
                                 text: GIGA_ROOT_POST,
                             }),
+                            quality: LOWEST_QUALITY,
                         }),
                         parent: result,
                     })

@@ -16,6 +16,7 @@ import {
     getOwnedAndSubownedElementsQuery,
     getTextElementsQuery,
     Layout,
+    LOWEST_QUALITY,
     ReplyingInProgresss,
     ReplyingNoLongerInProgresss,
     StaticContent,
@@ -496,6 +497,7 @@ export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
         new Element({
             content: new StaticContent({
                 content: new StaticMarkdownText({ text }),
+                quality: LOWEST_QUALITY,
             }),
             location: Layout.zero(),
             publicKey: parent.node.identity.publicKey,

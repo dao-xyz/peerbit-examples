@@ -1,17 +1,7 @@
-import {
-    StaticContent,
-    StaticImage,
-    StaticMarkdownText,
-    Element,
-    ElementContent,
-    StaticPartialImage,
-} from "@giga-app/interface";
-import { forwardRef, useEffect, useMemo } from "react";
+import { Element, ElementContent } from "@giga-app/interface";
+import { useMemo } from "react";
 import { Frame } from "../content/Frame";
-import {
-    rectIsStaticMarkdownText,
-    rectIsStaticPartialImage,
-} from "./utils/rect";
+import { rectIsStaticMarkdownText } from "./utils/rect";
 import { tw } from "../utils/tailwind";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { toString } from "mdast-util-to-string";

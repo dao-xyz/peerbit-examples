@@ -1,4 +1,11 @@
-import { Element, ElementContent, StaticContent } from "@giga-app/interface";
+import {
+    Element,
+    ElementContent,
+    HIGHEST_QUALITY,
+    LOWEST_QUALITY,
+    MEDIUM_QUALITY,
+    StaticContent,
+} from "@giga-app/interface";
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
@@ -13,6 +20,20 @@ type SizeProps = {
     scaled?: boolean;
     fitHeight?: boolean;
     fitWidth?: boolean;
+};
+
+const onlyLowestQuality = (rect: Element<any>[]): Element[] => {
+    if (rect.length === 0) return rect;
+    for (const quality of [LOWEST_QUALITY, MEDIUM_QUALITY, HIGHEST_QUALITY]) {
+        let out = rect.filter(
+            (x) =>
+                x.content instanceof StaticContent === false ||
+                x.content.quality === quality
+        );
+        if (out.length > 0 && out.find((x) => x instanceof StaticContent))
+            return out; // if we found one static content with the quality we are looking for, return all rects that are filtered by that quality
+    }
+    return rect;
 };
 
 export const Canvas = (
@@ -40,13 +61,16 @@ export const Canvas = (
 
     // First filter based on appearance, then group partial images.
     const filteredRects = useMemo(() => {
-        const allRects = [...rects, ...pendingRects].filter((rect, i) =>
+        let allRects = [...rects, ...pendingRects].filter((rect, i) =>
             properties.appearance === "chat-view-images"
                 ? i > 0 || !rectIsStaticMarkdownText(rect)
                 : properties.appearance === "chat-view-text"
                 ? rectIsStaticMarkdownText(rect)
                 : true
         );
+        if (properties.appearance === "chat-view-images") {
+            allRects = onlyLowestQuality(allRects);
+        }
         return groupPartialImages(allRects);
     }, [rects, pendingRects, properties.appearance, groupPartialImages]);
 

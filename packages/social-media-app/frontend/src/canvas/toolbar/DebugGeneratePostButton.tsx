@@ -8,6 +8,7 @@ import {
     ElementContent,
     IFrameContent,
     Layout,
+    LOWEST_QUALITY,
     StaticContent,
     StaticImage,
     StaticMarkdownText,
@@ -141,6 +142,7 @@ export const DebugGeneratePostButton = () => {
                             width: 200,
                             height: 300,
                         }),
+                        quality: LOWEST_QUALITY,
                     });
                 } else if (type === "text") {
                     mockContent = new StaticContent({
@@ -149,6 +151,8 @@ export const DebugGeneratePostButton = () => {
                                 Math.round(Math.max(Math.random() * 200, 10))
                             ),
                         }),
+
+                        quality: LOWEST_QUALITY,
                     });
                 } else if (type === "twitch") {
                     mockContent = new IFrameContent({

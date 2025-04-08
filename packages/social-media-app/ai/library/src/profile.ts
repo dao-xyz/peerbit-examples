@@ -5,6 +5,7 @@ import {
     Canvas,
     Element,
     Layout,
+    LOWEST_QUALITY,
     StaticContent,
     StaticImage,
 } from "@giga-app/interface";
@@ -44,6 +45,7 @@ export const createProfile = async (client: ProgramClient) => {
                         width: 100,
                         height: 100,
                     }),
+                    quality: LOWEST_QUALITY,
                 }),
                 parent: canvas,
                 publicKey: client.identity.publicKey,

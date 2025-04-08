@@ -14,7 +14,6 @@ import * as Switch from "@radix-ui/react-switch";
 import { useView } from "../../view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
 import { useAutoReply } from "../AutoReplyContext";
-import { FaMagic } from "react-icons/fa";
 
 interface ToolbarContentProps {
     onToggleAppSelect: () => void;
@@ -103,6 +102,9 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                 <div
                     ref={ref}
                     className="flex flex-col z-20 w-full left-0 rounded bg-neutral-100 dark:bg-neutral-900"
+                    style={{
+                        paddingBottom: "env(safe-area-inset-bottom, 30px)",
+                    }}
                 >
                     {/* Top area: pending images canvas positioned above the toolbar */}
                     <div

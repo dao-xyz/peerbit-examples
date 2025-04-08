@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Canvas as CanvasDB } from "@giga-app/interface";
+import { Canvas as CanvasDB, MEDIUM_QUALITY } from "@giga-app/interface";
 import { Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "../Preview.js";
@@ -151,7 +151,7 @@ export const Reply = ({
                 )}
                 {/* Preview / Canvas Section */}
                 <div /* className="overflow-hidden" */>
-                    <CanvasWrapper canvas={canvas}>
+                    <CanvasWrapper canvas={canvas} quality={MEDIUM_QUALITY}>
                         {isExpandedBreadcrumb ? (
                             <CanvasPreview
                                 forwardRef={forwardedRef}

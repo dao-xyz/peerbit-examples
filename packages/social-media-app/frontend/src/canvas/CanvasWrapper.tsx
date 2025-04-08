@@ -19,8 +19,11 @@ import {
     StaticImage,
     SimpleWebManifest,
     getOwnedElementsQuery,
+    getQuantityQuery,
+    LOWEST_QUALITY,
+    Quality,
 } from "@giga-app/interface";
-import { fromBase64, sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
+import { sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
@@ -102,6 +105,7 @@ interface CanvasWrapperProps {
     onSave?: () => void | Promise<void>;
     multiCanvas?: boolean;
     onContentChange?: (elements: Element[]) => void;
+    quality?: Quality;
 }
 
 export const CanvasWrapper = ({
@@ -111,6 +115,7 @@ export const CanvasWrapper = ({
     onSave,
     multiCanvas,
     onContentChange,
+    quality,
 }: CanvasWrapperProps) => {
     // Standard hooks & context from your existing code.
     const { peer } = usePeer();
@@ -135,7 +140,10 @@ export const CanvasWrapper = ({
                 !canvas || canvas.closed
                     ? undefined
                     : {
-                          query: getOwnedElementsQuery(canvas),
+                          query: [
+                              ...getOwnedElementsQuery(canvas),
+                              ...getQuantityQuery(quality ?? LOWEST_QUALITY),
+                          ],
                           sort: new Sort({ key: ["location", "y"] }),
                       },
             debug: canvas && canvas.path.length > 0,
@@ -350,10 +358,13 @@ export const CanvasWrapper = ({
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
     ) => {
         try {
-            const threshold = 3 * 1024 * 1024;
-            const image = await readFileAsImage(file);
-            console.log("FILE SIZE", file.size);
-            if (file.size > threshold) {
+            const images = await readFileAsImage(file);
+            const newElements: Element[] = await addRect(images, options);
+
+            setIsEmpty(false);
+            onContentChange?.(newElements);
+
+            /* if (file.size > threshold) {
                 const fullData = image.data;
                 const chunkSize = threshold;
                 const parts: Uint8Array[] = [];
@@ -380,13 +391,7 @@ export const CanvasWrapper = ({
                     partialImages.map((x) => new StaticContent({ content: x })),
                     options
                 );
-                console.log({
-                    newElements: newElements.map((x) =>
-                        x.content["content"] instanceof StaticPartialImage
-                            ? x.content["content"].partialData.length
-                            : 0
-                    ),
-                });
+
                 setIsEmpty(false);
                 onContentChange?.(newElements);
             } else {
@@ -405,7 +410,7 @@ export const CanvasWrapper = ({
                 );
                 setIsEmpty(false);
                 onContentChange?.([element]);
-            }
+            } */
         } catch (error) {
             showError({ message: "Failed to insert image", error });
         }
@@ -450,6 +455,7 @@ export const CanvasWrapper = ({
                 const defaultValue = native.default();
                 appToAdd = new StaticContent({
                     content: defaultValue,
+                    quality: LOWEST_QUALITY,
                 });
             } else {
                 appToAdd = new IFrameContent({
@@ -460,6 +466,7 @@ export const CanvasWrapper = ({
         } else {
             appToAdd = new StaticContent({
                 content: new StaticMarkdownText({ text: "" }),
+                quality: LOWEST_QUALITY,
             });
         }
         return addRect(appToAdd, {
@@ -595,12 +602,15 @@ export const CanvasWrapper = ({
                 group.parts[0].totalParts === group.parts.length
             ) {
                 const combinedImage = StaticPartialImage.combine(group.parts);
-                const rep = group.rects[0];
+                const rep = group.rects[0] as Element<StaticContent>;
                 const combinedRect = new Element({
                     publicKey: rep.publicKey,
                     id: rep.id,
                     location: rep.location,
-                    content: new StaticContent({ content: combinedImage }),
+                    content: new StaticContent({
+                        quality: rep.content.quality,
+                        content: combinedImage,
+                    }),
                     parent: canvas,
                 });
                 finalRects.push(combinedRect);

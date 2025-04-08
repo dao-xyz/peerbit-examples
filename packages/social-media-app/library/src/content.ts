@@ -120,6 +120,13 @@ type PathProperties =
     | { path: CanvasReference[] }
     | {};
 
+export const LOWEST_QUALITY: 0 = 0;
+export const HIGHEST_QUALITY: 4294967295 = 4294967295; // max u32
+export const MEDIUM_QUALITY: 2147483647 = 2147483647; // 50% of max u32
+export type Quality =
+    | typeof LOWEST_QUALITY
+    | typeof HIGHEST_QUALITY
+    | typeof MEDIUM_QUALITY;
 @variant(0)
 export class Element<T extends ElementContent = ElementContent> {
     @field({ type: fixedArray("u8", 32) })
@@ -189,6 +196,9 @@ export class IndexableElement {
     @field({ type: Layout })
     location: Layout;
 
+    @field({ type: "u32" })
+    quality: number; // the higher the number, the better the quality
+
     constructor(properties: {
         id: Uint8Array;
         publicKey: PublicSignKey;
@@ -196,6 +206,7 @@ export class IndexableElement {
         content: string;
         location: Layout;
         path: string[];
+        quality: number;
     }) {
         this.id = properties.id;
         this.publicKey = properties.publicKey.bytes;
@@ -204,6 +215,10 @@ export class IndexableElement {
         this.location = properties.location;
         this.path = properties.path;
         this.pathDepth = properties.path.length;
+        if (properties.quality == null) {
+            throw new Error("Quality is required");
+        }
+        this.quality = properties.quality;
     }
 
     private _idString: string;
@@ -324,6 +339,16 @@ export const getRepliesQuery = (to: { address: string }) => [
         method: StringMatchMethod.exact,
     }),
 ];
+
+export const getQuantityQuery = (quality: number) => {
+    return [
+        new IntegerCompare({
+            key: "quality",
+            value: quality,
+            compare: Compare.Equal,
+        }),
+    ];
+};
 
 export const getOwnedElementsQuery = (to: { address: string; path: any[] }) => [
     new StringMatch({
@@ -540,6 +565,10 @@ export class Canvas extends Program<CanvasArgs> {
                             content: indexable.content,
                             location: arg.location,
                             path: arg.path.map((x) => x.address),
+                            quality:
+                                arg.content instanceof StaticContent
+                                    ? arg.content.quality
+                                    : LOWEST_QUALITY,
                         });
                     },
                 },
@@ -778,6 +807,7 @@ export class Canvas extends Program<CanvasArgs> {
                     new Element({
                         content: new StaticContent<StaticMarkdownText>({
                             content: new StaticMarkdownText({ text: name }),
+                            quality: LOWEST_QUALITY,
                         }),
                         location: Layout.zero(),
                         publicKey: this.node.identity.publicKey,
@@ -1013,9 +1043,13 @@ export class StaticContent<
     @field({ type: AbstractStaticContent })
     content: T;
 
-    constructor(properties: { content: T }) {
+    @field({ type: "u32" })
+    quality: Quality;
+
+    constructor(properties: { content: T; quality: Quality }) {
         super();
         this.content = properties.content;
+        this.quality = properties.quality;
     }
 
     toIndex() {

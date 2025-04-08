@@ -1,8 +1,13 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { StaticMarkdownText } from "@giga-app/interface";
+import {
+    LOWEST_QUALITY,
+    StaticContent,
+    StaticMarkdownText,
+} from "@giga-app/interface";
 import { ChangeCallback } from "./types";
+import { FaMagic } from "react-icons/fa";
 
 export type MarkdownContentProps = {
     content: StaticMarkdownText;
@@ -56,9 +61,9 @@ export const MarkdownContent = ({
                 if (
                     lastDims.current &&
                     Math.abs(lastDims.current.width - newDims.width) <
-                        threshold &&
+                    threshold &&
                     Math.abs(lastDims.current.height - newDims.height) <
-                        threshold
+                    threshold
                 ) {
                     continue;
                 }
@@ -120,7 +125,12 @@ export const MarkdownContent = ({
                     try {
                         saving.current = true;
                         await onChange?.(
-                            new StaticMarkdownText({ text: currentValue }),
+                            new StaticContent({
+                                content: new StaticMarkdownText({
+                                    text: currentValue,
+                                }),
+                                quality: LOWEST_QUALITY,
+                            }),
                             { save: true }
                         );
                     } catch (error) {
@@ -140,7 +150,13 @@ export const MarkdownContent = ({
         const newText = e.target.value;
         setText(newText);
         autoResize();
-        onChange && onChange(new StaticMarkdownText({ text: newText }));
+        onChange &&
+            onChange(
+                new StaticContent({
+                    content: new StaticMarkdownText({ text: newText }),
+                    quality: LOWEST_QUALITY,
+                })
+            );
     };
 
     const handleBlur = () => {
@@ -156,30 +172,33 @@ export const MarkdownContent = ({
     return (
         <div
             ref={containerRef}
-            className={`${commonClasses} w-full text-left ${
-                editable ? "cursor-text" : ""
-            }`}
+            className={`${commonClasses} w-full text-left ${editable ? "cursor-text" : ""
+                }`}
             onClick={editable && !isEditing ? handleStartEditing : undefined}
         >
             {editable && isEditing ? (
-                <textarea
-                    ref={textareaRef}
-                    value={text}
-                    onChange={handleTextChange}
-                    onBlur={handleBlur}
-                    onKeyDown={handleKeyDown}
-                    onInput={autoResize}
-                    className={`${commonClasses} w-full border-none outline-none resize-none block dark:bg-black`}
-                    rows={1}
-                    placeholder="Type here..."
-                    style={{ overflow: "hidden" }}
-                />
+                <div className="flex flex-row">
+                    <textarea
+                        ref={textareaRef}
+                        value={text}
+                        onChange={handleTextChange}
+                        onBlur={handleBlur}
+                        onKeyDown={handleKeyDown}
+                        onInput={autoResize}
+                        className={`${commonClasses} w-full border-none outline-none resize-none block rounded dark:bg-black`}
+                        rows={1}
+                        placeholder="Type here..."
+                        style={{ overflow: "hidden" }}
+                    />{/* 
+                    <button disabled className="btn btn-icon ">
+                        <FaMagic />
+                    </button> */}
+                </div>
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={`${commonClasses} ${
-                        previewLines ? "line-clamp-[var(--preview-lines)]" : ""
-                    } ${previewLines === 1 ? "break-all" : ""}`}
+                    className={`${commonClasses} ${previewLines ? "line-clamp-[var(--preview-lines)]" : ""
+                        } ${previewLines === 1 ? "break-all" : ""}`}
                 >
                     <Markdown
                         disallowedElements={

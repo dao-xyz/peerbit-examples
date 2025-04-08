@@ -252,13 +252,15 @@ export const Frame = (properties: {
                     canOpenFullscreen={properties.canOpenFullscreen}
                     onResize={() => {}}
                     onChange={async (newContent, options) => {
-                        const content = new StaticContent({
-                            content: newContent,
-                        });
+                        if (Array.isArray(newContent)) {
+                            throw new Error(
+                                "Array of content is not supported"
+                            );
+                        }
 
                         await mutate(
                             (element) => {
-                                element.content = content;
+                                element.content = newContent;
                                 onContentChangeContextTrigger(element);
                                 return true;
                             },

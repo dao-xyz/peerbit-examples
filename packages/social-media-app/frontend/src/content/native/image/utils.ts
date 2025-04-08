@@ -1,8 +1,43 @@
-import { StaticImage } from "@giga-app/interface";
+import {
+    StaticImage,
+    StaticPartialImage,
+    LOWEST_QUALITY,
+    HIGHEST_QUALITY,
+    MEDIUM_QUALITY,
+    StaticContent,
+} from "@giga-app/interface";
+import { sha256Base64Sync } from "@peerbit/crypto";
 
-export const readFileAsImage = async (file: File): Promise<StaticImage> => {
+type Quality =
+    | typeof LOWEST_QUALITY
+    | typeof HIGHEST_QUALITY
+    | typeof MEDIUM_QUALITY;
+
+/**
+ * Reads an image File and returns a blended array of images.
+ * For each quality, the file is resized using a reusable canvas according to target widths:
+ *   - LOWEST_QUALITY: suitable for thumbnails (max width 256px)
+ *   - MEDIUM_QUALITY: suitable for feeds (max width 640px), generated only if original width ≥ 640px
+ *   - HIGHEST_QUALITY: raw full-size image.
+ * If the generated image data exceeds 3MB, it is split into partial images.
+ *
+ * @param file – The input File object.
+ * @param qualities – Array of quality markers; defaults to [LOWEST_QUALITY, HIGHEST_QUALITY].
+ *                   Note: LOWEST_QUALITY must be included.
+ * @returns A Promise resolving to a flat array of StaticContent objects containing either full images or partial images.
+ */
+export const readFileAsImage = async (
+    file: File,
+    qualities: Quality[] = [LOWEST_QUALITY, MEDIUM_QUALITY, HIGHEST_QUALITY]
+): Promise<StaticContent<StaticImage | StaticPartialImage>[]> => {
     if (!file) {
         throw new Error("No file provided");
+    }
+
+    if (!qualities.includes(LOWEST_QUALITY)) {
+        throw new Error(
+            "LOWEST_QUALITY must be included in the qualities array"
+        );
     }
 
     // Read the file as an ArrayBuffer.
@@ -15,38 +50,151 @@ export const readFileAsImage = async (file: File): Promise<StaticImage> => {
                 reject(new Error("Unexpected result type"));
             }
         };
-        reader.onerror = (error) => reject(error);
+        reader.onerror = (err) => reject(err);
         reader.readAsArrayBuffer(file);
     });
 
-    // Create a Blob and an object URL to load the image.
+    // Create a Blob and an object URL for loading the image.
     const blob = new Blob([arrayBuffer], { type: file.type });
     const url = URL.createObjectURL(blob);
 
-    // Load the image to get its natural dimensions.
-    const { width, height } = await new Promise<{
-        width: number;
-        height: number;
-    }>((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-            resolve({ width: img.naturalWidth, height: img.naturalHeight });
-            URL.revokeObjectURL(url);
-        };
-        img.onerror = (error) => {
-            reject(error);
-            URL.revokeObjectURL(url);
-        };
-        img.src = url;
-    });
+    // Load the image to access its natural dimensions.
+    const imgElement = await new Promise<HTMLImageElement>(
+        (resolve, reject) => {
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                resolve(img);
+            };
+            img.onerror = (err) => {
+                URL.revokeObjectURL(url);
+                reject(err);
+            };
+            img.src = url;
+        }
+    );
 
-    // Return a new StaticImage with the accurate dimensions.
-    return new StaticImage({
-        data: new Uint8Array(arrayBuffer),
-        mimeType: file.type,
-        alt: file.name,
-        width,
-        height,
-        caption: "",
-    });
+    const originalWidth = imgElement.naturalWidth;
+    const originalHeight = imgElement.naturalHeight;
+
+    // Create a single reusable canvas.
+    const canvas = document.createElement("canvas");
+    const ctx = canvas.getContext("2d");
+    if (!ctx) {
+        throw new Error("Could not get canvas context");
+    }
+
+    // Set the size threshold for splitting image data.
+    const threshold = 3 * 1024 * 1024; // 3 MB
+
+    const results: StaticContent<StaticImage | StaticPartialImage>[] = [];
+
+    // Process each quality sequentially.
+    for (const quality of qualities) {
+        let scale = 1.0;
+
+        switch (quality) {
+            case LOWEST_QUALITY: {
+                // Target for thumbnail: max width 256px.
+                const targetWidth = 256;
+                // If the original image is larger, scale down to target;
+                // if not, use the original as-is.
+                scale =
+                    originalWidth > targetWidth
+                        ? targetWidth / originalWidth
+                        : 1.0;
+                break;
+            }
+            case MEDIUM_QUALITY: {
+                // Target for feed images: exactly 640px width.
+                const targetWidth = 640;
+                // Skip generation if the original image is not wide enough.
+                if (originalWidth < targetWidth) continue;
+                scale = targetWidth / originalWidth;
+                break;
+            }
+            case HIGHEST_QUALITY: {
+                // Raw full-size image.
+                scale = 1.0;
+                break;
+            }
+            default:
+                scale = 1.0;
+        }
+
+        const scaledWidth = Math.round(originalWidth * scale);
+        const scaledHeight = Math.round(originalHeight * scale);
+
+        // Reset the canvas dimensions and clear previous content.
+        canvas.width = scaledWidth;
+        canvas.height = scaledHeight;
+        ctx.clearRect(0, 0, scaledWidth, scaledHeight);
+
+        // Draw the image into the canvas.
+        ctx.drawImage(imgElement, 0, 0, scaledWidth, scaledHeight);
+
+        // Convert the canvas content into a Blob.
+        const scaledBlob: Blob = await new Promise((resolve, reject) => {
+            canvas.toBlob((blob) => {
+                if (blob) resolve(blob);
+                else reject(new Error("Canvas toBlob conversion failed"));
+            }, file.type);
+        });
+        const scaledArrayBuffer = await scaledBlob.arrayBuffer();
+        const imageData = new Uint8Array(scaledArrayBuffer);
+
+        // Create a StaticImage instance.
+        const staticImage = new StaticImage({
+            data: imageData,
+            mimeType: file.type,
+            alt: file.name,
+            width: scaledWidth,
+            height: scaledHeight,
+            caption: "",
+        });
+
+        // If the image data exceeds the threshold, split into partial images.
+        if (staticImage.data.length > threshold) {
+            const parts: Uint8Array[] = [];
+            for (let i = 0; i < staticImage.data.length; i += threshold) {
+                parts.push(staticImage.data.slice(i, i + threshold));
+            }
+            const totalParts = parts.length;
+            const groupKey = sha256Base64Sync(staticImage.data);
+
+            // Add each partial image to the results.
+            for (let index = 0; index < parts.length; index++) {
+                const partialImage = new StaticPartialImage({
+                    partialData: parts[index],
+                    partIndex: index,
+                    totalParts,
+                    mimeType: file.type,
+                    width: scaledWidth,
+                    height: scaledHeight,
+                    alt: file.name,
+                    caption: "",
+                    groupKey,
+                });
+                results.push(
+                    new StaticContent({
+                        quality,
+                        content: partialImage,
+                    })
+                );
+            }
+        } else {
+            // Otherwise, add the full static image.
+            results.push(
+                new StaticContent({
+                    quality,
+                    content: staticImage,
+                })
+            );
+        }
+    }
+
+    // Clean up the canvas.
+    canvas.remove();
+
+    return results;
 };

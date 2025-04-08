@@ -11,6 +11,7 @@ import {
     getTextElementsQuery,
     getImagesQuery,
     getSubownedElementsQuery,
+    LOWEST_QUALITY,
 } from "../content.js";
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
@@ -308,6 +309,7 @@ describe("content", () => {
                                 width: 100,
                                 mimeType: "image/png",
                             }),
+                            quality: LOWEST_QUALITY,
                         }),
                         parent: subcanvasWithImage,
                         location: Layout.zero(),
