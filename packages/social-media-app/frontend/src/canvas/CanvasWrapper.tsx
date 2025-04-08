@@ -611,7 +611,6 @@ export const CanvasWrapper = ({
             }
         });
 
-        console.log(groups);
         // Sort the final elements by the y coordinate.
         finalRects.sort((a, b) => a.location.y - b.location.y);
         return finalRects;

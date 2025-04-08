@@ -9,7 +9,7 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
-import { Canvas as CanvasDB } from "@giga-app/interface";
+import { Canvas as CanvasDB, LOWEST_QUALITY } from "@giga-app/interface";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { CanvasPreview } from "../canvas/Preview";
 const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
@@ -35,7 +35,7 @@ const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
                     <Fragment key={ix}>
                         {ix > 1 && <span className="px-1">/</span>}
                         {ix > 0 && (
-                            <CanvasWrapper canvas={x}>
+                            <CanvasWrapper canvas={x} quality={LOWEST_QUALITY}>
                                 <CanvasPreview variant="breadcrumb" />
                             </CanvasWrapper>
                         )}

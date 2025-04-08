@@ -55,6 +55,7 @@ export const ImageContent = ({
         const img = new Image();
         img.onload = () => {
             const canvas = document.createElement("canvas");
+            console.log("IMAGE LOADED", img.width, img.height);
             canvas.width = img.width;
             canvas.height = img.height;
             const ctx = canvas.getContext("2d");

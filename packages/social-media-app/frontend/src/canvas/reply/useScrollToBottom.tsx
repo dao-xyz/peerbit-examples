@@ -71,6 +71,9 @@ export const useScrollToBottom = (properties: {
 
     // Update latest reply ref and scroll position before layout changes.
     useLayoutEffect(() => {
+        if (!viewIsShouldScrollToBottom) {
+            return;
+        }
         if (processedReplies.length > 0) {
             latestReplyRef.current =
                 processedReplies[processedReplies.length - 1];

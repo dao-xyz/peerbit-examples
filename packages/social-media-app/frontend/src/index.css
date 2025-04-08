@@ -524,44 +524,100 @@ code {
         animation-delay: 666ms;
     }
 
-
-    /* Ensure the content stays above the animated border */
+    /* Container for your content with “animated border” behavior */
     .animated-border {
-        /* add the animation, but pause it by default */
-        animation: spinx 7.5s infinite linear running;
-        --inner-bg: white;
+        position: relative;
+    }
 
-        /* in ligth mode theme eutral 300 in dark mode theme neutral 900 */
-        --bg-border: theme('colors.neutral.300');
 
-        .dark & {
-            --bg-border: theme('colors.neutral.900');
+    /* Base styles for each corner container */
+    .animated-border .corner {
+        position: absolute;
+        width: 24px;
+        height: 24px;
+    }
+
+    /* The quarter “arc” for each corner */
+    .animated-border .corner .arc {
+        display: block;
+        width: 100%;
+        height: 100%;
+        /* Only two borders will be visible for the arc */
+        animation: pulsex 2.5s infinite ease-in-out;
+    }
+
+    /* Top-left corner (inside) */
+    .animated-border .corner.top-left {
+        top: 0;
+        left: 0;
+        /* Instead of moving outward with translate(-50%, -50%), this inset positions it inside */
+        transform: translate(10%, 10%);
+
+    }
+
+    .animated-border .corner.top-left .arc {
+        border-top: 4px solid #0077ff;
+        border-left: 4px solid #0077ff;
+        border-top-left-radius: 8px;
+
+    }
+
+    /* Top-right corner (inside) */
+    .animated-border .corner.top-right {
+        top: 0;
+        right: 0;
+        transform: translate(-10%, 10%);
+    }
+
+    .animated-border .corner.top-right .arc {
+        border-top: 4px solid #0077ff;
+        border-right: 4px solid #0077ff;
+        border-top-right-radius: 8px;
+
+    }
+
+    /* Bottom-left corner (inside) */
+    .animated-border .corner.bottom-left {
+        bottom: 0;
+        left: 0;
+        transform: translate(10%, -10%);
+    }
+
+    .animated-border .corner.bottom-left .arc {
+        border-bottom: 4px solid #0077ff;
+        border-left: 4px solid #0077ff;
+        border-bottom-left-radius: 8px;
+
+    }
+
+    /* Bottom-right corner (inside) */
+    .animated-border .corner.bottom-right {
+        bottom: 0;
+        right: 0;
+        transform: translate(-10%, -10%);
+    }
+
+    .animated-border .corner.bottom-right .arc {
+        border-bottom: 4px solid #0077ff;
+        border-right: 4px solid #0077ff;
+        border-bottom-right-radius: 8px;
+
+    }
+
+
+    /* Pulse animation makes the corner arc expand slightly while reducing in opacity */
+    @keyframes pulsex {
+
+        0%,
+        100% {
+            transform: scale(1);
+            opacity: 1;
         }
 
-
-
-
-        /**
-        * Using `background-origin` we can create a “border” using two gradients. And to
-        * make the gradients better-looking, we use OKLCH.
-        *
-        * @see https://developer.mozilla.org/en-US/docs/Web/CSS/background-origin
-        * @see https://evilmartians.com/chronicles/oklch-in-css-why-quit-rgb-hsl
-        */
-        background:
-        /* Background colors don’t work with `background-origin`, so use a gradient. */
-        linear-gradient(to bottom, var(--inner-bg), var(--inner-bg)) padding-box,
-
-        /* ends at inner border edges */
-        conic-gradient(from var(--bg-angle), var(--bg-border), var(--bg-border), #0077ff) border-box;
-
-        /*  conic-gradient(from var(--bg-angle), #0077ff, #00ffcc, #0077ff) border-box; */
-
-        /* extends to outer border edges */
-        /* a clear border lets the background gradient shine through */
-        border: 1rem solid transparent;
-        border-radius: 0px;
-
+        50% {
+            transform: scale(1.2);
+            opacity: 1;
+        }
     }
 
     .animated-bg-btn {
@@ -576,6 +632,10 @@ code {
         /* Matches Tailwind's rounded-md */
         color: white;
 
+    }
+
+    .max-height-inherit-children * {
+        max-height: inherit;
     }
 }
 

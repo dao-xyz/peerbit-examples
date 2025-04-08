@@ -51,9 +51,7 @@ export const Content = () => {
 
     // Use our new hook to control header visibility.
     const headerVisible = useHeaderVisibilityContext();
-    console.log({
-        headerVisible: headerVisible,
-    });
+
     const [headerHeight, setHeaderHeight] = useState(0);
     const headerRef = useRef<HTMLDivElement>(null);
 

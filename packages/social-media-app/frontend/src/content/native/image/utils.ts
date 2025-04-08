@@ -11,7 +11,7 @@ import {
 import { sha256Sync } from "@peerbit/crypto";
 
 const qualityToTargetWidth: Record<Quality, number> = {
-    [LOWEST_QUALITY]: 256,
+    [LOWEST_QUALITY]: 160,
     [MEDIUM_QUALITY]: 640,
     [HIGH_QUALITY]: 1280,
     [HIGHEST_QUALITY]: null, // Full-size image

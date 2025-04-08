@@ -95,9 +95,7 @@ export const Reply = ({
         onClick && onClick();
     };
 
-    const highlightStyle = isHighlighted
-        ? "animated-border  border-3 p-0 [--inner-bg:theme('colors.neutral.50')] dark:[--inner-bg:black]"
-        : "";
+    const highlightStyle = isHighlighted ? "animated-border  p-0" : "";
 
     // Determine grid classes for the content container based on the variant.
     let flexAlign = "";
@@ -117,7 +115,7 @@ export const Reply = ({
             )}
             {/* Inline-flex container that shrink-wraps the visible content */}
             <div
-                className={`inline-flex flex-col  border-transparent hover:border-black dark:hover:border-white rounded-md p-2  ${highlightStyle}  ${
+                className={`inline-flex flex-col  border-transparent hover:border-black dark:hover:border-white  p-2  ${highlightStyle}  ${
                     isThread ? "w-full" : ""
                 }`}
             >
@@ -185,6 +183,19 @@ export const Reply = ({
                             />
                         )}
                     </CanvasWrapper>
+                </div>
+
+                <div className="corner top-left">
+                    <span className="arc"></span>
+                </div>
+                <div className="corner top-right">
+                    <span className="arc"></span>
+                </div>
+                <div className="corner bottom-left">
+                    <span className="arc"></span>
+                </div>
+                <div className="corner bottom-right">
+                    <span className="arc"></span>
                 </div>
             </div>
             {/* Reply button for thread variant */}

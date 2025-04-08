@@ -80,7 +80,7 @@ const PreviewFrame = ({
     onClick?: () => void;
 }) => (
     <div
-        className={`flex flex-col relative overflow-hidden w-full ${
+        className={`flex flex-col relative overflow-hidden w-full max-in ${
             maximizeHeight ? "h-full" : ""
         }`}
     >
@@ -329,7 +329,7 @@ const PostPreview = ({
                 <button
                     onClick={onClick}
                     className={
-                        "col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full rounded-md relative " +
+                        "col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative " +
                         className
                     }
                     ref={forwardRef}
@@ -396,7 +396,7 @@ const ChatMessagePreview = ({
                 <button
                     key={app.id.toString()}
                     onClick={onClick}
-                    className="w-fit max-h-[40vh] flex flex-col overflow-hidden h-full rounded-md relative"
+                    className="w-fit max-h-[40vh]  max-height-inherit-children flex flex-col overflow-hidden h-full rounded-md relative"
                 >
                     <PreviewFrame
                         bgBlur
