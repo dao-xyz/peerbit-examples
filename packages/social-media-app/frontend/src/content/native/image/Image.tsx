@@ -41,7 +41,7 @@ export const ImageContent = ({
     // Create a Blob URL from the raw binary data stored in content.data.
     useEffect(() => {
         if (!content.data || !content.mimeType) return;
-        let hash = sha256Base64Sync(content.data);
+        let hash = sha256Base64Sync(content.data); // TODO use StaticContent contentId instead
         if (lastImageHash.current === hash) {
             return;
         }
@@ -55,12 +55,10 @@ export const ImageContent = ({
         const img = new Image();
         img.onload = () => {
             const canvas = document.createElement("canvas");
-            console.log("IMAGE LOADED", img.width, img.height);
             canvas.width = img.width;
             canvas.height = img.height;
             const ctx = canvas.getContext("2d");
             if (ctx) {
-                console.log("CONVERTING IMAGE", img.width, img.height);
                 ctx.drawImage(img, 0, 0, img.width, img.height);
                 canvas.toBlob(
                     (convertedBlob) => {
@@ -76,7 +74,6 @@ export const ImageContent = ({
             }
             canvas.remove();
         };
-        console.log("BLOB URL", content.data, content.mimeType);
         img.src = originalUrl;
 
         return () => {
