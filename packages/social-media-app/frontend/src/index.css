@@ -530,11 +530,12 @@ code {
     }
 
 
+
     /* Base styles for each corner container */
     .animated-border .corner {
         position: absolute;
-        width: 24px;
-        height: 24px;
+        width: 18px;
+        height: 18px;
     }
 
     /* The quarter “arc” for each corner */
@@ -556,8 +557,8 @@ code {
     }
 
     .animated-border .corner.top-left .arc {
-        border-top: 4px solid #0077ff;
-        border-left: 4px solid #0077ff;
+        border-top: 4px solid theme('colors.primary.500');
+        border-left: 4px solid theme('colors.primary.500');
         border-top-left-radius: 8px;
 
     }
@@ -570,8 +571,8 @@ code {
     }
 
     .animated-border .corner.top-right .arc {
-        border-top: 4px solid #0077ff;
-        border-right: 4px solid #0077ff;
+        border-top: 4px solid theme('colors.primary.500');
+        border-right: 4px solid theme('colors.primary.500');
         border-top-right-radius: 8px;
 
     }
@@ -584,8 +585,8 @@ code {
     }
 
     .animated-border .corner.bottom-left .arc {
-        border-bottom: 4px solid #0077ff;
-        border-left: 4px solid #0077ff;
+        border-bottom: 4px solid theme('colors.primary.500');
+        border-left: 4px solid theme('colors.primary.500');
         border-bottom-left-radius: 8px;
 
     }
@@ -598,10 +599,27 @@ code {
     }
 
     .animated-border .corner.bottom-right .arc {
-        border-bottom: 4px solid #0077ff;
-        border-right: 4px solid #0077ff;
+        border-bottom: 4px solid theme('colors.primary.500');
+        border-right: 4px solid theme('colors.primary.500');
         border-bottom-right-radius: 8px;
 
+    }
+
+    .arc {
+        filter: opacity(0.5);
+
+        .dark & {
+            filter: opacity(0.8);
+        }
+    }
+
+    .safe-area-bottom {
+
+        :root:not( :has(input:focus-visible,
+                textarea:focus-visible,
+                [contenteditable]:focus-visible)) & {
+            padding-bottom: env(safe-area-inset-bottom, 0);
+        }
     }
 
 
@@ -611,12 +629,12 @@ code {
         0%,
         100% {
             transform: scale(1);
-            opacity: 1;
+
         }
 
         50% {
             transform: scale(1.2);
-            opacity: 1;
+
         }
     }
 

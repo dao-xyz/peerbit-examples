@@ -115,7 +115,7 @@ export const Reply = ({
             )}
             {/* Inline-flex container that shrink-wraps the visible content */}
             <div
-                className={`inline-flex flex-col  border-transparent hover:border-black dark:hover:border-white  p-2  ${highlightStyle}  ${
+                className={`inline-flex flex-col  border-transparent hover:border-black dark:hover:border-white   ${highlightStyle}  ${
                     isThread ? "w-full" : ""
                 }`}
             >
@@ -200,7 +200,7 @@ export const Reply = ({
             </div>
             {/* Reply button for thread variant */}
             {isThread && !isExpandedBreadcrumb && (
-                <div className="col-start-2 col-span-1 flex gap-2.5 mt-4">
+                <div className="col-start-2 col-span-1 flex gap-2.5">
                     <ReplyButton
                         className="ml-auto btn btn-xs h-full ganja-font text-lg leading-3"
                         onClick={() => {

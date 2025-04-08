@@ -38,6 +38,10 @@ export const AutoReplyProvider: React.FC<{
         await setReplyToCanvas(canvasOrRoot);
     };
 
+    useEffect(() => {
+        setReplyTo(viewRoot);
+    }, [viewRoot]); // reset replyTo when viewRoot changes
+
     /**
      * If the pending canvas has updated their path, we need to update all pending rects too
      */

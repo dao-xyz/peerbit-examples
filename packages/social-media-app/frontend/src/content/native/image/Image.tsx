@@ -213,7 +213,7 @@ export const ImageContent = ({
                     <img
                         src={imgUrl}
                         alt={content.alt ?? ""}
-                        className="w-full h-full object-contain"
+                        className="h-full object-contain"
                     />
                 </div>
                 {translateY === 0 && (
