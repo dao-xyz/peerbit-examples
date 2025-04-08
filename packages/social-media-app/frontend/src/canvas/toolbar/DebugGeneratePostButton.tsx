@@ -13,7 +13,7 @@ import {
     StaticImage,
     StaticMarkdownText,
 } from "@giga-app/interface";
-import { Ed25519Keypair } from "@peerbit/crypto";
+import { Ed25519Keypair, randomBytes } from "@peerbit/crypto";
 
 const generateATextInMarkdown = (length: number = 100) => {
     let text = "";
@@ -142,6 +142,7 @@ export const DebugGeneratePostButton = () => {
                             width: 200,
                             height: 300,
                         }),
+                        contentId: randomBytes(32),
                         quality: LOWEST_QUALITY,
                     });
                 } else if (type === "text") {
@@ -151,7 +152,7 @@ export const DebugGeneratePostButton = () => {
                                 Math.round(Math.max(Math.random() * 200, 10))
                             ),
                         }),
-
+                        contentId: randomBytes(32),
                         quality: LOWEST_QUALITY,
                     });
                 } else if (type === "twitch") {

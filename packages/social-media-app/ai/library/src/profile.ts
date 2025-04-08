@@ -11,6 +11,7 @@ import {
 } from "@giga-app/interface";
 import { Profile, Profiles } from "@giga-app/interface";
 import { fileURLToPath } from "url";
+import { sha256Sync } from "@peerbit/crypto";
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const createProfile = async (client: ProgramClient) => {
@@ -35,6 +36,7 @@ export const createProfile = async (client: ProgramClient) => {
             icon = path.join(__dirname, "..", "resources", iconFileName);
         }
         const image = fs.readFileSync(icon);
+        const contentId = sha256Sync(image);
         await canvas.elements.put(
             new Element({
                 location: Layout.zero(),
@@ -42,10 +44,11 @@ export const createProfile = async (client: ProgramClient) => {
                     content: new StaticImage({
                         data: image,
                         mimeType: "image/jpeg",
-                        width: 100,
-                        height: 100,
+                        width: 512,
+                        height: 512,
                     }),
                     quality: LOWEST_QUALITY,
+                    contentId,
                 }),
                 parent: canvas,
                 publicKey: client.identity.publicKey,

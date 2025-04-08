@@ -251,7 +251,7 @@ export const ImageContent = ({
                         <Dialog.Trigger asChild>
                             <img
                                 src={imgUrl}
-                                alt={content.alt}
+                                alt={content.alt ?? ""}
                                 className={`w-full h-full ${fitClass}`}
                             />
                         </Dialog.Trigger>
@@ -261,7 +261,7 @@ export const ImageContent = ({
                     <>
                         <img
                             src={imgUrl}
-                            alt={content.alt}
+                            alt={content.alt ?? ""}
                             className={`w-full h-full ${fitClass}`}
                         />
                         <button

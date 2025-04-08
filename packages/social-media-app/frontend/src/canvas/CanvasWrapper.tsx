@@ -19,16 +19,16 @@ import {
     StaticImage,
     SimpleWebManifest,
     getOwnedElementsQuery,
-    getQuantityQuery,
+    getQualityLessThanOrEqualQuery,
     LOWEST_QUALITY,
     Quality,
 } from "@giga-app/interface";
-import { sha256Sync } from "@peerbit/crypto";
+import { randomBytes, sha256Sync, toBase64 } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
 import { useErrorDialog } from "../dialogs/useErrorDialog.js";
-import { Sort } from "@peerbit/indexer-interface";
+import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import {
     rectIsStaticMarkdownText,
     rectIsStaticPartialImage,
@@ -72,7 +72,7 @@ export interface CanvasContextType {
             filter: (rect: Element) => boolean;
         }
     ) => boolean;
-    groupPartialImages: (rects: Element[]) => Element[];
+    reduceElementsForViewing: (rects: Element[]) => Element[];
     separateAndSortRects: (rects: Element[]) => {
         text: Element[];
         other: Element[];
@@ -142,9 +142,17 @@ export const CanvasWrapper = ({
                     : {
                           query: [
                               ...getOwnedElementsQuery(canvas),
-                              ...getQuantityQuery(quality ?? LOWEST_QUALITY),
+                              ...getQualityLessThanOrEqualQuery(
+                                  quality ?? LOWEST_QUALITY
+                              ),
                           ],
-                          sort: new Sort({ key: ["location", "y"] }),
+                          sort: [
+                              new Sort({
+                                  key: ["quality"],
+                                  direction: SortDirection.ASC,
+                              }),
+                              new Sort({ key: ["location", "y"] }),
+                          ],
                       },
             debug: canvas && canvas.path.length > 0,
         }
@@ -363,54 +371,6 @@ export const CanvasWrapper = ({
 
             setIsEmpty(false);
             onContentChange?.(newElements);
-
-            /* if (file.size > threshold) {
-                const fullData = image.data;
-                const chunkSize = threshold;
-                const parts: Uint8Array[] = [];
-                for (let i = 0; i < fullData.length; i += chunkSize) {
-                    parts.push(fullData.slice(i, i + chunkSize));
-                }
-                const totalParts = parts.length;
-                const groupKey = sha256Base64Sync(fullData);
-                const partialImages = parts.map(
-                    (partialData, index) =>
-                        new StaticPartialImage({
-                            partialData,
-                            partIndex: index,
-                            totalParts,
-                            mimeType: file.type,
-                            width: image.width,
-                            height: image.height,
-                            alt: image.alt,
-                            caption: image.caption,
-                            groupKey,
-                        })
-                );
-                const newElements: Element[] = await addRect(
-                    partialImages.map((x) => new StaticContent({ content: x })),
-                    options
-                );
-
-                setIsEmpty(false);
-                onContentChange?.(newElements);
-            } else {
-                const element = await addRect(
-                    new StaticContent({
-                        content: new StaticImage({
-                            data: image.data,
-                            mimeType: file.type,
-                            width: image.width,
-                            height: image.height,
-                            alt: image.alt,
-                            caption: image.caption,
-                        }),
-                    }),
-                    options
-                );
-                setIsEmpty(false);
-                onContentChange?.([element]);
-            } */
         } catch (error) {
             showError({ message: "Failed to insert image", error });
         }
@@ -456,6 +416,7 @@ export const CanvasWrapper = ({
                 appToAdd = new StaticContent({
                     content: defaultValue,
                     quality: LOWEST_QUALITY,
+                    contentId: randomBytes(32),
                 });
             } else {
                 appToAdd = new IFrameContent({
@@ -467,6 +428,7 @@ export const CanvasWrapper = ({
             appToAdd = new StaticContent({
                 content: new StaticMarkdownText({ text: "" }),
                 quality: LOWEST_QUALITY,
+                contentId: sha256Sync(new TextEncoder().encode("")),
             });
         }
         return addRect(appToAdd, {
@@ -576,48 +538,81 @@ export const CanvasWrapper = ({
         );
     };
 
-    const groupPartialImages = (rects: Element[]): Element[] => {
-        const grouped = new Map<
-            string,
-            { rects: Element[]; parts: StaticPartialImage[] }
-        >();
-        const finalRects: Element[] = [];
+    const reduceElementsForViewing = (rects: Element[]): Element[] => {
+        // Group rects by their content source, identified by contentId (as Base64).
+        const groups = new Map<string, Map<number, Element[]>>();
         rects.forEach((rect) => {
-            if (rectIsStaticPartialImage(rect)) {
-                const partial = rect.content.content as StaticPartialImage;
-                const key = partial.groupKey;
-                if (!grouped.has(key)) {
-                    grouped.set(key, { rects: [], parts: [] });
+            const contentId = rect.content.contentIdString;
+            if (!groups.has(contentId)) {
+                groups.set(contentId, new Map());
+            }
+            const quality = rect.content.quality; // quality is already a number
+            const qualityMap = groups.get(contentId)!;
+            if (!qualityMap.has(quality)) {
+                qualityMap.set(quality, []);
+            }
+            qualityMap.get(quality)!.push(rect);
+        });
+
+        const finalRects: Element[] = [];
+
+        // For each content source, choose the candidate with the best available quality.
+        groups.forEach((qualityMap) => {
+            // Get the sorted quality keys in descending order.
+            const qualityKeys = Array.from(qualityMap.keys()).sort(
+                (a, b) => b - a
+            );
+            if (qualityKeys.length === 0) return;
+            const bestQuality = qualityKeys[0];
+            const candidates = qualityMap.get(bestQuality)!;
+
+            // Separate candidates into full images and partial images.
+            const fullImages = candidates.filter(
+                (rect) => !rectIsStaticPartialImage(rect)
+            );
+            const partialImages = candidates.filter((rect) =>
+                rectIsStaticPartialImage(rect)
+            );
+
+            let bestCandidate: Element | undefined = undefined;
+            if (partialImages.length > 0) {
+                // Check whether partial images are complete.
+                const firstPartial = partialImages[0].content
+                    .content as StaticPartialImage;
+                if (firstPartial.totalParts === partialImages.length) {
+                    // If complete, merge partial images into a single image.
+                    const mergedImage = StaticPartialImage.combine(
+                        partialImages.map(
+                            (r) => r.content.content as StaticPartialImage
+                        )
+                    );
+                    const rep = partialImages[0] as Element<StaticContent>;
+                    bestCandidate = new Element({
+                        publicKey: rep.publicKey,
+                        id: rep.id,
+                        location: rep.location,
+                        content: new StaticContent({
+                            quality: rep.content.quality,
+                            content: mergedImage,
+                            contentId: rep.content.contentId,
+                        }),
+                        parent: rep.parent,
+                    });
+                } else {
+                    // Otherwise, use the first partial image (even though it may be incomplete).
+                    bestCandidate = partialImages[0];
                 }
-                const group = grouped.get(key)!;
-                group.rects.push(rect);
-                group.parts.push(partial);
-            } else {
-                finalRects.push(rect);
+            } else if (fullImages.length > 0) {
+                // If no partial images, use the first full image.
+                bestCandidate = fullImages[0];
+            }
+            if (bestCandidate) {
+                finalRects.push(bestCandidate);
             }
         });
-        grouped.forEach((group) => {
-            if (
-                group.parts.length > 0 &&
-                group.parts[0].totalParts === group.parts.length
-            ) {
-                const combinedImage = StaticPartialImage.combine(group.parts);
-                const rep = group.rects[0] as Element<StaticContent>;
-                const combinedRect = new Element({
-                    publicKey: rep.publicKey,
-                    id: rep.id,
-                    location: rep.location,
-                    content: new StaticContent({
-                        quality: rep.content.quality,
-                        content: combinedImage,
-                    }),
-                    parent: canvas,
-                });
-                finalRects.push(combinedRect);
-            } else {
-                finalRects.push(...group.rects);
-            }
-        });
+
+        console.log(groups);
+        // Sort the final elements by the y coordinate.
         finalRects.sort((a, b) => a.location.y - b.location.y);
         return finalRects;
     };
@@ -625,7 +620,7 @@ export const CanvasWrapper = ({
     const separateAndSortRects = (
         rects: Element[]
     ): { text: Element[]; other: Element[] } => {
-        const groupedRects = groupPartialImages(rects);
+        const groupedRects = reduceElementsForViewing(rects);
         const separated = { text: [] as Element[], other: [] as Element[] };
         groupedRects.forEach((rect) => {
             if (rectIsStaticMarkdownText(rect)) {
@@ -655,7 +650,7 @@ export const CanvasWrapper = ({
         onContentChange: _onContentChange,
         insertImage,
         mutate,
-        groupPartialImages,
+        reduceElementsForViewing,
         separateAndSortRects,
         text,
         requestAIReply,

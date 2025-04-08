@@ -8,6 +8,7 @@ import {
 } from "@giga-app/interface";
 import { ChangeCallback } from "./types";
 import { FaMagic } from "react-icons/fa";
+import { sha256Sync } from "@peerbit/crypto";
 
 export type MarkdownContentProps = {
     content: StaticMarkdownText;
@@ -61,9 +62,9 @@ export const MarkdownContent = ({
                 if (
                     lastDims.current &&
                     Math.abs(lastDims.current.width - newDims.width) <
-                    threshold &&
+                        threshold &&
                     Math.abs(lastDims.current.height - newDims.height) <
-                    threshold
+                        threshold
                 ) {
                     continue;
                 }
@@ -130,6 +131,9 @@ export const MarkdownContent = ({
                                     text: currentValue,
                                 }),
                                 quality: LOWEST_QUALITY,
+                                contentId: sha256Sync(
+                                    new TextEncoder().encode(currentValue)
+                                ),
                             }),
                             { save: true }
                         );
@@ -155,6 +159,7 @@ export const MarkdownContent = ({
                 new StaticContent({
                     content: new StaticMarkdownText({ text: newText }),
                     quality: LOWEST_QUALITY,
+                    contentId: sha256Sync(new TextEncoder().encode(newText)),
                 })
             );
     };
@@ -172,8 +177,9 @@ export const MarkdownContent = ({
     return (
         <div
             ref={containerRef}
-            className={`${commonClasses} w-full text-left ${editable ? "cursor-text" : ""
-                }`}
+            className={`${commonClasses} w-full text-left ${
+                editable ? "cursor-text" : ""
+            }`}
             onClick={editable && !isEditing ? handleStartEditing : undefined}
         >
             {editable && isEditing ? (
@@ -189,7 +195,8 @@ export const MarkdownContent = ({
                         rows={1}
                         placeholder="Type here..."
                         style={{ overflow: "hidden" }}
-                    />{/* 
+                    />
+                    {/* 
                     <button disabled className="btn btn-icon ">
                         <FaMagic />
                     </button> */}
@@ -197,8 +204,9 @@ export const MarkdownContent = ({
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={`${commonClasses} ${previewLines ? "line-clamp-[var(--preview-lines)]" : ""
-                        } ${previewLines === 1 ? "break-all" : ""}`}
+                    className={`${commonClasses} ${
+                        previewLines ? "line-clamp-[var(--preview-lines)]" : ""
+                    } ${previewLines === 1 ? "break-all" : ""}`}
                 >
                     <Markdown
                         disallowedElements={

@@ -15,7 +15,7 @@ import {
     StaticMarkdownText,
 } from "@giga-app/interface";
 import { useLocation } from "react-router-dom";
-import { Ed25519Keypair } from "@peerbit/crypto";
+import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { deserialize } from "@dao-xyz/borsh";
 
@@ -209,6 +209,9 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                                 text: GIGA_ROOT_POST,
                             }),
                             quality: LOWEST_QUALITY,
+                            contentId: sha256Sync(
+                                new TextEncoder().encode(GIGA_ROOT_POST)
+                            ),
                         }),
                         parent: result,
                     })

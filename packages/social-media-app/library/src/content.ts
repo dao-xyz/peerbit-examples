@@ -18,6 +18,7 @@ import {
     randomBytes,
     sha256Base64Sync,
     sha256Sync,
+    toBase64,
 } from "@peerbit/crypto";
 import { Program, ProgramClient } from "@peerbit/program";
 import { AbstractStaticContent } from "./static/content.js";
@@ -28,7 +29,7 @@ import {
     NATIVE_TEXT_APP_URL,
 } from "./types.js";
 import { RPC } from "@peerbit/rpc";
-import { concat } from "uint8arrays";
+import { concat, equals } from "uint8arrays";
 
 @variant(0)
 export class Layout {
@@ -85,6 +86,17 @@ export abstract class ElementContent {
 
     abstract get isEmpty(): boolean;
     abstract equals(other: ElementContent): boolean;
+    abstract get contentId(): Uint8Array;
+
+    private _contentIdString: string;
+    get contentIdString(): string {
+        return (
+            this._contentIdString ||
+            (this._contentIdString = toBase64(this.contentId))
+        );
+    }
+
+    abstract get quality(): Quality;
 }
 
 export abstract class CanvasReference {
@@ -121,12 +133,16 @@ type PathProperties =
     | {};
 
 export const LOWEST_QUALITY: 0 = 0;
+export const MEDIUM_QUALITY: 1431655765 = 1431655765; // 33% of max u32
+export const HIGH_QUALITY: 2863311530 = 2863311530; // max u32
 export const HIGHEST_QUALITY: 4294967295 = 4294967295; // max u32
-export const MEDIUM_QUALITY: 2147483647 = 2147483647; // 50% of max u32
+
 export type Quality =
     | typeof LOWEST_QUALITY
-    | typeof HIGHEST_QUALITY
-    | typeof MEDIUM_QUALITY;
+    | typeof MEDIUM_QUALITY
+    | typeof HIGH_QUALITY
+    | typeof HIGHEST_QUALITY;
+
 @variant(0)
 export class Element<T extends ElementContent = ElementContent> {
     @field({ type: fixedArray("u8", 32) })
@@ -340,7 +356,17 @@ export const getRepliesQuery = (to: { address: string }) => [
     }),
 ];
 
-export const getQuantityQuery = (quality: number) => {
+export const getQualityLessThanOrEqualQuery = (quality: number) => {
+    return [
+        new IntegerCompare({
+            key: "quality",
+            value: quality,
+            compare: Compare.LessOrEqual,
+        }),
+    ];
+};
+
+export const getQualityEqualsQuery = (quality: number) => {
     return [
         new IntegerCompare({
             key: "quality",
@@ -808,6 +834,9 @@ export class Canvas extends Program<CanvasArgs> {
                         content: new StaticContent<StaticMarkdownText>({
                             content: new StaticMarkdownText({ text: name }),
                             quality: LOWEST_QUALITY,
+                            contentId: sha256Sync(
+                                new TextEncoder().encode(name)
+                            ),
                         }),
                         location: Layout.zero(),
                         publicKey: this.node.identity.publicKey,
@@ -1013,11 +1042,20 @@ export class IFrameContent extends ElementContent {
     @field({ type: "bool" })
     resizer: boolean; // if IFrameResizer is installed on the target site
 
+    // A source id can be used ot group content together. For example PartialImages, or figuring out if we have two elements with different quality but the same content, we can use the sourceId to determine if they are the same
+    @field({ type: Uint8Array })
+    contentId: Uint8Array;
+
+    @field({ type: "u32" })
+    quality: Quality;
+
     constructor(properties: { src: string; resizer: boolean }) {
         super();
         this.src = properties.src;
         this.orgSrc = properties.src;
         this.resizer = properties.resizer;
+        this.contentId = sha256Sync(new TextEncoder().encode(this.src));
+        this.quality = LOWEST_QUALITY;
     }
 
     toIndex() {
@@ -1046,10 +1084,19 @@ export class StaticContent<
     @field({ type: "u32" })
     quality: Quality;
 
-    constructor(properties: { content: T; quality: Quality }) {
+    // A source id can be used ot group content together. For example PartialImages, or figuring out if we have two elements with different quality but the same content, we can use the sourceId to determine if they are the same
+    @field({ type: Uint8Array })
+    contentId: Uint8Array;
+
+    constructor(properties: {
+        content: T;
+        quality: Quality;
+        contentId: Uint8Array;
+    }) {
         super();
         this.content = properties.content;
         this.quality = properties.quality;
+        this.contentId = properties.contentId;
     }
 
     toIndex() {
@@ -1065,7 +1112,10 @@ export class StaticContent<
 
     equals(other: ElementContent): boolean {
         return (
-            other instanceof StaticContent && other.content.equals(this.content)
+            other instanceof StaticContent &&
+            other.content.equals(this.content) &&
+            other.quality === this.quality &&
+            equals(other.contentId, this.contentId)
         );
     }
 }

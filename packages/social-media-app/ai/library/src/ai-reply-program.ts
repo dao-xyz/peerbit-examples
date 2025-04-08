@@ -3,7 +3,7 @@ import { Program } from "@peerbit/program";
 import { RPC } from "@peerbit/rpc";
 import { queryOllama } from "./ollama.js";
 import { queryChatGPT } from "./chatgpt.js";
-import { PublicSignKey, sha256Base64Sync } from "@peerbit/crypto";
+import { PublicSignKey, sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { SilentDelivery } from "@peerbit/stream-interface";
 import { DEEP_SEEK_R1_7b } from "./model.js";
 import { delay } from "@peerbit/time";
@@ -498,6 +498,7 @@ export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
             content: new StaticContent({
                 content: new StaticMarkdownText({ text }),
                 quality: LOWEST_QUALITY,
+                contentId: sha256Sync(new TextEncoder().encode(text)),
             }),
             location: Layout.zero(),
             publicKey: parent.node.identity.publicKey,

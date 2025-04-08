@@ -5,14 +5,17 @@ import {
     HIGHEST_QUALITY,
     MEDIUM_QUALITY,
     StaticContent,
+    Quality,
+    HIGH_QUALITY,
 } from "@giga-app/interface";
-import { sha256Base64Sync } from "@peerbit/crypto";
+import { sha256Sync } from "@peerbit/crypto";
 
-type Quality =
-    | typeof LOWEST_QUALITY
-    | typeof HIGHEST_QUALITY
-    | typeof MEDIUM_QUALITY;
-
+const qualityToTargetWidth: Record<Quality, number> = {
+    [LOWEST_QUALITY]: 256,
+    [MEDIUM_QUALITY]: 640,
+    [HIGH_QUALITY]: 1280,
+    [HIGHEST_QUALITY]: null, // Full-size image
+};
 /**
  * Reads an image File and returns a blended array of images.
  * For each quality, the file is resized using a reusable canvas according to target widths:
@@ -26,9 +29,15 @@ type Quality =
  *                   Note: LOWEST_QUALITY must be included.
  * @returns A Promise resolving to a flat array of StaticContent objects containing either full images or partial images.
  */
+
 export const readFileAsImage = async (
     file: File,
-    qualities: Quality[] = [LOWEST_QUALITY, MEDIUM_QUALITY, HIGHEST_QUALITY]
+    qualities: Quality[] = [
+        LOWEST_QUALITY,
+        MEDIUM_QUALITY,
+        HIGH_QUALITY,
+        HIGHEST_QUALITY,
+    ]
 ): Promise<StaticContent<StaticImage | StaticPartialImage>[]> => {
     if (!file) {
         throw new Error("No file provided");
@@ -55,7 +64,8 @@ export const readFileAsImage = async (
     });
 
     // Create a Blob and an object URL for loading the image.
-    const blob = new Blob([arrayBuffer], { type: file.type });
+    const uint8arrayRaw = new Uint8Array(arrayBuffer);
+    const blob = new Blob([uint8arrayRaw], { type: file.type });
     const url = URL.createObjectURL(blob);
 
     // Load the image to access its natural dimensions.
@@ -74,6 +84,8 @@ export const readFileAsImage = async (
         }
     );
 
+    const groupKey = sha256Sync(uint8arrayRaw);
+
     const originalWidth = imgElement.naturalWidth;
     const originalHeight = imgElement.naturalHeight;
 
@@ -90,36 +102,26 @@ export const readFileAsImage = async (
     const results: StaticContent<StaticImage | StaticPartialImage>[] = [];
 
     // Process each quality sequentially.
+    let maxQualityFound = false;
     for (const quality of qualities) {
         let scale = 1.0;
+        if (maxQualityFound) {
+            continue;
+        }
+        const targetWidth = qualityToTargetWidth[quality];
+        if (targetWidth === null) {
+            // HIGHEST_QUALITY: raw full-size image.
+            maxQualityFound = true;
+            scale = 1.0;
+            continue;
+        } else {
+            // If the original image is smaller than the target width, skip this quality.
+            if (originalWidth <= targetWidth) {
+                maxQualityFound = true;
+            }
 
-        switch (quality) {
-            case LOWEST_QUALITY: {
-                // Target for thumbnail: max width 256px.
-                const targetWidth = 256;
-                // If the original image is larger, scale down to target;
-                // if not, use the original as-is.
-                scale =
-                    originalWidth > targetWidth
-                        ? targetWidth / originalWidth
-                        : 1.0;
-                break;
-            }
-            case MEDIUM_QUALITY: {
-                // Target for feed images: exactly 640px width.
-                const targetWidth = 640;
-                // Skip generation if the original image is not wide enough.
-                if (originalWidth < targetWidth) continue;
-                scale = targetWidth / originalWidth;
-                break;
-            }
-            case HIGHEST_QUALITY: {
-                // Raw full-size image.
-                scale = 1.0;
-                break;
-            }
-            default:
-                scale = 1.0;
+            scale =
+                originalWidth > targetWidth ? targetWidth / originalWidth : 1.0;
         }
 
         const scaledWidth = Math.round(originalWidth * scale);
@@ -160,7 +162,6 @@ export const readFileAsImage = async (
                 parts.push(staticImage.data.slice(i, i + threshold));
             }
             const totalParts = parts.length;
-            const groupKey = sha256Base64Sync(staticImage.data);
 
             // Add each partial image to the results.
             for (let index = 0; index < parts.length; index++) {
@@ -173,12 +174,12 @@ export const readFileAsImage = async (
                     height: scaledHeight,
                     alt: file.name,
                     caption: "",
-                    groupKey,
                 });
                 results.push(
                     new StaticContent({
                         quality,
                         content: partialImage,
+                        contentId: groupKey,
                     })
                 );
             }
@@ -188,6 +189,7 @@ export const readFileAsImage = async (
                 new StaticContent({
                     quality,
                     content: staticImage,
+                    contentId: groupKey,
                 })
             );
         }

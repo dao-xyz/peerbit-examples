@@ -1,4 +1,4 @@
-import { HIGHEST_QUALITY } from "@giga-app/interface";
+import { HIGH_QUALITY } from "@giga-app/interface";
 import { useView } from "../../view/ViewContex";
 import { Canvas } from "../Canvas";
 import { CanvasWrapper } from "../CanvasWrapper";
@@ -16,7 +16,7 @@ export const DetailedView = () => {
                     className="mb-2 px-4"
                 />
             )}
-            <CanvasWrapper canvas={viewRoot} quality={HIGHEST_QUALITY}>
+            <CanvasWrapper canvas={viewRoot} quality={HIGH_QUALITY}>
                 <Canvas bgBlur fitWidth draft={false} />
             </CanvasWrapper>
         </div>

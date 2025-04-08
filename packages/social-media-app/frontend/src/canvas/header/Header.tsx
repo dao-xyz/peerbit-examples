@@ -94,7 +94,7 @@ export const Header = ({
                         reverseLayout ? "flex-row-reverse" : ""
                     } items-center ${
                         variant === "large"
-                            ? "gap-6"
+                            ? "gap-3"
                             : variant === "medium"
                             ? "gap-3"
                             : "gap-1.5"

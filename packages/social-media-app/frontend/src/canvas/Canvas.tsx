@@ -10,7 +10,11 @@ import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
 import { ReactNode, useMemo, useReducer } from "react";
-import { rectIsStaticMarkdownText } from "./utils/rect";
+import {
+    rectIsStaticImage,
+    rectIsStaticMarkdownText,
+    rectIsStaticPartialImage,
+} from "./utils/rect";
 import { IoIosArrowDown, IoIosArrowUp } from "react-icons/io";
 import { MdClear } from "react-icons/md";
 
@@ -30,8 +34,12 @@ const onlyLowestQuality = (rect: Element<any>[]): Element[] => {
                 x.content instanceof StaticContent === false ||
                 x.content.quality === quality
         );
-        if (out.length > 0 && out.find((x) => x instanceof StaticContent))
+        if (
+            out.length > 0 &&
+            out.find((x) => x.content instanceof StaticContent)
+        ) {
             return out; // if we found one static content with the quality we are looking for, return all rects that are filtered by that quality
+        }
     }
     return rect;
 };
@@ -55,7 +63,7 @@ export const Canvas = (
         removePending,
         canvas,
         mutate,
-        groupPartialImages, // from context!
+        reduceElementsForViewing, // from context!
     } = useCanvas();
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
@@ -63,7 +71,7 @@ export const Canvas = (
     const filteredRects = useMemo(() => {
         let allRects = [...rects, ...pendingRects].filter((rect, i) =>
             properties.appearance === "chat-view-images"
-                ? i > 0 || !rectIsStaticMarkdownText(rect)
+                ? rectIsStaticImage(rect) || rectIsStaticPartialImage(rect)
                 : properties.appearance === "chat-view-text"
                 ? rectIsStaticMarkdownText(rect)
                 : true
@@ -71,8 +79,12 @@ export const Canvas = (
         if (properties.appearance === "chat-view-images") {
             allRects = onlyLowestQuality(allRects);
         }
-        return groupPartialImages(allRects);
-    }, [rects, pendingRects, properties.appearance, groupPartialImages]);
+        return reduceElementsForViewing(allRects);
+    }, [rects, pendingRects, properties.appearance, reduceElementsForViewing]);
+
+    if (properties.appearance === "chat-view-images") {
+        console.log(filteredRects);
+    }
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((rect, ix) => {

@@ -16,7 +16,7 @@ import {
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
 import { waitForResolved } from "@peerbit/time";
-import { Ed25519Keypair } from "@peerbit/crypto";
+import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { StaticImage } from "../static/image.js";
 
 describe("content", () => {
@@ -309,6 +309,7 @@ describe("content", () => {
                                 width: 100,
                                 mimeType: "image/png",
                             }),
+                            contentId: sha256Sync(new Uint8Array([1, 2, 3, 4])),
                             quality: LOWEST_QUALITY,
                         }),
                         parent: subcanvasWithImage,

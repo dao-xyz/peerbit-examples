@@ -102,9 +102,6 @@ export class StaticPartialImage extends AbstractStaticContent {
     @field({ type: "string" })
     caption: string;
 
-    // Group key that identifies which partial images belong together.
-    @field({ type: "string" })
-    groupKey: string;
 
     constructor(properties: {
         partialData: Uint8Array;
@@ -115,7 +112,6 @@ export class StaticPartialImage extends AbstractStaticContent {
         height?: number;
         alt?: string;
         caption?: string;
-        groupKey: string;
     }) {
         super();
         this.partialData = properties.partialData;
@@ -126,8 +122,6 @@ export class StaticPartialImage extends AbstractStaticContent {
         this.height = properties.height || 0;
         this.alt = properties.alt || "";
         this.caption = properties.caption || "";
-        // groupKey is now required.
-        this.groupKey = properties.groupKey;
     }
 
     toString(): string {
@@ -147,8 +141,7 @@ export class StaticPartialImage extends AbstractStaticContent {
             this.width === other.width &&
             this.height === other.height &&
             this.alt === other.alt &&
-            this.caption === other.caption &&
-            this.groupKey === other.groupKey
+            this.caption === other.caption
         );
     }
 
@@ -160,11 +153,7 @@ export class StaticPartialImage extends AbstractStaticContent {
     static combine(parts: StaticPartialImage[]): StaticImage {
         // Sort the parts by their partIndex.
         const sortedParts = parts.sort((a, b) => a.partIndex - b.partIndex);
-        // Verify that all parts have the same group key.
-        const key = sortedParts[0].groupKey;
-        if (!sortedParts.every((p) => p.groupKey === key)) {
-            throw new Error("Partial image parts do not share the same groupKey");
-        }
+
         // Combine the Uint8Array chunks.
         const fullData = concat(sortedParts.map((p) => p.partialData));
         const meta = sortedParts[0];

@@ -125,9 +125,10 @@ export const Reply = ({
                 {!hideHeader && (
                     <div
                         className={
-                            "flex items-center mb-2 " + align === "right"
+                            "flex items-center mb-2 " +
+                            (align === "right"
                                 ? "justify-end"
-                                : "justify-start"
+                                : "justify-start")
                         }
                     >
                         {/*  {isExpandedBreadcrumb && index !== 0 && (
@@ -165,7 +166,7 @@ export const Reply = ({
                                 variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
                                 className={
-                                    "flex flex-col gap-2" +
+                                    "flex flex-col gap-2 " +
                                     (align === "right"
                                         ? "flex flex-col justify-end items-end"
                                         : "")
