@@ -7,10 +7,18 @@ import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
 import { useOnline } from "@peerbit/react";
 
 const readableView = (view: ViewType) => {
-    if (view === "chat") return "Chat view";
-    if (view === "new") return "New stuff";
-    if (view === "old") return "Old stuff";
-    if (view === "best") return "Popular";
+    if (view === "chat") {
+        return "Chat view";
+    }
+    if (view === "new") {
+        return "New stuff";
+    }
+    if (view === "old") {
+        return "Old stuff";
+    }
+    if (view === "best") {
+        return "Popular";
+    }
 };
 
 export const SubHeader = () => {
