@@ -125,7 +125,7 @@ export class CanvasAIReply extends Program<Args> {
             if ("llm" in args) {
                 // in case of that the user passed server args without the server flag
                 // we defined the serverConfig anywayis if llm is defined
-                this.serverConfig = {
+                args = {
                     server: true,
                     llm: args.llm,
                     apiKey: "apiKey" in args ? args.apiKey : undefined,
@@ -134,6 +134,13 @@ export class CanvasAIReply extends Program<Args> {
         }
 
         if (args?.server) {
+            console.log(
+                "Launching AI Reply server: " +
+                    args.llm +
+                    "Api key provided: " +
+                    !!args["apiKey"]
+            );
+
             await createProfile(this.node);
 
             const llm = args?.llm || "ollama";
@@ -485,13 +492,6 @@ export class QueryResponse extends AIResponse {
     }
 }
 
-const createContextFromElement = (
-    element: WithContext<Element<StaticContent<StaticMarkdownText>>>
-) => {
-    const text = element.content.content.text.replace(/"/g, '\\"');
-    return `{ from: ${element.publicKey.hashcode()}, message: "${text}" }`;
-};
-
 export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
     return parent.elements.put(
         new Element({
@@ -547,9 +547,8 @@ const generateTextContext = async (properties: {
     const createContextFromElement = (
         element: WithContext<Element<StaticContent<StaticMarkdownText>>>
     ) => {
-        return `{ from: ${element.publicKey.hashcode()}, message: "${
-            element.content.content.text
-        }" }`;
+        const text = element.content.content.text.replace(/"/g, '\\"');
+        return `{ from: ${element.publicKey.hashcode()}, message: "${text}" }`;
     };
     for (const element of elements) {
         const el = element as WithContext<
