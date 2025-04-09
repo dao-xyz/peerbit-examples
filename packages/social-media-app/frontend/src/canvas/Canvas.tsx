@@ -82,10 +82,6 @@ export const Canvas = (
         return reduceElementsForViewing(allRects);
     }, [rects, pendingRects, properties.appearance, reduceElementsForViewing]);
 
-    if (properties.appearance === "chat-view-images") {
-        console.log(filteredRects);
-    }
-
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((rect, ix) => {
             const deleteFn = async () => {
