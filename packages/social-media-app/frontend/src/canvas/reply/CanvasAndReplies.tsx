@@ -103,7 +103,17 @@ export const CanvasAndReplies = () => {
                         <Replies />
                     </FullscreenEditor>
                 </div>
-                <ReplyingInProgress canvas={lastReply} />
+                <div className="relative">
+                    <div
+                        className={`absolute right-1`}
+                        style={{
+                            bottom: toolbarHeight + "px",
+                        }}
+                    >
+                        <ReplyingInProgress canvas={lastReply} />
+                    </div>
+                </div>
+
                 {/* AnimatedStickyToolbar receives toolbarVisible and calls onHeightChange when its height changes */}
                 <AnimatedStickyToolbar
                     toolbarVisible={toolbarVisible}
