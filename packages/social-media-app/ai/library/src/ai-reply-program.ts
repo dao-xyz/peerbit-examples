@@ -1,11 +1,10 @@
 import { field, fixedArray, option, variant, vec } from "@dao-xyz/borsh";
-import { Program } from "@peerbit/program";
+import { Program, ProgramClient } from "@peerbit/program";
 import { RPC } from "@peerbit/rpc";
 import { queryOllama } from "./ollama.js";
 import { queryChatGPT } from "./chatgpt.js";
 import { PublicSignKey, sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { SilentDelivery } from "@peerbit/stream-interface";
-import { DEEP_SEEK_R1_7b } from "./model.js";
 import { delay } from "@peerbit/time";
 import { AbortError, TimeoutError } from "@peerbit/time";
 import {
@@ -24,13 +23,12 @@ import {
 } from "@giga-app/interface";
 import { Query, Sort, WithContext } from "@peerbit/document";
 import { createProfile } from "./profile.js";
+import { DEEP_SEEK_R1_1_5b, DEEP_SEEK_R1_7b } from "./model.js";
 
 // Utility to ignore specific errors.
 const ignoreTimeoutandAbort = (error: Error) => {
-    if (error instanceof TimeoutError) {
-        // Ignore timeout errors
-    } else if (error instanceof AbortError) {
-        // Ignore abort errors
+    if (error instanceof TimeoutError || error instanceof AbortError) {
+        // Ignore timeout and abort errors.
     } else {
         throw error;
     }
@@ -45,38 +43,284 @@ export type RequestStats = {
 
 export type Args = {
     server?: boolean;
-    onRequest?: (query: ChatQuery | ModelRequest, context?: any) => void;
+    onRequest?: (
+        query: ChatQuery | ModelRequest | SuggestedReplyQuery,
+        context?: any
+    ) => void;
 } & (OpenAPIArgs | OLLamaArgs);
 
-type OpenAPIArgs = {
-    server: true;
-    llm: "chatgpt";
-    apiKey?: string;
-};
-
-type OLLamaArgs = {
+export type OpenAPIArgs = { server: true; llm: "chatgpt"; apiKey?: string };
+export type OLLamaArgs = {
     server: true;
     llm: "ollama";
+    model?: typeof DEEP_SEEK_R1_1_5b | typeof DEEP_SEEK_R1_7b;
+    apiKey?: string;
 };
+export type ServerConfig = OpenAPIArgs | OLLamaArgs;
 
-type ServerConfig = OpenAPIArgs | OLLamaArgs;
+/**
+ * Helper function to resolve a canvas reference into an open canvas.
+ */
+async function resolveCanvas(
+    canvasOrRef: Canvas | CanvasReference,
+    node: any
+): Promise<Canvas> {
+    let canvas: Canvas =
+        canvasOrRef instanceof Canvas
+            ? canvasOrRef
+            : await canvasOrRef.load(node);
+    return node.open(canvas, { existing: "reuse" });
+}
+
+/**
+ * Given an array of canvases or canvas references, load and open each one.
+ */
+async function resolveCanvases(
+    canvases: (Canvas | CanvasReference)[],
+    node: any
+): Promise<Canvas[]> {
+    return Promise.all(canvases.map((c) => resolveCanvas(c, node)));
+}
+const DEFAULT_MAX_CHAR_LIMIT = 1000;
+const DEFAULT_MAX_ITEM_LIMIT = 100;
+
+/**
+ * Instead of fetching all context elements at once,
+ * this helper gathers context texts from a given canvas in batches.
+ * Optionally stops when a maximum character length or item count is reached.
+ */
+async function getOrderedContextTexts(options: {
+    canvas: Canvas;
+    elementsQuery?: Query;
+    visited: Set<string>;
+    maxChars?: number; // maximum total characters to aggregate
+    maxItems?: number; // maximum number of context elements
+}): Promise<string[]> {
+    let maxChars = options.maxChars || DEFAULT_MAX_CHAR_LIMIT;
+    let maxItems = options.maxItems || DEFAULT_MAX_ITEM_LIMIT;
+
+    await options.canvas.load();
+    const iterator = options.canvas.elements.index.iterate(
+        {
+            query: [
+                ...getOwnedAndSubownedElementsQuery(options.canvas),
+                getTextElementsQuery(),
+                ...(options.elementsQuery ? [options.elementsQuery] : []),
+            ],
+            sort: new Sort({ key: ["__context", "created"] }),
+        },
+        {
+            remote: { eager: true },
+        }
+    );
+
+    const texts: { text: string; order?: number; from: string }[] = [];
+    let aggregatedLength = 0;
+    let totalItems = 0;
+    while (true) {
+        // Fetch the next 10 elements.
+        const batch = await iterator.next(10);
+        if (!batch || batch.length === 0) break;
+        for (const element of batch) {
+            const el = element as WithContext<
+                Element<StaticContent<StaticMarkdownText>>
+            >;
+            if (!options.visited.has(el.idString)) {
+                options.visited.add(el.idString);
+                // Prepare the text and sort order.
+                const text = el.content.content.text.replace(/"/g, '\\"');
+                const order =
+                    el.location && typeof el.location.y === "number"
+                        ? el.location.y
+                        : undefined;
+                const from = el.publicKey.hashcode();
+                const formatted = `{ from: ${from} message: ${text} }`;
+                texts.push({ text, order, from });
+                aggregatedLength += formatted.length;
+                totalItems++;
+                if (totalItems >= maxItems || aggregatedLength >= maxChars) {
+                    break;
+                }
+            }
+        }
+        if (totalItems >= maxItems || aggregatedLength >= maxChars) {
+            break;
+        }
+    }
+    await iterator.close();
+    // Sort the texts by their order if available.
+    texts.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+    // Format the texts.
+    return texts.map((t) => `{ from: ${t.from} message: ${t.text} }`);
+}
+
+/**
+ * Builds the aggregated prompt for the AI generator.
+ * It combines the target canvas texts and texts from related contexts.
+ * Optionally, it limits the total context using the maxChars (or maxItems) parameter.
+ */
+async function buildAggregatedPrompt(options: {
+    targetCanvas: Canvas;
+    contextCanvases: Canvas[];
+    elementsQuery?: Query;
+    maxChars?: number; // maximum characters for the aggregated context
+    maxItems?: number; // maximum number of context items
+}): Promise<string> {
+    let visited = new Set<string>();
+    // Get texts from the target canvas.
+    const targetTexts = await getOrderedContextTexts({
+        canvas: options.targetCanvas,
+        elementsQuery: options.elementsQuery,
+        visited,
+        maxChars: options.maxChars,
+        maxItems: options.maxItems,
+    });
+    // Get texts from each context canvas.
+    const contextTextsArrays = await Promise.all(
+        options.contextCanvases.map((canvas) =>
+            getOrderedContextTexts({
+                canvas,
+                elementsQuery: options.elementsQuery,
+                visited,
+                maxChars: options.maxChars,
+                maxItems: options.maxItems,
+            })
+        )
+    );
+    const contextTexts = contextTextsArrays.flat();
+
+    let aggregated = "Context for generating your reply. Note:\n";
+    aggregated +=
+        "- 'from' refers to content created by the post's author (for identification purposes).\n\n";
+    if (contextTexts.length > 0) {
+        aggregated +=
+            "\nRelated Posts (other responses):\n" +
+            contextTexts.join("\n") +
+            "\n";
+    }
+    aggregated +=
+        "\nTarget Post (the post you should reply to):\n" +
+        (targetTexts.length > 0
+            ? targetTexts.join("\n")
+            : "_Missing Target Content_") +
+        "\n";
+    return aggregated;
+}
+
+/**
+ * Core function that prepares the context and calls the AI generator.
+ * The 'outputFn' parameter determines how the final reply is handled:
+ * - For chat queries, the output is inserted in the canvas.
+ * - For suggested reply queries, the output is returned.
+ *
+ * An optional `actAs` key instructs the generator to act on behalf of a specific user.
+ */
+async function processReplyGeneration(options: {
+    node: ProgramClient;
+    actAs?: PublicSignKey;
+    emitProgress?: boolean;
+    target: Canvas | CanvasReference;
+    context: (Canvas | CanvasReference)[];
+    elementsQuery?: Query;
+    canvasesQuery?: Query;
+    generator: (prompt: string) => Promise<string>;
+    outputFn: (reply: string, target: Canvas) => Promise<void>;
+}): Promise<void> {
+    // Resolve the target and context canvases.
+    const targetCanvas = await resolveCanvas(options.target, options.node);
+    const contextCanvases =
+        options.context && options.context.length > 0
+            ? await resolveCanvases(options.context, options.node)
+            : targetCanvas.path.length > 0
+            ? [await targetCanvas.loadParent()]
+            : [];
+
+    const aggregatedContext = await buildAggregatedPrompt({
+        targetCanvas,
+        contextCanvases,
+        elementsQuery: options.elementsQuery,
+    });
+
+    // Build initial instructions.
+    let promptIntro = `You are a social media assistant answering as another user (refer to the other person as "you" rather than "I"). `;
+    if (options.actAs) {
+        promptIntro += `Your reply is being generated on behalf of the user (acting as the user) with "from" value of ${options.actAs.hashcode()}. Use only posts created by this user when considering the context. `;
+    } else {
+        promptIntro += `Generate your response in your own voice. `;
+    }
+    promptIntro += `Given a target post and context, generate a concise, thoughtful reply that continues the conversation naturally.\n\n`;
+    promptIntro += `Important:\n- Each context post is represented as { from: <hash>, message: "<text>" }.\n- Do not include any meta commentary about the target post.\n\n`;
+
+    const prompt = `
+${promptIntro}
+${aggregatedContext}
+Your reply to the target post without any meta commentary or reasoning. Don't be too accomodating and aswer "please" "how can I assist" etc. Just the answer:
+  `;
+
+    // --- Start reply in progress interval ---
+    let progressInterval: ReturnType<typeof setInterval> | undefined;
+    try {
+        // Send a periodic in-progress notification every second.
+        progressInterval = options?.emitProgress
+            ? setInterval(async () => {
+                  try {
+                      await targetCanvas.messages.send(
+                          new ReplyingInProgresss({ reference: targetCanvas })
+                      );
+                  } catch (err) {
+                      // Optionally log or handle errors in sending in-progress messages.
+                  }
+              }, 1000)
+            : undefined;
+
+        // Call the AI generator and process the reply text.
+        const aiResponse = await options.generator(prompt);
+
+        // some trimming because some moodels add some extra text and stuff we dont need
+        let reply = "";
+        const delimiters = ["message:", "</think>"]; // deepseek r1 seems to emit </think> tag
+        for (const delim of delimiters) {
+            let split = aiResponse.split(delim);
+            reply = split.pop()?.trim() || "";
+            if (split.length > 0) {
+                break; // assume only one delimiter is needed, if any
+            }
+        }
+
+        await options.outputFn(reply, targetCanvas);
+    } finally {
+        if (progressInterval) {
+            clearInterval(progressInterval);
+        }
+        // Notify that reply generation is no longer in progress.
+        try {
+            await targetCanvas.messages.send(
+                new ReplyingNoLongerInProgresss({ reference: targetCanvas })
+            );
+        } catch (err) {
+            // Optionally log or handle errors.
+        }
+    }
+}
+
+//
+// ─── THE MAIN CLASS ────────────────────────────────────────────────────────────
+//
+
 @variant("canvas-ai-reply")
 export class CanvasAIReply extends Program<Args> {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
-
     @field({ type: RPC })
-    rpc: RPC<ChatQuery | ModelRequest, AIResponse>;
+    rpc: RPC<AIRequest, AIResponse>;
 
-    // Map to store model information: key = model name, value = peer identifier.
+    // Model map and supported models.
     private modelMap: Map<string, { peers: Set<string>; model: string }>;
-    // List of models supported by this server (if running in server mode).
     public supportedModels: string[] = [];
 
-    // New configuration for LLM.
+    // LLM configuration.
     private serverConfig: ServerConfig | undefined;
-
-    // New property for request statistics.
+    // Request statistics.
     private stats: RequestStats;
 
     constructor(
@@ -94,9 +338,6 @@ export class CanvasAIReply extends Program<Args> {
         this.stats = { requestCount: 0, totalLatency: 0, errorCount: 0 };
     }
 
-    /**
-     * Returns the current request statistics.
-     */
     public getRequestStats() {
         const averageLatency =
             this.stats.requestCount > 0
@@ -109,72 +350,54 @@ export class CanvasAIReply extends Program<Args> {
         };
     }
 
-    /**
-     * Opens the RPC channel.
-     * In server mode:
-     *  - Registers a response handler that handles both chat and model requests.
-     *  - Initializes the supportedModels list with a default ("deepseek-r1:7b").
-     * In client mode:
-     *  - Requests model info from peers and stores it in a map.
-     */
     async open(args?: Args): Promise<void> {
         this.modelMap = new Map();
-
-        // Set LLM configuration (defaulting to "ollama").
         if (!args?.server && args) {
             if ("llm" in args) {
-                // in case of that the user passed server args without the server flag
-                // we defined the serverConfig anywayis if llm is defined
                 args = {
                     server: true,
                     llm: args.llm,
                     apiKey: "apiKey" in args ? args.apiKey : undefined,
+                    model: "model" in args ? args.model : undefined,
                 };
             }
         }
-
         if (args?.server) {
             console.log(
                 "Launching AI Reply server: " +
                     args.llm +
-                    "Api key provided: " +
-                    !!args["apiKey"]
+                    ", apikey provided: " +
+                    !!args["apiKey"] +
+                    ", model provided: " +
+                    args["model"]
             );
-
             await createProfile(this.node);
-
             const llm = args?.llm || "ollama";
             let apiKey: string | undefined = undefined;
-
-            // Initialize default supported model.
             if (args.llm === "ollama") {
-                this.supportedModels = [DEEP_SEEK_R1_7b];
+                this.supportedModels = args.model
+                    ? [args.model]
+                    : [DEEP_SEEK_R1_7b];
             } else if (args.llm === "chatgpt") {
                 this.supportedModels = ["gpt-4o"];
                 apiKey = args?.apiKey
                     ? args.apiKey
                     : process.env.OPENAI_API_KEY || undefined;
-                if (!apiKey) {
-                    throw new Error("Missing ChatGPT API Key");
-                }
+                if (!apiKey) throw new Error("Missing ChatGPT API Key");
             } else {
                 throw new Error("Missing LLM Model source");
             }
             this.serverConfig = { server: true, llm, apiKey };
         } else {
-            // Client mode: request model info from peers.
             this.supportedModels = [];
         }
-
         await this.rpc.open({
             responseType: AIResponse,
             queryType: AIRequest,
             topic: sha256Base64Sync(this.id),
             responseHandler: args?.server
                 ? async (query, context) => {
-                      if (args?.onRequest) {
-                          args.onRequest(query, context);
-                      }
+                      if (args?.onRequest) args.onRequest(query, context);
                       if (query instanceof ChatQuery) {
                           return this.handleChatQuery(query);
                       } else if (query instanceof ModelRequest) {
@@ -182,13 +405,17 @@ export class CanvasAIReply extends Program<Args> {
                               model: this.supportedModels.join(", "),
                               info: "Supported models by this peer",
                           });
+                      } else if (query instanceof SuggestedReplyQuery) {
+                          return this.handleSuggestedReplyQuery({
+                              ...query,
+                              actAs: context.from!,
+                          });
                       }
                   }
                 : undefined,
         });
-
         if (!args?.server) {
-            // Helper to request model info from peers.
+            // Request model info from peers.
             const requestModels = async (toPeers?: PublicSignKey[]) => {
                 try {
                     const responses = await this.rpc.request(
@@ -217,32 +444,19 @@ export class CanvasAIReply extends Program<Args> {
                     }
                 } catch (error) {}
             };
-
-            // On peer join, request its model info.
             this.rpc.events.addEventListener("join", async (e: any) => {
                 await requestModels([e.detail]).catch(ignoreTimeoutandAbort);
             });
-
-            // Broadcast a ModelRequest to all peers (non-blocking).
             requestModels().catch(ignoreTimeoutandAbort);
         }
     }
 
     private getPeersWithModel(model?: string) {
-        if (model) {
-            return this.modelMap.get(model);
-        } else {
-            const keys = [...this.modelMap.keys()];
-            if (keys.length > 0) {
-                return this.modelMap.get(keys[0]);
-            }
-        }
+        if (model) return this.modelMap.get(model);
+        const keys = [...this.modelMap.keys()];
+        return keys.length > 0 ? this.modelMap.get(keys[0]) : undefined;
     }
 
-    /**
-     * Sends a prompt to the AI model via an RPC request.
-     * If options.model is provided, the query is sent only to the peer supporting that model.
-     */
     async query(
         to: CanvasReference | Canvas,
         options?: {
@@ -253,7 +467,7 @@ export class CanvasAIReply extends Program<Args> {
             model?: string;
         }
     ): Promise<AIResponse | undefined> {
-        const { timeout = 2e4, model: maybeModel } = options || {};
+        const { timeout = 20000, model: maybeModel } = options || {};
         const peers = this.getPeersWithModel(maybeModel);
         const meInPeer = peers?.peers?.has(
             this.node.identity.publicKey.hashcode()
@@ -289,10 +503,7 @@ export class CanvasAIReply extends Program<Args> {
                 timeout,
                 mode:
                     toPeers.length > 0
-                        ? new SilentDelivery({
-                              redundancy: 1,
-                              to: toPeers,
-                          })
+                        ? new SilentDelivery({ redundancy: 1, to: toPeers })
                         : undefined,
             }
         );
@@ -304,10 +515,85 @@ export class CanvasAIReply extends Program<Args> {
         throw new Error("No response received");
     }
 
-    /**
-     * Handles a chat query by generating a reply using the appropriate LLM.
-     * This method also measures the processing time and updates the request statistics.
-     */
+    async suggest(
+        to: CanvasReference | Canvas,
+        options?: {
+            context?: CanvasReference[];
+            elementsQuery?: Query;
+            canvasesQuery?: Query;
+            timeout?: number;
+            model?: string;
+            actAs?: PublicSignKey;
+        }
+    ): Promise<SuggestedReplyResponse> {
+        const { timeout = 20000, model: maybeModel, actAs } = options || {};
+        const peers = this.getPeersWithModel(maybeModel);
+        const meInPeer = peers?.peers?.has(
+            this.node.identity.publicKey.hashcode()
+        );
+        if (meInPeer) {
+            // When running locally, pass the actAs parameter to the handler.
+            return this.handleSuggestedReplyQuery({
+                to,
+                context: options?.context || [],
+                canvasesQuery: options?.canvasesQuery,
+                elementsQuery: options?.elementsQuery,
+                model: peers!.model,
+                actAs: actAs ? actAs : this.node.identity.publicKey,
+            });
+        }
+        if (!peers?.peers || peers.peers.size === 0) {
+            throw new Error(
+                `No peers available for model ${peers?.model ?? "NO_MODEL"}`
+            );
+        }
+        // If not available locally, pick a random peer to send the request.
+        let toPeers = [
+            [...peers.peers][
+                Math.round(Math.random() * (peers.peers.size - 1))
+            ],
+        ];
+        // Create a new SuggestedReplyQuery.
+        const query = new SuggestedReplyQuery({
+            to,
+            context: options?.context || [],
+            canvasesQuery: options?.canvasesQuery,
+            elementsQuery: options?.elementsQuery,
+            model: peers!.model,
+        }) as SuggestedReplyQuery & { actAs?: PublicSignKey };
+        if (actAs) {
+            query.actAs = actAs;
+        }
+        const responses = await this.rpc.request(query, {
+            timeout,
+            mode: new SilentDelivery({ redundancy: 1, to: toPeers }),
+        });
+        const response = responses[0]?.response as SuggestedReplyResponse;
+        if (response) {
+            return response;
+        }
+        throw new Error("No response received");
+    }
+
+    private resolveGenerator = (
+        model: string
+    ): ((string: string) => Promise<string>) => {
+        return this.serverConfig!.llm === "ollama" || !this.serverConfig!.llm
+            ? (text: string) => queryOllama(text, model || DEEP_SEEK_R1_7b)
+            : this.serverConfig?.llm === "chatgpt"
+            ? (text: string) => {
+                  if (
+                      "apiKey" in this.serverConfig! === false ||
+                      !this.serverConfig.apiKey
+                  )
+                      throw new Error("Missing ChatGPT API Key");
+                  return queryChatGPT(text, this.serverConfig.apiKey);
+              }
+            : () => {
+                  throw new Error("Missing LLM Model source");
+              };
+    };
+
     async handleChatQuery(properties: {
         to: CanvasReference | Canvas;
         context: CanvasReference[] | Canvas[];
@@ -321,53 +607,62 @@ export class CanvasAIReply extends Program<Args> {
             if (model && !this.supportedModels.includes(model)) {
                 return new MissingModel({ model });
             }
-            let canvasInstance =
-                properties.to instanceof Canvas
-                    ? properties.to
-                    : await properties.to.load(this.node);
-            canvasInstance = await this.node.open(canvasInstance, {
-                existing: "reuse",
-            });
-
-            let contextInstances: Canvas[] = [];
-            for (const context of properties.context) {
-                let canvas =
-                    context instanceof Canvas
-                        ? context
-                        : await context.load(this.node);
-                canvas = await this.node.open(canvas, { existing: "reuse" });
-                contextInstances.push(canvas);
-            }
-
-            // Choose the query function based on the LLM configuration.
-            let queryFunction: (text: string) => Promise<string>;
-            if (
-                this.serverConfig!.llm === "ollama" ||
-                !this.serverConfig!.llm
-            ) {
-                queryFunction = (text: string) =>
-                    queryOllama(text, model || DEEP_SEEK_R1_7b);
-            } else if (this.serverConfig?.llm === "chatgpt") {
-                if (!this.serverConfig.apiKey) {
-                    throw new Error("Missing ChatGPT API Key");
-                }
-                let key = this.serverConfig.apiKey;
-                queryFunction = (text: string) => queryChatGPT(text, key);
-            } else {
-                throw new Error("Missing LLM Model source");
-            }
-
-            await generateReply({
-                to: canvasInstance,
-                context: contextInstances,
-                canvasesQuery: properties.canvasesQuery,
+            // Use processReplyGeneration to reuse common steps.
+            await processReplyGeneration({
+                node: this.node,
+                target: properties.to,
+                emitProgress: true,
+                context: properties.context,
                 elementsQuery: properties.elementsQuery,
-                generator: queryFunction,
+                canvasesQuery: properties.canvasesQuery,
+                generator: this.resolveGenerator(model),
+                outputFn: async (reply: string, targetCanvas: Canvas) => {
+                    await insertTextReply(reply, targetCanvas);
+                },
             });
-            const latency = Date.now() - startTime;
             this.stats.requestCount++;
-            this.stats.totalLatency += latency;
+            this.stats.totalLatency += Date.now() - startTime;
             return new QueryResponse();
+        } catch (error) {
+            this.stats.errorCount++;
+            throw error;
+        }
+    }
+
+    async handleSuggestedReplyQuery(properties: {
+        to: CanvasReference | Canvas;
+        context: CanvasReference[] | Canvas[];
+        actAs: PublicSignKey;
+        canvasesQuery?: Query;
+        elementsQuery?: Query;
+        model?: string;
+    }): Promise<SuggestedReplyResponse> {
+        const startTime = Date.now();
+        try {
+            const model = properties.model || DEEP_SEEK_R1_7b;
+            if (model && !this.supportedModels.includes(model)) {
+                return new SuggestedReplyResponse({
+                    reply: `Missing model ${model}`,
+                });
+            }
+            // Here we call the same processing function but with a different outputFn.
+            let replyText = "";
+            await processReplyGeneration({
+                node: this.node,
+                actAs: properties.actAs,
+                emitProgress: false,
+                target: properties.to,
+                context: properties.context,
+                elementsQuery: properties.elementsQuery,
+                canvasesQuery: properties.canvasesQuery,
+                generator: this.resolveGenerator(model),
+                outputFn: async (reply: string, _targetCanvas: Canvas) => {
+                    replyText = reply;
+                },
+            });
+            this.stats.requestCount++;
+            this.stats.totalLatency += Date.now() - startTime;
+            return new SuggestedReplyResponse({ reply: replyText });
         } catch (error) {
             this.stats.errorCount++;
             throw error;
@@ -382,29 +677,30 @@ export class CanvasAIReply extends Program<Args> {
         while (Date.now() - start < (options?.timeout || 10000)) {
             if (options?.model) {
                 if (
-                    this.supportedModels.includes(options?.model) ||
-                    this.modelMap.has(options?.model)
+                    this.supportedModels.includes(options.model) ||
+                    this.modelMap.has(options.model)
                 ) {
                     return;
                 }
-            } else {
-                if (
-                    this.supportedModels.length > 0 ||
-                    [...this.modelMap.values()].filter((x) => x.peers.size > 0)
-                        .length > 0
-                ) {
-                    return;
-                }
+            } else if (
+                this.supportedModels.length > 0 ||
+                [...this.modelMap.values()].some((x) => x.peers.size > 0)
+            ) {
+                return;
             }
             await delay(100);
         }
         throw new Error(
-            `Timeout waiting for  ${
+            `Timeout waiting for ${
                 options?.model ? "model " + options.model : "any model"
             }`
         );
     }
 }
+
+//
+// ─── RPC REQUEST/RESPONSE TYPES ─────────────────────────────
+//
 
 abstract class AIRequest {}
 
@@ -412,16 +708,12 @@ abstract class AIRequest {}
 export class ChatQuery extends AIRequest {
     @field({ type: CanvasReference })
     to: CanvasReference;
-
     @field({ type: vec(CanvasReference) })
     context: CanvasReference[];
-
     @field({ type: option(Query) })
     canvasesQuery?: Query;
-
     @field({ type: option(Query) })
     elementsQuery?: Query;
-
     @field({ type: option("string") })
     model?: string;
 
@@ -453,16 +745,48 @@ export class ModelRequest extends AIRequest {
     }
 }
 
+@variant(2)
+export class SuggestedReplyQuery extends AIRequest {
+    @field({ type: CanvasReference })
+    to: CanvasReference;
+    @field({ type: vec(CanvasReference) })
+    context: CanvasReference[];
+    @field({ type: option(Query) })
+    canvasesQuery?: Query;
+    @field({ type: option(Query) })
+    elementsQuery?: Query;
+    @field({ type: option("string") })
+    model?: string;
+
+    constructor(properties: {
+        to: CanvasReference | Canvas;
+        context?: CanvasReference[] | Canvas[];
+        canvasesQuery?: Query;
+        elementsQuery?: Query;
+        model?: string;
+    }) {
+        super();
+        this.to =
+            properties.to instanceof Canvas
+                ? new CanvasValueReference({ canvas: properties.to })
+                : properties.to;
+        this.context = (properties.context || []).map((c) =>
+            c instanceof Canvas ? new CanvasValueReference({ canvas: c }) : c
+        );
+        this.model = properties.model;
+        this.canvasesQuery = properties.canvasesQuery;
+        this.elementsQuery = properties.elementsQuery;
+    }
+}
+
 abstract class AIResponse {}
 
 @variant(0)
 export class ModelResponse extends AIResponse {
     @field({ type: "string" })
     model: string;
-
     @field({ type: "string" })
     info: string;
-
     constructor(properties: { model: string; info: string }) {
         super();
         this.model = properties.model;
@@ -474,7 +798,6 @@ export class ModelResponse extends AIResponse {
 export class MissingModel extends AIResponse {
     @field({ type: "string" })
     model: string;
-
     constructor(properties: { model: string }) {
         super();
         this.model = properties.model;
@@ -485,14 +808,24 @@ export class MissingModel extends AIResponse {
 export class QueryResponse extends AIResponse {
     @field({ type: "u8" })
     status: number;
-
     constructor() {
         super();
         this.status = 0;
     }
 }
 
+@variant(3)
+export class SuggestedReplyResponse extends AIResponse {
+    @field({ type: "string" })
+    reply: string;
+    constructor(properties: { reply: string }) {
+        super();
+        this.reply = properties.reply;
+    }
+}
+
 export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
+    await parent.load();
     return parent.elements.put(
         new Element({
             content: new StaticContent({
@@ -508,12 +841,10 @@ export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
 };
 
 export const insertTextReply = async (text: string, parent: Canvas) => {
+    await parent.load();
     return parent.node
         .open(
-            new Canvas({
-                parent: parent,
-                publicKey: parent.node.identity.publicKey,
-            }),
+            new Canvas({ parent, publicKey: parent.node.identity.publicKey }),
             { existing: "reuse" }
         )
         .then(async (newCanvas) => {
@@ -521,140 +852,4 @@ export const insertTextReply = async (text: string, parent: Canvas) => {
             await insertTextIntoCanvas(text, newCanvas);
             return parent.replies.put(newCanvas);
         });
-};
-
-type ReplyContext = string;
-
-const generateTextContext = async (properties: {
-    canvas: Canvas;
-    elementsQuery?: Query;
-    visited: Set<string>;
-}): Promise<ReplyContext[]> => {
-    const { canvas, visited } = properties;
-    await canvas.load();
-    const elements = await canvas.elements.index
-        .iterate({
-            query: [
-                ...getOwnedAndSubownedElementsQuery(canvas),
-                getTextElementsQuery(),
-                ...(properties.elementsQuery ? [properties.elementsQuery] : []),
-            ],
-            sort: new Sort({ key: ["__context", "created"] }),
-        })
-        .all();
-
-    const replyContext: ReplyContext[] = [];
-    const createContextFromElement = (
-        element: WithContext<Element<StaticContent<StaticMarkdownText>>>
-    ) => {
-        const text = element.content.content.text.replace(/"/g, '\\"');
-        return `{ from: ${element.publicKey.hashcode()}, message: "${text}" }`;
-    };
-    for (const element of elements) {
-        const el = element as WithContext<
-            Element<StaticContent<StaticMarkdownText>>
-        >;
-        if (!visited.has(el.idString)) {
-            visited.add(el.idString);
-            replyContext.push(createContextFromElement(el));
-        }
-    }
-    return replyContext;
-};
-
-const generateReply = async (properties: {
-    to: Canvas;
-    context: Canvas[];
-    elementsQuery?: Query;
-    canvasesQuery?: Query;
-    generator: (text: string) => Promise<string>;
-}): Promise<void> => {
-    const {
-        to,
-        context: maybeContext,
-        elementsQuery,
-        canvasesQuery,
-        generator,
-    } = properties;
-
-    let writingInProgressInterval: ReturnType<typeof setInterval> | undefined;
-    try {
-        await to.load();
-        writingInProgressInterval = setInterval(async () => {
-            await to.messages.send(new ReplyingInProgresss({ reference: to }));
-        }, 1000);
-
-        let context = maybeContext;
-        if (!context || context.length === 0) {
-            context = to.path.length > 0 ? [await to.loadParent()] : [];
-        }
-
-        let visited = new Set<string>();
-        const replyToTexts = await generateTextContext({
-            canvas: to,
-            visited,
-            elementsQuery,
-        });
-        const contextTexts = (
-            await Promise.all(
-                context.map((x) =>
-                    generateTextContext({ canvas: x, visited, elementsQuery })
-                )
-            )
-        ).flat();
-
-        // Build the aggregated context with metadata.
-        let aggregatedContext = "Context for generating your reply. Note:\n";
-        /* aggregatedContext +=
-            "- 'Thread Parent Post' is the previous post in the conversation thread (metadata is provided only for speaker identification).\n"; */
-        aggregatedContext +=
-            "- 'from' refers to content created by the post's author (the from field is provided solely for identification purposes).\n\n";
-
-        /*  if (parentTexts.length > 0) {
-             aggregatedContext +=
-                 "Thread Parent Post:\n" + parentTexts.join("\n") + "\n";
-         } */
-
-        if (contextTexts.length > 0) {
-            aggregatedContext +=
-                "\nRelated Posts (other responses in the conversation):\n" +
-                contextTexts.join("\n") +
-                "\n";
-        }
-
-        aggregatedContext +=
-            "\nTarget Post (the post you should reply to):\n" +
-            (replyToTexts.length > 0
-                ? replyToTexts.join("\n")
-                : "_Missing Target Content_") +
-            "\n";
-
-        // Construct the prompt with clear instructions.
-        const promptText = `
-You are a social media assistant and an user, answering questions for users, acting as an another user on the platform. It is very important that you act as another identity, hence answer questions with "you" instead of "I" or "me". You are just trying to answer question the best as you can given a target post and some context, which are other posts. Generate a thoughtful and engaging reply that continues the discussion appropriately. Keep your reply concise and directly address the target post's content. You will act as a different user in the conversation, like a friend or a colleague. For example, if someone asks, what is my name, you can say "I think your name is ...". Important you are referencing the person you are replying to as "you", and not "me" or "they". Reply in the same tone, or vibe as the target post and context.
-
-Important:
-- Each post in the context is represented as { from: <hash>, message: "<text>" } where "from" will be a hash of the users identity, and message will be the actual message content.
-- The Target Post is the last one in the context. But you use the context too, to find information. Don't mention the word "Target post" or any other meta data related terms. Your goal is answering the question as best as you can and also bringing the discussion forward. If someone asks "How many days does a week have?" you should respond with "7" and not with the question again.
-
-${aggregatedContext}
-
-Your reply to the last, Target Post:\n
-        `;
-
-        const aiResponse = await generator(promptText);
-        const thinkSplit = aiResponse.split("</think>");
-        await insertTextReply(thinkSplit[thinkSplit.length - 1].trim(), to);
-    } catch (error) {
-        await insertTextReply("Error generating AI reply :(", to);
-        console.error("Error generating AI reply:", error);
-    } finally {
-        if (writingInProgressInterval) {
-            clearInterval(writingInProgressInterval);
-        }
-
-        await to.messages.send(
-            new ReplyingNoLongerInProgresss({ reference: to })
-        );
-    }
 };

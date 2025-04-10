@@ -5,11 +5,14 @@ import {
     ModelRequest,
     ModelResponse,
     QueryResponse,
+    SuggestedReplyQuery,
+    SuggestedReplyResponse,
 } from "../ai-reply-program";
 import { expect } from "chai";
-import { DEEP_SEEK_R1_7b } from "../model.js";
+import { DEEP_SEEK_R1_1_5b, DEEP_SEEK_R1_7b } from "../model.js";
 import { Canvas } from "@giga-app/interface";
 import { waitForResolved } from "@peerbit/time";
+import { ProgramClient } from "@peerbit/program";
 
 describe("AIResponseProgram", () => {
     let session: TestSession;
@@ -22,22 +25,30 @@ describe("AIResponseProgram", () => {
         await session.stop();
     });
 
-    const createDefaultCanvas = async (text = "Hey! what is 1+1") => {
-        const root = await createReply();
+    const createDefaultCanvas = async (
+        text = "Hey! what is 1+1",
+        client: ProgramClient = session.peers[0]
+    ) => {
+        const root = await createReply(undefined, client);
         await insertTextIntoCanvas(text, root);
         return root;
     };
-    const createReply = async (to?: Canvas) => {
-        const canvas = await session.peers[0].open(
+    const createReply = async (
+        to?: Canvas,
+        client: ProgramClient = session.peers[0]
+    ) => {
+        const canvas = await client.open(
             new Canvas({
                 parent: to,
-                publicKey: session.peers[0].identity.publicKey,
+                publicKey: client.identity.publicKey,
             })
         );
         return canvas;
     };
 
     it("ollama", async () => {
+        // If OOlama starts slowly this test will fail. (run the test twice
+
         const canvas = await createDefaultCanvas();
 
         // Open the program on the first peer as the server.
@@ -61,6 +72,18 @@ describe("AIResponseProgram", () => {
         );
         const [text] = await canvas.replies.index.iterate({}).all();
         expect((await text.getText()).length).to.be.greaterThan(0);
+    });
+
+    it("ollama different model", async () => {
+        // Open the program on the first peer as the server.
+        const server = await session.peers[0].open(new CanvasAIReply(), {
+            args: { server: true, llm: "ollama", model: DEEP_SEEK_R1_1_5b },
+        });
+        // Open a client on the second peer.
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
+        await client.waitForModel({ model: DEEP_SEEK_R1_1_5b });
     });
 
     it("can use context", async () => {
@@ -162,5 +185,52 @@ describe("AIResponseProgram", () => {
         const modelResp = responses[0]?.response as ModelResponse;
         expect(modelResp).to.be.instanceof(ModelResponse);
         expect(modelResp.model).to.include(DEEP_SEEK_R1_7b);
+    });
+
+    it("generates a suggested reply using actAs", async () => {
+        // Open the program on the first peer as the server.
+        const server = await session.peers[0].open(new CanvasAIReply(), {
+            args: { server: true, llm: "ollama" },
+        });
+        // Open a client on the second peer.
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
+
+        await client.waitForModel({ model: DEEP_SEEK_R1_7b });
+
+        // Server announces their name
+        const canvas = await createDefaultCanvas(
+            "My name is A",
+            session.peers[0]
+        );
+
+        // Client responds withs their name
+        const reply1 = await createReply(canvas, session.peers[1]);
+        await insertTextIntoCanvas("My name is B", reply1);
+
+        // Client also responds with a question figuring out their name
+        const reply2 = await createReply(canvas, session.peers[1]);
+        await insertTextIntoCanvas(
+            "There are two names in the chat, but what is my name again?",
+            reply2
+        );
+
+        // wait for client to have 2 messages in total
+        await reply2.load();
+        const rootFromClient = reply2.origin;
+        await waitForResolved(async () => {
+            expect((await rootFromClient!.replies.index.getSize()) === 3);
+            expect((await rootFromClient!.elements.index.getSize()) === 3);
+        });
+
+        // Send the SuggestedReplyQuery.
+        const response = await client.suggest(reply2);
+
+        expect(response).to.exist;
+        const suggestion = response as SuggestedReplyResponse;
+        expect(suggestion).to.be.instanceof(SuggestedReplyResponse);
+        // Check that the generated reply is non-empty.
+        expect(suggestion.reply.length).to.be.greaterThan(0);
     });
 });

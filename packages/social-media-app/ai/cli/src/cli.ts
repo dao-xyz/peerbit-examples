@@ -1,6 +1,6 @@
 import inquirer from "inquirer";
 import { Peerbit } from "peerbit";
-import { CanvasAIReply } from "@giga-app/llm";
+import { CanvasAIReply, ServerConfig } from "@giga-app/llm";
 import path from "path";
 import os from "os";
 import fs from "fs";
@@ -50,13 +50,23 @@ export const start = async (directory?: string | null) => {
         chatgptApiKey = process.argv[apiKeyIndex + 1];
     }
 
+    // Check if an model key is passed as a CLI argument using the flag "--model".
+    let model: string | undefined;
+    const modelIndex = process.argv.indexOf("--model");
+    if (modelIndex > -1 && process.argv.length > modelIndex + 1) {
+        model = process.argv[modelIndex + 1];
+    }
+
     const serviceArgs = {
         server: true,
         llm: llm as "chatgpt" | "ollama",
         ...(llm === "chatgpt" && {
             apiKey: chatgptApiKey || process.env.OPENAI_API_KEY,
         }),
-    };
+        ...(llm === "ollama" && {
+            model,
+        }),
+    } as ServerConfig;
 
     // Open the CanvasAIReply service (server mode) with the proper LLM configuration.
     const service = await client.open<CanvasAIReply>(new CanvasAIReply(), {
