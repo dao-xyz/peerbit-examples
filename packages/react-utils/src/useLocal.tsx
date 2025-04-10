@@ -31,7 +31,8 @@ export const useLocal = <
     const emptyResultsRef = useRef(false);
 
     useEffect(() => {
-        if (!db || db.closed) {
+        if (!db || db.closed || options?.query === null) {
+            // null query means no query at all
             return;
         }
 
