@@ -35,6 +35,7 @@ export const resolveTrigger = (
     | React.ComponentType<{
           className?: string;
           children?: React.ReactNode;
+          onClick?: (insertDefault: boolean) => void;
       }>
     | undefined => {
     if (app.url === "native:image") {

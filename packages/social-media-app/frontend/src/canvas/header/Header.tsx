@@ -90,7 +90,7 @@ export const Header = ({
         <>
             {canvas && (
                 <div
-                    className={`flex px-2 pt-1 ${
+                    className={`flex px-2 pt-2 ${
                         reverseLayout ? "flex-row-reverse" : ""
                     } items-center ${
                         variant === "large"

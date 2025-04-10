@@ -19,7 +19,7 @@ function getScrollTop() {
     return window.scrollY || document.documentElement.scrollTop;
 }
 
-function getScrollBottomOffset(scrollPosition: number) {
+function getScrollBottomOffset(scrollPosition) {
     return (
         document.documentElement.scrollHeight -
         (scrollPosition + window.innerHeight)
@@ -28,9 +28,11 @@ function getScrollBottomOffset(scrollPosition: number) {
 
 const DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED = 100;
 
-export const useScrollToBottom = (properties: {
+export const useAutoScroll = (properties: {
     replies: { reply: Canvas }[];
     repliesContainerRef: React.RefObject<any>;
+    scrollRef?: React.RefObject<any>;
+    enabled: boolean;
 }) => {
     const { replies: processedReplies, repliesContainerRef } = properties;
     const { view } = useView();
@@ -43,6 +45,9 @@ export const useScrollToBottom = (properties: {
     const viewIsShouldScrollToBottom = view === "chat" || view === "new";
 
     useEffect(() => {
+        if (!properties.enabled) {
+            return;
+        }
         if (viewIsShouldScrollToBottom) {
             scrollMode.current = "automatic";
             forceScrollToBottom.current = true;
@@ -50,7 +55,11 @@ export const useScrollToBottom = (properties: {
             scrollMode.current = "manual";
             forceScrollToBottom.current = false;
         }
-    }, [view]);
+
+        if (view === "best" || view === "old") {
+            scrollToTop();
+        }
+    }, [view, properties.enabled]);
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
@@ -74,6 +83,9 @@ export const useScrollToBottom = (properties: {
         if (!viewIsShouldScrollToBottom) {
             return;
         }
+        if (!properties.enabled) {
+            return;
+        }
         if (processedReplies.length > 0) {
             latestReplyRef.current =
                 processedReplies[processedReplies.length - 1];
@@ -87,21 +99,50 @@ export const useScrollToBottom = (properties: {
             }
         }
         bodyResizeScrollPositionRef.current = getScrollTop();
-    }, [processedReplies]);
+    }, [processedReplies, properties.enabled]);
 
+    // UPDATED scrollToBottom: scroll the container if available.
     const scrollToBottom = () => {
-        window.scrollTo({
-            top: document.documentElement.scrollHeight,
-            left: 0,
-            behavior: "instant",
-        });
+        if (properties.scrollRef?.current) {
+            properties.scrollRef.current.scrollTo({
+                top: repliesContainerRef.current.scrollHeight,
+                left: 0,
+                behavior: "instant",
+            });
+        } else {
+            window.scrollTo({
+                top: document.documentElement.scrollHeight,
+                left: 0,
+                behavior: "instant",
+            });
+        }
         scrollMode.current = "automatic";
         forceScrollToBottom.current = false;
+    };
+
+    const scrollToTop = () => {
+        if (properties.scrollRef?.current) {
+            properties.scrollRef.current.scrollTo({
+                top: 0,
+                left: 0,
+                behavior: "instant",
+            });
+        } else {
+            window.scrollTo({
+                top: 0,
+                left: 0,
+                behavior: "instant",
+            });
+        }
+        setIsAtBottom(false);
     };
 
     // Handle window resize for scroll adjustments (applies only in chat view).
     useEffect(() => {
         if (!viewIsShouldScrollToBottom) {
+            return;
+        }
+        if (!properties.enabled) {
             return;
         }
         const cycleLength = 100;
@@ -142,7 +183,7 @@ export const useScrollToBottom = (properties: {
             handleResizeThrottled.cancel();
             setup.cancel();
         };
-    }, [view]);
+    }, [view, properties.enabled]);
 
     // detect scroll up events to prevent automatic down scrolling to happen
     let lastScrollTop = useRef(-1);
@@ -150,13 +191,16 @@ export const useScrollToBottom = (properties: {
     useEffect(() => {
         // New replies added: reset lastScrollTop to current scroll position
         lastScrollTop.current = -1;
-    }, [processedReplies]);
+    }, [processedReplies, properties.enabled]);
 
     const scrollUpTimeout = useRef<ReturnType<typeof setTimeout> | undefined>(
         undefined
     );
     useEffect(() => {
         if (!viewIsShouldScrollToBottom) {
+            return;
+        }
+        if (!properties.enabled) {
             return;
         }
         let listener = () => {
@@ -170,7 +214,7 @@ export const useScrollToBottom = (properties: {
 
             scrollUpTimeout.current = setTimeout(() => {
                 var st =
-                    window.pageYOffset || document.documentElement.scrollTop; // Credits: "https://github.com/qeremy/so/blob/master/so.dom.js#L426"
+                    window.pageYOffset || document.documentElement.scrollTop;
 
                 if (st > lastScrollTop.current) {
                     // downscroll code
@@ -180,9 +224,8 @@ export const useScrollToBottom = (properties: {
                     forceScrollToBottom.current = false;
                     setIsAtBottom(false);
                     console.log("manual scroll mode");
-                } // else was horizontal scroll
-                lastScrollTop.current = st <= 0 ? 0 : st; // For Mobile or negative scrollin
-
+                }
+                lastScrollTop.current = st <= 0 ? 0 : st;
                 scrollUpTimeout.current = undefined;
             }, DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED);
         };
@@ -190,7 +233,7 @@ export const useScrollToBottom = (properties: {
         return () => {
             window.removeEventListener("scroll", listener);
         };
-    }, [view, lastScrollTop]);
+    }, [view, lastScrollTop, properties.enabled]);
 
     // Handle body resize events due to new replies being inserted.
     useEffect(() => {
@@ -199,6 +242,10 @@ export const useScrollToBottom = (properties: {
         }
 
         if (!repliesContainerRef.current) {
+            return;
+        }
+
+        if (!properties.enabled) {
             return;
         }
         const cycleLength = 100;
@@ -232,7 +279,7 @@ export const useScrollToBottom = (properties: {
             resizeObserver.disconnect();
             handleBodyResizeDebounced.cancel();
         };
-    }, [view, peer, repliesContainerRef.current]);
+    }, [view, peer, repliesContainerRef.current, properties.enabled]);
 
     return {
         isAtBottom,

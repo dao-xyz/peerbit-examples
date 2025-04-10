@@ -138,7 +138,7 @@ export const CanvasWrapper = ({
             id: canvas?.idString,
             query:
                 !canvas || canvas.closed
-                    ? undefined
+                    ? { query: { id: new Uint8Array(0) } } // use local seems to be really flaky?? we need this to prevent loading all elements by mistake
                     : {
                           query: [
                               ...getOwnedElementsQuery(canvas),
@@ -460,6 +460,12 @@ export const CanvasWrapper = ({
             }
             setPendingRects([]);
             pendingCounter.current += pendingToSave.length;
+
+            // re-assign parent to canvas (TODO - remove this, when we have eliminated flaky parent updatnig behaviour that happens during save)
+            // (when update the path of a canvas while concurrently saving we might run into problems)
+            for (const element of pendingToSave) {
+                element.parent = canvas;
+            }
 
             await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
             if (draft && onSave) {

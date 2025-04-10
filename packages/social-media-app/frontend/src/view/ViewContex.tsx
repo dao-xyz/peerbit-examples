@@ -53,9 +53,10 @@ function useViewContextHook() {
     // --- Query & Reply Fetching Management ---
 
     // State to hold our query (a SearchRequest and a unique id)
-    const [query, setQuery] = useState<
-        { query: SearchRequest; id: string } | undefined
-    >(undefined);
+    const [query, setQuery] = useState<{
+        query: SearchRequest;
+        id: string;
+    } | null>(null);
 
     // Helper to create a unique query id based on the canvas and view type.
     const getQueryId = (canvas: CanvasDB, sortCriteria: ViewType) => {

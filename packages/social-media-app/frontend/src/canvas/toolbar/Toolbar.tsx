@@ -12,7 +12,7 @@ import ToolbarContent from "./ToolbarContent";
 import { AppSelectPaneInline } from "./AppSelectPaneInline";
 import { SimpleWebManifest } from "@giga-app/interface";
 import { usePendingCanvas } from "../PendingCanvasContext";
-import { AutoReplyProvider, useAutoReply } from "../AutoReplyContext";
+import { AutoReplyProvider } from "../AutoReplyContext";
 
 interface ToolbarContextType {
     fullscreenEditorActive: boolean;
@@ -122,7 +122,15 @@ const ToolbarInner = forwardRef<HTMLDivElement, ToolbarInnerProps>(
             >
                 <div className="flex flex-col w-full items-center max-w-[876px]">
                     <ToolbarContent
-                        onToggleAppSelect={() => setAppSelectOpen(true)}
+                        onToggleAppSelect={(open) => {
+                            if (open != null) {
+                                setAppSelectOpen(open);
+                            } else {
+                                setAppSelectOpen(
+                                    (appSelectOpen) => !appSelectOpen
+                                );
+                            }
+                        }}
                         appSelectOpen={appSelectOpen}
                     />
                     <div

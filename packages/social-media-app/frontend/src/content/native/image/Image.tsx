@@ -206,7 +206,7 @@ export const ImageContent = ({
                 }}
             >
                 <Dialog.Title className="sr-only">Image Preview</Dialog.Title>
-                <div className="w-full h-full max-w-4xl max-h-[100vh]">
+                <div className="w-full h-full flex justify-center max-w-4xl max-h-[100vh]">
                     <img
                         src={imgUrl}
                         alt={content.alt ?? ""}

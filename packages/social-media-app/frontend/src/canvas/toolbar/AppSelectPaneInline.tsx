@@ -38,9 +38,12 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
         [filteredApps]
     );
 
-    const onSelected = (app: SimpleWebManifest) => {
+    const onSelected = (
+        app: SimpleWebManifest,
+        insertDefaultValue: boolean
+    ) => {
         setQuery("");
-        insertDefault({ app, increment: true });
+        insertDefaultValue && insertDefault({ app, increment: true });
         _onSelected(app);
     };
 
@@ -72,7 +75,9 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
                                     key={app.url}
                                     app={app}
                                     className="btn btn-md"
-                                    onClick={() => onSelected(app)}
+                                    onClick={(insertDefault) =>
+                                        onSelected(app, insertDefault)
+                                    }
                                 />
                             ))}
                         </div>
@@ -86,7 +91,9 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
                                 <AppButton
                                     key={ix}
                                     app={app}
-                                    onClick={() => onSelected(app)}
+                                    onClick={(insertDefault) =>
+                                        onSelected(app, insertDefault)
+                                    }
                                     showTitle
                                     className="btn btn-md"
                                 />

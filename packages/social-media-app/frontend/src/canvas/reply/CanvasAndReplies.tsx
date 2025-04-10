@@ -1,4 +1,4 @@
-import React, { useRef, useState } from "react";
+import { useRef, useState, useEffect } from "react";
 import { ToolbarProvider } from "../toolbar/Toolbar.js";
 import { FullscreenEditor } from "../toolbar/FullscreenEditor.js";
 import { Spinner } from "../../utils/Spinner.js";
@@ -11,8 +11,9 @@ import { useToolbarVisibility } from "./useToolbarVisibility.js";
 import { DetailedView } from "../detailed/DetailedView.js";
 import { SubHeader } from "./SubHeader.js";
 import { AnimatedStickyToolbar } from "./AnimatedStickyToolbar.js";
+import { DetailedViewContainer } from "../detailed/DetailedViewContainer.js";
 
-const loadingTexts: string[] = [
+const loadingTexts = [
     "Just a moment, we're getting things ready…",
     "A little magic is coming your way…",
     "Warming up the good vibes…",
@@ -54,18 +55,34 @@ const loadingTexts: string[] = [
     "Hold on, playful pixels are assembling…",
     "Almost there—your lighthearted escape is almost live!",
 ];
+
 const textToLoad =
     loadingTexts[Math.floor(Math.random() * loadingTexts.length)];
 
+/**
+ * CanvasAndReplies component.
+ *
+ * When the Replies area is unfocused, it will cover the space between the SubHeader
+ * (immediately above) and the Toolbar below. In this state the Replies area is rendered in a fixed
+ * container (its scrollbar is hidden) so it doesn't affect the body scrollbar.
+ * When focused, Replies are rendered in-line.
+ */
 export const CanvasAndReplies = () => {
+    // Ref for the overall container (used for toolbar height calculations)
     const scrollContainerRef = useRef(null);
-    // This state will hold the measured toolbar height.
-    const [toolbarHeight, setToolbarHeight] = useState(0);
 
-    // Use the custom hook to get view-related state and actions.
-    const { loading, canvases, viewRoot, lastReply } = useView();
-    // Pass the scrollContainerRef if your hook uses it.
+    const [toolbarHeight, _setToolbarHeight] = useState(0);
+
+    const { loading, canvases, viewRoot, lastReply, view } = useView();
     const toolbarVisible = useToolbarVisibility(scrollContainerRef);
+
+    // For view types other than "best" or "old", we want the new scroll-based effect.
+    const normalScrollBehaviour = view === "best" || view === "old";
+
+    // When using the new behavior, initially the Replies area is unfocused.
+    const [repliesFocused, setRepliesFocused] = useState(normalScrollBehaviour);
+
+    const repliesScrollRef = useRef<HTMLDivElement>(null);
 
     if (!canvases || canvases.length === 0) {
         return (
@@ -86,38 +103,117 @@ export const CanvasAndReplies = () => {
         );
     }
 
+    const goToTop = () => {
+        // Scroll to the top of the page
+        setRepliesFocused(false);
+        window.scrollTo({
+            top: 0,
+            behavior: "instant",
+        });
+    };
+
     return (
         <PendingCanvasProvider viewRoot={viewRoot}>
             <ToolbarProvider>
-                {/* Reserve space at the bottom equal to the toolbar height */}
+                {/* 
+          Main container takes full viewport height.
+          Header (DetailedView + SubHeader) is shrink-to-fit.
+          Replies area fills the remaining space.
+        */}
+
                 <div
                     ref={scrollContainerRef}
                     className="h-fit min-h-full flex flex-col relative grow shrink-0"
                     style={{ paddingBottom: toolbarHeight }}
                 >
-                    <FullscreenEditor>
-                        <div className="mt-6 max-w-[876px] mx-auto w-full">
-                            <DetailedView />
-                        </div>
-                        <SubHeader />
-                        <Replies />
-                    </FullscreenEditor>
-                </div>
-                <div className="relative">
-                    <div
-                        className={`absolute right-1`}
-                        style={{
-                            bottom: toolbarHeight + "px",
+                    {/* Header section */}
+                    <div className="flex-shrink-0">
+                        <FullscreenEditor>
+                            <div className="mt-6 max-w-[876px] mx-auto w-full">
+                                {!repliesFocused ? (
+                                    <DetailedViewContainer
+                                        onMinimized={() => {
+                                            // When the DetailedView is minimized, keep Replies unfocused.
+                                            setRepliesFocused(false);
+                                        }}
+                                    >
+                                        <DetailedView />
+                                    </DetailedViewContainer>
+                                ) : (
+                                    <DetailedView />
+                                )}
+                            </div>
+                        </FullscreenEditor>
+                    </div>
+                    <SubHeader
+                        onBackToTop={goToTop}
+                        onViewChange={() => {
+                            // a manual change in view is an indication of that the user is interested in the replies
+                            setRepliesFocused(true);
                         }}
-                    >
-                        <ReplyingInProgress canvas={lastReply} />
+                    />
+
+                    {/* Replies section */}
+                    <div className="relative flex-1 overflow-hidden">
+                        <div
+                            // When not focused, make the container fill the available area and show a pointer cursor.
+                            // When focused, render it inline (relative) and remove the click handler.
+
+                            className={`${
+                                !repliesFocused
+                                    ? "absolute inset-0 w-full cursor-pointer"
+                                    : "relative"
+                            }`}
+                        >
+                            {/* When unfocused, wrap Replies in an absolutely positioned, scrollable container.
+        When focused, no extra wrapper is applied so the Replies render inline. */}
+                            <div
+                                className={`${
+                                    !repliesFocused
+                                        ? "absolute inset-0 overflow-y-auto hide-scrollbar"
+                                        : ""
+                                }`}
+                            >
+                                <Replies
+                                    focused={repliesFocused}
+                                    scrollRef={
+                                        repliesFocused
+                                            ? undefined
+                                            : repliesScrollRef
+                                    }
+                                />
+                            </div>
+                            {/* Render the gradient overlay only when unfocused.
+        This overlay is absolutely positioned over the container and does not receive pointer events. */}
+                            {!repliesFocused && (
+                                <div
+                                    className="absolute inset-0 cursor-pointer backdrop-blur-[1px] bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black"
+                                    onClick={(e) => {
+                                        if (repliesFocused) {
+                                            return;
+                                        }
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                        setRepliesFocused(true);
+                                    }}
+                                />
+                            )}
+                        </div>
                     </div>
                 </div>
 
-                {/* AnimatedStickyToolbar receives toolbarVisible and calls onHeightChange when its height changes */}
+                {/* Optionally, you can also include a fixed AnimatedStickyToolbar or ReplyingInProgress
+            as needed. For example, to display a ReplyingInProgress indicator: */}
+                <div className="relative">
+                    <div className="absolute right-1 bottom-0">
+                        <ReplyingInProgress canvas={lastReply} />
+                    </div>
+                </div>
                 <AnimatedStickyToolbar
                     toolbarVisible={toolbarVisible}
-                    onHeightChange={setToolbarHeight}
+                    onHeightChange={(setHeight) => {
+                        _setToolbarHeight(setHeight);
+                    }}
                 >
                     <Toolbar />
                 </AnimatedStickyToolbar>

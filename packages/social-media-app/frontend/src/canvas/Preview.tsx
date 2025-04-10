@@ -80,7 +80,7 @@ const PreviewFrame = ({
     onClick?: () => void;
 }) => (
     <div
-        className={`flex flex-col relative overflow-hidden w-full max-in ${
+        className={`flex flex-col relative w-full max-in ${
             maximizeHeight ? "h-full" : ""
         }`}
     >
@@ -295,7 +295,6 @@ const PostQuotePreview = ({
                     <span className="leading-tight">
                         <PreviewFrame
                             element={text}
-                            previewLines={1}
                             noPadding
                             onClick={onClick}
                         />
@@ -371,7 +370,7 @@ const PostPreview = ({
                     className="col-start-2 col-span-1 bg-neutral-50 dark:bg-neutral-950 rounded-md  py-1"
                     ref={forwardRef}
                 >
-                    <PreviewFrame element={text} previewLines={3} />
+                    <PreviewFrame element={text} />
                 </button>
             )}
         </>

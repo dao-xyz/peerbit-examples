@@ -523,13 +523,47 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     async setParent(canvas: Canvas) {
+        if (canvas.address === this.path[this.path.length - 1]?.address) {
+            return; // no change
+        }
+
+        const elements = await this.elements.index
+            .iterate({ query: getOwnedElementsQuery(this) })
+            .all();
+        const elementsWithSubElements = await this.elements.index
+            .iterate({ query: getOwnedAndSubownedElementsQuery(this) })
+            .all();
+        if (elementsWithSubElements.length !== elements.length) {
+            throw new Error("Cannot move canvas with sub-elements");
+        }
+
         this.path = [
             ...canvas.path,
             new CanvasAddressReference({
                 canvas,
             }),
         ];
-        await this.calculateAddress({ reset: true });
+        let addressBefore = this.address;
+        let addrsesAfter = (await this.calculateAddress({ reset: true }))
+            .address;
+
+        if (addressBefore !== addrsesAfter) {
+            await this.node.services.blocks.rm(addressBefore);
+        }
+
+        const newPath = [
+            ...this.path,
+            new CanvasAddressReference({
+                canvas: this,
+            }),
+        ];
+        // move all elements
+        // TODO what if the origin has changed?
+        // TODO implement sub canvases movements?
+        for (const element of elements) {
+            element.path = newPath;
+            await this.elements.put(element);
+        }
     }
 
     private _idString: string;

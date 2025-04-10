@@ -3,14 +3,17 @@ import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Toast from "@radix-ui/react-toast";
 import { Reply } from "./Reply"; // Uses the updated Reply component
 import { tw } from "../../utils/tailwind";
-import { useView, ViewType } from "../../view/ViewContex";
-import { useOnline, usePeer } from "@peerbit/react";
+import { useView } from "../../view/ViewContex";
+import { usePeer } from "@peerbit/react";
 import { SmoothReplyLine } from "./SmoothReplyLine";
 import { useAutoReply } from "../AutoReplyContext";
-import { useScrollToBottom } from "./useScrollToBottom";
+import { useAutoScroll } from "./useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
 
-export const Replies = () => {
+export const Replies = (properties: {
+    focused: boolean;
+    scrollRef?: React.RefObject<any>;
+}) => {
     const { view, processedReplies } = useView();
     const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
@@ -21,9 +24,11 @@ export const Replies = () => {
         [processedReplies]
     );
 
-    const { isAtBottom, scrollToBottom } = useScrollToBottom({
+    const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
         repliesContainerRef,
+        scrollRef: properties.scrollRef,
+        enabled: true,
     });
 
     // State for managing the Radix Toast notification.
@@ -47,7 +52,7 @@ export const Replies = () => {
     }, [processedReplies, isAtBottom]);
 
     return (
-        <div className="flex flex-col mt-10 relative w-full">
+        <div className="flex flex-col relative w-full">
             {processedReplies && processedReplies.length > 0 ? (
                 <div
                     ref={repliesContainerRef}

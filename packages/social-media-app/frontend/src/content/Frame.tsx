@@ -291,9 +291,9 @@ export const Frame = (properties: {
     return (
         <div
             key={properties.key}
-            className="flex flex-row w-full h-full max-w-full overflow-hidden group"
+            className="flex flex-row w-full h-full max-w-full  group"
         >
-            <div className="w-full overflow-hidden">
+            <div className="w-full ">
                 {renderContent({ previewLines: properties.previewLines })}
             </div>
 

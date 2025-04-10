@@ -7,7 +7,7 @@ type FullscreenEditorProps = {
 
 export const FullscreenEditor = ({ children }: FullscreenEditorProps) => {
     const { fullscreenEditorActive } = useToolbar();
-    if (fullscreenEditorActive)
+    if (fullscreenEditorActive) {
         return (
             <div className="overflow-auto bg-neutral-50 dark:bg-neutral-950">
                 <Canvas
@@ -18,5 +18,6 @@ export const FullscreenEditor = ({ children }: FullscreenEditorProps) => {
                 />
             </div>
         );
+    }
     return <>{children}</>;
 };

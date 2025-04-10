@@ -7,8 +7,13 @@ import {
     StaticMarkdownText,
 } from "@giga-app/interface";
 import { ChangeCallback } from "./types";
-import { FaMagic } from "react-icons/fa";
 import { sha256Sync } from "@peerbit/crypto";
+import { useCanvas } from "../../canvas/CanvasWrapper";
+import { useAIReply } from "../../ai/AIReployContext";
+import { usePeer } from "@peerbit/react";
+import pQueue from "p-queue";
+import { FaCheck } from "react-icons/fa";
+import { Spinner } from "../../utils/Spinner";
 
 export type MarkdownContentProps = {
     content: StaticMarkdownText;
@@ -19,10 +24,6 @@ export type MarkdownContentProps = {
     previewLines?: number;
     noPadding?: boolean;
     inFullscreen?: boolean;
-};
-
-const textHasOneOrMoreLines = (text: string) => {
-    return text.split("\n").length > 1;
 };
 
 export const MarkdownContent = ({
@@ -40,17 +41,77 @@ export const MarkdownContent = ({
     const threshold = 1;
     const saving = useRef(false);
 
+    // Start editing automatically if there's no text.
+    const [isEditing, setIsEditing] = useState(false);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
+
     // Local state for the markdown text.
     const [text, setText] = useState(content.text);
+
+    const { canvas } = useCanvas();
+    const { suggest, isReady } = useAIReply();
+    const { peer } = usePeer();
+    const [loadingSuggestedReply, setLoadingSuggestedReply] = useState(false);
+    const [suggestReply, setSuggestedReply] = useState<string | null>(null);
+
+    const suggestedReplyForParent = useRef<string | null>(null);
+    const queue = useRef(
+        new pQueue({
+            concurrency: 1,
+            timeout: 2e4,
+        })
+    );
+
+    useEffect(() => {
+        if (
+            !isReady ||
+            !isEditing ||
+            !canvas ||
+            !canvas.path ||
+            text.length > 0
+        ) {
+            return;
+        }
+        let parent = canvas.path[canvas.path.length - 1];
+        if (parent) {
+            if (suggestedReplyForParent.current !== parent.address) {
+                suggestedReplyForParent.current = parent.address;
+                queue.current.clear();
+                queue.current.add(async () => {
+                    setLoadingSuggestedReply(true);
+                    setSuggestedReply(null);
+                    try {
+                        const loadedParent = await parent.load(peer);
+                        if (loadedParent.publicKey.equals(canvas.publicKey)) {
+                            return; // no self reply
+                        }
+                        suggest(loadedParent, 2e4).then((reply) => {
+                            console.log("suggested reply", reply);
+                            setSuggestedReply(reply);
+                        });
+                    } finally {
+                        setLoadingSuggestedReply(false);
+                    }
+                });
+            }
+        }
+        return () => {
+            queue.current.clear();
+        };
+    }, [
+        canvas?.path,
+        isEditing,
+        isReady,
+        text,
+        suggest,
+        peer,
+        canvas?.publicKey.hashcode(),
+    ]);
 
     // Update text when content changes.
     useEffect(() => {
         setText(content.text);
     }, [content.text]);
-
-    // Start editing automatically if there's no text.
-    const [isEditing, setIsEditing] = useState(content.text.length === 0);
-    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     // Observe container's size changes.
     useEffect(() => {
@@ -114,10 +175,35 @@ export const MarkdownContent = ({
         }
     }, [editable, content.text]);
 
+    // New helper to insert the suggested reply
+    const handleInsertSuggestion = () => {
+        if (suggestReply) {
+            handleTextChange({ target: { value: suggestReply } });
+            setSuggestedReply(null);
+            // Optionally, move the cursor to the end of the inserted text
+            setTimeout(() => {
+                if (textareaRef.current) {
+                    textareaRef.current.focus();
+                    textareaRef.current.setSelectionRange(
+                        suggestReply.length,
+                        suggestReply.length
+                    );
+                }
+            }, 0);
+        }
+    };
+
     // Handle key presses in the textarea.
     const handleKeyDown = async (
         e: React.KeyboardEvent<HTMLTextAreaElement>
     ) => {
+        // If there's a suggested reply and the user presses Tab, insert it.
+        if (e.key === "Tab" && suggestReply) {
+            e.preventDefault();
+            handleInsertSuggestion();
+            return;
+        }
+
         if (!inFullscreen) {
             if (e.key === "Enter" && !e.shiftKey) {
                 const currentValue = e.currentTarget.value;
@@ -150,7 +236,7 @@ export const MarkdownContent = ({
         }
     };
 
-    const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const handleTextChange = (e: { target: { value: string } }) => {
         const newText = e.target.value;
         setText(newText);
         autoResize();
@@ -183,7 +269,7 @@ export const MarkdownContent = ({
             onClick={editable && !isEditing ? handleStartEditing : undefined}
         >
             {editable && isEditing ? (
-                <div className="flex flex-row">
+                <div className="flex flex-row items-start">
                     <textarea
                         ref={textareaRef}
                         value={text}
@@ -193,13 +279,25 @@ export const MarkdownContent = ({
                         onInput={autoResize}
                         className={`${commonClasses} w-full border-none outline-none resize-none block rounded dark:bg-black`}
                         rows={1}
-                        placeholder="Type here..."
+                        placeholder={suggestReply || "Type here..."}
                         style={{ overflow: "hidden" }}
                     />
-                    {/* 
-                    <button disabled className="btn btn-icon ">
-                        <FaMagic />
-                    </button> */}
+                    {/* Render the "Use suggestion" button if a suggested reply is available.
+                        This helps mobile users (or others without a Tab key) easily insert the suggestion. */}
+                    {suggestReply && (
+                        <button
+                            type="button"
+                            onClick={handleInsertSuggestion}
+                            className="btn btn-icon btn-small"
+                        >
+                            <FaCheck />
+                        </button>
+                    )}
+                    {!suggestReply && loadingSuggestedReply && (
+                        <div className="flex items-center">
+                            <Spinner />
+                        </div>
+                    )}
                 </div>
             ) : (
                 <div

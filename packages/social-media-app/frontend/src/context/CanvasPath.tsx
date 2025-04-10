@@ -19,7 +19,7 @@ const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
     useLayoutEffect(() => {
         if (endMarkerRef.current) {
             setTimeout(() => {
-                endMarkerRef.current.scrollIntoView({
+                endMarkerRef.current?.scrollIntoView({
                     behavior: "instant",
                     block: "nearest",
                     inline: "end",

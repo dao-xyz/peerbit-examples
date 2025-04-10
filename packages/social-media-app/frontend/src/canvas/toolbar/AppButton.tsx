@@ -4,7 +4,7 @@ import { resolveTrigger } from "../../content/useApps";
 
 interface AppButtonProps {
     app: SimpleWebManifest;
-    onClick?: () => void;
+    onClick: (insertDefault: boolean) => void;
     className?: string;
     showTitle?: boolean;
     orientation?: "horizontal" | "vertical";
@@ -27,13 +27,13 @@ export const AppButton: React.FC<AppButtonProps> = ({
     if (Trigger) {
         return (
             // You can also wrap the Trigger if needed for consistency.
-            <Trigger className={`btn ${className || ""}`} />
+            <Trigger className={`btn ${className || ""}`} onClick={onClick} />
         );
     }
 
     return (
         <button
-            onClick={onClick}
+            onClick={() => onClick(true)}
             className={`flex ${
                 orientation === "vertical" ? "flex-col" : "flex-row"
             } items-center btn ${className || ""}`}

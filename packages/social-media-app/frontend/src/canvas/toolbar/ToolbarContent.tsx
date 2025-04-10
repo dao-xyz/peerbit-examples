@@ -16,7 +16,7 @@ import { useAIReply } from "../../ai/AIReployContext";
 import { useAutoReply } from "../AutoReplyContext";
 
 interface ToolbarContentProps {
-    onToggleAppSelect: () => void;
+    onToggleAppSelect: (open?: boolean) => void;
     appSelectOpen: boolean;
 }
 
@@ -55,7 +55,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
 
         const AddButton = () => (
             <button
-                onClick={props.onToggleAppSelect}
+                onClick={() => props.onToggleAppSelect(true)}
                 className="btn btn-icon p-0 m-0"
             >
                 <FaPlus
@@ -81,7 +81,12 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 <BsArrowsCollapse />
                             </button>
                             {isEmpty ? (
-                                <ImageUploadTrigger className="btn btn-icon btn-icon-md flex items-center justify-center">
+                                <ImageUploadTrigger
+                                    onFileChange={() =>
+                                        props.onToggleAppSelect(false)
+                                    }
+                                    className="btn btn-icon btn-icon-md flex items-center justify-center"
+                                >
                                     <BsCamera />
                                 </ImageUploadTrigger>
                             ) : (
@@ -109,7 +114,12 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                         style={{ top: "0", transform: "translateY(-100%)" }}
                     >
                         <Canvas appearance="chat-view-images">
-                            <ImageUploadTrigger className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white">
+                            <ImageUploadTrigger
+                                onFileChange={() =>
+                                    props.onToggleAppSelect(false)
+                                }
+                                className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white dark:bg-black"
+                            >
                                 <FaPlus className="btn-icon-md" />
                             </ImageUploadTrigger>
                         </Canvas>
@@ -180,12 +190,19 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                             {resolvedApp && (
                                 <AppButton
                                     app={resolvedApp}
-                                    onClick={() =>
+                                    onClick={(insertDefaultValue) => {
+                                        if (!insertDefaultValue) {
+                                            return;
+                                        }
+                                        console.log(
+                                            "INSERT DEFAULT",
+                                            resolvedApp
+                                        );
                                         insertDefault({
                                             app: resolvedApp,
                                             increment: true,
-                                        }).then(() => savePending())
-                                    }
+                                        });
+                                    }}
                                     className="btn items-center px-2 p-1"
                                     orientation="horizontal"
                                     showTitle={true}

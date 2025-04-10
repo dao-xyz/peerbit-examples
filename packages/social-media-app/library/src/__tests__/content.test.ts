@@ -352,6 +352,45 @@ describe("content", () => {
                 expect(ownedImageElements).to.have.length(1); // image reply
             });
         });
+
+        describe("path", () => {
+            it("setParent", async () => {
+                let root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                const [c] = await root.getCreateRoomByPath(["a", "b", "c"]);
+                const [a] = await root.getCreateRoomByPath(["a"]);
+                const [b] = await root.getCreateRoomByPath(["a", "b"]);
+                expect(a.path).to.have.length(1);
+                expect(b.path).to.have.length(2);
+                expect(c.path).to.have.length(3);
+                expect(c.path[0].address).to.eq(root.address);
+                expect(c.path[1].address).to.eq(a.address);
+                expect(c.path[2].address).to.eq(b.address);
+
+                let cElements = await c.elements.index
+                    .iterate({ query: getOwnedElementsQuery(c) })
+                    .all();
+                expect(cElements).to.have.length(1);
+                expect(cElements[0].path).to.have.length(4); // root + a + b + c
+
+                await c.setParent(a);
+                expect(c.path).to.have.length(2);
+                expect(c.path[0].address).to.eq(root.address);
+                expect(c.path[1].address).to.eq(a.address);
+
+                cElements = await c.elements.index
+                    .iterate({ query: getOwnedElementsQuery(c) })
+                    .all();
+                expect(cElements).to.have.length(1);
+                expect(cElements[0].path).to.have.length(3); // root + a + c
+            });
+
+            // TODO implement sub elements move
+        });
         /*  it("determinstic with seed", async () => {
              let seed = new Uint8Array([0, 1, 2]);
              const rootA = await session.peers[0].open(

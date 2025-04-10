@@ -2,9 +2,18 @@ import { useMemo } from "react";
 import { StickyHeader } from "./StickyHeader";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useView, ViewType } from "../../view/ViewContex";
-import { ChevronDownIcon } from "@radix-ui/react-icons";
+import {
+    ChevronDownIcon,
+    ChevronLeftIcon,
+    ChevronUpIcon,
+} from "@radix-ui/react-icons";
 import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
 import { useOnline } from "@peerbit/react";
+
+interface SubHeaderProps {
+    onBackToTop?: () => void;
+    onViewChange: (view: ViewType) => void;
+}
 
 const readableView = (view: ViewType) => {
     if (view === "chat") {
@@ -21,14 +30,19 @@ const readableView = (view: ViewType) => {
     }
 };
 
-export const SubHeader = () => {
-    const { view, viewRoot, setView } = useView();
+export const SubHeader = ({
+    onBackToTop: onBackToTop,
+    onViewChange,
+}: SubHeaderProps) => {
+    const { view, viewRoot, setView: _setView } = useView();
     const viewAsReadable = useMemo(() => readableView(view), [view]);
-    const { peers } = useOnline(viewRoot);
-
+    const setView = (view: ViewType) => {
+        _setView(view);
+        onViewChange(view);
+    };
     return (
         <StickyHeader>
-            <div className="w-full max-w-[876px] mx-auto flex flex-row">
+            <div className="w-full max-w-[876px] mx-auto flex flex-row items-center">
                 <DropdownMenu.Root>
                     <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
                         <span>{viewAsReadable}</span>
@@ -52,9 +66,18 @@ export const SubHeader = () => {
                         )}
                     </DropdownMenu.Content>
                 </DropdownMenu.Root>
-                <div className="ml-auto">
+                {onBackToTop && (
+                    <button
+                        onClick={onBackToTop}
+                        className="ml-auto btn flex flex-row justify-center items-cent"
+                    >
+                        <span className="ganja-font">To the top</span>
+                        <ChevronUpIcon className="ml-2 mr-1" />
+                    </button>
+                )}
+                {/*     <div className="ml-auto">
                     <OnlineProfilesDropdown peers={peers} />
-                </div>
+                </div> */}
             </div>
         </StickyHeader>
     );

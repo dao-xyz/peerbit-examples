@@ -4,11 +4,16 @@ import { Canvas } from "../Canvas";
 import { CanvasWrapper } from "../CanvasWrapper";
 import { Header } from "../header/Header";
 
-export const DetailedView = () => {
+export const DetailedView = (properties: {
+    ref?: React.Ref<HTMLDivElement>;
+}) => {
     const { canvases, viewRoot } = useView();
 
     return (
-        <div className="max-w-[876px] mx-auto w-full">
+        <div
+            className="max-w-[876px] max-height-inherit-children mx-auto w-full"
+            ref={properties?.ref}
+        >
             {canvases.length > 1 && (
                 <Header
                     variant="large"

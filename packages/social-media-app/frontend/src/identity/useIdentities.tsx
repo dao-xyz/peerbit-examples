@@ -56,7 +56,7 @@ export const IdentitiesProvider = ({ children }: { children: JSX.Element }) => {
                   id: peer.identity.publicKey.hashcode(),
                   debounce: 1e4,
               }
-            : undefined
+            : null
     );
 
     const memo = React.useMemo<IIdentitiesContext>(

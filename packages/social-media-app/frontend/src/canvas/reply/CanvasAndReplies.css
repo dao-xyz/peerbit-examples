@@ -1,0 +1,33 @@
+.fixed-replies-container {
+    position: fixed;
+    width: 100%;
+    overflow-y: auto;
+}
+
+/* Hide the scrollbar, if needed */
+.fixed-replies-container.hide-scrollbar {
+    -ms-overflow-style: none;
+    /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
+}
+
+.fixed-replies-container.hide-scrollbar::-webkit-scrollbar {
+    display: none;
+}
+
+/* Add a gradient overlay via the :after pseudo-element */
+.fixed-replies-container::after {
+    content: "";
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: linear-gradient(to top,
+            rgba(0, 0, 0, 0.65),
+            rgba(0, 0, 0, 0));
+    pointer-events: none;
+    z-index: 333;
+    /* Adjust z-index as needed */
+}
