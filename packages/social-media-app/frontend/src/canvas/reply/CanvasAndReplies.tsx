@@ -5,7 +5,7 @@ import { Spinner } from "../../utils/Spinner.js";
 import { Replies } from "./Replies.js";
 import { ReplyingInProgress } from "./ReplyingInProgress.js";
 import { Toolbar } from "../toolbar/Toolbar.js";
-import { useView } from "../../view/ViewContex.js";
+import { useView, ViewType } from "../../view/ViewContex.js";
 import { PendingCanvasProvider } from "../PendingCanvasContext.js";
 import { useToolbarVisibility } from "./useToolbarVisibility.js";
 import { DetailedView } from "../detailed/DetailedView.js";
@@ -59,6 +59,10 @@ const loadingTexts = [
 const textToLoad =
     loadingTexts[Math.floor(Math.random() * loadingTexts.length)];
 
+const shouldFocusRepliesByDefault = (view: ViewType) => {
+    // For view types other than "best" or "old", we want the new scroll-based effect.
+    return view === "best" || view === "old";
+};
 /**
  * CanvasAndReplies component.
  *
@@ -73,16 +77,61 @@ export const CanvasAndReplies = () => {
 
     const [toolbarHeight, _setToolbarHeight] = useState(0);
 
-    const { loading, canvases, viewRoot, lastReply, view } = useView();
+    const { loading, canvases, viewRoot, lastReply, view, processedReplies } =
+        useView();
     const toolbarVisible = useToolbarVisibility(scrollContainerRef);
 
     // For view types other than "best" or "old", we want the new scroll-based effect.
-    const normalScrollBehaviour = view === "best" || view === "old";
 
     // When using the new behavior, initially the Replies area is unfocused.
-    const [repliesFocused, setRepliesFocused] = useState(normalScrollBehaviour);
+    const [repliesFocused, setRepliesFocused] = useState(
+        shouldFocusRepliesByDefault(view)
+    );
+
+    useEffect(() => {
+        if (view) {
+            if (!repliesFocused) {
+                setRepliesFocused(shouldFocusRepliesByDefault(view));
+            }
+        }
+    }, [view]);
+
+    useEffect(() => {
+        if (!processedReplies) {
+            return;
+        }
+
+        if (processedReplies.length === 0) {
+            setRepliesFocused(true);
+        }
+    }, [processedReplies?.length]);
 
     const repliesScrollRef = useRef<HTMLDivElement>(null);
+
+    // catch scroll events, and if the replies scroll ref top is above 50vh, go into focused mode
+    useEffect(() => {
+        if (!repliesScrollRef.current) {
+            return;
+        }
+
+        const handleScroll = () => {
+            if (repliesScrollRef.current) {
+                const rect = repliesScrollRef.current.getBoundingClientRect();
+                const threshold = 50;
+                const offset = Math.max(window.innerHeight - rect.top, 0);
+                console.log(window.innerHeight, rect.top, offset, threshold);
+
+                if (rect.top < window.innerHeight / 3 - threshold) {
+                    setRepliesFocused(true);
+                }
+            }
+        };
+
+        window.addEventListener("scroll", handleScroll);
+        return () => {
+            window.removeEventListener("scroll", handleScroll);
+        };
+    }, []);
 
     if (!canvases || canvases.length === 0) {
         return (
@@ -105,7 +154,7 @@ export const CanvasAndReplies = () => {
 
     const goToTop = () => {
         // Scroll to the top of the page
-        setRepliesFocused(false);
+        setRepliesFocused(shouldFocusRepliesByDefault(view));
         window.scrollTo({
             top: 0,
             behavior: "instant",
@@ -155,7 +204,7 @@ export const CanvasAndReplies = () => {
                     />
 
                     {/* Replies section */}
-                    <div className="relative flex-1 overflow-hidden">
+                    <div className="relative flex-1  min-h-[75vh]">
                         <div
                             // When not focused, make the container fill the available area and show a pointer cursor.
                             // When focused, render it inline (relative) and remove the click handler.
@@ -171,7 +220,7 @@ export const CanvasAndReplies = () => {
                             <div
                                 className={`${
                                     !repliesFocused
-                                        ? "absolute inset-0 overflow-y-auto hide-scrollbar"
+                                        ? "absolute inset-0 overflow-y-auto hide-scrollbar "
                                         : ""
                                 }`}
                                 ref={repliesScrollRef}
@@ -189,7 +238,11 @@ export const CanvasAndReplies = () => {
         This overlay is absolutely positioned over the container and does not receive pointer events. */}
                             {!repliesFocused && (
                                 <div
-                                    className="absolute inset-0 cursor-pointer backdrop-blur-[1px] bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black"
+                                    style={{
+                                        mask: "linear-gradient(black, black, transparent)",
+                                        backdropFilter: "blur(3px)",
+                                    }}
+                                    className="absolute inset-0 cursor-pointer flex flex-col justify-center items-center " /* bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black */
                                     onClick={(e) => {
                                         if (repliesFocused) {
                                             return;
@@ -205,7 +258,11 @@ export const CanvasAndReplies = () => {
                                         e.stopPropagation();
                                         setRepliesFocused(true);
                                     }}
-                                />
+                                >
+                                    {/*                <span className="p-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md">
+                                        Click to see more
+                                    </span> */}
+                                </div>
                             )}
                         </div>
                     </div>
