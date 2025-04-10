@@ -43,23 +43,41 @@ export const useAutoScroll = (properties: {
     const [isAtBottom, setIsAtBottom] = useState(true);
 
     const viewIsShouldScrollToBottom = view === "chat" || view === "new";
-
+    const triggerScroll = () => {
+        if (view === "best" || view === "old") {
+            scrollToTop();
+        } else {
+            scrollToBottom();
+        }
+    };
     useEffect(() => {
         if (!properties.enabled) {
             return;
         }
+        // TODO is this needed?
         if (viewIsShouldScrollToBottom) {
             scrollMode.current = "automatic";
             forceScrollToBottom.current = true;
-        } else {
+        }
+        // TODO is this needed?
+        else {
             scrollMode.current = "manual";
             forceScrollToBottom.current = false;
         }
 
-        if (view === "best" || view === "old") {
-            scrollToTop();
-        }
+        // trigger scroll to bottom when the view changes
+        triggerScroll();
     }, [view, properties.enabled]);
+
+    const lastScrollRef = useRef(properties.scrollRef?.current);
+    useEffect(() => {
+        if (properties.scrollRef?.current !== lastScrollRef.current) {
+            lastScrollRef.current = properties.scrollRef?.current;
+
+            // trigger scroll because the replies container has changed
+            triggerScroll();
+        }
+    }, [properties.scrollRef]);
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
@@ -104,6 +122,10 @@ export const useAutoScroll = (properties: {
     // UPDATED scrollToBottom: scroll the container if available.
     const scrollToBottom = () => {
         if (properties.scrollRef?.current) {
+            if (!repliesContainerRef.current) {
+                return;
+            }
+
             properties.scrollRef.current.scrollTo({
                 top: repliesContainerRef.current.scrollHeight,
                 left: 0,

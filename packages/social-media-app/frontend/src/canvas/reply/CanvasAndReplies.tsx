@@ -130,7 +130,7 @@ export const CanvasAndReplies = () => {
                     <div className="flex-shrink-0">
                         <FullscreenEditor>
                             <div className="mt-6 max-w-[876px] mx-auto w-full">
-                                {!repliesFocused ? (
+                                {/*  {!repliesFocused ? (
                                     <DetailedViewContainer
                                         onMinimized={() => {
                                             // When the DetailedView is minimized, keep Replies unfocused.
@@ -141,7 +141,8 @@ export const CanvasAndReplies = () => {
                                     </DetailedViewContainer>
                                 ) : (
                                     <DetailedView />
-                                )}
+                                )} */}
+                                <DetailedView />
                             </div>
                         </FullscreenEditor>
                     </div>
@@ -173,6 +174,7 @@ export const CanvasAndReplies = () => {
                                         ? "absolute inset-0 overflow-y-auto hide-scrollbar"
                                         : ""
                                 }`}
+                                ref={repliesScrollRef}
                             >
                                 <Replies
                                     focused={repliesFocused}
@@ -193,6 +195,13 @@ export const CanvasAndReplies = () => {
                                             return;
                                         }
                                         e.preventDefault();
+                                        e.stopPropagation();
+                                        setRepliesFocused(true);
+                                    }}
+                                    onTouchStart={(e) => {
+                                        if (repliesFocused) {
+                                            return;
+                                        }
                                         e.stopPropagation();
                                         setRepliesFocused(true);
                                     }}
