@@ -11,7 +11,6 @@ import { useToolbarVisibility } from "./useToolbarVisibility.js";
 import { DetailedView } from "../detailed/DetailedView.js";
 import { SubHeader } from "./SubHeader.js";
 import { AnimatedStickyToolbar } from "./AnimatedStickyToolbar.js";
-import { DetailedViewContainer } from "../detailed/DetailedViewContainer.js";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",
@@ -211,7 +210,7 @@ export const CanvasAndReplies = () => {
     if (!canvases || canvases.length === 0) {
         return (
             <div className="h-full flex flex-col justify-center">
-                <div className="flex flex-col gap-4 items-center">
+                <div className="flex flex-col gap-4 items-center m-2">
                     {loading ? (
                         <div className="flex flex-row gap-2">
                             {textToLoad}
@@ -291,8 +290,8 @@ export const CanvasAndReplies = () => {
                     <div
                         className="relative flex-1 h-full"
                         /*    style={{
-                   height: `${spacerHeight}px`,
-               }} */
+               height: `${spacerHeight}px`,
+           }} */
                     >
                         <div
                             // When not focused, make the container fill the available area and show a pointer cursor.

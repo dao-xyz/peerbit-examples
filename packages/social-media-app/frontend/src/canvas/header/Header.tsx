@@ -14,6 +14,7 @@ import RelativeTimestamp from "./RelativeTimestamp";
 import { WithContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FaRegComment } from "react-icons/fa";
+import { useDownOnClickTriggerFix } from "../utils/dropdown";
 
 export const Header = ({
     canvas,
@@ -164,15 +165,14 @@ export const Header = ({
 
                     {/* Dropdown menu always available */}
                     <DropdownMenu.Root>
-                        <DropdownMenu.Trigger asChild>
-                            <button
-                                className={
-                                    "btn btn-icon btn-icon-sm " /* +
-                                    (direction === "col"
-                                        ? "mt-auto"
-                                        : "ml-auto") */
-                                }
-                            >
+                        <DropdownMenu.Trigger
+                            asChild
+                            onPointerDown={(e) => {
+                                console.log(e);
+                                e.preventDefault();
+                            }}
+                        >
+                            <button className={"btn btn-icon btn-icon-sm "}>
                                 <HiDotsHorizontal size={20} />
                             </button>
                         </DropdownMenu.Trigger>

@@ -110,7 +110,8 @@ export const Replies = (properties: {
                     }}
                 >
                     <Toast.Title className="flex flex-row justify-center items-center gap-2">
-                        <span>New Messages</span> <IoIosArrowDown />
+                        <span className="whitespace-nowrap">New Messages</span>{" "}
+                        <IoIosArrowDown />
                     </Toast.Title>
                 </Toast.Root>
                 <Toast.Viewport className="fixed bottom-[90px] left-1/2 transform -translate-x-1/2 flex flex-col p-2 gap-2 m-0 z-50 outline-none" />

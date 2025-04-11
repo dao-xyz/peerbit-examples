@@ -35,7 +35,7 @@
         "lint": "eslint --ext .ts . && prettier --check '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint:fix": "eslint --fix --ext .ts . && yarn fmt",
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}",
-        "postinstall": "mkdir -p node_modules/chai-extend && cp chai-global.js node_modules/chai-extend/chai-global.js && echo '{\"type\": \"module\"}' > node_modules/chai-extend/package.json"
+        "postinstall": "patch-package && mkdir -p node_modules/chai-extend && cp chai-global.js node_modules/chai-extend/chai-global.js && echo '{\"type\": \"module\"}' > node_modules/chai-extend/package.json"
     },
     "devDependencies": {
         "@types/eslint": "^8.40.2",
@@ -61,6 +61,7 @@
         "typescript": "^5.6.3",
         "typescript-esm": "^2.0.0",
         "json": "^11.0.0",
-        "rollup-plugin-copy": "^3.5.0"
+        "rollup-plugin-copy": "^3.5.0",
+        "patch-package": "^8"
     }
 }

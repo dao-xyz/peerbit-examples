@@ -419,7 +419,7 @@ const ChatMessagePreview = ({
             {text && (
                 <button
                     onClick={onClick} /* bg-neutral-50 dark:bg-neutral-950  */
-                    className="max-w-prose rounded-md px-1.5 py-1"
+                    className="max-w-prose rounded-md px-2 py-1"
                 >
                     <PreviewFrame
                         element={text}
