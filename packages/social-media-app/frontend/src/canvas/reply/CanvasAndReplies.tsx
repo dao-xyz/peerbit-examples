@@ -291,8 +291,8 @@ export const CanvasAndReplies = () => {
                     <div
                         className="relative flex-1 h-full"
                         /*    style={{
-                       height: `${spacerHeight}px`,
-                   }} */
+                   height: `${spacerHeight}px`,
+               }} */
                     >
                         <div
                             // When not focused, make the container fill the available area and show a pointer cursor.
@@ -352,7 +352,7 @@ export const CanvasAndReplies = () => {
                                     }}
                                 >
                                     {showClickToSeeMore && (
-                                        <span className="p-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
+                                        <span className="p-2 m-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
                                             Click to see more
                                         </span>
                                     )}

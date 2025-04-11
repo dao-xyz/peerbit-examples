@@ -38,7 +38,7 @@ export const StickyHeader = ({
     // then use transform to slide it up by 14 units when the main header is hidden.
     // This ensures both animations use the transform property.
     const defaultBG = `bg-neutral-50 ${
-        view === "chat" ? "dark:bg-neutral-" : "dark:bg-neutral-950"
+        view === "chat" ? "dark:bg-neutral-700" : "dark:bg-neutral-950"
     }`;
     return (
         <div
