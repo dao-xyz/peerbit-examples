@@ -20,6 +20,7 @@ import {
     HeaderVisibilityProvider,
     useHeaderVisibilityContext,
 } from "./HeaderVisibilitiyProvider";
+import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
 
 export const Content = () => {
     const { error: peerError } = usePeer();
@@ -55,6 +56,8 @@ export const Content = () => {
     const [headerHeight, setHeaderHeight] = useState(0);
     const headerRef = useRef<HTMLDivElement>(null);
 
+    useRemoveFocusWhenNotTab();
+
     useLayoutEffect(() => {
         if (headerRef.current) {
             setHeaderHeight(headerRef.current.offsetHeight);
@@ -67,7 +70,7 @@ export const Content = () => {
                 {/* Main header with transform animation */}
                 <div
                     ref={headerRef}
-                    className={`fixed top-0 inset-x-0 z-30 transition-transform duration-800 ease-in-out`}
+                    className={`fixed top-0 inset-x-0 z-3 transition-transform duration-800 ease-in-out`}
                     style={{
                         transform: headerVisible
                             ? "translateY(0)"

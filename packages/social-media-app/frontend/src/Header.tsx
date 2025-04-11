@@ -45,7 +45,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
         >
             {!props.fullscreen && (
                 <>
-                    <div className="sticky  top-0 inset-x-0 grid grid-cols-[0.5rem_auto_0.5rem_1fr_min-content_0.5rem_minmax(0,var(--container-xl))_1fr_0.5rem_auto_0.5rem] grid-rows-[0.5rem_auto_0.5rem] z-40 bg-neutral-50 dark:bg-neutral-900">
+                    <div className="sticky  top-0 inset-x-0 grid grid-cols-[0.5rem_auto_0.5rem_1fr_min-content_0.5rem_minmax(0,var(--container-xl))_1fr_0.5rem_auto_0.5rem] grid-rows-[0.5rem_auto_0.5rem] z-4 bg-neutral-50 dark:bg-neutral-900">
                         <div className="col-span-full row-start-1 "></div>
                         <div className="col-start-2 flex items-center">
                             <HeaderLogo

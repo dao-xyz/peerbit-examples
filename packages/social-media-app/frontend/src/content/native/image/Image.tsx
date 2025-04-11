@@ -264,7 +264,7 @@ export const ImageContent = ({
                         />
                         <button
                             onClick={() => setDialogOpen(true)}
-                            className="absolute bottom-4 right-4 z-10 p-2 bg-black bg-opacity-50 rounded-full text-white"
+                            className="absolute bottom-4 right-4 p-2 bg-black bg-opacity-50 rounded-full text-white"
                         >
                             <FiMaximize />
                         </button>

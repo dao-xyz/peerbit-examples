@@ -1,4 +1,9 @@
-import { Element, ElementContent } from "@giga-app/interface";
+import {
+    Element,
+    ElementContent,
+    StaticContent,
+    StaticMarkdownText,
+} from "@giga-app/interface";
 import { useMemo } from "react";
 import { Frame } from "../content/Frame";
 import { rectIsStaticMarkdownText } from "./utils/rect";
@@ -39,13 +44,16 @@ export type CanvasPreviewProps = StandardVariantProps | ChatMessageVariantProps;
 
 function getRectsForVariant<V extends VariantType>(
     separatedRects: {
-        text: Element<ElementContent>[];
+        text: Element<StaticContent<StaticMarkdownText>>[];
         other: Element<ElementContent>[];
     },
     variant: V
 ): V extends "tiny" | "breadcrumb"
     ? Element<ElementContent> | undefined
-    : { text?: Element<ElementContent>; other: Element<ElementContent>[] } {
+    : {
+          text?: Element<StaticContent<StaticMarkdownText>>;
+          other: Element<ElementContent>[];
+      } {
     switch (variant) {
         case "tiny":
         case "breadcrumb":
@@ -243,7 +251,10 @@ const PostQuotePreview = ({
     author,
     forwardedRef,
 }: {
-    rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
+    rects: {
+        text?: Element<StaticContent<StaticMarkdownText>>;
+        other: Element<ElementContent>[];
+    };
     onClick?: () => void;
     author?: string;
     forwardedRef?: React.Ref<HTMLDivElement>;
@@ -295,7 +306,7 @@ const PostQuotePreview = ({
             ))}
             <div className="px-2 py-2 flex flex-col justify-around gap-0.5">
                 <b className="leading-tight">{author?.substring(0, 7)}</b>
-                {text ? (
+                {text?.content.content.text ? (
                     <span className="leading-tight">
                         <PreviewFrame
                             element={text}
@@ -485,7 +496,7 @@ export const CanvasPreview = ({
                 <PostQuotePreview
                     rects={
                         variantRects as {
-                            text?: Element<ElementContent>;
+                            text?: Element<StaticContent<StaticMarkdownText>>;
                             other: Element<ElementContent>[];
                         }
                     }

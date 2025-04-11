@@ -74,7 +74,7 @@ export interface CanvasContextType {
     ) => boolean;
     reduceElementsForViewing: (rects: Element[]) => Element[];
     separateAndSortRects: (rects: Element[]) => {
-        text: Element[];
+        text: Element<StaticContent<StaticMarkdownText>>[];
         other: Element[];
     };
     text: string;
@@ -624,9 +624,15 @@ export const CanvasWrapper = ({
 
     const separateAndSortRects = (
         rects: Element[]
-    ): { text: Element[]; other: Element[] } => {
+    ): {
+        text: Element<StaticContent<StaticMarkdownText>>[];
+        other: Element[];
+    } => {
         const groupedRects = reduceElementsForViewing(rects);
-        const separated = { text: [] as Element[], other: [] as Element[] };
+        const separated = {
+            text: [] as Element<StaticContent<StaticMarkdownText>>[],
+            other: [] as Element[],
+        };
         groupedRects.forEach((rect) => {
             if (rectIsStaticMarkdownText(rect)) {
                 separated.text.push(rect);

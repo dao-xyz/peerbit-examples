@@ -6,9 +6,11 @@ import { useView } from "../../view/ViewContex";
 export const StickyHeader = ({
     children,
     className,
+    onStateChange,
 }: {
     children: React.ReactNode;
     className?: string;
+    onStateChange?: (collapsed: boolean) => void;
 }) => {
     const headerVisible = useHeaderVisibilityContext();
     const [shouldOffsetSubheader, setShouldOffsetSubheader] = useState(true);
@@ -22,10 +24,15 @@ export const StickyHeader = ({
             if (ref.current) {
                 const rect = ref.current.getBoundingClientRect();
                 // When the header is within 100px of the top, animate it up and change style.
-                let isClose = rect.top <= 100;
+                let isClose = rect.top <= 60;
+
                 setIsScrolled(isClose);
-                const shouldMoveUpSubHeader = isClose && !headerVisible;
-                setShouldOffsetSubheader(shouldMoveUpSubHeader);
+
+                const updateShouldMoveUpSubHeader = isClose && !headerVisible;
+                if (updateShouldMoveUpSubHeader !== shouldOffsetSubheader) {
+                    setShouldOffsetSubheader(updateShouldMoveUpSubHeader);
+                    onStateChange?.(updateShouldMoveUpSubHeader);
+                }
             }
             animationFrame = requestAnimationFrame(checkPosition);
         };
@@ -44,7 +51,7 @@ export const StickyHeader = ({
         <div
             ref={ref}
             className={
-                `sticky top-14 z-10 transition-transform duration-800 ease-in-out flex flex-row items-center justify-between py-1 px-2.5   ` +
+                `sticky top-14 z-5 transition-transform duration-800 ease-in-out flex flex-row items-center justify-between  px-2.5   ` +
                 (className ?? "")
             }
             style={{
@@ -54,12 +61,13 @@ export const StickyHeader = ({
             }}
         >
             {/* Base layer: gradient background */}
-            <div
-                /* background-image: linear-gradient(73deg, #171717, #262626); */
-                className={`absolute inset-0 ${defaultBG} bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[linear-gradient(73deg,rgba(23,23,23,1),rgba(64,64,64,1))] drop-shadow-lg ${
-                    isScrolled ? "drop-shadow-md" : ""
-                }`}
-            ></div>
+            {
+                <div
+                    className={`absolute inset-0 ${defaultBG} bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[linear-gradient(73deg,rgba(23,23,23,1),rgba(64,64,64,1))] drop-shadow-lg ${
+                        isScrolled ? "drop-shadow-md" : ""
+                    }`}
+                ></div>
+            }
             {/* Overlay: fades in/out based on scroll */}
             <div
                 className={`absolute inset-0 transition-opacity duration-700 ${

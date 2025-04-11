@@ -80,6 +80,8 @@ export const CanvasAndReplies = () => {
 
     const [toolbarHeight, _setToolbarHeight] = useState(0);
 
+    const [collapsed, setCollapsed] = useState(false);
+
     const { loading, canvases, viewRoot, lastReply, view, processedReplies } =
         useView();
 
@@ -140,6 +142,7 @@ export const CanvasAndReplies = () => {
 
     useEffect(() => {
         lastScrollTopRef.current = -1;
+        setCollapsed(false);
     }, [viewRoot]);
 
     // catch scroll events, and if the replies scroll ref top is above 50vh, go into focused mode
@@ -268,7 +271,14 @@ export const CanvasAndReplies = () => {
                     }}
                 >
                     {/* Header section */}
-                    <div ref={postRef}>
+                    <div
+                        ref={postRef}
+                        className={`transition-all duration-300 ${
+                            collapsed
+                                ? "blur-3xl opacity-0"
+                                : "blur-0 opacity-100"
+                        }`}
+                    >
                         <div className="flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
                             <FullscreenEditor>
                                 <div className="pt-6 max-w-[876px] mx-auto w-full">
@@ -279,6 +289,7 @@ export const CanvasAndReplies = () => {
                     </div>
 
                     <SubHeader
+                        onCollapse={setCollapsed}
                         onBackToTop={goToTop}
                         onViewChange={() => {
                             // a manual change in view is an indication of that the user is interested in the replies
@@ -290,8 +301,8 @@ export const CanvasAndReplies = () => {
                     <div
                         className="relative flex-1 h-full"
                         /*    style={{
-               height: `${spacerHeight}px`,
-           }} */
+           height: `${spacerHeight}px`,
+       }} */
                     >
                         <div
                             // When not focused, make the container fill the available area and show a pointer cursor.

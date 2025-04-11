@@ -2,17 +2,12 @@ import { useMemo } from "react";
 import { StickyHeader } from "./StickyHeader";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useView, ViewType } from "../../view/ViewContex";
-import {
-    ChevronDownIcon,
-    ChevronLeftIcon,
-    ChevronUpIcon,
-} from "@radix-ui/react-icons";
-import { OnlineProfilesDropdown } from "../../profile/OnlinePeersButton";
-import { useOnline } from "@peerbit/react";
+import { ChevronDownIcon, ChevronUpIcon } from "@radix-ui/react-icons";
 
 interface SubHeaderProps {
     onBackToTop?: () => void;
     onViewChange: (view: ViewType) => void;
+    onCollapse: (collapsed: boolean) => void;
 }
 
 const readableView = (view: ViewType) => {
@@ -33,6 +28,7 @@ const readableView = (view: ViewType) => {
 export const SubHeader = ({
     onBackToTop: onBackToTop,
     onViewChange,
+    onCollapse,
 }: SubHeaderProps) => {
     const { view, viewRoot, setView: _setView } = useView();
     const viewAsReadable = useMemo(() => readableView(view), [view]);
@@ -41,10 +37,10 @@ export const SubHeader = ({
         onViewChange(view);
     };
     return (
-        <StickyHeader>
+        <StickyHeader onStateChange={onCollapse}>
             <div className="w-full max-w-[876px] mx-auto flex flex-row items-center">
                 <DropdownMenu.Root>
-                    <DropdownMenu.Trigger className="btn flex flex-row justify-center items-center ganja-font">
+                    <DropdownMenu.Trigger className="btn px-1 flex flex-row justify-center items-center ganja-font">
                         <span>{viewAsReadable}</span>
                         <ChevronDownIcon className="ml-2" />
                     </DropdownMenu.Trigger>
@@ -69,10 +65,10 @@ export const SubHeader = ({
                 {onBackToTop && (
                     <button
                         onClick={onBackToTop}
-                        className="ml-auto btn flex flex-row justify-center items-cent"
+                        className="px-1 ml-auto btn flex flex-row justify-center items-cent"
                     >
                         <span className="ganja-font">To the top</span>
-                        <ChevronUpIcon className="ml-2 mr-1" />
+                        <ChevronUpIcon className="ml-2 " />
                     </button>
                 )}
                 {/*     <div className="ml-auto">
