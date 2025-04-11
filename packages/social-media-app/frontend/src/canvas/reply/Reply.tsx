@@ -132,7 +132,7 @@ export const Reply = ({
 
     return (
         <div
-            className={`flex flex-col ${
+            className={`flex flex-col  ${
                 isChat ? (align === "right" ? "items-end" : "items-start") : ""
             } ${className}`}
         >

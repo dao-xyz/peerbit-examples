@@ -71,6 +71,10 @@ const shouldFocusRepliesByDefault = (view: ViewType) => {
  * container (its scrollbar is hidden) so it doesn't affect the body scrollbar.
  * When focused, Replies are rendered in-line.
  */
+
+const getSnapToRepliesViewThreshold = (offset: number) =>
+    offset + window.innerHeight / 3;
+
 export const CanvasAndReplies = () => {
     // Ref for the overall container (used for toolbar height calculations)
     const scrollContainerRef = useRef(null);
@@ -79,6 +83,43 @@ export const CanvasAndReplies = () => {
 
     const { loading, canvases, viewRoot, lastReply, view, processedReplies } =
         useView();
+
+    const lastScrollTopRef = useRef(-1);
+    const repliesScrollRef = useRef<HTMLDivElement>(null);
+
+    const postRef = useRef<HTMLDivElement>(null);
+    const [spacerHeight, setSpacerHeight] = useState(0);
+
+    // Set up a ResizeObserver to and make the spacer height equal to postRef height - 50vh
+    useEffect(() => {
+        if (!postRef.current || !repliesScrollRef.current) {
+            return;
+        }
+        const checkHeight = () => {
+            const repliesRect =
+                repliesScrollRef.current.getBoundingClientRect();
+            let snapIntoViewThreshold = getSnapToRepliesViewThreshold(0); // window.innerHeight / 3;
+            let minimumScrollHeight = 5;
+            if (repliesRect.top < snapIntoViewThreshold) {
+                // If the top of the container is above the middle of the window, we want to set the spacer height to 0
+                console.log("setting spacer height to 0");
+                setSpacerHeight(minimumScrollHeight);
+                return;
+            }
+            let diffToBottom = repliesRect.top - snapIntoViewThreshold;
+            let newSpacerHeight = diffToBottom + minimumScrollHeight;
+            setSpacerHeight(newSpacerHeight);
+        };
+        checkHeight();
+        const observer = new ResizeObserver(() => {
+            checkHeight();
+        });
+        observer.observe(postRef.current);
+        return () => {
+            observer.disconnect();
+        };
+    }, [postRef.current, repliesScrollRef.current]);
+
     const toolbarVisible = useToolbarVisibility(scrollContainerRef);
 
     // For view types other than "best" or "old", we want the new scroll-based effect.
@@ -87,6 +128,8 @@ export const CanvasAndReplies = () => {
     const [repliesFocused, setRepliesFocused] = useState(
         shouldFocusRepliesByDefault(view)
     );
+
+    const [showClickToSeeMore, setShowClickToSeeMore] = useState(false);
 
     useEffect(() => {
         if (view) {
@@ -97,31 +140,36 @@ export const CanvasAndReplies = () => {
     }, [view]);
 
     useEffect(() => {
-        if (!processedReplies) {
-            return;
-        }
-
-        if (processedReplies.length === 0) {
-            setRepliesFocused(true);
-        }
-    }, [processedReplies?.length]);
-
-    const repliesScrollRef = useRef<HTMLDivElement>(null);
+        lastScrollTopRef.current = -1;
+    }, [viewRoot]);
 
     // catch scroll events, and if the replies scroll ref top is above 50vh, go into focused mode
     useEffect(() => {
-        if (!repliesScrollRef.current) {
+        if (!repliesScrollRef.current || !postRef.current || repliesFocused) {
             return;
         }
 
         const handleScroll = () => {
             if (repliesScrollRef.current) {
                 const rect = repliesScrollRef.current.getBoundingClientRect();
-                const threshold = 50;
-                const offset = Math.max(window.innerHeight - rect.top, 0);
-                console.log(window.innerHeight, rect.top, offset, threshold);
 
-                if (rect.top < window.innerHeight / 3 - threshold) {
+                // If the scroll position is greater than the last scroll position, we are scrolling down
+                // If we are scrolling down and the replies area is not focused, we want to focus it
+                let lastScrollTop = lastScrollTopRef.current;
+                let downscroll = false;
+                if (lastScrollTop > 0) {
+                    if (lastScrollTop > rect.top) {
+                        // Scrolling down
+                        downscroll = true;
+                    } else if (lastScrollTop < rect.top) {
+                        // Scrolling up
+                        downscroll = false;
+                    }
+                }
+                //    console.log("downscroll", downscroll, rect.top, window.innerHeight, { split1: window.innerHeight / 3 - threshold, bbb: rect.top < window.innerHeight / 3 - threshold });
+
+                lastScrollTopRef.current = rect.top;
+                if (rect.top < getSnapToRepliesViewThreshold(0) && downscroll) {
                     setRepliesFocused(true);
                 }
             }
@@ -131,7 +179,31 @@ export const CanvasAndReplies = () => {
         return () => {
             window.removeEventListener("scroll", handleScroll);
         };
-    }, []);
+    }, [repliesScrollRef.current, postRef.current, repliesFocused]);
+
+    // Set up a ResizeObserver on the fixed Replies container to check for overflow.
+    useEffect(() => {
+        if (!repliesScrollRef.current || repliesFocused) {
+            // Only observe when Replies are unfocused.
+            setShowClickToSeeMore(false);
+            return;
+        }
+        const container = repliesScrollRef.current;
+        const checkOverflow = () => {
+            // Compare scrollHeight and clientHeight.
+            setShowClickToSeeMore(
+                container.scrollHeight > container.clientHeight
+            );
+        };
+        checkOverflow();
+        const observer = new ResizeObserver(() => {
+            checkOverflow();
+        });
+        observer.observe(container);
+        return () => {
+            observer.disconnect();
+        };
+    }, [repliesFocused, repliesScrollRef.current]);
 
     if (!canvases || canvases.length === 0) {
         return (
@@ -172,29 +244,27 @@ export const CanvasAndReplies = () => {
 
                 <div
                     ref={scrollContainerRef}
-                    className="h-fit min-h-full flex flex-col relative grow shrink-0"
-                    style={{ paddingBottom: toolbarHeight }}
+                    className={`${
+                        repliesFocused ? "h-fit" : "h-full"
+                    } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
+                    style={{
+                        paddingBottom: toolbarHeight,
+                        height: repliesFocused
+                            ? "fit-content"
+                            : `calc(100% + ${spacerHeight}px)`,
+                    }}
                 >
                     {/* Header section */}
-                    <div className="flex-shrink-0">
-                        <FullscreenEditor>
-                            <div className="mt-6 max-w-[876px] mx-auto w-full">
-                                {/*  {!repliesFocused ? (
-                                    <DetailedViewContainer
-                                        onMinimized={() => {
-                                            // When the DetailedView is minimized, keep Replies unfocused.
-                                            setRepliesFocused(false);
-                                        }}
-                                    >
-                                        <DetailedView />
-                                    </DetailedViewContainer>
-                                ) : (
+                    <div ref={postRef}>
+                        <div className="flex-shrink-0">
+                            <FullscreenEditor>
+                                <div className="mt-6 max-w-[876px] mx-auto w-full">
                                     <DetailedView />
-                                )} */}
-                                <DetailedView />
-                            </div>
-                        </FullscreenEditor>
+                                </div>
+                            </FullscreenEditor>
+                        </div>
                     </div>
+
                     <SubHeader
                         onBackToTop={goToTop}
                         onViewChange={() => {
@@ -204,7 +274,12 @@ export const CanvasAndReplies = () => {
                     />
 
                     {/* Replies section */}
-                    <div className="relative flex-1  min-h-[75vh]">
+                    <div
+                        className="relative flex-1 h-full"
+                        /*    style={{
+                           height: `${spacerHeight}px`,
+                       }} */
+                    >
                         <div
                             // When not focused, make the container fill the available area and show a pointer cursor.
                             // When focused, render it inline (relative) and remove the click handler.
@@ -224,6 +299,13 @@ export const CanvasAndReplies = () => {
                                         : ""
                                 }`}
                                 ref={repliesScrollRef}
+                                style={
+                                    {
+                                        /*   paddingBottom: `${!repliesFocused ? 0 : toolbarHeight
+                                          }px` */
+                                        /* For some reason we need this for focused view??? */
+                                    }
+                                }
                             >
                                 <Replies
                                     focused={repliesFocused}
@@ -238,11 +320,7 @@ export const CanvasAndReplies = () => {
         This overlay is absolutely positioned over the container and does not receive pointer events. */}
                             {!repliesFocused && (
                                 <div
-                                    style={{
-                                        mask: "linear-gradient(black, black, transparent)",
-                                        backdropFilter: "blur(3px)",
-                                    }}
-                                    className="absolute inset-0 cursor-pointer flex flex-col justify-center items-center " /* bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black */
+                                    className="absolute inset-0 cursor-pointer flex flex-col justify-start items-center " /* bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black */
                                     onClick={(e) => {
                                         if (repliesFocused) {
                                             return;
@@ -259,17 +337,21 @@ export const CanvasAndReplies = () => {
                                         setRepliesFocused(true);
                                     }}
                                 >
-                                    {/*                <span className="p-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md">
-                                        Click to see more
-                                    </span> */}
+                                    {showClickToSeeMore && (
+                                        <span className="p-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 pt-4 rounded text-sm font-semibold shadow-md">
+                                            Click to see more
+                                        </span>
+                                    )}
                                 </div>
                             )}
                         </div>
                     </div>
+                    {/* Spacer to ensure the container is always tall enough for scrolling */}
+                    {/* {!repliesFocused && <div id="spacer" style={{
+                        height: `${spacerHeight}px`,
+                    }} />} */}
                 </div>
 
-                {/* Optionally, you can also include a fixed AnimatedStickyToolbar or ReplyingInProgress
-            as needed. For example, to display a ReplyingInProgress indicator: */}
                 <div className="relative">
                     <div className="absolute right-1 bottom-0">
                         <ReplyingInProgress canvas={lastReply} />
