@@ -1,6 +1,7 @@
 // StickyHeader.tsx
 import React, { useEffect, useRef, useState } from "react";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
+import { useView } from "../../view/ViewContex";
 
 export const StickyHeader = ({
     children,
@@ -13,6 +14,7 @@ export const StickyHeader = ({
     const [shouldOffsetSubheader, setShouldOffsetSubheader] = useState(true);
     const [isScrolled, setIsScrolled] = useState(false);
     const ref = useRef<HTMLDivElement>(null);
+    const { view } = useView();
 
     useEffect(() => {
         let animationFrame: number;
@@ -35,7 +37,9 @@ export const StickyHeader = ({
     // Instead of changing the top value, we always fix the sticky header at top-14
     // then use transform to slide it up by 14 units when the main header is hidden.
     // This ensures both animations use the transform property.
-
+    const defaultBG = `bg-neutral-50 ${
+        view === "chat" ? "dark:bg-neutral-" : "dark:bg-neutral-950"
+    }`;
     return (
         <div
             ref={ref}
@@ -51,7 +55,8 @@ export const StickyHeader = ({
         >
             {/* Base layer: gradient background */}
             <div
-                className={`absolute inset-0 bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[radial-gradient(circle,rgba(57,57,57,1)_0%,rgba(10,10,10,1)_100%)] drop-shadow-lg ${
+                /* background-image: linear-gradient(73deg, #171717, #262626); */
+                className={`absolute inset-0 ${defaultBG} bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[linear-gradient(73deg,rgba(23,23,23,1),rgba(64,64,64,1))] drop-shadow-lg ${
                     isScrolled ? "drop-shadow-md" : ""
                 }`}
             ></div>
@@ -59,7 +64,7 @@ export const StickyHeader = ({
             <div
                 className={`absolute inset-0 transition-opacity duration-700 ${
                     isScrolled ? "opacity-100" : "opacity-0"
-                } bg-neutral-50 dark:bg-neutral-950`}
+                } ${defaultBG}`}
             ></div>
             {/* Content */}
             <div className="relative z-10 flex w-full justify-center">

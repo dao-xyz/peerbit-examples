@@ -257,7 +257,7 @@ export const MarkdownContent = ({
     // Common Tailwind classes for consistent padding, font size, and line-height.
     // If noPadding is true, we remove the padding.
     const commonClasses = noPadding
-        ? "text-base leading-6"
+        ? "text-base leading-6 "
         : "p-1 pt-0.5 text-base leading-6";
 
     return (
@@ -277,7 +277,7 @@ export const MarkdownContent = ({
                         onBlur={handleBlur}
                         onKeyDown={handleKeyDown}
                         onInput={autoResize}
-                        className={`${commonClasses} w-full border-none outline-none resize-none block rounded dark:bg-black`}
+                        className={`${commonClasses} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800`}
                         rows={1}
                         placeholder={suggestReply || "Type here..."}
                         style={{ overflow: "hidden" }}

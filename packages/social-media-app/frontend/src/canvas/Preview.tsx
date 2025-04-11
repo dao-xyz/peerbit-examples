@@ -22,6 +22,7 @@ type BaseCanvasPreviewProps = {
     // forward ref
     forwardRef?: React.Ref<any>;
     className?: string;
+    classNameContent?: string;
 };
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
@@ -70,6 +71,7 @@ const PreviewFrame = ({
     fit,
     noPadding,
     onClick,
+    className,
 }: {
     element: Element<ElementContent>;
     previewLines?: number;
@@ -78,6 +80,7 @@ const PreviewFrame = ({
     fit?: "cover" | "contain";
     noPadding?: boolean;
     onClick?: () => void;
+    className?: string;
 }) => (
     <div
         className={`flex flex-col relative w-full max-in ${
@@ -98,6 +101,7 @@ const PreviewFrame = ({
             noPadding={noPadding}
             onClick={onClick}
             canOpenFullscreen={false}
+            className={className}
         />
         {bgBlur && (
             <BlurredBackground element={element} noPadding={noPadding} />
@@ -220,7 +224,7 @@ const ExpandedBreadcrumbPreview = ({
                 </div>
             ))}
             {text && (
-                <div className=" bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1">
+                <div className="  rounded-md px-1.5 py-1">
                     <PreviewFrame
                         element={text}
                         previewLines={2}
@@ -314,11 +318,13 @@ const PostPreview = ({
     onClick,
     forwardRef,
     className,
+    classNameContent,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
     forwardRef?: React.Ref<any>;
     className?: string;
+    classNameContent?: string;
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
     const { text } = rects;
@@ -338,6 +344,7 @@ const PostPreview = ({
                         element={firstApp}
                         fit="contain"
                         maximizeHeight
+                        className={classNameContent}
                     />
                 </button>
             )}
@@ -359,6 +366,7 @@ const PostPreview = ({
                                 element={app}
                                 fit="cover"
                                 maximizeHeight
+                                className={classNameContent}
                             />
                         </button>
                     ))}
@@ -367,10 +375,10 @@ const PostPreview = ({
             {text && (
                 <button
                     onClick={onClick}
-                    className="col-start-2 col-span-1 bg-neutral-50 dark:bg-neutral-950 rounded-md  py-1"
+                    className="col-start-2 col-span-1  rounded-md  py-1"
                     ref={forwardRef}
                 >
-                    <PreviewFrame element={text} />
+                    <PreviewFrame element={text} className={classNameContent} />
                 </button>
             )}
         </>
@@ -382,11 +390,13 @@ const ChatMessagePreview = ({
     onClick,
     forwardRef,
     className,
+    classNameContent,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: () => void;
     forwardRef?: React.Ref<any>;
     className?: string;
+    classNameContent?: string;
 }) => {
     const { other: apps, text } = rects;
     return (
@@ -402,15 +412,21 @@ const ChatMessagePreview = ({
                         element={app}
                         fit="contain"
                         maximizeHeight
+                        className={classNameContent}
                     />
                 </button>
             ))}
             {text && (
                 <button
-                    onClick={onClick}
-                    className="max-w-prose bg-neutral-50 dark:bg-neutral-950 rounded-md px-1.5 py-1"
+                    onClick={onClick} /* bg-neutral-50 dark:bg-neutral-950  */
+                    className="max-w-prose rounded-md px-1.5 py-1"
                 >
-                    <PreviewFrame element={text} previewLines={3} noPadding />
+                    <PreviewFrame
+                        element={text}
+                        previewLines={3}
+                        noPadding
+                        className={classNameContent}
+                    />
                 </button>
             )}
         </div>
@@ -422,6 +438,7 @@ export const CanvasPreview = ({
     onClick,
     forwardRef,
     className,
+    classNameContent,
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
@@ -487,6 +504,7 @@ export const CanvasPreview = ({
                     }
                     onClick={onClick}
                     className={className}
+                    classNameContent={classNameContent}
                 />
             );
         case "chat-message":
@@ -501,6 +519,7 @@ export const CanvasPreview = ({
                     onClick={onClick}
                     className={className}
                     forwardRef={forwardRef}
+                    classNameContent={classNameContent}
                 />
             );
         default:

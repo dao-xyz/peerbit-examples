@@ -71,7 +71,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             return (
                 <div ref={ref} className="flex flex-col z-20 w-full left-0">
                     <div className="flex flex-col h-full">
-                        <div className="flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-950 p-4">
+                        <div className="flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-700 p-4">
                             {AddButton()}
 
                             <button
@@ -106,7 +106,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             <>
                 <div
                     ref={ref}
-                    className="flex flex-col z-20 w-full left-0 rounded bg-neutral-100 dark:bg-neutral-900 safe-area-bottom"
+                    className="flex flex-col z-20 w-full left-0 rounded bg-neutral-100 dark:bg-neutral-700 safe-area-bottom"
                 >
                     {/* Top area: pending images canvas positioned above the toolbar */}
                     <div

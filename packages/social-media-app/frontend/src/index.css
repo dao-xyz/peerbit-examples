@@ -97,7 +97,7 @@ code {
         @apply text-neutral-950;
         @apply dark:text-neutral-50;
         @apply bg-neutral-50;
-        @apply dark:bg-neutral-950;
+        @apply dark:bg-neutral-800;
     }
 
     span {

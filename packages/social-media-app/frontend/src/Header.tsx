@@ -45,8 +45,8 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
         >
             {!props.fullscreen && (
                 <>
-                    <div className="sticky  top-0 inset-x-0 grid grid-cols-[0.5rem_auto_0.5rem_1fr_min-content_0.5rem_minmax(0,var(--container-xl))_1fr_0.5rem_auto_0.5rem] grid-rows-[0.5rem_auto_0.5rem] z-40 bg-neutral-50 dark:bg-neutral-950">
-                        <div className="col-span-full row-start-1 bg-neutral-50 dark:bg-neutral-950"></div>
+                    <div className="sticky  top-0 inset-x-0 grid grid-cols-[0.5rem_auto_0.5rem_1fr_min-content_0.5rem_minmax(0,var(--container-xl))_1fr_0.5rem_auto_0.5rem] grid-rows-[0.5rem_auto_0.5rem] z-40 bg-neutral-50 dark:bg-neutral-900">
+                        <div className="col-span-full row-start-1 "></div>
                         <div className="col-start-2 flex items-center">
                             <HeaderLogo
                                 onClick={() => setIsBreadcrumbExpanded(false)}
@@ -65,7 +65,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                 <IoIosArrowBack size={15} />
                             </button>
                         )}
-                        <div className="col-start-7 relative flex h-full w-full items-center bg-neutral-50 dark:bg-neutral-950">
+                        <div className="col-start-7 relative flex h-full w-full items-center ">
                             <div
                                 className={`w-full z-10 h-[${HEIGHT}] overflow-visible`}
                             >
@@ -89,7 +89,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                                 maxHeight: `calc(100vh - ${EXPANDED_BREADCRUMB_PADDING})`,
                                             }}
                                         >
-                                            <div className="w-full h-full p-5 bg-neutral-50 dark:bg-neutral-950 border-b-1">
+                                            <div className="w-full h-full p-5  border-b-1">
                                                 <ExpandedContext />
                                             </div>
                                         </div>
@@ -98,7 +98,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                             </div>
                             {/* helper block to cover the distance between overlay and breadcrumb bar */}
                             {isBreadcrumbExpanded && (
-                                <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-950 border-neutral-950 dark:border-neutral-50 border-x"></div>
+                                <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-900 border-neutral-950 dark:border-neutral-50 border-x"></div>
                             )}
                         </div>
                         {/*  TODO do we really need to set the z-index to 2 here? */}
@@ -182,7 +182,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                 <Spinner />
                             )}
                         </div>
-                        <div className="col-span-full row-start-3 bg-neutral-50 dark:bg-neutral-950"></div>
+                        <div className="col-span-full row-start-3 "></div>
                     </div>
                 </>
             )}

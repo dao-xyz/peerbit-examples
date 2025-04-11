@@ -83,6 +83,7 @@ export const Frame = (properties: {
     showEditControls: boolean;
     editControls?: React.ReactNode;
     editMode: boolean;
+    className?: string;
 }) => {
     const navigate = useNavigate();
     const { getCuratedWebApp } = useApps();
@@ -291,7 +292,9 @@ export const Frame = (properties: {
     return (
         <div
             key={properties.key}
-            className="flex flex-row w-full h-full max-w-full  group"
+            className={`flex flex-row w-full h-full max-w-full  group ${
+                properties.className || ""
+            }`}
         >
             <div className="w-full ">
                 {renderContent({ previewLines: properties.previewLines })}

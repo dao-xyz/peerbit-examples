@@ -89,6 +89,7 @@ export const CanvasAndReplies = () => {
 
     const postRef = useRef<HTMLDivElement>(null);
     const [spacerHeight, setSpacerHeight] = useState(0);
+    const scrollToSnapEnabled = useRef(true);
 
     // Set up a ResizeObserver to and make the spacer height equal to postRef height - 50vh
     useEffect(() => {
@@ -102,7 +103,6 @@ export const CanvasAndReplies = () => {
             let minimumScrollHeight = 5;
             if (repliesRect.top < snapIntoViewThreshold) {
                 // If the top of the container is above the middle of the window, we want to set the spacer height to 0
-                console.log("setting spacer height to 0");
                 setSpacerHeight(minimumScrollHeight);
                 return;
             }
@@ -150,6 +150,9 @@ export const CanvasAndReplies = () => {
         }
 
         const handleScroll = () => {
+            if (!scrollToSnapEnabled.current) {
+                return;
+            }
             if (repliesScrollRef.current) {
                 const rect = repliesScrollRef.current.getBoundingClientRect();
 
@@ -226,11 +229,18 @@ export const CanvasAndReplies = () => {
 
     const goToTop = () => {
         // Scroll to the top of the page
+        scrollToSnapEnabled.current = false;
+        lastScrollTopRef.current = -1;
+
         setRepliesFocused(shouldFocusRepliesByDefault(view));
+
         window.scrollTo({
             top: 0,
             behavior: "instant",
         });
+        setTimeout(() => {
+            scrollToSnapEnabled.current = true;
+        }, 100); // This seems to be necessary on IOS Safari to avoid down scrolls to trigger focus again immediately
     };
 
     return (
@@ -245,6 +255,10 @@ export const CanvasAndReplies = () => {
                 <div
                     ref={scrollContainerRef}
                     className={`${
+                        view === "chat"
+                            ? "dark:bg-neutral-800"
+                            : "dark:bg-neutral-950"
+                    } ${
                         repliesFocused ? "h-fit" : "h-full"
                     } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
                     style={{
@@ -256,9 +270,9 @@ export const CanvasAndReplies = () => {
                 >
                     {/* Header section */}
                     <div ref={postRef}>
-                        <div className="flex-shrink-0">
+                        <div className="flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
                             <FullscreenEditor>
-                                <div className="mt-6 max-w-[876px] mx-auto w-full">
+                                <div className="pt-6 max-w-[876px] mx-auto w-full">
                                     <DetailedView />
                                 </div>
                             </FullscreenEditor>
@@ -277,8 +291,8 @@ export const CanvasAndReplies = () => {
                     <div
                         className="relative flex-1 h-full"
                         /*    style={{
-                           height: `${spacerHeight}px`,
-                       }} */
+                       height: `${spacerHeight}px`,
+                   }} */
                     >
                         <div
                             // When not focused, make the container fill the available area and show a pointer cursor.
@@ -338,7 +352,7 @@ export const CanvasAndReplies = () => {
                                     }}
                                 >
                                     {showClickToSeeMore && (
-                                        <span className="p-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 pt-4 rounded text-sm font-semibold shadow-md">
+                                        <span className="p-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
                                             Click to see more
                                         </span>
                                     )}

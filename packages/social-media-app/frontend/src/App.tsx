@@ -80,7 +80,10 @@ export const Content = () => {
                 </div>
 
                 {/* Add padding so content isn’t hidden by the fixed header */}
-                <div className="pt-16 h-full">
+                <div
+                    className="h-full"
+                    style={{ paddingTop: `${headerHeight}px` }}
+                >
                     <BaseRoutes />
                 </div>
             </ViewProvider>

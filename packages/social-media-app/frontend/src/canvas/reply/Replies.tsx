@@ -51,6 +51,10 @@ export const Replies = (properties: {
         prevRepliesCountRef.current = processedReplies.length;
     }, [processedReplies, isAtBottom]);
 
+    useEffect(() => {
+        setShowNewMessagesToast(false);
+    }, [isAtBottom]);
+
     return (
         <div className="flex flex-col relative w-full">
             {processedReplies && processedReplies.length > 0 ? (

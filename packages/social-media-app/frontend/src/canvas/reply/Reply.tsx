@@ -129,6 +129,8 @@ export const Reply = ({
     const isThread = variant === "thread";
 
     const highlightStyle = isHighlighted ? "animated-border p-0" : "";
+    const styleFromFromMode =
+        isChat && align === "right" ? "bg-neutral-300 dark:bg-neutral-600" : "";
 
     return (
         <div
@@ -187,11 +189,16 @@ export const Reply = ({
                                 onClick={handleCanvasClick}
                                 variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
-                                className={`flex flex-col gap-2 ${
+                                className={`flex flex-col gap-2  ${
                                     align === "right"
-                                        ? "flex flex-col justify-end items-end"
-                                        : ""
+                                        ? "flex flex-col justify-end items-end ml-10"
+                                        : "mr-10"
                                 }`}
+                                classNameContent={
+                                    align === "right"
+                                        ? "bg-neutral-200 dark:bg-neutral-700 p-2 rounded"
+                                        : ""
+                                }
                             />
                         ) : showMore ? (
                             <div ref={forwardedRef}>
