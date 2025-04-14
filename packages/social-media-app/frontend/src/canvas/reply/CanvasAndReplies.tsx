@@ -58,6 +58,8 @@ const loadingTexts = [
 const textToLoad =
     loadingTexts[Math.floor(Math.random() * loadingTexts.length)];
 
+const SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT = 5;
+
 const shouldFocusRepliesByDefault = (view: ViewType) => {
     // For view types other than "best" or "old", we want the new scroll-based effect.
     return view === "best" || view === "old";
@@ -101,14 +103,14 @@ export const CanvasAndReplies = () => {
             const repliesRect =
                 repliesScrollRef.current.getBoundingClientRect();
             let snapIntoViewThreshold = getSnapToRepliesViewThreshold(0); // window.innerHeight / 3;
-            let minimumScrollHeight = 5;
             if (repliesRect.top < snapIntoViewThreshold) {
                 // If the top of the container is above the middle of the window, we want to set the spacer height to 0
-                setSpacerHeight(minimumScrollHeight);
+                setSpacerHeight(SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT);
                 return;
             }
             let diffToBottom = repliesRect.top - snapIntoViewThreshold;
-            let newSpacerHeight = diffToBottom + minimumScrollHeight;
+            let newSpacerHeight =
+                diffToBottom + SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT;
             setSpacerHeight(newSpacerHeight);
         };
         checkHeight();
@@ -301,8 +303,8 @@ export const CanvasAndReplies = () => {
                     <div
                         className="relative flex-1 h-full"
                         /*    style={{
-           height: `${spacerHeight}px`,
-       }} */
+height: `${spacerHeight}px`,
+}} */
                     >
                         <div
                             // When not focused, make the container fill the available area and show a pointer cursor.
@@ -317,6 +319,7 @@ export const CanvasAndReplies = () => {
                             {/* When unfocused, wrap Replies in an absolutely positioned, scrollable container.
         When focused, no extra wrapper is applied so the Replies render inline. */}
                             <div
+                                id="replies-container"
                                 className={`${
                                     !repliesFocused
                                         ? "absolute inset-0 overflow-y-auto hide-scrollbar "
@@ -332,6 +335,7 @@ export const CanvasAndReplies = () => {
                                 }
                             >
                                 <Replies
+                                    viewRef={scrollContainerRef}
                                     focused={repliesFocused}
                                     scrollRef={
                                         repliesFocused

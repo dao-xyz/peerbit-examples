@@ -30,7 +30,7 @@ const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
 
     return (
         <div className="flex flex-row justify-start items-center overflow-x-auto w-full  no-scrollbar p-1 pr-0">
-            {path.length > 1 ? (
+            {path?.length > 1 ? (
                 path.map((x, ix) => (
                     <Fragment key={ix}>
                         {ix > 1 && <span className="px-1">/</span>}

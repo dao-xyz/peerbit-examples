@@ -516,6 +516,7 @@ export const CanvasPreview = ({
                     onClick={onClick}
                     className={className}
                     classNameContent={classNameContent}
+                    forwardRef={forwardRef}
                 />
             );
         case "chat-message":
