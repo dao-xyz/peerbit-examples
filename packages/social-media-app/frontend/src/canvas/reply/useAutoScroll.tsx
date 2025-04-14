@@ -31,8 +31,11 @@ const DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED = 100;
 export const useAutoScroll = (properties: {
     replies: { reply: Canvas }[];
     repliesContainerRef: React.RefObject<any>;
+    lastElementRef?: React.RefObject<any>;
     scrollRef?: React.RefObject<any>;
+
     enabled: boolean;
+    debug?: boolean;
 }) => {
     const { replies: processedReplies, repliesContainerRef } = properties;
     const { view } = useView();
@@ -70,14 +73,35 @@ export const useAutoScroll = (properties: {
     }, [view, properties.enabled]);
 
     const lastScrollRef = useRef(properties.scrollRef?.current);
+    const lastRepliesContainerRef = useRef(repliesContainerRef.current);
+
     useEffect(() => {
-        if (properties.scrollRef?.current !== lastScrollRef.current) {
+        if (!properties.enabled) {
+            return;
+        }
+        /*  if (!properties.scrollRef?.current) {
+             return;
+         } */
+
+        /*  if (!repliesContainerRef.current) {
+             return;
+         } */
+
+        if (
+            properties.scrollRef?.current !== lastScrollRef.current ||
+            lastRepliesContainerRef.current !== repliesContainerRef.current
+        ) {
+            lastRepliesContainerRef.current = repliesContainerRef.current;
             lastScrollRef.current = properties.scrollRef?.current;
 
             // trigger scroll because the replies container has changed
             triggerScroll();
         }
-    }, [properties.scrollRef]);
+        return () => {
+            lastScrollRef.current = undefined;
+            lastRepliesContainerRef.current = undefined;
+        };
+    }, [properties.scrollRef, repliesContainerRef.current, properties.enabled]);
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
@@ -122,16 +146,31 @@ export const useAutoScroll = (properties: {
     // UPDATED scrollToBottom: scroll the container if available.
     const scrollToBottom = () => {
         if (properties.scrollRef?.current) {
+            if (properties.lastElementRef?.current) {
+                properties.lastElementRef.current.scrollIntoView({
+                    behavior: "instant",
+                    block: "end",
+                });
+                return;
+            }
             if (!repliesContainerRef.current) {
+                properties.debug && console.log("No replies container ref");
                 return;
             }
 
+            properties.debug &&
+                console.log(
+                    "scroll to bottom!",
+                    properties.scrollRef.current.getBoundingClientRect(),
+                    repliesContainerRef.current.scrollHeight
+                );
             properties.scrollRef.current.scrollTo({
                 top: repliesContainerRef.current.scrollHeight,
                 left: 0,
                 behavior: "instant",
             });
         } else {
+            properties.debug && console.log("scroll to bottom 2!");
             window.scrollTo({
                 top: document.documentElement.scrollHeight,
                 left: 0,
@@ -143,6 +182,7 @@ export const useAutoScroll = (properties: {
     };
 
     const scrollToTop = () => {
+        properties.debug && console.log("scroll to top!");
         if (properties.scrollRef?.current) {
             properties.scrollRef.current.scrollTo({
                 top: 0,
@@ -245,7 +285,6 @@ export const useAutoScroll = (properties: {
                     scrollMode.current = "manual";
                     forceScrollToBottom.current = false;
                     setIsAtBottom(false);
-                    console.log("manual scroll mode");
                 }
                 lastScrollTop.current = st <= 0 ? 0 : st;
                 scrollUpTimeout.current = undefined;

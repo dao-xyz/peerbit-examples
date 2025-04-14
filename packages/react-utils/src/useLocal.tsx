@@ -24,7 +24,7 @@ export const useLocal = <
         transform?: (result: RT) => Promise<RT>;
         onChanges?: (all: RT[]) => void;
         debounce?: number;
-        debug?: boolean; // add debug option here
+        debug?: boolean | { id: string };
     } & QueryOptons
 ) => {
     const [all, setAll] = useState<RT[]>([]);
@@ -51,6 +51,18 @@ export const useLocal = <
                         results.map((x) => options.transform!(x))
                     );
                 }
+                if (options?.debug) {
+                    let dbgId =
+                        typeof options.debug === "boolean"
+                            ? undefined
+                            : options.debug.id;
+                    console.log(
+                        dbgId ? "fetched " + dbgId : "fetched",
+                        results,
+                        "query",
+                        options?.query
+                    );
+                }
                 emptyResultsRef.current = results.length === 0;
                 setAll(() => {
                     options?.onChanges?.(results);
@@ -69,10 +81,6 @@ export const useLocal = <
             options?.debounce ?? 1000
         );
 
-        let ts = setTimeout(() => {
-            _l();
-        }, 3000);
-
         const handleChange = () => {
             if (emptyResultsRef.current) {
                 debounced.cancel();
@@ -88,7 +96,6 @@ export const useLocal = <
         return () => {
             db.events.removeEventListener("change", handleChange);
             debounced.cancel();
-            clearTimeout(ts);
         };
     }, [
         db?.closed ? undefined : db?.rootAddress,

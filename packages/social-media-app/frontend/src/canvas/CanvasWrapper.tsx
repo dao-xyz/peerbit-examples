@@ -154,7 +154,7 @@ export const CanvasWrapper = ({
                               new Sort({ key: ["location", "y"] }),
                           ],
                       },
-            debug: canvas && canvas.path.length > 0,
+            /*  debug: canvas && canvas.path.length > 0, */
         }
     );
     const [pendingRects, setPendingRects] = useState<Element[]>([]);

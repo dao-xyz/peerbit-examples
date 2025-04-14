@@ -7,7 +7,7 @@ import React, {
     useMemo,
     ReactNode,
 } from "react";
-import { useLocal } from "@peerbit/react";
+import { useLocal, useLocalPaginated } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Canvas,
@@ -54,9 +54,10 @@ function useViewContextHook() {
 
     // State to hold our query (a SearchRequest and a unique id)
     const [query, setQuery] = useState<{
-        query: SearchRequest;
+        query: SearchRequest | null;
         id: string;
-    } | null>(null);
+        reverse?: boolean;
+    } | null>({ query: null, id: "" });
 
     // Helper to create a unique query id based on the canvas and view type.
     const getQueryId = (canvas: CanvasDB, sortCriteria: ViewType) => {
@@ -96,11 +97,12 @@ function useViewContextHook() {
                     sort: [
                         new Sort({
                             key: ["__context", "created"],
-                            direction: SortDirection.ASC,
+                            direction: SortDirection.DESC,
                         }),
                     ],
                 }),
                 id: getQueryId(viewRoot, view),
+                reverse: true,
             });
         } else if (view === "best") {
             setQuery({
@@ -128,19 +130,33 @@ function useViewContextHook() {
                         key: ["__context", "created"],
                         direction:
                             view === "new"
-                                ? SortDirection.ASC
-                                : SortDirection.DESC,
+                                ? SortDirection.DESC
+                                : SortDirection.ASC,
                     }),
                 }),
                 id: getQueryId(viewRoot, view),
+                reverse: view === "new",
             });
         }
     }, [view, viewRoot, calculateAddress]);
 
     // Use the query (if available) to fetch sorted replies from the viewRoot.
-    const sortedReplies = useLocal(
+    /*   const sortedReplies = uLocseLocal(
+         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
+         { ...query, transform: calculateAddress } // for some reason if we set the transform function in the setQuery it does not work, propagate to useLocal?
+     ); 
+     const loadMore = () => {};
+     const isLoading = false; */
+
+    const [batchSize, setBatchSize] = useState(10); // Default batch size
+    const {
+        items: sortedReplies,
+        loadMore,
+        isLoading,
+    } = useLocalPaginated(
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
-        { ...query, transform: calculateAddress } // for some reason if we set the transform function in the setQuery it does not work, propagate to useLocal?
+        { ...query, transform: calculateAddress, batchSize }
+        // batch size
     );
 
     const lastReply = useMemo(() => {
@@ -187,7 +203,7 @@ function useViewContextHook() {
         const lastElements = {
             next: next.path[next.path.length - 1],
             current:
-                current.path.length > 0
+                current.path?.length > 0
                     ? current.path[current.path.length - 1]
                     : undefined,
         };
@@ -269,11 +285,15 @@ function useViewContextHook() {
         viewRoot,
         view,
         setView,
+        loadMore,
+        isLoading,
         query,
         lastReply,
         sortedReplies,
         processedReplies,
         loading,
+        batchSize,
+        setBatchSize,
     };
 }
 

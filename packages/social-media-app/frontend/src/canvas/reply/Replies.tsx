@@ -13,23 +13,43 @@ import { IoIosArrowDown } from "react-icons/io";
 export const Replies = (properties: {
     focused: boolean;
     scrollRef?: React.RefObject<any>;
+    viewRef: React.RefObject<any>;
 }) => {
-    const { view, processedReplies } = useView();
+    const { view, processedReplies, loadMore, batchSize, isLoading } =
+        useView();
     const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
     const { replyTo } = useAutoReply();
 
     const replyRefs = useMemo(
         () => processedReplies.map(() => React.createRef<HTMLDivElement>()),
-        [processedReplies]
+        [processedReplies.length]
     );
+    const sentinelRef = useRef<HTMLDivElement>(null);
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
         repliesContainerRef,
         scrollRef: properties.scrollRef,
         enabled: true,
+        lastElementRef: replyRefs[replyRefs.length - 1],
     });
+
+    const isTransitioning = useRef(false);
+
+    useEffect(() => {
+        if (!properties.focused) {
+            return;
+        }
+        isTransitioning.current = true;
+        let timeout = setTimeout(() => {
+            isTransitioning.current = false;
+        }, 300);
+        return () => {
+            isTransitioning.current = false;
+            clearTimeout(timeout);
+        };
+    }, [properties.focused]);
 
     // State for managing the Radix Toast notification.
     const [showNewMessagesToast, setShowNewMessagesToast] = useState(false);
@@ -55,13 +75,74 @@ export const Replies = (properties: {
         setShowNewMessagesToast(false);
     }, [isAtBottom]);
 
+    const loadMoreCounter = useRef(0);
+    // --- Adaptive content fetching using IntersectionObserver ---
+    useEffect(() => {
+        // Create an observer that loads more content when the sentinel is visible.
+        const observer = new IntersectionObserver(
+            (entries) => {
+                const entry = entries[0];
+                if (
+                    entry.isIntersecting &&
+                    !isLoading &&
+                    !isTransitioning.current
+                ) {
+                    /*  console.log("Load more please!", isTransitioning, entry) */
+                    loadMore();
+                }
+            },
+            {
+                root: properties.viewRef.current, // you can also set root to null if you want viewport-based scrolling
+                threshold: 0.1, // adjust threshold as needed
+            }
+        );
+        const currentSentinel = sentinelRef.current;
+        if (currentSentinel) observer.observe(currentSentinel);
+        return () => {
+            if (currentSentinel) observer.unobserve(currentSentinel);
+        };
+    }, [isLoading, properties.viewRef, loadMore]);
+
+    const [sentinelVisible, setSentinelVisible] = useState(true);
+    /*  useEffect(() => {
+         let timeout = setTimeout(() => {
+             if (processedReplies.length === batchSize) {
+                 setSentinelVisible(true);
+             }
+         }, 3000);
+         return () => {
+             clearTimeout(timeout);
+             setSentinelVisible(false);
+         };
+     }, [processedReplies.length]); */
+
+    let sentinentBefore = view === "chat" || view === "new" ? true : false;
+
+    const sentinent = () => {
+        return (
+            <div
+                id="sentinel"
+                className={`w-full h-[1px] transparent ${
+                    sentinelVisible ? "" : "hidden"
+                }`}
+                ref={sentinelRef}
+            >
+                {/* This sentinel div is observed for infinite scrolling */}
+                {isLoading && (
+                    <div className="text-center py-2">Loading more...</div>
+                )}
+            </div>
+        );
+    };
     return (
-        <div className="flex flex-col relative w-full">
+        <div
+            className="flex flex-col relative w-full mt-5"
+            ref={repliesContainerRef}
+        >
             {processedReplies && processedReplies.length > 0 ? (
                 <div
-                    ref={repliesContainerRef}
                     className={tw(
-                        "mt-5 max-w-[876px] w-full mx-auto grid relative"
+                        " max-w-[876px] w-full mx-auto grid relative"
                     )}
                 >
                     <SmoothReplyLine
@@ -76,6 +157,7 @@ export const Replies = (properties: {
                                 : "right"
                         )}
                     />
+                    {sentinentBefore && sentinent()}
                     {processedReplies.map((item, i) => (
                         <Fragment key={i}>
                             <Reply
@@ -89,7 +171,9 @@ export const Replies = (properties: {
                             />
                         </Fragment>
                     ))}
-                    <div className="w-full h-4"></div>
+
+                    {/*  <div className="w-full h-4"></div>  */}
+                    {!sentinentBefore && sentinent()}
                 </div>
             ) : (
                 <div className="flex-grow flex items-center justify-center h-40 font ganja-font">

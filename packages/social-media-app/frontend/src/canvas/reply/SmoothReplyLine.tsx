@@ -1,4 +1,5 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
+import debounce from "lodash/debounce";
 
 type Point = { x: number; y: number };
 
@@ -94,20 +95,16 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
     );
     const [viewBox, setViewBox] = useState("");
 
-    useEffect(() => {
-        if (!containerRef.current) return;
-        const containerRect = containerRef.current.getBoundingClientRect();
+    const runCalculations = () => {
+        const containerRect = containerRef.current!.getBoundingClientRect();
         setViewBox(`0 0 ${containerRect.width} ${containerRect.height}`);
 
         let index = 0;
-        const points: (Point | null)[] = replyRefs.map((ref, ix) => {
+        const points: (Point | null)[] = replyRefs.map((ref) => {
             const el = ref.current;
             if (el) {
                 const rect = el.getBoundingClientRect();
                 let anchor = anchorPoints?.[index] ?? "center";
-                /*  if (lineTypes[index] === "end") {
-                     anchor = "center";
-                 } */
 
                 let x: number;
                 // never make the line cross middle of the screen for left and right
@@ -139,10 +136,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
         });
         const validPoints = points.filter((p): p is Point => p !== null);
 
-        if (
-            validPoints.length <
-            2 /* || validPoints.length !== lineTypes.length */
-        ) {
+        if (validPoints.length < 2) {
             setSegments([]);
             return;
         }
@@ -163,25 +157,54 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             groups.push(currentGroup);
         }
 
-        const windowSize = 10; // Look at 2 neighbors on each side
-        const smoothingFactor = 0.3; // Blend 50% with local average
+        const windowSize = 10; // Look at 10 neighbors on each side
+        const smoothingFactor = 0.3; // Blend 30% with local average
+        const tension = 3; // Tension for Catmull-Rom to Bezier conversion
         const smoothedGroups = groups.map((group) =>
             smoothPoints(group, windowSize, smoothingFactor)
         );
 
         const groupSegments = smoothedGroups.map((group) =>
-            createSmoothPathSegments(group, 3)
+            createSmoothPathSegments(group, tension)
         );
         const flatSegments = groupSegments.flat();
         setSegments(flatSegments);
+    };
+
+    useEffect(() => {
+        if (!containerRef.current) return;
+
+        // Create a debounced version of the calculation function.
+        const debouncedCalc = debounce(runCalculations, 1000, {
+            leading: false,
+            trailing: true,
+        });
+        debouncedCalc();
+
+        // Cleanup by cancelling the debounced call if the effect re-runs.
+        return () => debouncedCalc.cancel();
     }, [replyRefs, containerRef, lineTypes, anchorPoints]);
+
+    const count = useRef(0);
+    useEffect(() => {
+        const interval = setInterval(() => {
+            runCalculations();
+            count.current++;
+            if (count.current > 5) {
+                clearInterval(interval);
+            }
+        }, 1000);
+        return () => {
+            clearInterval(interval);
+        };
+    }, []);
 
     if (!viewBox) return null;
 
     return (
         <svg
             className="absolute inset-0 pointer-events-none"
-            style={{ zIndex: -1, width: "100%", height: "100%" }}
+            style={{ zIndex: 1, width: "100%", height: "100%" }}
             viewBox={viewBox}
         >
             <defs>
@@ -203,8 +226,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             </defs>
             {segments.map((seg, index) => {
                 const lengthThreshold = 400;
-                const strokeDasharray =
-                    seg.length > 100 ? "35,35" : "35,35"; /* "15,15" */
+                const strokeDasharray = seg.length > 100 ? "35,35" : "35,35"; // Adjust as needed
                 const strokeWidth = seg.length > lengthThreshold ? 3 : 3;
                 return (
                     <path
@@ -219,7 +241,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
                             strokeDasharray,
                             filter: "url(#sketchyFilter)",
                         }}
-                        className="dark:stroke-neutral-700 stroke-neutral-500/30 stroke-da"
+                        className="dark:stroke-neutral-500 stroke-neutral-300/30 stroke-da"
                     />
                 );
             })}
