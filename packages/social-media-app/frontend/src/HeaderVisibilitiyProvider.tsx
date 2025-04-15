@@ -6,11 +6,11 @@ import React, {
     useRef,
 } from "react";
 
-function getScrollTop() {
+export const getScrollTop = () => {
     return window.scrollY || document.documentElement.scrollTop;
-}
+};
 
-function getMaxScrollTop() {
+export const getMaxScrollTop = () => {
     const documentHeight = Math.max(
         document.body.scrollHeight,
         document.body.offsetHeight,
@@ -19,7 +19,7 @@ function getMaxScrollTop() {
         document.documentElement.offsetHeight
     );
     return documentHeight - window.innerHeight;
-}
+};
 
 const useHeaderVisibility = (
     threshold = 50,

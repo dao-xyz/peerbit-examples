@@ -259,10 +259,6 @@ export const CanvasAndReplies = () => {
                 <div
                     ref={scrollContainerRef}
                     className={`${
-                        view === "chat"
-                            ? "dark:bg-neutral-800"
-                            : "dark:bg-neutral-950"
-                    } ${
                         repliesFocused ? "h-fit" : "h-full"
                     } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
                     style={{
@@ -335,7 +331,12 @@ height: `${spacerHeight}px`,
                                 }
                             >
                                 <Replies
-                                    viewRef={scrollContainerRef}
+                                    // viewRef is body if focused, otherwise the scrollRef
+                                    viewRef={
+                                        repliesFocused
+                                            ? document.body
+                                            : repliesScrollRef.current
+                                    }
                                     focused={repliesFocused}
                                     scrollRef={
                                         repliesFocused

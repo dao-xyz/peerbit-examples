@@ -55,7 +55,18 @@ export const useLocalPaginated = <
                 combined.length
             );
         }
+
+        const dedub = new Set<string>();
+        for (const item of combined) {
+            if ("idString" in item) {
+                if (dedub.has(item.idString as string)) {
+                    throw new Error("Duplicate item found in iterator");
+                }
+                dedub.add(item.idString as string);
+            }
+        }
         allRef.current = combined;
+
         setAll(combined);
     };
 

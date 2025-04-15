@@ -6,6 +6,9 @@ import {
     Element,
     Layout,
     LOWEST_QUALITY,
+    MEDIUM_QUALITY,
+    HIGHEST_QUALITY,
+    HIGH_QUALITY,
     StaticContent,
     StaticImage,
 } from "@giga-app/interface";
@@ -37,22 +40,27 @@ export const createProfile = async (client: ProgramClient) => {
         }
         const image = fs.readFileSync(icon);
         const contentId = sha256Sync(image);
-        await canvas.elements.put(
-            new Element({
-                location: Layout.zero(),
-                content: new StaticContent({
-                    content: new StaticImage({
-                        data: image,
-                        mimeType: "image/jpeg",
-                        width: 512,
-                        height: 512,
-                    }),
-                    quality: LOWEST_QUALITY,
-                    contentId,
-                }),
-                parent: canvas,
-                publicKey: client.identity.publicKey,
-            })
+        await Promise.all(
+            [LOWEST_QUALITY, MEDIUM_QUALITY, HIGH_QUALITY, HIGHEST_QUALITY].map(
+                (x) =>
+                    canvas.elements.put(
+                        new Element({
+                            location: Layout.zero(),
+                            content: new StaticContent({
+                                content: new StaticImage({
+                                    data: image,
+                                    mimeType: "image/jpeg",
+                                    width: 512,
+                                    height: 512,
+                                }),
+                                quality: x,
+                                contentId,
+                            }),
+                            parent: canvas,
+                            publicKey: client.identity.publicKey,
+                        })
+                    )
+            )
         );
 
         await profiles.profiles.put(

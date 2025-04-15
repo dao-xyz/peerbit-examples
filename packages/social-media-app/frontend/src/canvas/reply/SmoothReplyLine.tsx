@@ -6,7 +6,7 @@ type Point = { x: number; y: number };
 export type LineType = "start" | "middle" | "end" | "end-and-start" | "none";
 
 export type SmoothReplyLineProps = {
-    replyRefs: React.RefObject<HTMLDivElement>[];
+    replyRefs: HTMLDivElement[];
     containerRef: React.RefObject<HTMLDivElement>;
     lineTypes: LineType[];
     anchorPoints?: ("left" | "right" | "center")[];
@@ -101,21 +101,22 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
 
         let index = 0;
         const points: (Point | null)[] = replyRefs.map((ref) => {
-            const el = ref.current;
+            const el = ref;
             if (el) {
                 const rect = el.getBoundingClientRect();
                 let anchor = anchorPoints?.[index] ?? "center";
 
                 let x: number;
+                let margin = 20;
                 // never make the line cross middle of the screen for left and right
                 if (anchor === "left") {
-                    x = rect.left - containerRect.left;
-                    if (x < containerRect.width / 2) {
+                    x = rect.right - containerRect.left + margin;
+                    if (x > containerRect.width / 2) {
                         x = containerRect.width / 2;
                     }
                 } else if (anchor === "right") {
-                    x = rect.right - containerRect.left;
-                    if (x > containerRect.width / 2) {
+                    x = rect.left - containerRect.left - margin;
+                    if (x < containerRect.width / 2) {
                         x = containerRect.width / 2;
                     }
                 } else {
@@ -124,11 +125,12 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
 
                 // For the first element, we originally set y so that it starts at the top.
                 let y: number;
-                if (index === 0) {
-                    y = rect.top - rect.height - containerRect.top;
-                } else {
-                    y = rect.top + rect.height / 2 - containerRect.top;
-                }
+                /*  if (index === 0) {
+                     y = rect.top - rect.height - containerRect.top;
+                 } else {
+                     y = rect.top + rect.height / 2 - containerRect.top;
+                 } */
+                y = rect.top - containerRect.top;
                 index++;
                 return { x, y };
             }
@@ -157,9 +159,9 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             groups.push(currentGroup);
         }
 
-        const windowSize = 10; // Look at 10 neighbors on each side
-        const smoothingFactor = 0.3; // Blend 30% with local average
-        const tension = 3; // Tension for Catmull-Rom to Bezier conversion
+        const windowSize = 1; // Look at 10 neighbors on each side
+        const smoothingFactor = 0.7; // Blend 30% with local average
+        const tension = 0.7; // Tension for Catmull-Rom to Bezier conversion
         const smoothedGroups = groups.map((group) =>
             smoothPoints(group, windowSize, smoothingFactor)
         );
@@ -175,7 +177,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
         if (!containerRef.current) return;
 
         // Create a debounced version of the calculation function.
-        const debouncedCalc = debounce(runCalculations, 1000, {
+        const debouncedCalc = debounce(runCalculations, 50, {
             leading: false,
             trailing: true,
         });
@@ -203,8 +205,8 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
 
     return (
         <svg
-            className="absolute inset-0 pointer-events-none"
-            style={{ zIndex: 1, width: "100%", height: "100%" }}
+            className="absolute inset-0 pointer-events-none "
+            style={{ zIndex: 0, width: "100%", height: "100%" }}
             viewBox={viewBox}
         >
             <defs>

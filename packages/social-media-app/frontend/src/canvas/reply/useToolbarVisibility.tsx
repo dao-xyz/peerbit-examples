@@ -1,8 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-
-function getScrollTop() {
-    return window.scrollY || document.documentElement.scrollTop;
-}
+import { getScrollTop } from "../../HeaderVisibilitiyProvider";
 
 function getScrollBottomOffset() {
     return (

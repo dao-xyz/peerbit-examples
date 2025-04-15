@@ -19,6 +19,7 @@ import { SearchRequest } from "@peerbit/document-interface";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router-dom";
+import { BodyStyler } from "./BodyStyler";
 
 export type ViewType = "new" | "old" | "best" | "chat";
 export type LineType = "start" | "end" | "end-and-start" | "none" | "middle";
@@ -140,15 +141,7 @@ function useViewContextHook() {
         }
     }, [view, viewRoot, calculateAddress]);
 
-    // Use the query (if available) to fetch sorted replies from the viewRoot.
-    /*   const sortedReplies = uLocseLocal(
-         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
-         { ...query, transform: calculateAddress } // for some reason if we set the transform function in the setQuery it does not work, propagate to useLocal?
-     ); 
-     const loadMore = () => {};
-     const isLoading = false; */
-
-    const [batchSize, setBatchSize] = useState(10); // Default batch size
+    const [batchSize, setBatchSize] = useState(15); // Default batch size
     const {
         items: sortedReplies,
         loadMore,
@@ -219,6 +212,7 @@ function useViewContextHook() {
         replies: WithContext<Canvas>[],
         context: CanvasDB
     ): {
+        id: string;
         reply: WithContext<Canvas>;
         type: "reply" | "quote";
         lineType: LineType;
@@ -226,7 +220,12 @@ function useViewContextHook() {
         const repliesAndQuotes: {
             reply: WithContext<Canvas>;
             type: "reply" | "quote";
-        }[] = replies.map((reply) => ({ reply, type: "reply" }));
+            id: string;
+        }[] = replies.map((reply) => ({
+            id: reply.idString,
+            reply,
+            type: "reply",
+        }));
         for (let i = 0; i < repliesAndQuotes.length - 1; i++) {
             const current = repliesAndQuotes[i];
             const next = repliesAndQuotes[i + 1];
@@ -242,6 +241,7 @@ function useViewContextHook() {
                     ...quotes.map((quote) => ({
                         type: "quote" as const,
                         reply: quote,
+                        id: current.reply.idString + "-" + quote.idString,
                     }))
                 );
                 i += quotes.length;
@@ -271,13 +271,21 @@ function useViewContextHook() {
         ) {
             return insertQuotes(sortedReplies, viewRoot);
         }
-        return sortedReplies
-            ? sortedReplies.map((reply) => ({
-                  reply,
-                  type: "reply" as const,
-                  lineType: "none" as const,
-              }))
-            : [];
+        return (
+            sortedReplies
+                ? sortedReplies.map((reply) => ({
+                      reply,
+                      type: "reply" as const,
+                      lineType: "none" as const,
+                      id: reply.idString,
+                  }))
+                : []
+        ) as {
+            reply: WithContext<Canvas>;
+            type: "reply" | "quote";
+            lineType: LineType;
+            id: string;
+        }[];
     }, [sortedReplies, view, viewRoot?.closed, viewRoot]);
 
     return {
@@ -308,7 +316,12 @@ export const ViewProvider: React.FC<{ children: ReactNode }> = ({
     children,
 }) => {
     const view = useViewContextHook();
-    return <ViewContext.Provider value={view}>{children}</ViewContext.Provider>;
+    return (
+        <ViewContext.Provider value={view}>
+            <BodyStyler />
+            {children}
+        </ViewContext.Provider>
+    );
 };
 
 // Custom hook for child components to access view context.
