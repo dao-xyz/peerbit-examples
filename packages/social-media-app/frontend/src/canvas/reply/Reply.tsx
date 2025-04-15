@@ -139,9 +139,8 @@ export const Reply = ({
     return (
         <div
             ref={forwardRef}
-            className={`flex flex-col  ${
-                isChat ? (align === "right" ? "items-end" : "items-start") : ""
-            } ${className}`}
+            className={`flex flex-col  ${isChat ? (align === "right" ? "items-end ml-10" : "items-start mr-10") : ""
+                } ${className}`}
         >
             {lineType && lineType !== "none" && (
                 <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">
@@ -149,23 +148,21 @@ export const Reply = ({
                 </div>
             )}
             <div
-                className={`inline-flex flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${
-                    isThread ? "w-full" : ""
-                }`}
+                className={`inline-flex flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${isThread ? "w-full" : ""
+                    }`}
             >
                 {!hideHeader && (
                     <div
-                        className={`flex items-center mb-2 ${
-                            align === "right" ? "justify-end" : "justify-start"
-                        }`}
+                        className={`flex items-center mb-2 ${align === "right" ? "justify-end" : "justify-start"
+                            }`}
                     >
                         <Header
                             variant={
                                 isChat
                                     ? "medium"
                                     : isExpandedBreadcrumb
-                                    ? "tiny"
-                                    : "large"
+                                        ? "tiny"
+                                        : "large"
                             }
                             forwardRef={headerRef}
                             canvas={canvas}
@@ -178,9 +175,8 @@ export const Reply = ({
                 {/* Preview / Canvas Section with a ref and Tailwind classes for transition */}
                 <div
                     ref={previewContainerRef}
-                    className={` relative overflow-hidden ${
-                        showMore ? "max-h-full" : "max-h-40vh"
-                    }`}
+                    className={` relative overflow-hidden ${showMore ? "max-h-full" : "max-h-40vh"
+                        }`}
                 >
                     <CanvasWrapper canvas={canvas} quality={MEDIUM_QUALITY}>
                         {isExpandedBreadcrumb ? (
@@ -195,11 +191,10 @@ export const Reply = ({
                                 onClick={handleCanvasClick}
                                 variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
-                                className={`flex flex-col gap-2  ${
-                                    align === "right"
-                                        ? "flex flex-col justify-end items-end ml-10"
-                                        : "mr-10"
-                                }`}
+                                className={`flex flex-col gap-2  ${align === "right"
+                                        ? "flex flex-col justify-end items-end"
+                                        : ""
+                                    }`}
                                 classNameContent={
                                     align === "right"
                                         ? "bg-neutral-200 dark:bg-neutral-700 p-2 rounded"
@@ -243,9 +238,8 @@ export const Reply = ({
             {!isExpandedBreadcrumb && isOverflowing && (
                 /* Show more button, overlay with content, if contracted */
                 <div
-                    className={`flex gap-2.5 w-full ${
-                        !showMore ? "-translate-y-full" : ""
-                    }`}
+                    className={`flex gap-2.5 w-full ${!showMore ? "-translate-y-full" : ""
+                        }`}
                 >
                     <div className="ml-auto p-2">
                         <ReplyButton
