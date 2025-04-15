@@ -33,7 +33,9 @@ type BaseReplyPropsType = {
     onClick?: () => void;
     hideHeader?: boolean;
     lineType?: "start" | "middle" | "end" | "end-and-start" | "none";
-    forwardedRef?: React.Ref<HTMLDivElement>;
+    contentRef?: React.Ref<HTMLDivElement>;
+    headerRef?: React.Ref<HTMLDivElement>;
+    forwardRef?: React.Ref<HTMLDivElement>;
     isHighlighted?: boolean;
     className?: string;
 };
@@ -51,7 +53,9 @@ export const Reply = ({
     hideHeader = false,
     lineType,
     isQuote,
-    forwardedRef,
+    contentRef: contentRef,
+    headerRef: headerRef,
+    forwardRef: forwardRef,
     isHighlighted,
     className,
 }: ReplyPropsType) => {
@@ -134,6 +138,7 @@ export const Reply = ({
 
     return (
         <div
+            ref={forwardRef}
             className={`flex flex-col  ${
                 isChat ? (align === "right" ? "items-end" : "items-start") : ""
             } ${className}`}
@@ -162,6 +167,7 @@ export const Reply = ({
                                     ? "tiny"
                                     : "large"
                             }
+                            forwardRef={headerRef}
                             canvas={canvas}
                             direction="row"
                             open={handleCanvasClick}
@@ -179,13 +185,13 @@ export const Reply = ({
                     <CanvasWrapper canvas={canvas} quality={MEDIUM_QUALITY}>
                         {isExpandedBreadcrumb ? (
                             <CanvasPreview
-                                forwardRef={forwardedRef}
+                                forwardRef={contentRef}
                                 variant="expanded-breadcrumb"
                                 onClick={handleCanvasClick}
                             />
                         ) : isChat ? (
                             <CanvasPreview
-                                forwardRef={forwardedRef}
+                                forwardRef={contentRef}
                                 onClick={handleCanvasClick}
                                 variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
@@ -201,12 +207,12 @@ export const Reply = ({
                                 }
                             />
                         ) : showMore ? (
-                            <div ref={forwardedRef}>
+                            <div ref={contentRef}>
                                 <Canvas bgBlur fitWidth draft={false} />
                             </div>
                         ) : (
                             <CanvasPreview
-                                forwardRef={forwardedRef}
+                                forwardRef={contentRef}
                                 onClick={handleCanvasClick}
                                 variant="post"
                                 className="w-full"

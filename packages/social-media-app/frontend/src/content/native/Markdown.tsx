@@ -73,6 +73,11 @@ export const MarkdownContent = ({
             return;
         }
         let parent = canvas.path[canvas.path.length - 1];
+        console.log(
+            "HERE?",
+            parent,
+            suggestedReplyForParent.current !== parent.address
+        );
         if (parent) {
             if (suggestedReplyForParent.current !== parent.address) {
                 suggestedReplyForParent.current = parent.address;
@@ -85,9 +90,16 @@ export const MarkdownContent = ({
                         if (loadedParent.publicKey.equals(canvas.publicKey)) {
                             return; // no self reply
                         }
+                        console.log("SUGGEST!");
                         suggest(loadedParent, 2e4).then((reply) => {
-                            console.log("suggested reply", reply);
-                            setSuggestedReply(reply);
+                            console.log(
+                                "SUGGEST OUT",
+                                queue.current.size,
+                                reply
+                            );
+                            if (queue.current.size === 0) {
+                                setSuggestedReply(reply);
+                            }
                         });
                     } finally {
                         setLoadingSuggestedReply(false);
@@ -96,6 +108,7 @@ export const MarkdownContent = ({
             }
         }
         return () => {
+            suggestedReplyForParent.current = null;
             queue.current.clear();
         };
     }, [

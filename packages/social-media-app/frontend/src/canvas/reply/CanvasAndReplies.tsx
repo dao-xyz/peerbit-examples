@@ -262,7 +262,7 @@ export const CanvasAndReplies = () => {
                         repliesFocused ? "h-fit" : "h-full"
                     } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
                     style={{
-                        paddingBottom: toolbarHeight,
+                        paddingBottom: toolbarHeight + 10,
                         height: repliesFocused
                             ? "fit-content"
                             : `calc(100% + ${spacerHeight}px)`,
@@ -277,7 +277,7 @@ export const CanvasAndReplies = () => {
                                 : "blur-0 opacity-100"
                         }`}
                     >
-                        <div className="flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
+                        <div className="z-5 flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
                             <FullscreenEditor>
                                 <div className="pt-6 max-w-[876px] mx-auto w-full">
                                     <DetailedView />

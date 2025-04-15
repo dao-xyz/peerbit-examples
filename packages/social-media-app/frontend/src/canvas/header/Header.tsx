@@ -23,6 +23,7 @@ export const Header = ({
     variant,
     open: open,
     reverseLayout,
+    forwardRef,
 }: {
     canvas?: Canvas | WithContext<Canvas>;
     direction?: "row" | "col";
@@ -30,6 +31,7 @@ export const Header = ({
     variant: "tiny" | "large" | "medium";
     open?: () => void;
     reverseLayout?: boolean;
+    forwardRef?: React.Ref<HTMLDivElement>;
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
@@ -91,6 +93,7 @@ export const Header = ({
         <>
             {canvas && (
                 <div
+                    ref={forwardRef}
                     className={`flex px-2 pt-2 ${
                         reverseLayout ? "flex-row-reverse" : ""
                     } items-center ${

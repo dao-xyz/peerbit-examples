@@ -75,7 +75,7 @@ export const StickyHeader = ({
                 } ${defaultBG}`}
             ></div>
             {/* Content */}
-            <div className="relative z-10 flex w-full justify-center">
+            <div className="relative flex w-full justify-center">
                 {children}
             </div>
         </div>

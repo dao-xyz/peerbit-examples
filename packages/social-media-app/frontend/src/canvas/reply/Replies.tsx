@@ -4,7 +4,7 @@ import { Reply } from "./Reply"; // Uses the updated Reply component
 import { tw } from "../../utils/tailwind";
 import { useView } from "../../view/ViewContex";
 import { usePeer } from "@peerbit/react";
-import { SmoothReplyLine } from "./SmoothReplyLine";
+import { StraightReplyLine } from "./StraightReplyLine";
 import { useAutoReply } from "../AutoReplyContext";
 import { useAutoScroll } from "./useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
@@ -21,11 +21,13 @@ export const Replies = (properties: {
     const sentinelRef = useRef<HTMLDivElement>(null);
 
     // Initialize a ref that holds an array of refs.
-    const replyRefs = useRef<(HTMLDivElement | null)[]>([]);
+    const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
 
     // If the current number of refs doesn't match processedReplies, update the array.
-    if (replyRefs.current.length !== processedReplies.length) {
-        replyRefs.current = new Array(processedReplies.length).fill(null);
+    if (replyContentRefs.current.length !== processedReplies.length) {
+        replyContentRefs.current = new Array(processedReplies.length).fill(
+            null
+        );
     }
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
@@ -33,7 +35,9 @@ export const Replies = (properties: {
         repliesContainerRef,
         scrollRef: properties.scrollRef,
         enabled: true, // always enabled in this example
-        lastElementRef: replyRefs.current[replyRefs.current.length - 1],
+        lastElementRef: () =>
+            replyContentRefs.current[replyContentRefs.current.length - 1],
+        debug: true,
     });
 
     const isTransitioning = useRef(false);
@@ -106,11 +110,10 @@ export const Replies = (properties: {
                 } else {
                     (container as HTMLElement).scrollTop += offsetDiff;
                 }
-            }
-
-            // Continue adjusting until max attempts are reached.
-            if (attempts < maxAttempts) {
-                requestAnimationFrame(adjustScroll);
+                // Continue adjusting until max attempts are reached.
+                if (attempts < maxAttempts) {
+                    requestAnimationFrame(adjustScroll);
+                }
             }
         };
         requestAnimationFrame(adjustScroll);
@@ -196,56 +199,51 @@ export const Replies = (properties: {
         : processedReplies.length - 1;
 
     return (
-        <div
-            className="flex flex-col relative w-full mt-5"
-            ref={repliesContainerRef}
-        >
+        <div className="flex flex-col relative w-full mt-5 px-2">
             {processedReplies && processedReplies.length > 0 ? (
                 <div
+                    ref={repliesContainerRef}
                     className={tw(
-                        "max-w-[876px] w-full mx-auto grid relative px-2"
+                        "max-w-[876px] w-full mx-auto grid relative "
                     )}
                 >
-                    <SmoothReplyLine
-                        replyRefs={replyRefs.current}
+                    <StraightReplyLine
+                        replyRefs={replyContentRefs.current}
                         containerRef={repliesContainerRef}
                         lineTypes={processedReplies.map(
                             (item) => item.lineType
                         )}
-                        anchorPoints={processedReplies.map((item) =>
-                            item.reply.publicKey.equals(peer.identity.publicKey)
-                                ? "right"
-                                : "left"
-                        )}
                     />
-                    {processedReplies.map((item, i) => {
-                        const replyElement = (
-                            <Fragment key={item.id}>
-                                <Reply
-                                    forwardedRef={(ref) => {
-                                        replyRefs.current[i] = ref;
-                                        if (i === showSentinentAtIndex) {
-                                            sentinelRef.current = ref;
+                    <div className="pl-[10px]">
+                        {processedReplies.map((item, i) => {
+                            const replyElement = (
+                                <Fragment key={item.id}>
+                                    <Reply
+                                        forwardRef={(ref) => {
+                                            replyContentRefs.current[i] = ref;
+                                            if (i === showSentinentAtIndex) {
+                                                sentinelRef.current = ref;
+                                            }
+                                        }}
+                                        canvas={item.reply}
+                                        variant={
+                                            view === "chat" ? "chat" : "thread"
                                         }
-                                    }}
-                                    canvas={item.reply}
-                                    variant={
-                                        view === "chat" ? "chat" : "thread"
-                                    }
-                                    isQuote={item.type === "quote"}
-                                    className={
-                                        i === showSentinentAtIndex ? "" : ""
-                                    }
-                                    isHighlighted={
-                                        replyTo?.idString ===
-                                        item.reply.idString
-                                    }
-                                />
-                            </Fragment>
-                        );
+                                        isQuote={item.type === "quote"}
+                                        className={
+                                            i === showSentinentAtIndex ? "" : ""
+                                        }
+                                        isHighlighted={
+                                            replyTo?.idString ===
+                                            item.reply.idString
+                                        }
+                                    />
+                                </Fragment>
+                            );
 
-                        return replyElement;
-                    })}
+                            return replyElement;
+                        })}
+                    </div>
                 </div>
             ) : (
                 <div className="flex-grow flex items-center justify-center h-40 font ganja-font">

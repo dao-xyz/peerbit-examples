@@ -1,4 +1,4 @@
-import React, { forwardRef, useEffect, useState } from "react";
+import { forwardRef, useEffect, useState } from "react";
 import { useCanvas } from "../CanvasWrapper";
 import { Canvas } from "../Canvas";
 import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
@@ -106,7 +106,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             <>
                 <div
                     ref={ref}
-                    className="flex flex-col z-20 w-full left-0 rounded bg-neutral-100 dark:bg-neutral-700 safe-area-bottom"
+                    className="flex flex-col z-20 w-full left-0 rounded rounded-b-none bg-neutral-100 dark:bg-neutral-700 safe-area-bottom"
                 >
                     {/* Top area: pending images canvas positioned above the toolbar */}
                     <div

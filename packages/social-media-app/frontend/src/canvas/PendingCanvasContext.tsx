@@ -13,7 +13,7 @@ import pDefer from "p-defer";
 
 interface PendingCanvasContextType {
     pendingCanvas: Canvas | undefined;
-    onSavePending: () => Promise<void>;
+    savePending: () => Promise<void>;
     setReplyTo: (canvas: Canvas | undefined) => Promise<void>;
 }
 
@@ -57,13 +57,14 @@ export const PendingCanvasProvider: React.FC<{
             return;
         }
         if (pendingCanvasState) {
+            await pendingCanvasState.load();
             await pendingCanvasState.setParent(replyTo || viewRoot);
         }
 
         setPendingCanvasState(pendingCanvasState);
     };
 
-    const onSavePending = async () => {
+    const savePending = async () => {
         const savePromise = pDefer<void>();
         isSaving.current = true;
         if (viewRoot) {
@@ -101,7 +102,7 @@ export const PendingCanvasProvider: React.FC<{
         <PendingCanvasContext.Provider
             value={{
                 pendingCanvas: pendingCanvas?.program,
-                onSavePending,
+                savePending: savePending,
                 setReplyTo,
             }}
         >

@@ -27,6 +27,7 @@ export const AutoReplyProvider: React.FC<{
 }> = ({ children }) => {
     const { setReplyTo: setReplyToCanvas, pendingCanvas } = usePendingCanvas();
     const { subscribeContentChange, mutate, pendingRects } = useCanvas();
+    const typedOnce = useRef(false);
     const { view, processedReplies, viewRoot } = useView();
     const [replyTo, _setReplyTo] = useState<Canvas | undefined>(viewRoot);
     const lastPendingCanvasId = useRef<string | undefined>(undefined);
@@ -49,6 +50,7 @@ export const AutoReplyProvider: React.FC<{
         if (!pendingCanvas || pendingCanvas.closed) {
             return;
         }
+        typedOnce.current = false; // reset typedOnce when pending canvas changes
         const newPath = [
             ...pendingCanvas.path,
             new CanvasAddressReference({ canvas: pendingCanvas }),
@@ -66,7 +68,8 @@ export const AutoReplyProvider: React.FC<{
             pendingCanvas.idString !== lastPendingCanvasId.current
         ) {
             lastPendingCanvasId.current = pendingCanvas?.idString;
-            setReplyTo(viewRoot);
+            console.log("SET REPLY TO VIEWROOT", viewRoot);
+            setReplyTo(replyTo ?? viewRoot);
 
             enabled.current = true; // we can enable auto reply again, because we are going into a new canvas draft
         }
@@ -86,11 +89,14 @@ export const AutoReplyProvider: React.FC<{
         }
     };
 
-    const callback = (_elements) => {
+    const contentChangeCallback = (_elements) => {
         if (!enabled.current) {
             console.log("Auto reply disabled");
             return;
         }
+
+        typedOnce.current = true;
+
         for (const element of pendingRects) {
             if (!element.content.isEmpty) {
                 autoReplyFunctionality();
@@ -101,11 +107,27 @@ export const AutoReplyProvider: React.FC<{
     };
 
     useEffect(() => {
-        const unsubscribe = subscribeContentChange(callback);
+        const unsubscribe = subscribeContentChange(contentChangeCallback);
         return () => {
             unsubscribe();
         };
-    }, [subscribeContentChange, callback, pendingCanvas]);
+    }, [subscribeContentChange, contentChangeCallback, pendingCanvas]);
+
+    useEffect(() => {
+        // this behaviour we only want if we have not typed anything
+        /*    if (typedOnce.current) {
+               return;
+           }
+    */
+        // auto reply to the last processed reply
+        if (processedReplies.length > 0) {
+            let last = processedReplies[processedReplies.length - 1]?.reply;
+            if (view === "chat" && last) {
+                console.log("AUTO REPLY TO", last, processedReplies.length);
+                setReplyTo(last);
+            }
+        }
+    }, [processedReplies]);
 
     return (
         <AutoReplyContext.Provider

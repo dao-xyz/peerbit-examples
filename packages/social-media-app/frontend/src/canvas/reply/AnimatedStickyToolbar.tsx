@@ -49,13 +49,13 @@ export const AnimatedStickyToolbar = ({
     return (
         // This outer container is sticky and always reserves the toolbar height.
         <div
-            className="fixed z-20 bottom-0 inset-x-0"
+            className="fixed z-20 bottom-0 inset-x-0 "
             style={{ height: toolbarHeight || "auto" }}
         >
             {/* The inner toolbar is animated with transform */}
             <div
                 ref={innerRef}
-                className="w-full duration-800 ease-in-out"
+                className="w-full duration-800 ease-in-out  "
                 style={{ transform: `translateY(${translateY})` }}
             >
                 {children}

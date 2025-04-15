@@ -100,7 +100,8 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
         setViewBox(`0 0 ${containerRect.width} ${containerRect.height}`);
 
         let index = 0;
-        const points: (Point | null)[] = replyRefs.map((ref) => {
+        console.log(lineTypes);
+        const points: (Point | null)[] = replyRefs.map((ref, i) => {
             const el = ref;
             if (el) {
                 const rect = el.getBoundingClientRect();
@@ -108,6 +109,9 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
 
                 let x: number;
                 let margin = 20;
+                let isLast =
+                    lineTypes[index] === "end" ||
+                    lineTypes[index] === "end-and-start";
                 // never make the line cross middle of the screen for left and right
                 if (anchor === "left") {
                     x = rect.right - containerRect.left + margin;
@@ -130,13 +134,15 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
                  } else {
                      y = rect.top + rect.height / 2 - containerRect.top;
                  } */
-                y = rect.top - containerRect.top;
+
+                y = rect.top - containerRect.top + (isLast ? rect.height : 0);
                 index++;
                 return { x, y };
             }
             return null;
         });
         const validPoints = points.filter((p): p is Point => p !== null);
+        console.log(validPoints);
 
         if (validPoints.length < 2) {
             setSegments([]);
@@ -159,7 +165,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             groups.push(currentGroup);
         }
 
-        const windowSize = 1; // Look at 10 neighbors on each side
+        const windowSize = 10; // Look at 10 neighbors on each side
         const smoothingFactor = 0.7; // Blend 30% with local average
         const tension = 0.7; // Tension for Catmull-Rom to Bezier conversion
         const smoothedGroups = groups.map((group) =>
@@ -213,7 +219,7 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
                 <filter id="sketchyFilter">
                     <feTurbulence
                         type="fractalNoise"
-                        baseFrequency="0.3"
+                        baseFrequency="0.9"
                         numOctaves="1"
                         result="noise"
                     />
@@ -228,7 +234,8 @@ export const SmoothReplyLine: React.FC<SmoothReplyLineProps> = ({
             </defs>
             {segments.map((seg, index) => {
                 const lengthThreshold = 400;
-                const strokeDasharray = seg.length > 100 ? "35,35" : "35,35"; // Adjust as needed
+                const strokeDasharray =
+                    seg.length > 100 ? "" : ""; /* "35,35" : "35,35";  */ // Adjust as needed
                 const strokeWidth = seg.length > lengthThreshold ? 3 : 3;
                 return (
                     <path
