@@ -31,6 +31,7 @@ import {
 import { RPC } from "@peerbit/rpc";
 import { concat, equals } from "uint8arrays";
 import { waitFor } from "@peerbit/time";
+import { error } from "console";
 
 @variant(0)
 export class Layout {
@@ -963,11 +964,12 @@ export class Canvas extends Program<CanvasArgs> {
         // for now lets just use the root
         await waitFor(() => this.node, {
             signal: this.closeController?.signal,
-        }).catch(() => {
+        }).catch((error) => {
             if (this.closed) {
                 return;
             }
-            console.error("Never opened");
+            console.error("Not open");
+            throw error;
         });
         const root = this.path[0];
         if (root) {

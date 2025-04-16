@@ -1,12 +1,5 @@
-import {
-    useEffect,
-    useState,
-    useRef,
-    Fragment,
-    useLayoutEffect,
-    useMemo,
-} from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useEffect, useState, useRef, Fragment, useLayoutEffect } from "react";
+import { useNavigate } from "react-router-dom";
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
 import { Canvas as CanvasDB, LOWEST_QUALITY } from "@giga-app/interface";

@@ -1,5 +1,4 @@
 import { useRef, useState, useEffect } from "react";
-import { ToolbarProvider, useToolbar } from "../toolbar/Toolbar.js";
 import { FullscreenEditor } from "../toolbar/FullscreenEditor.js";
 import { Spinner } from "../../utils/Spinner.js";
 import { Replies } from "./Replies.js";
@@ -11,6 +10,7 @@ import { useToolbarVisibility } from "./useToolbarVisibility.js";
 import { DetailedView } from "../detailed/DetailedView.js";
 import { SubHeader } from "./SubHeader.js";
 import { AnimatedStickyToolbar } from "./AnimatedStickyToolbar.js";
+import { ToolbarProvider, useToolbar } from "../toolbar/ToolbarContext.js";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",
@@ -77,6 +77,17 @@ const getSnapToRepliesViewThreshold = (offset: number) =>
     offset + window.innerHeight / 3;
 
 export const CanvasAndReplies = () => {
+    const { viewRoot } = useView();
+    return (
+        <PendingCanvasProvider viewRoot={viewRoot}>
+            <ToolbarProvider>
+                <CanvasAndRepliesInner />
+            </ToolbarProvider>
+        </PendingCanvasProvider>
+    );
+};
+
+export const CanvasAndRepliesInner = () => {
     // Ref for the overall container (used for toolbar height calculations)
     const scrollContainerRef = useRef(null);
 
@@ -248,157 +259,155 @@ export const CanvasAndReplies = () => {
         }, 100); // This seems to be necessary on IOS Safari to avoid down scrolls to trigger focus again immediately
     };
 
+    const bottomPadding = fullscreenEditorActive ? 10 : 10 + toolbarHeight;
+
     return (
-        <PendingCanvasProvider viewRoot={viewRoot}>
-            <ToolbarProvider>
-                {/* 
+        <>
+            {/* 
           Main container takes full viewport height.
           Header (DetailedView + SubHeader) is shrink-to-fit.
           Replies area fills the remaining space.
         */}
 
+            <div
+                ref={scrollContainerRef}
+                className={`${
+                    repliesFocused ? "h-fit" : "h-full"
+                } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
+                style={{
+                    paddingBottom: bottomPadding,
+                    height: repliesFocused
+                        ? "fit-content"
+                        : `calc(100% + ${spacerHeight}px)`,
+                }}
+            >
+                {/* Header section */}
                 <div
-                    ref={scrollContainerRef}
-                    className={`${
-                        repliesFocused ? "h-fit" : "h-full"
-                    } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
-                    style={{
-                        paddingBottom: toolbarHeight + 10,
-                        height: repliesFocused
-                            ? "fit-content"
-                            : `calc(100% + ${spacerHeight}px)`,
-                    }}
+                    ref={postRef}
+                    className={`transition-all duration-300 ${
+                        collapsed ? "blur-3xl opacity-0" : "blur-0 opacity-100"
+                    }`}
                 >
-                    {/* Header section */}
-                    <div
-                        ref={postRef}
-                        className={`transition-all duration-300 ${
-                            collapsed
-                                ? "blur-3xl opacity-0"
-                                : "blur-0 opacity-100"
-                        }`}
-                    >
-                        <div className="z-5 flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
-                            <div className="py-6 max-w-[876px] mx-auto w-full">
-                                <DetailedView />
-                            </div>
+                    <div className="z-5 flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
+                        <div className="py-6 max-w-[876px] mx-auto w-full">
+                            <DetailedView />
                         </div>
                     </div>
+                </div>
 
-                    <SubHeader
-                        onCollapse={setCollapsed}
-                        onBackToTop={goToTop}
-                        onViewChange={() => {
-                            // a manual change in view is an indication of that the user is interested in the replies
-                            setRepliesFocused(true);
-                        }}
-                    />
+                <SubHeader
+                    onCollapse={setCollapsed}
+                    onBackToTop={goToTop}
+                    onViewChange={() => {
+                        // a manual change in view is an indication of that the user is interested in the replies
+                        setRepliesFocused(true);
+                    }}
+                />
 
-                    {/* Replies section */}
-                    <div
-                        className="relative flex-1 h-full"
-                        /*    style={{
+                {/* Replies section */}
+                <div
+                    className="relative flex-1 h-full"
+                    /*    style={{
 height: `${spacerHeight}px`,
 }} */
-                    >
-                        <div
-                            // When not focused, make the container fill the available area and show a pointer cursor.
-                            // When focused, render it inline (relative) and remove the click handler.
+                >
+                    <div
+                        // When not focused, make the container fill the available area and show a pointer cursor.
+                        // When focused, render it inline (relative) and remove the click handler.
 
+                        className={`${
+                            !repliesFocused
+                                ? "absolute inset-0 w-full cursor-pointer"
+                                : "relative"
+                        }`}
+                    >
+                        {/* When unfocused, wrap Replies in an absolutely positioned, scrollable container.
+        When focused, no extra wrapper is applied so the Replies render inline. */}
+                        <div
+                            id="replies-container"
                             className={`${
                                 !repliesFocused
-                                    ? "absolute inset-0 w-full cursor-pointer"
-                                    : "relative"
+                                    ? "absolute inset-0 overflow-y-auto hide-scrollbar "
+                                    : ""
                             }`}
-                        >
-                            {/* When unfocused, wrap Replies in an absolutely positioned, scrollable container.
-        When focused, no extra wrapper is applied so the Replies render inline. */}
-                            <div
-                                id="replies-container"
-                                className={`${
-                                    !repliesFocused
-                                        ? "absolute inset-0 overflow-y-auto hide-scrollbar "
-                                        : ""
-                                }`}
-                                ref={repliesScrollRef}
-                                style={
-                                    {
-                                        /*   paddingBottom: `${!repliesFocused ? 0 : toolbarHeight
-                                          }px` */
-                                        /* For some reason we need this for focused view??? */
-                                    }
+                            ref={repliesScrollRef}
+                            style={
+                                {
+                                    /*   paddingBottom: `${!repliesFocused ? 0 : toolbarHeight
+                                      }px` */
+                                    /* For some reason we need this for focused view??? */
                                 }
-                            >
-                                <Replies
-                                    // viewRef is body if focused, otherwise the scrollRef
-                                    viewRef={
-                                        repliesFocused
-                                            ? document.body
-                                            : repliesScrollRef.current
-                                    }
-                                    focused={repliesFocused}
-                                    scrollRef={
-                                        repliesFocused
-                                            ? undefined
-                                            : repliesScrollRef
-                                    }
-                                />
-                            </div>
-                            {/* Render the gradient overlay only when unfocused.
-        This overlay is absolutely positioned over the container and does not receive pointer events. */}
-                            {!repliesFocused && (
-                                <div
-                                    className="absolute inset-0 cursor-pointer flex flex-col justify-start items-center " /* bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black */
-                                    onClick={(e) => {
-                                        if (repliesFocused) {
-                                            return;
-                                        }
-                                        e.preventDefault();
-                                        e.stopPropagation();
-                                        setRepliesFocused(true);
-                                    }}
-                                    onTouchStart={(e) => {
-                                        if (repliesFocused) {
-                                            return;
-                                        }
-                                        e.stopPropagation();
-                                        setRepliesFocused(true);
-                                    }}
-                                >
-                                    {showClickToSeeMore && (
-                                        <span className="p-2 m-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
-                                            Click to see more
-                                        </span>
-                                    )}
-                                </div>
-                            )}
+                            }
+                        >
+                            <Replies
+                                // viewRef is body if focused, otherwise the scrollRef
+                                viewRef={
+                                    repliesFocused
+                                        ? document.body
+                                        : repliesScrollRef.current
+                                }
+                                focused={repliesFocused}
+                                scrollRef={
+                                    repliesFocused
+                                        ? undefined
+                                        : repliesScrollRef
+                                }
+                            />
                         </div>
+                        {/* Render the gradient overlay only when unfocused.
+        This overlay is absolutely positioned over the container and does not receive pointer events. */}
+                        {!repliesFocused && (
+                            <div
+                                className="absolute inset-0 cursor-pointer flex flex-col justify-start items-center " /* bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black */
+                                onClick={(e) => {
+                                    if (repliesFocused) {
+                                        return;
+                                    }
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    setRepliesFocused(true);
+                                }}
+                                onTouchStart={(e) => {
+                                    if (repliesFocused) {
+                                        return;
+                                    }
+                                    e.stopPropagation();
+                                    setRepliesFocused(true);
+                                }}
+                            >
+                                {showClickToSeeMore && (
+                                    <span className="p-2 m-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
+                                        Click to see more
+                                    </span>
+                                )}
+                            </div>
+                        )}
                     </div>
-                    {/* Spacer to ensure the container is always tall enough for scrolling */}
-                    {/* {!repliesFocused && <div id="spacer" style={{
+                </div>
+                {/* Spacer to ensure the container is always tall enough for scrolling */}
+                {/* {!repliesFocused && <div id="spacer" style={{
                         height: `${spacerHeight}px`,
                     }} />} */}
-                </div>
+            </div>
 
-                <div className="relative">
-                    <div className="absolute right-1 bottom-0">
-                        <ReplyingInProgress canvas={lastReply} />
-                    </div>
+            <div className="relative">
+                <div className="absolute right-1 bottom-0">
+                    <ReplyingInProgress canvas={lastReply} />
                 </div>
-                <div className="max-w-[876px] mx-auto w-full">
-                    <FullscreenEditor>
-                        <></>
-                    </FullscreenEditor>
-                </div>
-                <AnimatedStickyToolbar
-                    toolbarVisible={toolbarVisible}
-                    onHeightChange={(setHeight) => {
-                        _setToolbarHeight(setHeight);
-                    }}
-                >
-                    <Toolbar />
-                </AnimatedStickyToolbar>
-            </ToolbarProvider>
-        </PendingCanvasProvider>
+            </div>
+            <div className="max-w-[876px] mx-auto w-full">
+                <FullscreenEditor>
+                    <></>
+                </FullscreenEditor>
+            </div>
+            <AnimatedStickyToolbar
+                toolbarVisible={toolbarVisible}
+                onHeightChange={(setHeight) => {
+                    _setToolbarHeight(setHeight);
+                }}
+            >
+                <Toolbar />
+            </AnimatedStickyToolbar>
+        </>
     );
 };

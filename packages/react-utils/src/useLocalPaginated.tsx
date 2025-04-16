@@ -56,15 +56,7 @@ export const useLocalPaginated = <
             );
         }
 
-        const dedub = new Set<string>();
-        for (const item of combined) {
-            if ("idString" in item) {
-                if (dedub.has(item.idString as string)) {
-                    throw new Error("Duplicate item found in iterator");
-                }
-                dedub.add(item.idString as string);
-            }
-        }
+        console.log("updateAll", "change: " + combined.length);
         allRef.current = combined;
 
         setAll(combined);
@@ -102,9 +94,9 @@ export const useLocalPaginated = <
         };
 
         // Reset state when the db or query changes.
-
-        console.log("RESET FROM", all.length);
+        emptyResultsRef.current = false;
         setAll([]);
+        setIsLoading(false);
         allRef.current = [];
 
         initIterator();
@@ -143,6 +135,7 @@ export const useLocalPaginated = <
         return () => {
             db.events.removeEventListener("change", handleChange);
             iteratorRef.current?.close();
+            emptyResultsRef.current = false;
         };
     }, [
         db?.closed ? undefined : db?.rootAddress,
@@ -153,8 +146,14 @@ export const useLocalPaginated = <
 
     // Define the loadMore function
     const loadMore = async () => {
-        if (!iteratorRef.current || isLoading || emptyResultsRef.current)
+        if (!iteratorRef.current || emptyResultsRef.current) {
+            console.log("loadMore: already loading or no more items", {
+                isLoading,
+                emptyResultsRef: emptyResultsRef.current,
+                iteratorRef: !iteratorRef.current,
+            });
             return;
+        }
 
         setIsLoading(true);
         try {
@@ -164,6 +163,8 @@ export const useLocalPaginated = <
             let newItems: WithContext<RT>[] = await iteratorRef.current.next(
                 options?.batchSize ?? 10
             );
+
+            console.log({ newItems });
 
             if (options?.transform) {
                 newItems = await Promise.all(
@@ -186,6 +187,7 @@ export const useLocalPaginated = <
                     (x) => !prevHash.has(x.__context.head)
                 );
                 if (newItemsNoHash.length === 0) {
+                    console.log("no new items, not updating state");
                     return;
                 }
                 const combined = options?.reverse

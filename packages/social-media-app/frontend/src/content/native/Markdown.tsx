@@ -55,12 +55,6 @@ export const MarkdownContent = ({
     const [suggestReply, setSuggestedReply] = useState<string | null>(null);
 
     const suggestedReplyForParent = useRef<string | null>(null);
-    const queue = useRef(
-        new pQueue({
-            concurrency: 1,
-            timeout: 2e4,
-        })
-    );
 
     useEffect(() => {
         if (
@@ -74,11 +68,12 @@ export const MarkdownContent = ({
         }
         let parent = canvas.path[canvas.path.length - 1];
 
+        let suggestTimeout: ReturnType<typeof setTimeout> | null = null;
         if (parent) {
             if (suggestedReplyForParent.current !== parent.address) {
                 suggestedReplyForParent.current = parent.address;
-                queue.current.clear();
-                queue.current.add(async () => {
+                let suggestStartRef = parent.address;
+                suggestTimeout = setTimeout(async () => {
                     setLoadingSuggestedReply(true);
                     setSuggestedReply(null);
                     try {
@@ -88,24 +83,23 @@ export const MarkdownContent = ({
                         }
                         console.log("SUGGEST!");
                         suggest(loadedParent, 2e4).then((reply) => {
-                            console.log(
-                                "SUGGEST OUT",
-                                queue.current.size,
-                                reply
-                            );
-                            if (queue.current.size === 0) {
-                                setSuggestedReply(reply);
+                            if (
+                                suggestStartRef !==
+                                canvas.path[canvas.path.length - 1].address
+                            ) {
+                                return; // the parent has changed, ignore the suggestion
                             }
+                            setSuggestedReply(reply);
                         });
                     } finally {
                         setLoadingSuggestedReply(false);
                     }
-                });
+                }, 300);
             }
         }
         return () => {
             suggestedReplyForParent.current = null;
-            queue.current.clear();
+            suggestTimeout && clearTimeout(suggestTimeout);
         };
     }, [
         canvas?.path,

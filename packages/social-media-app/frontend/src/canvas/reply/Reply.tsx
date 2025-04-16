@@ -1,5 +1,10 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Canvas as CanvasDB, MEDIUM_QUALITY } from "@giga-app/interface";
+import {
+    Canvas as CanvasDB,
+    getOwnedAndSubownedElementsQuery,
+    getOwnedElementsQuery,
+    MEDIUM_QUALITY,
+} from "@giga-app/interface";
 import { Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "../Preview.js";
@@ -8,7 +13,7 @@ import { useNavigate } from "react-router-dom";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
-import { useView } from "../../view/ViewContex.js";
+import { useView, ViewType } from "../../view/ViewContex.js";
 import { rectIsStaticMarkdownText } from "../utils/rect.js";
 
 const ReplyButton = ({
@@ -121,8 +126,31 @@ export const Reply = ({
         return () => observer.disconnect();
     }, [canvas, showMore]); // Re-run if canvas content or showMore toggles
 
-    const handleCanvasClick = () => {
-        navigate(getCanvasPath(canvas, view), {});
+    const handleCanvasClick = async () => {
+        let viewAfterNavigation: ViewType = "chat";
+        canvas = canvas.closed
+            ? await peer.open(canvas, { existing: "reuse" })
+            : canvas;
+        await canvas.load();
+
+        const totalReplies = await canvas.replies.count({
+            query: getOwnedAndSubownedElementsQuery(canvas),
+            approximate: true,
+        });
+        const immediateReplies = await canvas.replies.count({
+            query: getOwnedElementsQuery(canvas),
+            approximate: true,
+        });
+        if (
+            totalReplies > immediateReplies * 3 ||
+            totalReplies > 100 // this means that replies are very nested, and we should open the thread
+        ) {
+            viewAfterNavigation = "best";
+        }
+        viewAfterNavigation = "chat";
+
+        console.log("navigate to canvas", canvas.idString, viewAfterNavigation);
+        navigate(getCanvasPath(canvas, viewAfterNavigation), {});
         onClick && onClick();
     };
 

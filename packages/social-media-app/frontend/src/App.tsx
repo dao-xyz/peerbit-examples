@@ -21,6 +21,7 @@ import {
     useHeaderVisibilityContext,
 } from "./HeaderVisibilitiyProvider";
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
+import { ToolbarProvider } from "./canvas/toolbar/ToolbarContext";
 
 export const Content = () => {
     const { error: peerError } = usePeer();

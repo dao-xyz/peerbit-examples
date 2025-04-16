@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { getScrollTop } from "../../HeaderVisibilitiyProvider";
-import { useToolbar } from "../toolbar/Toolbar";
+import { useToolbar } from "../toolbar/ToolbarContext";
 
 function getScrollBottomOffset() {
     return (

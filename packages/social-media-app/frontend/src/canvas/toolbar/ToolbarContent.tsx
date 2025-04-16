@@ -6,7 +6,6 @@ import { MdAdd as FaPlus, MdClear } from "react-icons/md";
 import { SaveButton } from "../SaveCanvasButton";
 import { FiSend } from "react-icons/fi";
 import { BsCamera, BsArrowsCollapse } from "react-icons/bs";
-import { useToolbar } from "./Toolbar";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
 import { SimpleWebManifest } from "@giga-app/interface";
@@ -15,6 +14,7 @@ import { useView } from "../../view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
 import { useAutoReply } from "../AutoReplyContext";
 import { BsArrowsAngleExpand } from "react-icons/bs";
+import { useToolbar } from "./ToolbarContext";
 
 const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
     const {
@@ -107,7 +107,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
         <>
             <div
                 ref={ref}
-                className={`flex flex-col z-20 w-full left-0  ${colorStyle} safe-area-bottom`}
+                className={`flex flex-col z-20 w-full left-0  ${colorStyle}`}
             >
                 {/* Top area: pending images canvas positioned above the toolbar */}
                 <div

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Canvas } from "../Canvas";
-import { useToolbar } from "./Toolbar";
+import { useToolbar } from "./ToolbarContext";
 
 type FullscreenEditorProps = {
     children: React.ReactNode;
@@ -43,28 +43,29 @@ const titles = [
 
 export const FullscreenEditor = ({ children }: FullscreenEditorProps) => {
     const { fullscreenEditorActive } = useToolbar();
-    const endRef = useRef<HTMLHeadingElement>(null);
+    const startRef = useRef<HTMLHeadingElement>(null);
     // Pick a random title once when the component mounts.
     const randomTitle = useMemo(() => {
         return titles[Math.floor(Math.random() * titles.length)];
     }, []);
 
     useEffect(() => {
-        if (fullscreenEditorActive && endRef.current) {
-            endRef.current.scrollIntoView({
+        if (fullscreenEditorActive && startRef.current) {
+            startRef.current.scrollIntoView({
+                // scroll to the top of the page
                 behavior: "instant",
                 block: "start",
+                inline: "nearest",
             });
         }
     }, [fullscreenEditorActive]);
     if (fullscreenEditorActive) {
         return (
-            <div className="overflow-auto  px-2 " ref={endRef}>
-                <span className="">
+            <div className="overflow-auto  px-2 ">
+                <span className="" ref={startRef}>
                     <h2>{randomTitle}</h2>
                 </span>
                 <Canvas fitWidth draft={true} inFullScreen />
-                <div ref={endRef} />
             </div>
         );
     }

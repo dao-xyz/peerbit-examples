@@ -5,7 +5,7 @@ import { useCanvas } from "../CanvasWrapper";
 import { DebugGeneratePostButton } from "./DebugGeneratePostButton";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
-import { useToolbar } from "./Toolbar";
+import { useToolbar } from "./ToolbarContext";
 
 interface AppSelectPaneInlineProps {
     onSelected: (app: SimpleWebManifest) => void;

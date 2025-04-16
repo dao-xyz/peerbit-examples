@@ -268,7 +268,7 @@ export const Canvas = (
     } ${
         properties.draft
             ? properties.inFullScreen
-                ? "h-[calc(100vh-4rem)]"
+                ? "h-[calc(100vh-10rem)]"
                 : ""
             : ""
     }`;
