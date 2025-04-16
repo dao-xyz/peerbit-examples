@@ -678,6 +678,20 @@ code {
     .max-height-inherit-children * {
         max-height: inherit;
     }
+
+    /* in your global CSS or component module */
+    .textarea-truncate {
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+    }
+
+    .textarea-truncate::placeholder {
+        /* make sure the placeholder itself is also clamped */
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+    }
 }
 
 @keyframes spinx {

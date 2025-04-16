@@ -280,7 +280,9 @@ export const MarkdownContent = ({
                         onBlur={handleBlur}
                         onKeyDown={handleKeyDown}
                         onInput={autoResize}
-                        className={`${commonClasses} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800`}
+                        className={`${commonClasses} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800 ${
+                            !inFullscreen ? "textarea-truncate" : ""
+                        }`}
                         rows={1}
                         placeholder={suggestReply || "Type here..."}
                         style={{ overflow: "hidden" }}
