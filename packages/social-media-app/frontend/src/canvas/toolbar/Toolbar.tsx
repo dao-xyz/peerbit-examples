@@ -42,11 +42,9 @@ const ToolbarInner = (props: { className: string }) => {
     return (
         <div
             ref={toolbarRef}
-            className={
-                "w-full flex justify-center safe-area-bottom " + props.className
-            }
+            className={"w-full flex justify-center " + props.className}
         >
-            <div className="flex flex-col w-full rounded-t-lg items-center max-w-[876px] bg-neutral-100 dark:bg-neutral-900">
+            <div className="flex flex-col w-full rounded-t-lg items-center safe-area-bottom max-w-[876px] bg-neutral-100 dark:bg-neutral-900">
                 <ToolbarContent />
                 <div
                     ref={appSelectRef}
