@@ -47,7 +47,10 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
         setQuery("");
         insertDefaultValue && insertDefault({ app, increment: true });
         _onSelected(app);
-        setFullscreenEditorActive(true);
+        if (app.url !== "native:image") {
+            // TODO only do for images?
+            setFullscreenEditorActive(true);
+        }
     };
 
     return (
