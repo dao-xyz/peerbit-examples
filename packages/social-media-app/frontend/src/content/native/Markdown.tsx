@@ -87,6 +87,9 @@ export const MarkdownContent = ({
                                 suggestStartRef !==
                                 canvas.path[canvas.path.length - 1].address
                             ) {
+                                console.log(
+                                    "SUGGESTED reply parent change, skipping"
+                                );
                                 return; // the parent has changed, ignore the suggestion
                             }
                             setSuggestedReply(reply);
