@@ -22,6 +22,7 @@ export const Replies = (properties: {
 
     // Initialize a ref that holds an array of refs.
     const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
+    const alreadySeen = useRef(new Set<string>());
 
     // If the current number of refs doesn't match processedReplies, update the array.
     if (replyContentRefs.current.length !== processedReplies.length) {
@@ -55,7 +56,10 @@ export const Replies = (properties: {
             !isAtBottom &&
             !processedReplies[
                 processedReplies.length - 1
-            ].reply.publicKey.equals(peer.identity.publicKey)
+            ].reply.publicKey.equals(peer.identity.publicKey) &&
+            !alreadySeen.current.has(
+                processedReplies[processedReplies.length - 1].reply.idString
+            )
         ) {
             setShowNewMessagesToast(true);
         }
@@ -64,6 +68,10 @@ export const Replies = (properties: {
 
     useEffect(() => {
         setShowNewMessagesToast(false);
+        // assume all messages have been "seen" in the sense we dont need to scroll bottom to see them again
+        processedReplies.forEach((reply) => {
+            alreadySeen.current.add(reply.reply.idString);
+        });
     }, [isAtBottom]);
 
     // ----------------------------
