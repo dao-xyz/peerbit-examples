@@ -95,8 +95,7 @@ export const CanvasAndRepliesInner = () => {
 
     const [collapsed, setCollapsed] = useState(false);
 
-    const { loading, canvases, viewRoot, lastReply, view, processedReplies } =
-        useView();
+    const { loading, canvases, viewRoot, lastReply, view } = useView();
 
     const lastScrollTopRef = useRef(-1);
     const repliesScrollRef = useRef<HTMLDivElement>(null);
