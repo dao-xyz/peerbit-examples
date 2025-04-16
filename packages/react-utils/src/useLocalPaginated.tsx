@@ -62,9 +62,17 @@ export const useLocalPaginated = <
         setAll(combined);
     };
 
+    const reset = () => {
+        emptyResultsRef.current = false;
+        setAll([]);
+        setIsLoading(false);
+        allRef.current = [];
+    };
+
     // Initialize the iterator only once or when query changes
     useEffect(() => {
         if (!db || db.closed || options?.query === null) {
+            reset();
             return;
         }
         const initIterator = () => {
@@ -94,11 +102,7 @@ export const useLocalPaginated = <
         };
 
         // Reset state when the db or query changes.
-        emptyResultsRef.current = false;
-        setAll([]);
-        setIsLoading(false);
-        allRef.current = [];
-
+        reset();
         initIterator();
 
         const handleChange = async (e: CustomEvent<DocumentsChange<T>>) => {
