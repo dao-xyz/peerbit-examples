@@ -164,8 +164,6 @@ export const useLocalPaginated = <
                 options?.batchSize ?? 10
             );
 
-            console.log({ newItems });
-
             if (options?.transform) {
                 newItems = await Promise.all(
                     newItems.map((item) => options.transform!(item))
