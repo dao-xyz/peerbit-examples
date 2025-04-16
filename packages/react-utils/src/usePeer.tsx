@@ -24,6 +24,17 @@ import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import * as filters from "@libp2p/websockets/filters";
 import { detectIncognito } from "detectincognitojs";
 
+const isInStandaloneMode = () =>
+    window.matchMedia("(display-mode: standalone)").matches ||
+    window.navigator["standalone"] ||
+    document.referrer.includes("android-app://");
+
+if (isInStandaloneMode()) {
+    console.log("webapp is installed");
+} else {
+    console.log("webapp is not installed");
+}
+
 export class ClientBusyError extends Error {
     constructor(message: string) {
         super(message);
@@ -185,6 +196,10 @@ export const PeerProvider = (options: PeerOptions) => {
                         globalThis.onbeforeunload = function () {
                             mutex.release(lockKey);
                         };
+                        if (isInStandaloneMode()) {
+                            // PWA issue fix
+                            mutex.release(lockKey);
+                        }
                         await mutex.lock(lockKey, () => true, {
                             replaceIfSameClient: true,
                         });
