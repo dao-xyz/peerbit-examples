@@ -106,6 +106,11 @@ type WithChildren = {
 };
 type PeerOptions = (TopAndIframeOptions | TopOptions) & WithChildren;
 
+const subscribeToUnload = (fn: () => any) => {
+    window.addEventListener("pagehide", fn);
+    window.addEventListener("beforeunload", fn);
+};
+
 export const PeerProvider = (options: PeerOptions) => {
     const [peer, setPeer] = React.useState<ProgramClient | undefined>(
         undefined
@@ -193,9 +198,9 @@ export const PeerProvider = (options: PeerOptions) => {
                     const localId = getClientId("local");
                     try {
                         const lockKey = localId + "-singleton";
-                        globalThis.onbeforeunload = function () {
+                        subscribeToUnload(function () {
                             mutex.release(lockKey);
-                        };
+                        });
                         if (isInStandaloneMode()) {
                             // PWA issue fix
                             mutex.release(lockKey);
@@ -219,9 +224,9 @@ export const PeerProvider = (options: PeerOptions) => {
                         releaseFirstLock,
                         releaseLockIfSameId: true,
                     });
-                    globalThis.onbeforeunload = function () {
+                    subscribeToUnload(function () {
                         mutex.release(kp.path);
-                    };
+                    });
                     nodeId = kp.key;
                     setTabIndex(kp.index);
                 }
