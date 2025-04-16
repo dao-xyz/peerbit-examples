@@ -123,7 +123,7 @@ function useViewContextHook() {
     }, [view, viewRoot, calculateAddress]);
 
     // For lazy loading, we use a paginated hook.
-    const [batchSize, setBatchSize] = useState(15); // Default batch size
+    const [batchSize, setBatchSize] = useState(5); // Default batch size
     const {
         items: sortedReplies,
         loadMore,

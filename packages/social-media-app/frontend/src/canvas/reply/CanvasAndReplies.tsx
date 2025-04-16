@@ -60,9 +60,9 @@ const textToLoad =
 
 const SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT = 5;
 
-const shouldFocusRepliesByDefault = (view: ViewType) => {
+const shouldFocusRepliesByDefault = (view?: ViewType) => {
     // For view types other than "best" or "old", we want the new scroll-based effect.
-    return view === "best" || view === "old";
+    return view === "best" || view === "old" || view == null;
 };
 /**
  * CanvasAndReplies component.
@@ -152,6 +152,9 @@ export const CanvasAndRepliesInner = () => {
                 setRepliesFocused(shouldFocusRepliesByDefault(view));
             }
         }
+        return () => {
+            setRepliesFocused(false); // seem to be necessary to prevent old values to interfer
+        };
     }, [view]);
 
     useEffect(() => {

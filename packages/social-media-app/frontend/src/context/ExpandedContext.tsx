@@ -18,7 +18,7 @@ const ExpandedContext = ({ onClick: onClickMaybe }: ExpandedContextProps) => {
             </div>
         );
     return (
-        <div className="flex flex-col">
+        <div className="flex flex-col gap-4">
             {path.slice(1).map((p, i) => (
                 <Reply
                     onClick={onClickMaybe ? () => onClickMaybe?.(p) : undefined}
