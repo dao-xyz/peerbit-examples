@@ -219,7 +219,7 @@ export const Replies = (properties: {
                     <div
                         className={`${
                             view === "chat" ? "pl-[10px]" : ""
-                        } flex flex-col gap-2 w-full`}
+                        } flex flex-col gap-4 w-full`}
                     >
                         {processedReplies.map((item, i) => {
                             const replyElement = (
