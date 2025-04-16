@@ -36,6 +36,23 @@ export const ChessLobby = () => {
     const [gameStarted, setGameStarted] = useState(false);
     const isHost = lobby?.creator.equals(peer?.identity.publicKey);
 
+    // Track the screen size to conditionally render background styling.
+    const [isSmallScreen, setIsSmallScreen] = useState(false);
+    useEffect(() => {
+        const handleResize = () => {
+            // Adjust thresholds as needed.
+            if (window.innerWidth < 301 || window.innerHeight < 201) {
+                setIsSmallScreen(true);
+            } else {
+                setIsSmallScreen(false);
+            }
+        };
+        // Initialize the state and attach the listener.
+        handleResize();
+        window.addEventListener("resize", handleResize);
+        return () => window.removeEventListener("resize", handleResize);
+    }, []);
+
     useEffect(() => {
         if (!messages || !lobby) return;
         const gameStartMessage = messages.find(
@@ -52,7 +69,7 @@ export const ChessLobby = () => {
                     }
                 });
         }
-    }, [messages, lobby, isHost]);
+    }, [messages, lobby, isHost, navigate]);
 
     if (loading)
         return (
@@ -108,8 +125,13 @@ export const ChessLobby = () => {
         return "Awaiting the host's call for battle...";
     };
 
+    // Conditionally apply container styling.
+    const containerClass = isSmallScreen
+        ? "w-full p-4" // No background or margins on small screens.
+        : "max-w-xl mx-auto my-8 p-6 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-gray-800 dark:to-gray-700 rounded-lg shadow-lg";
+
     return (
-        <div className="max-w-xl mx-auto my-8 p-6 bg-gradient-to-r from-purple-50 to-blue-50 dark:from-gray-800 dark:to-gray-700 rounded-lg shadow-lg">
+        <div className={containerClass}>
             <div className="flex items-center justify-between gap-2 mb-4">
                 <h1 className="text-2xl font-extrabold tracking-wide text-gray-800 dark:text-white flex items-center gap-2">
                     <FaChess className="text-3xl" />

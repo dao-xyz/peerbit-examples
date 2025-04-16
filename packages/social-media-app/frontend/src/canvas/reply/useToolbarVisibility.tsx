@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { getScrollTop } from "../../HeaderVisibilitiyProvider";
+import { useToolbar } from "../toolbar/Toolbar";
 
 function getScrollBottomOffset() {
     return (
@@ -15,6 +16,8 @@ export const useToolbarVisibility = (
 ) => {
     const [visible, setVisible] = useState(true);
     const prevScrollTopRef = useRef(getScrollTop());
+
+    const { setAppSelectOpen } = useToolbar();
 
     useEffect(() => {
         const handleScroll = () => {
@@ -38,6 +41,10 @@ export const useToolbarVisibility = (
             // Only animate upward if either at the bottom OR scrolling up while the element is near the top.
             const shouldShow =
                 isAtBottom || isScrollingUp; /* && isElementCloseToTop */
+
+            if (!shouldShow) {
+                setAppSelectOpen(false);
+            }
             setVisible(shouldShow);
 
             prevScrollTopRef.current = currentScrollTop;

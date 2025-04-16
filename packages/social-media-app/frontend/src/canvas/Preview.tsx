@@ -27,7 +27,7 @@ type BaseCanvasPreviewProps = {
     // forward ref
     forwardRef?: React.Ref<any>;
     className?: string;
-    classNameContent?: string;
+    classNameContent?: string | ((element: Element<ElementContent>) => string);
 };
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
@@ -88,7 +88,7 @@ const PreviewFrame = ({
     fit?: "cover" | "contain";
     noPadding?: boolean;
     onClick?: () => void;
-    className?: string;
+    className?: string | ((element: Element<ElementContent>) => string);
 }) => (
     <div
         className={`flex flex-col relative w-full max-in ${
@@ -109,7 +109,12 @@ const PreviewFrame = ({
             noPadding={noPadding}
             onClick={onClick}
             canOpenFullscreen={false}
-            className={"z-1 " + className}
+            className={
+                "z-1 " +
+                (typeof className === "function"
+                    ? className(element)
+                    : className)
+            }
         />
         {bgBlur && (
             <BlurredBackground element={element} noPadding={noPadding} />
@@ -284,7 +289,7 @@ const PostQuotePreview = ({
                     key={i}
                     className={tw(
                         "shrink-0 w-[3.625rem] h-[3.625rem] rounded-sm overflow-hidden outline outline-neutral-700 dark:outline-neutral-300 relative",
-                        i === 1 ? "-ml-10" : "z-10"
+                        i === 1 ? "-ml-10" : "z-1"
                     )}
                 >
                     <div
@@ -343,14 +348,11 @@ const PostPreview = ({
     onClick?: () => void;
     forwardRef?: React.Ref<any>;
     className?: string;
-    classNameContent?: string;
+    classNameContent?: string | ((element: Element<ElementContent>) => string);
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
     const text = rects.text;
-    console.log({
-        text,
-        firstApp,
-    });
+
     return (
         <>
             {firstApp && (
@@ -419,7 +421,7 @@ const ChatMessagePreview = ({
     onClick?: () => void;
     forwardRef?: React.Ref<any>;
     className?: string;
-    classNameContent?: string;
+    classNameContent?: string | ((element: Element<ElementContent>) => string);
 }) => {
     const { other: apps, text } = rects;
     return (

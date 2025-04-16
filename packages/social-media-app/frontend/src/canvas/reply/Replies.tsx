@@ -37,7 +37,7 @@ export const Replies = (properties: {
         enabled: true, // always enabled in this example
         lastElementRef: () =>
             replyContentRefs.current[replyContentRefs.current.length - 1],
-        debug: true,
+        /*  debug: true, */
     });
 
     const isTransitioning = useRef(false);

@@ -15,7 +15,12 @@ export const DetailedView = (properties: {
             ref={properties?.ref}
         >
             {canvases.length > 1 && (
-                <Header variant="large" canvas={viewRoot} className="mb-2" />
+                <Header
+                    variant="large"
+                    canvas={viewRoot}
+                    detailed
+                    className="mb-2"
+                />
             )}
             <CanvasWrapper canvas={viewRoot} quality={HIGH_QUALITY}>
                 <Canvas bgBlur fitWidth draft={false} />

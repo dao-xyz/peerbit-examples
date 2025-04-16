@@ -57,21 +57,26 @@ export const useAutoScroll = (properties: {
         }
         // TODO is this needed?
         if (viewIsShouldScrollToBottom) {
-            console.log(
-                "view is chat or new, setting scroll mode to automatic"
-            );
+            properties.debug &&
+                console.log(
+                    "view is chat or new, setting scroll mode to automatic"
+                );
             scrollMode.current = "automatic";
             forceScrollToBottom.current = true;
         }
         // TODO is this needed?
         else {
-            console.log("view is best or old, setting scroll mode to manual");
+            properties.debug &&
+                console.log(
+                    "view is best or old, setting scroll mode to manual"
+                );
             scrollMode.current = "manual";
             forceScrollToBottom.current = false;
         }
 
         // trigger scroll to bottom when the view changes
-        console.log("trigger scroll because the view changed");
+        properties.debug &&
+            console.log("trigger scroll because the view changed");
         triggerScroll();
     }, [view, properties.scrollRef?.current, properties.enabled]);
 
@@ -98,9 +103,10 @@ export const useAutoScroll = (properties: {
             lastScrollRef.current = properties.scrollRef?.current;
 
             // trigger scroll because the replies container has changed
-            console.log(
-                "trigger scroll because the replies container has changed"
-            );
+            properties.debug &&
+                console.log(
+                    "trigger scroll because the replies container has changed"
+                );
             triggerScroll();
         }
         return () => {
@@ -184,7 +190,8 @@ export const useAutoScroll = (properties: {
                 behavior: "instant",
             });
         }
-        console.log("setting automatic scroll mode on scroll to bottom");
+        properties.debug &&
+            console.log("setting automatic scroll mode on scroll to bottom");
         scrollMode.current = "automatic";
         forceScrollToBottom.current = false;
     };
@@ -222,7 +229,8 @@ export const useAutoScroll = (properties: {
                 const maxScrollTop = getMaxScrollTop();
                 const scrollBottom = resizeScrollBottomRef.current;
                 if (scrollBottom <= bottomRegionSize) {
-                    console.log("scroll to bottom on resize");
+                    properties.debug &&
+                        console.log("scroll to bottom on resize");
                     scrollToBottom();
                 }
                 resizeScrollBottomRef.current = getScrollBottomOffset(
@@ -279,7 +287,8 @@ export const useAutoScroll = (properties: {
             const scrollTop = getScrollTop();
             if (Math.abs(scrollHeight - clientHeight - scrollTop) < 1) {
                 // scrolling to bottom, set scroll mode to automatic again (i.e. on new messages or resize scroll to bottom automatically)
-                console.log("setting automatic scroll mode");
+                properties.debug &&
+                    console.log("setting automatic scroll mode");
                 scrollMode.current = "automatic";
                 setIsAtBottom(true);
             }
@@ -295,7 +304,7 @@ export const useAutoScroll = (properties: {
                     if (disableScrollUpEvents.current) {
                         return;
                     }
-                    console.log("scroll up detected");
+                    properties.debug && console.log("scroll up detected");
                     scrollMode.current = "manual";
                     forceScrollToBottom.current = false;
                     setIsAtBottom(false);
@@ -323,7 +332,8 @@ export const useAutoScroll = (properties: {
         const handleBodyResizeDebounced = debounce(
             () => {
                 if (scrollMode.current === "automatic") {
-                    console.log("scroll to bottom on body resize");
+                    properties.debug &&
+                        console.log("scroll to bottom on body resize");
                     scrollToBottom();
                 }
 
@@ -337,11 +347,11 @@ export const useAutoScroll = (properties: {
         const resizeObserver = new ResizeObserver(() => {
             lastScrollTop.current = -1;
             disableScrollUpEvents.current = true;
-            console.log("disable scroll up!");
+            properties.debug && console.log("disable scroll up!");
             scrollUpTimeout.current = setTimeout(() => {
                 lastScrollTop.current = -1;
                 scrollUpTimeout.current = undefined;
-                console.log("enable scroll up!");
+                properties.debug && console.log("enable scroll up!");
                 disableScrollUpEvents.current = false;
             }, DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED);
             handleBodyResizeDebounced();

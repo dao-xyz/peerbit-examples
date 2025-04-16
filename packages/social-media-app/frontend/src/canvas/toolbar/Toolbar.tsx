@@ -17,12 +17,16 @@ import { AutoReplyProvider } from "../AutoReplyContext";
 interface ToolbarContextType {
     fullscreenEditorActive: boolean;
     setFullscreenEditorActive: React.Dispatch<React.SetStateAction<boolean>>;
+    appSelectOpen: boolean;
+    setAppSelectOpen: React.Dispatch<React.SetStateAction<boolean>>;
 }
 
 // Create the context with a default value
 const ToolbarContext = createContext<ToolbarContextType>({
     fullscreenEditorActive: false,
     setFullscreenEditorActive: () => {},
+    appSelectOpen: false,
+    setAppSelectOpen: () => {},
 });
 
 // Create a provider component
@@ -32,6 +36,8 @@ type ToolbarProviderProps = {
 
 export const ToolbarProvider = ({ children }: ToolbarProviderProps) => {
     const [fullscreenEditor, setFullscreenEditor] = useState(false);
+    const [appSelectOpen, setAppSelectOpen] = useState(false);
+
     const { pendingCanvas, savePending: onSavePending } = usePendingCanvas();
 
     return (
@@ -39,6 +45,8 @@ export const ToolbarProvider = ({ children }: ToolbarProviderProps) => {
             value={{
                 fullscreenEditorActive: fullscreenEditor,
                 setFullscreenEditorActive: setFullscreenEditor,
+                appSelectOpen: appSelectOpen,
+                setAppSelectOpen: setAppSelectOpen,
             }}
         >
             <CanvasWrapper
@@ -62,99 +70,77 @@ export const useToolbar = () => {
     return context;
 };
 
-// A simple media query hook to detect desktop screens.
-function useMediaQuery(query: string) {
-    const [matches, setMatches] = useState(false);
-    useEffect(() => {
-        const media = window.matchMedia(query);
-        setMatches(media.matches);
-        const listener = () => setMatches(media.matches);
-        media.addEventListener("change", listener);
-        return () => media.removeEventListener("change", listener);
-    }, [query]);
-    return matches;
-}
-
 // Wrap ToolbarContainer with forwardRef so that if a parent passes a ref, it is forwarded.
-export const Toolbar = forwardRef<HTMLDivElement, { className?: string }>(
-    (props, ref) => {
-        return <ToolbarInner ref={ref} className={props.className} />;
-    }
-);
+export const Toolbar = (props?: { className?: string }) => {
+    return <ToolbarInner className={props?.className} />;
+};
 
-interface ToolbarInnerProps {
-    className?: string;
-}
+const ToolbarInner = (props?: { className?: string }) => {
+    const { appSelectOpen, setAppSelectOpen } = useToolbar();
+    const appSelectRef = useRef<HTMLDivElement>(null);
+    const toolbarRef = useRef<HTMLDivElement>(null);
 
-const ToolbarInner = forwardRef<HTMLDivElement, ToolbarInnerProps>(
-    (_props, ref) => {
-        const [appSelectOpen, setAppSelectOpen] = useState(false);
-        const appSelectRef = useRef<HTMLDivElement>(null);
+    const handleAppSelected = (app: SimpleWebManifest) => {
+        setAppSelectOpen(false);
+    };
 
-        const handleAppSelected = (app: SimpleWebManifest) => {
-            setAppSelectOpen(false);
+    useEffect(() => {
+        const handleClickOutside = (event: MouseEvent) => {
+            if (
+                appSelectOpen &&
+                toolbarRef.current &&
+                !toolbarRef.current.contains(event.target as Node)
+            ) {
+                event.preventDefault();
+                event.stopImmediatePropagation();
+                event.stopPropagation();
+                setAppSelectOpen(false);
+            }
         };
 
-        useEffect(() => {
-            const handleClickOutside = (event: MouseEvent) => {
-                if (
-                    appSelectOpen &&
-                    appSelectRef.current &&
-                    !appSelectRef.current.contains(event.target as Node)
-                ) {
-                    console.log("UNMOUNTING");
-                    setAppSelectOpen(false);
-                }
-            };
+        document.addEventListener("click", handleClickOutside, true);
+        return () =>
+            document.removeEventListener("click", handleClickOutside, true);
+    }, [appSelectOpen]);
 
-            document.addEventListener("mousedown", handleClickOutside);
-            return () =>
-                document.removeEventListener("mousedown", handleClickOutside);
-        }, [appSelectOpen]);
+    // Determine if we're on a desktop screen (min-width: 640px).
+    /*  const isDesktop = useMediaQuery("(min-width: 640px)"); */
 
-        // Determine if we're on a desktop screen (min-width: 640px).
-        /*  const isDesktop = useMediaQuery("(min-width: 640px)"); */
-
-        return (
+    return (
+        <div
+            ref={toolbarRef}
+            className={"w-full flex justify-center " + props.className}
+        >
+            {/* blur above the toolbar to the top of the screen */}
             <div
-                ref={ref}
-                className={"w-full flex justify-center " + _props.className}
-            >
-                <div className="flex flex-col w-full rounded-t-lg items-center max-w-[876px] bg-neutral-100 dark:bg-neutral-900">
-                    <ToolbarContent
-                        onToggleAppSelect={(open) => {
-                            if (open != null) {
-                                setAppSelectOpen(open);
-                            } else {
-                                setAppSelectOpen(
-                                    (appSelectOpen) => !appSelectOpen
-                                );
-                            }
-                        }}
-                        appSelectOpen={appSelectOpen}
+                className="absolute top-0 left-0 right-0 h-14 to-transparent pointer-events-none"
+                style={{
+                    zIndex: -1,
+                }}
+            ></div>
+            <div className="flex flex-col w-full rounded-t-lg items-center max-w-[876px] bg-neutral-100 dark:bg-neutral-900">
+                <ToolbarContent />
+                <div
+                    ref={appSelectRef}
+                    className="overflow-hidden w-full"
+                    style={
+                        appSelectOpen
+                            ? {
+                                  height: `100%`,
+                                  pointerEvents: "auto",
+                              }
+                            : {
+                                  height: "0px",
+                                  pointerEvents: "none",
+                              }
+                    }
+                >
+                    <AppSelectPaneInline
+                        className="p-4 pt-2"
+                        onSelected={handleAppSelected}
                     />
-                    <div
-                        ref={appSelectRef}
-                        className="overflow-hidden w-full"
-                        style={
-                            appSelectOpen
-                                ? {
-                                      height: `100%`,
-                                      pointerEvents: "auto",
-                                  }
-                                : {
-                                      height: "0px",
-                                      pointerEvents: "none",
-                                  }
-                        }
-                    >
-                        <AppSelectPaneInline
-                            className="p-4 pt-2"
-                            onSelected={handleAppSelected}
-                        />
-                    </div>
                 </div>
             </div>
-        );
-    }
-);
+        </div>
+    );
+};

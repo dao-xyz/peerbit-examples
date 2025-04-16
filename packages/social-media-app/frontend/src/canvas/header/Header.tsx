@@ -14,7 +14,7 @@ import RelativeTimestamp from "./RelativeTimestamp";
 import { WithContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FaRegComment } from "react-icons/fa";
-import { MdArrowOutward, MdOpenInFull } from "react-icons/md";
+import { MdOpenInFull } from "react-icons/md";
 
 export const Header = ({
     canvas,
@@ -24,6 +24,7 @@ export const Header = ({
     open: open,
     reverseLayout,
     forwardRef,
+    detailed,
 }: {
     canvas?: Canvas | WithContext<Canvas>;
     direction?: "row" | "col";
@@ -32,6 +33,7 @@ export const Header = ({
     open?: () => void;
     reverseLayout?: boolean;
     forwardRef?: React.Ref<HTMLDivElement>;
+    detailed?: boolean; // detailed view
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
@@ -104,7 +106,7 @@ export const Header = ({
                     }
                 >
                     <div
-                        className={`overflow-hidden flex pr-1 ${
+                        className={`overflow-hidden flex mr-1 ${
                             variant === "tiny" || variant === "medium"
                                 ? "rounded-full"
                                 : "rounded-lg"
@@ -142,7 +144,7 @@ export const Header = ({
                         </div>
                     )}
 
-                    {variant === "large" && (
+                    {variant === "large" && !detailed && (
                         <>
                             {/* Show comment icon with comment counts if applicable */}
 

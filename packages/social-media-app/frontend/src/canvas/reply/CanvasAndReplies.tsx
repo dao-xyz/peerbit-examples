@@ -280,9 +280,7 @@ export const CanvasAndReplies = () => {
                     >
                         <div className="z-5 flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
                             <div className="py-6 max-w-[876px] mx-auto w-full">
-                                <FullscreenEditor>
-                                    <DetailedView />
-                                </FullscreenEditor>
+                                <DetailedView />
                             </div>
                         </div>
                     </div>
@@ -386,6 +384,11 @@ height: `${spacerHeight}px`,
                     <div className="absolute right-1 bottom-0">
                         <ReplyingInProgress canvas={lastReply} />
                     </div>
+                </div>
+                <div className="max-w-[876px] mx-auto w-full">
+                    <FullscreenEditor>
+                        <></>
+                    </FullscreenEditor>
                 </div>
                 <AnimatedStickyToolbar
                     toolbarVisible={toolbarVisible}

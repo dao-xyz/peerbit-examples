@@ -70,7 +70,7 @@ export const Content = () => {
                 {/* Main header with transform animation */}
                 <div
                     ref={headerRef}
-                    className={`fixed top-0 inset-x-0 z-1 transition-transform duration-800 ease-in-out`}
+                    className={`sticky top-0 inset-x-0 z-2 transition-transform duration-800 ease-in-out`}
                     style={{
                         transform: headerVisible
                             ? "translateY(0)"
@@ -83,12 +83,7 @@ export const Content = () => {
                 </div>
 
                 {/* Add padding so content isn’t hidden by the fixed header */}
-                <div
-                    className="h-full"
-                    style={{ paddingTop: `${headerHeight}px` }}
-                >
-                    <BaseRoutes />
-                </div>
+                <BaseRoutes />
             </ViewProvider>
         </>
     );

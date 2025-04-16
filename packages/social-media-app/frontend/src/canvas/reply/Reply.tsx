@@ -9,6 +9,7 @@ import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
 import { useView } from "../../view/ViewContex.js";
+import { rectIsStaticMarkdownText } from "../utils/rect.js";
 
 const ReplyButton = ({
     children,
@@ -207,7 +208,11 @@ export const Reply = ({
                                 }`}
                                 classNameContent={
                                     align === "right"
-                                        ? "bg-neutral-200 dark:bg-neutral-700 p-2 rounded"
+                                        ? (element) =>
+                                              "bg-neutral-200 dark:bg-neutral-700 rounded " +
+                                              (rectIsStaticMarkdownText(element)
+                                                  ? "p-2"
+                                                  : "")
                                         : ""
                                 }
                             />

@@ -30,6 +30,7 @@ import {
 } from "./types.js";
 import { RPC } from "@peerbit/rpc";
 import { concat, equals } from "uint8arrays";
+import { waitFor } from "@peerbit/time";
 
 @variant(0)
 export class Layout {
@@ -579,7 +580,9 @@ export class Canvas extends Program<CanvasArgs> {
         return this.address + ":" + value;
     }
     public debug: boolean = false;
+    private closeController: AbortController | null = null;
     async open(args?: CanvasArgs): Promise<void> {
+        this.closeController = new AbortController();
         this.debug = !!args?.debug;
         if (!this.isOrigin) {
             // dont open if we are not the origin, TODO unless we want private canvases
@@ -742,6 +745,7 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     close(from?: Program): Promise<boolean> {
+        this.closeController?.abort();
         this._repliesChangeListener &&
             this._replies.events.removeEventListener(
                 "change",
@@ -957,6 +961,14 @@ export class Canvas extends Program<CanvasArgs> {
 
         // TODO use the rootmost canvas with same ACL
         // for now lets just use the root
+        await waitFor(() => this.node, {
+            signal: this.closeController?.signal,
+        }).catch(() => {
+            if (this.closed) {
+                return;
+            }
+            console.error("Never opened");
+        });
         const root = this.path[0];
         if (root) {
             const rootLoaded = (this._topMostCanvasWithSameACL =

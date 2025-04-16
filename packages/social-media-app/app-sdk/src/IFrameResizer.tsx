@@ -26,14 +26,14 @@ const IFrameResizer: React.FC<IFrameResizerProps> = ({
                 log: false,
                 onResized(data) {
                     onResize({ height: data.height, width: data.width });
-                    console.log(
-                        `[iframe-resizer/react][${iframe?.id}] Resized to ${data.height}px`
-                    );
+                    /*  console.log(
+                         `[iframe-resizer/react][${iframe?.id}] Resized to ${data.height}px`
+                     ); */
                 },
                 onClosed: () => {
-                    console.warn(
-                        `[iframe-resizer/react][${iframe?.id}] Close event ignored. To remove the iframe update your React component.`
-                    );
+                    /*  console.warn(
+                         `[iframe-resizer/react][${iframe?.id}] Close event ignored. To remove the iframe update your React component.`
+                     ); */
                     return false;
                 },
             },
