@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef } from "react";
-import { getScrollTop } from "../../HeaderVisibilitiyProvider";
+import {
+    getScrollTop,
+    useHeaderVisibilityContext,
+} from "../../HeaderVisibilitiyProvider";
 import { useToolbar } from "../toolbar/ToolbarContext";
 
 function getScrollBottomOffset() {
@@ -16,8 +19,28 @@ export const useToolbarVisibility = (
 ) => {
     const [visible, setVisible] = useState(true);
     const prevScrollTopRef = useRef(getScrollTop());
-
+    const headerIsShowing = useHeaderVisibilityContext();
     const { setAppSelectOpen } = useToolbar();
+    const isAtBottom = useRef(false);
+
+    const show = () => {
+        setVisible(true);
+    };
+
+    const unshow = () => {
+        setVisible(false);
+        setAppSelectOpen(false);
+    };
+
+    useEffect(() => {
+        if (headerIsShowing) {
+            show();
+        } else {
+            if (!isAtBottom.current) {
+                unshow();
+            }
+        }
+    }, [headerIsShowing]);
 
     useEffect(() => {
         const handleScroll = () => {
@@ -25,9 +48,8 @@ export const useToolbarVisibility = (
             const scrollBottomOffset = getScrollBottomOffset();
 
             // Determine if user is scrolling up
-            const isScrollingUp = currentScrollTop < prevScrollTopRef.current;
             // Check if near the bottom of the page
-            const isAtBottom = scrollBottomOffset < scrollThreshold;
+            isAtBottom.current = scrollBottomOffset < scrollThreshold;
 
             /*  // Check if the element (e.g., subheader/toolbar) is actually close to the top of the viewport.
              let isElementCloseToTop = false;
@@ -39,13 +61,10 @@ export const useToolbarVisibility = (
              } */
 
             // Only animate upward if either at the bottom OR scrolling up while the element is near the top.
-            const shouldShow =
-                isAtBottom || isScrollingUp; /* && isElementCloseToTop */
 
-            if (!shouldShow) {
-                setAppSelectOpen(false);
+            if (isAtBottom.current) {
+                show();
             }
-            setVisible(shouldShow);
 
             prevScrollTopRef.current = currentScrollTop;
         };
