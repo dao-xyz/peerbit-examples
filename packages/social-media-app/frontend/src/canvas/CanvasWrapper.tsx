@@ -35,7 +35,7 @@ import {
 } from "./utils/rect.js";
 import { useReplyProgress } from "./reply/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
-import { serialize, deserialize } from "@dao-xyz/borsh";
+import { waitFor } from "@peerbit/time";
 
 // Extend the context type to include a subscription function.
 export interface CanvasContextType {
@@ -293,6 +293,10 @@ export const CanvasWrapper = ({
             throw new Error("Cannot set id when adding multiple elements");
         }
         const yStrategy = options.y ?? "optimize";
+        await waitFor(() => canvas).catch(() => {
+            new Error("Canvas not ready");
+        });
+
         await canvas.load();
         const allCurrentRects = await canvas.elements.index.search({
             query: getOwnedElementsQuery(canvas),

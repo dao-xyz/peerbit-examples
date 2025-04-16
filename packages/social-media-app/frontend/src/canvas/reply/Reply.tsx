@@ -133,36 +133,44 @@ export const Reply = ({
     const isThread = variant === "thread";
 
     const highlightStyle = isHighlighted ? "animated-border p-0" : "";
-    const styleFromFromMode =
-        isChat && align === "right" ? "bg-neutral-300 dark:bg-neutral-600" : "";
+    const styleFromFromMode = isChat
+        ? ""
+        : "bg-neutral-50 dark:bg-neutral-800 shadow  rounded-lg p-2";
 
     return (
         <div
             ref={forwardRef}
-            className={`flex flex-col  ${isChat ? (align === "right" ? "items-end ml-10" : "items-start mr-10") : ""
-                } ${className}`}
+            className={`flex flex-col  ${
+                isChat
+                    ? align === "right"
+                        ? " items-end ml-10"
+                        : "items-start mr-10"
+                    : ""
+            } ${styleFromFromMode} ${className}`}
         >
-            {lineType && lineType !== "none" && (
+            {/* ??? {lineType && lineType !== "none" && (
                 <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">
                     <div className="w-px h-full bg-neutral-300 dark:bg-neutral-600" />
                 </div>
-            )}
+            )} */}
             <div
-                className={`inline-flex flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${isThread ? "w-full" : ""
-                    }`}
+                className={`inline-flex flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${
+                    isThread ? "w-full" : ""
+                }`}
             >
                 {!hideHeader && (
                     <div
-                        className={`flex items-center mb-2 ${align === "right" ? "justify-end" : "justify-start"
-                            }`}
+                        className={`flex items-center mb-2 ${
+                            align === "right" ? "justify-end" : "justify-start"
+                        }`}
                     >
                         <Header
                             variant={
                                 isChat
                                     ? "medium"
                                     : isExpandedBreadcrumb
-                                        ? "tiny"
-                                        : "large"
+                                    ? "tiny"
+                                    : "large"
                             }
                             forwardRef={headerRef}
                             canvas={canvas}
@@ -175,8 +183,9 @@ export const Reply = ({
                 {/* Preview / Canvas Section with a ref and Tailwind classes for transition */}
                 <div
                     ref={previewContainerRef}
-                    className={` relative overflow-hidden ${showMore ? "max-h-full" : "max-h-40vh"
-                        }`}
+                    className={` relative overflow-hidden flex flex-col ${
+                        showMore ? "max-h-full" : "max-h-40vh"
+                    }`}
                 >
                     <CanvasWrapper canvas={canvas} quality={MEDIUM_QUALITY}>
                         {isExpandedBreadcrumb ? (
@@ -191,10 +200,11 @@ export const Reply = ({
                                 onClick={handleCanvasClick}
                                 variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
-                                className={`flex flex-col gap-2  ${align === "right"
+                                className={`flex flex-col gap-2  ${
+                                    align === "right"
                                         ? "flex flex-col justify-end items-end"
                                         : ""
-                                    }`}
+                                }`}
                                 classNameContent={
                                     align === "right"
                                         ? "bg-neutral-200 dark:bg-neutral-700 p-2 rounded"
@@ -210,7 +220,7 @@ export const Reply = ({
                                 forwardRef={contentRef}
                                 onClick={handleCanvasClick}
                                 variant="post"
-                                className="w-full"
+                                className="w-full "
                             />
                         )}
                     </CanvasWrapper>
@@ -238,8 +248,9 @@ export const Reply = ({
             {!isExpandedBreadcrumb && isOverflowing && (
                 /* Show more button, overlay with content, if contracted */
                 <div
-                    className={`flex gap-2.5 w-full ${!showMore ? "-translate-y-full" : ""
-                        }`}
+                    className={`flex gap-2.5 w-full ${
+                        !showMore ? "-translate-y-full" : ""
+                    }`}
                 >
                     <div className="ml-auto p-2">
                         <ReplyButton

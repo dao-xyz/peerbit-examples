@@ -114,6 +114,7 @@ export const Canvas = (
                         <Frame
                             thumbnail={asThumbnail}
                             active={active.has(rect.id)}
+                            className="z-1"
                             setActive={(v) => {
                                 if (v) {
                                     setActive(new Set(active.add(rect.id)));
@@ -233,25 +234,27 @@ export const Canvas = (
                         >
                             <filter id="gaussianBlurCanvas">
                                 <feGaussianBlur
-                                    stdDeviation="20"
+                                    stdDeviation="25"
                                     result="blur"
                                 />
                             </filter>
                         </svg>
                         {!rectIsStaticMarkdownText(rect) &&
                             properties.bgBlur && (
-                                <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 [filter:url('#gaussianBlurCanvas')]">
-                                    <Frame
-                                        thumbnail={false}
-                                        active={false}
-                                        setActive={() => {}}
-                                        delete={() => {}}
-                                        editMode={false}
-                                        showEditControls={false}
-                                        element={rect}
-                                        onLoad={() => {}}
-                                        fit="cover"
-                                    />
+                                <div className="absolute bg-white dark:bg-black w-[150%] h-[150%] left-1/2 top-1/2  -translate-x-1/2 -translate-y-1/2 ">
+                                    <div className=" opacity-30  [filter:url('#gaussianBlurCanvas')]">
+                                        <Frame
+                                            thumbnail={false}
+                                            active={false}
+                                            setActive={() => {}}
+                                            delete={() => {}}
+                                            editMode={false}
+                                            showEditControls={false}
+                                            element={rect}
+                                            onLoad={() => {}}
+                                            fit="cover"
+                                        />
+                                    </div>
                                 </div>
                             )}
                     </div>
@@ -260,6 +263,15 @@ export const Canvas = (
         });
     };
 
+    let sizingClassNames = ` ${properties.fitHeight ? "h-full" : ""} ${
+        properties.fitWidth ? "w-full" : ""
+    } ${
+        properties.draft
+            ? properties.inFullScreen
+                ? "h-[calc(100vh-4rem)]"
+                : ""
+            : ""
+    }`;
     return (
         (filteredRects.length > 0 && (
             <div
@@ -267,9 +279,7 @@ export const Canvas = (
                     properties.appearance === "chat-view-images"
                         ? "gap-4 p-4"
                         : "flex-col gap-4"
-                } ${properties.fitHeight ? "h-full" : ""} ${
-                    properties.fitWidth ? "w-full" : ""
-                } ${properties.className ?? ""}`}
+                } ${sizingClassNames} ${properties.className ?? ""}`}
             >
                 {renderRects(filteredRects)}
                 {filteredRects.length > 0 ? properties.children : null}

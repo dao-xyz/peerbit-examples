@@ -120,12 +120,16 @@ export const AutoReplyProvider: React.FC<{
            }
     */
         // auto reply to the last processed reply
-        if (processedReplies.length > 0) {
-            let last = processedReplies[processedReplies.length - 1]?.reply;
-            if (view === "chat" && last) {
-                console.log("AUTO REPLY TO", last, processedReplies.length);
-                setReplyTo(last);
+        if (view === "chat") {
+            if (processedReplies.length > 0) {
+                let last = processedReplies[processedReplies.length - 1]?.reply;
+                if (view === "chat" && last) {
+                    console.log("AUTO REPLY TO", last, processedReplies.length);
+                    setReplyTo(last);
+                }
             }
+        } else {
+            setReplyTo(viewRoot); // clear replyTo when not in chat view
         }
     }, [processedReplies]);
 

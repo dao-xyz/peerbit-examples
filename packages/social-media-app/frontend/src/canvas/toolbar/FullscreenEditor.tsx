@@ -10,12 +10,7 @@ export const FullscreenEditor = ({ children }: FullscreenEditorProps) => {
     if (fullscreenEditorActive) {
         return (
             <div className="overflow-auto bg-neutral-50 dark:bg-neutral-950">
-                <Canvas
-                    fitWidth
-                    draft={true}
-                    className="w-full h-full"
-                    inFullScreen
-                />
+                <Canvas fitWidth draft={true} inFullScreen />
             </div>
         );
     }

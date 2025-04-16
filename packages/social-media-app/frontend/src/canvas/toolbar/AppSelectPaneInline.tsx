@@ -5,6 +5,7 @@ import { useCanvas } from "../CanvasWrapper";
 import { DebugGeneratePostButton } from "./DebugGeneratePostButton";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
+import { useToolbar } from "./Toolbar";
 
 interface AppSelectPaneInlineProps {
     onSelected: (app: SimpleWebManifest) => void;
@@ -20,6 +21,7 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
     const { insertDefault } = useCanvas();
     const [filteredApps, setFilteredApps] = useState<SimpleWebManifest[]>([]);
     const inputRef = React.useRef<HTMLInputElement>(null);
+    const { setFullscreenEditorActive } = useToolbar();
 
     // Filter apps based on the search query.
     useEffect(() => {
@@ -45,6 +47,7 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
         setQuery("");
         insertDefaultValue && insertDefault({ app, increment: true });
         _onSelected(app);
+        setFullscreenEditorActive(true);
     };
 
     return (

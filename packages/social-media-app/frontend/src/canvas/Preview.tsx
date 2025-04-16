@@ -109,7 +109,7 @@ const PreviewFrame = ({
             noPadding={noPadding}
             onClick={onClick}
             canOpenFullscreen={false}
-            className={className}
+            className={"z-1 " + className}
         />
         {bgBlur && (
             <BlurredBackground element={element} noPadding={noPadding} />
@@ -134,19 +134,24 @@ const BlurredBackground = ({
                 <feGaussianBlur stdDeviation="20" result="blur" />
             </filter>
         </svg>
-        <div className="absolute opacity-10 -z-10 w-[150%] h-[150%] left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 [filter:url('#gaussianBlurPreview')]">
-            <Frame
-                thumbnail={false}
-                active={false}
-                setActive={() => {}}
-                delete={() => {}}
-                editMode={false}
-                showEditControls={false}
-                element={element}
-                onLoad={() => {}}
-                fit="cover"
-                noPadding={noPadding}
-            />
+
+        <div
+            id="frame-with-blur"
+            className="absolute bg-white dark:bg-black w-[150%] h-[150%] left-1/2 top-1/2  -translate-x-1/2 -translate-y-1/2 "
+        >
+            <div className=" opacity-30  [filter:url('#gaussianBlurCanvas')]">
+                <Frame
+                    thumbnail={false}
+                    active={false}
+                    setActive={() => {}}
+                    delete={() => {}}
+                    editMode={false}
+                    showEditControls={false}
+                    element={element}
+                    onLoad={() => {}}
+                    fit="cover"
+                />
+            </div>
         </div>
     </>
 );
@@ -331,14 +336,21 @@ const PostPreview = ({
     className,
     classNameContent,
 }: {
-    rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
+    rects: {
+        text?: Element<StaticContent<StaticMarkdownText>>;
+        other: Element<ElementContent>[];
+    };
     onClick?: () => void;
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string;
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
-    const { text } = rects;
+    const text = rects.text;
+    console.log({
+        text,
+        firstApp,
+    });
     return (
         <>
             {firstApp && (
@@ -386,7 +398,7 @@ const PostPreview = ({
             {text && (
                 <button
                     onClick={onClick}
-                    className="col-start-2 col-span-1  rounded-md  py-1"
+                    className={"col-start-2 col-span-1 rounded-md py-1 "}
                     ref={forwardRef}
                 >
                     <PreviewFrame element={text} className={classNameContent} />
@@ -509,7 +521,7 @@ export const CanvasPreview = ({
                 <PostPreview
                     rects={
                         variantRects as {
-                            text?: Element<ElementContent>;
+                            text?: Element<StaticContent<StaticMarkdownText>>;
                             other: Element<ElementContent>[];
                         }
                     }

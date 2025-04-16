@@ -14,6 +14,7 @@ import * as Switch from "@radix-ui/react-switch";
 import { useView } from "../../view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
 import { useAutoReply } from "../AutoReplyContext";
+import { BsArrowsAngleExpand } from "react-icons/bs";
 
 interface ToolbarContentProps {
     onToggleAppSelect: (open?: boolean) => void;
@@ -71,7 +72,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
             return (
                 <div ref={ref} className="flex flex-col z-20 w-full left-0">
                     <div className="flex flex-col h-full">
-                        <div className="flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-700 p-4">
+                        <div className="flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-700">
                             {AddButton()}
 
                             <button
@@ -209,8 +210,14 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                 />
                             )}
                         </div>
+                        {/* Right: Fullscreen button */}
+                        <button
+                            className="btn btn-icon btn-icon-md ml-auto"
+                            onClick={() => setFullscreenEditorActive(true)}
+                        >
+                            <BsArrowsAngleExpand />
+                        </button>
 
-                        {/* Right: Send button */}
                         {view === "chat" &&
                             replyTo &&
                             replyTo.idString !== viewRoot.idString && (
@@ -223,6 +230,8 @@ const ToolbarContent = forwardRef<HTMLDivElement, ToolbarContentProps>(
                                     <MdClear className="animated-bg-btn [--inner-bg:theme('colors.primary.900')] dark:[--inner-bg:theme('colors.primary.200')] text-white  dark:text-black " />
                                 </button>
                             )}
+
+                        {/* Right: Send button */}
                         <button
                             onClick={() => savePending()}
                             className="btn btn-icon btn-icon-md"

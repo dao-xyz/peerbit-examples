@@ -207,14 +207,20 @@ export const Replies = (properties: {
                         "max-w-[876px] w-full mx-auto grid relative "
                     )}
                 >
-                    <StraightReplyLine
-                        replyRefs={replyContentRefs.current}
-                        containerRef={repliesContainerRef}
-                        lineTypes={processedReplies.map(
-                            (item) => item.lineType
-                        )}
-                    />
-                    <div className="pl-[10px]">
+                    {view === "chat" && (
+                        <StraightReplyLine
+                            replyRefs={replyContentRefs.current}
+                            containerRef={repliesContainerRef}
+                            lineTypes={processedReplies.map(
+                                (item) => item.lineType
+                            )}
+                        />
+                    )}
+                    <div
+                        className={`${
+                            view === "chat" ? "pl-[10px]" : ""
+                        } flex flex-col gap-2 w-full`}
+                    >
                         {processedReplies.map((item, i) => {
                             const replyElement = (
                                 <Fragment key={item.id}>

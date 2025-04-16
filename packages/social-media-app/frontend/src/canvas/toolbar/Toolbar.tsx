@@ -120,7 +120,7 @@ const ToolbarInner = forwardRef<HTMLDivElement, ToolbarInnerProps>(
                 ref={ref}
                 className={"w-full flex justify-center " + _props.className}
             >
-                <div className="flex flex-col w-full items-center max-w-[876px] bg-neutral-100 dark:bg-neutral-900">
+                <div className="flex flex-col w-full rounded-t-lg items-center max-w-[876px] bg-neutral-100 dark:bg-neutral-900">
                     <ToolbarContent
                         onToggleAppSelect={(open) => {
                             if (open != null) {

@@ -362,6 +362,7 @@ export class CanvasAIReply extends Program<Args> {
                 };
             }
         }
+
         if (args?.server) {
             console.log(
                 "Launching AI Reply server: " +

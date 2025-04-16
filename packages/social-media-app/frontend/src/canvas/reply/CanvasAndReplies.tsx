@@ -1,5 +1,5 @@
 import { useRef, useState, useEffect } from "react";
-import { ToolbarProvider } from "../toolbar/Toolbar.js";
+import { ToolbarProvider, useToolbar } from "../toolbar/Toolbar.js";
 import { FullscreenEditor } from "../toolbar/FullscreenEditor.js";
 import { Spinner } from "../../utils/Spinner.js";
 import { Replies } from "./Replies.js";
@@ -93,6 +93,7 @@ export const CanvasAndReplies = () => {
     const postRef = useRef<HTMLDivElement>(null);
     const [spacerHeight, setSpacerHeight] = useState(0);
     const scrollToSnapEnabled = useRef(true);
+    const { fullscreenEditorActive } = useToolbar();
 
     // Set up a ResizeObserver to and make the spacer height equal to postRef height - 50vh
     useEffect(() => {
@@ -278,11 +279,11 @@ export const CanvasAndReplies = () => {
                         }`}
                     >
                         <div className="z-5 flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
-                            <FullscreenEditor>
-                                <div className="pt-6 max-w-[876px] mx-auto w-full">
+                            <div className="py-6 max-w-[876px] mx-auto w-full">
+                                <FullscreenEditor>
                                     <DetailedView />
-                                </div>
-                            </FullscreenEditor>
+                                </FullscreenEditor>
+                            </div>
                         </div>
                     </div>
 

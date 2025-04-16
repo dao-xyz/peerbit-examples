@@ -14,7 +14,7 @@ import RelativeTimestamp from "./RelativeTimestamp";
 import { WithContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FaRegComment } from "react-icons/fa";
-import { useDownOnClickTriggerFix } from "../utils/dropdown";
+import { MdArrowOutward, MdOpenInFull } from "react-icons/md";
 
 export const Header = ({
     canvas,
@@ -58,10 +58,6 @@ export const Header = ({
               }
     );
 
-    // We assume canvas has a unique id as a string.
-    const canvasId =
-        !canvas || canvas.closed ? undefined : canvas.address.toString();
-
     // State for controlling the More Info dialog and its content.
     const [moreInfoOpen, setMoreInfoOpen] = useState(false);
     const [elementsInfo, setElementsInfo] = useState<
@@ -96,15 +92,9 @@ export const Header = ({
                     ref={forwardRef}
                     className={`flex px-2 pt-2 ${
                         reverseLayout ? "flex-row-reverse" : ""
-                    } items-center ${
-                        variant === "large"
-                            ? "gap-3"
-                            : variant === "medium"
-                            ? "gap-3"
-                            : "gap-1.5"
-                    } ${direction === "col" ? "flex-col" : "flex-row"} ${
-                        className ?? ""
-                    } ${variant === "large" && "w-full"}`}
+                    } items-center gap-1 ${
+                        direction === "col" ? "flex-col" : "flex-row"
+                    } ${className ?? ""} ${variant === "large" && "w-full"}`}
                     style={
                         {
                             "--bgcolor": bgColor
@@ -114,7 +104,7 @@ export const Header = ({
                     }
                 >
                     <div
-                        className={`overflow-hidden flex ${
+                        className={`overflow-hidden flex pr-1 ${
                             variant === "tiny" || variant === "medium"
                                 ? "rounded-full"
                                 : "rounded-lg"
@@ -133,36 +123,44 @@ export const Header = ({
                         />
                     </div>
                     {canvas.loadedContext && (
-                        <RelativeTimestamp
-                            timestamp={
-                                new Date(
-                                    Number(
-                                        canvas.context.created / BigInt(1000000)
+                        <div className="px-1">
+                            <RelativeTimestamp
+                                timestamp={
+                                    new Date(
+                                        Number(
+                                            canvas.context.created /
+                                                BigInt(1000000)
+                                        )
                                     )
-                                )
-                            }
-                            className={
-                                variant === "large" || variant === "medium"
-                                    ? "text-sm"
-                                    : "text-xs"
-                            }
-                        />
+                                }
+                                className={
+                                    variant === "large" || variant === "medium"
+                                        ? "text-sm"
+                                        : "text-xs"
+                                }
+                            />
+                        </div>
                     )}
 
                     {variant === "large" && (
                         <>
                             {/* Show comment icon with comment counts if applicable */}
-                            {canvasId && (
-                                <button
-                                    className="btn flex p-2 flex-row items-center gap-1"
-                                    onClick={open}
-                                >
-                                    <FaRegComment size={16} />
-                                    <span className="text-xs">
-                                        {replyCount}
-                                    </span>
-                                </button>
-                            )}
+
+                            <button
+                                className="btn flex p-2 flex-row items-center gap-1"
+                                onClick={open}
+                            >
+                                <FaRegComment size={16} />
+                                <span className="text-xs">{replyCount}</span>
+                            </button>
+
+                            {/* Show a "go to post" buttom */}
+                            <button
+                                className="btn flex p-2 flex-row items-center gap-1"
+                                onClick={open}
+                            >
+                                <MdOpenInFull size={16} />
+                            </button>
                         </>
                     )}
 
@@ -180,6 +178,12 @@ export const Header = ({
                             </button>
                         </DropdownMenu.Trigger>
                         <DropdownMenu.Content className="dropdown-menu-responsive bg-white dark:bg-black p-2 rounded shadow-md">
+                            <DropdownMenu.Item
+                                className="menu-item"
+                                onSelect={() => open?.()}
+                            >
+                                Open
+                            </DropdownMenu.Item>
                             {canvas &&
                                 peer.identity.publicKey.equals(
                                     canvas.publicKey

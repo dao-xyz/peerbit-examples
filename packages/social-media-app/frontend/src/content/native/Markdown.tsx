@@ -132,9 +132,9 @@ export const MarkdownContent = ({
                 if (
                     lastDims.current &&
                     Math.abs(lastDims.current.width - newDims.width) <
-                    threshold &&
+                        threshold &&
                     Math.abs(lastDims.current.height - newDims.height) <
-                    threshold
+                        threshold
                 ) {
                     continue;
                 }
@@ -272,8 +272,9 @@ export const MarkdownContent = ({
     return (
         <div
             ref={containerRef}
-            className={`${commonClasses} w-full text-left ${editable ? "cursor-text" : ""
-                }`}
+            className={`${commonClasses} w-full text-left ${
+                editable ? "cursor-text" : ""
+            }`}
             onClick={editable && !isEditing ? handleStartEditing : undefined}
         >
             {editable && isEditing ? (
@@ -310,8 +311,9 @@ export const MarkdownContent = ({
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={`${commonClasses} ${previewLines ? "line-clamp-[var(--preview-lines)]" : ""
-                        } ${previewLines === 1 ? "break-all" : ""}`}
+                    className={`${commonClasses} ${
+                        previewLines ? "line-clamp-[var(--preview-lines)]" : ""
+                    } ${previewLines === 1 ? "break-all" : ""}`}
                 >
                     <Markdown
                         disallowedElements={
