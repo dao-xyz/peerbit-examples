@@ -4,7 +4,11 @@ import { Canvas, IndexableCanvas } from "./content.js";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 import { Documents } from "@peerbit/document";
-import { ByteMatchQuery } from "@peerbit/indexer-interface";
+import {
+    ByteMatchQuery,
+    Sort,
+    SortDirection,
+} from "@peerbit/indexer-interface";
 import { Identities } from "./identity.js";
 
 @variant(0)
@@ -121,12 +125,18 @@ export class Profiles extends Program {
     }
 
     async create(properties: { profile: Canvas; context?: Canvas }) {
+        const previous = await this.get(properties.profile.publicKey);
+
         const profileIndexed = new Profile({
             publicKey: properties.profile.publicKey,
             profile: properties.profile,
             context: properties.context,
         });
         await this.profiles.put(profileIndexed);
+
+        if (previous) {
+            await this.profiles.del(previous.id);
+        }
     }
 
     async get(publicKey: PublicSignKey, identities?: Identities) {
@@ -136,6 +146,13 @@ export class Profiles extends Program {
                     new ByteMatchQuery({
                         key: ["profile", "publicKey"],
                         value: _publicKey.bytes,
+                    }),
+                ],
+                sort: [
+                    // sort by newest first
+                    new Sort({
+                        key: ["__context", "created"],
+                        direction: SortDirection.DESC,
                     }),
                 ],
             });

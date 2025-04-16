@@ -26,7 +26,7 @@ describe("profile", () => {
         expect(address1).to.eq(address2);
     });
 
-    it("can get", async () => {
+    it("get", async () => {
         let identities = await session.peers[0].open(
             new Identities({ baseUrl: "root://" })
         );
@@ -46,6 +46,43 @@ describe("profile", () => {
             identities
         );
         expect(profile).to.not.be.undefined;
+    });
+
+    it("update get", async () => {
+        let identities = await session.peers[0].open(
+            new Identities({ baseUrl: "root://" })
+        );
+        const root = await session.peers[0].open(
+            new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                seed: new Uint8Array(),
+            })
+        );
+        const abc = await root.getCreateRoomByPath(["a", "b", "c"]);
+        const abd = await root.getCreateRoomByPath(["a", "b", "d"]);
+
+        const profiles = await session.peers[0].open(new Profiles());
+        await profiles.create({ profile: abc[abc.length - 1] });
+
+        const profile = await profiles.get(
+            profiles.node.identity.publicKey,
+            identities
+        );
+        expect(profile?.profile.address).to.eq(
+            abc[abc.length - 1].address.toString()
+        );
+
+        await profiles.create({ profile: abd[abd.length - 1] });
+        const updatedProfile = await profiles.get(
+            profiles.node.identity.publicKey,
+            identities
+        );
+        expect(updatedProfile?.profile.address).to.eq(
+            abd[abd.length - 1].address.toString()
+        );
+
+        // expect profiles db to only have 1 profile entry
+        expect(await profiles.profiles.index.getSize()).to.eq(1);
     });
 
     it("can get through linked device", async () => {
