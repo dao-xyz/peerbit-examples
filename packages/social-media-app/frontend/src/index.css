@@ -544,7 +544,7 @@ code {
     /* Base styles for each corner container */
     .animated-border .corner {
         position: absolute;
-        z-index: 300;
+        z-index: 19;
         width: 18px;
         height: 18px;
     }
