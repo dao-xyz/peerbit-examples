@@ -2,7 +2,7 @@
 import React, { useContext, useMemo, useRef } from "react";
 import { useLocal, useProgram } from "@peerbit/react";
 import { Profile, Profiles } from "@giga-app/interface";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { getCanvasPath, MISSING_PROFILE } from "../routes";
 import { PublicSignKey } from "@peerbit/crypto";
 

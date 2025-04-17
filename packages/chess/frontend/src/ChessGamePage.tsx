@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import { usePeer, useLocal, useProgram } from "@peerbit/react";
 import { ChessGame, Move } from "./chessGame";
 import InteractiveChessBoard from "./InteractiveChessBoard";

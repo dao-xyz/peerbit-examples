@@ -1,4 +1,4 @@
-import { HashRouter } from "react-router-dom";
+import { HashRouter } from "react-router";
 import { Content } from "./Content";
 import { PeerProvider } from "@peerbit/react";
 import { AppProvider } from "@giga-app/sdk";

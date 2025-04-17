@@ -1,6 +1,6 @@
 import React, { SyntheticEvent, useEffect, useRef, useState } from "react";
 import { IFrameContent, Element, StaticContent } from "@giga-app/interface";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { EditableStaticContent } from "./native/NativeContent";
 import { useApps } from "./useApps";
 import { CuratedWebApp } from "@giga-app/app-service";

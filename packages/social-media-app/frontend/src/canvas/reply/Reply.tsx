@@ -9,7 +9,7 @@ import { Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "../Preview.js";
 import { WithContext } from "@peerbit/document";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";

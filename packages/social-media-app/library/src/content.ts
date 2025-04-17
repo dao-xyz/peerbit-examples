@@ -525,9 +525,25 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     async setParent(canvas: Canvas) {
+        await waitFor(() => !this.closed).catch((error) => {
+            console.error("Failed to wait for canvas to open", error);
+            throw error;
+        });
+
+        this.path = [
+            ...canvas.path,
+            new CanvasAddressReference({
+                canvas,
+            }),
+        ];
+
+        await this.save(this.node.services.blocks, { reset: true });
+
         if (canvas.address === this.path[this.path.length - 1]?.address) {
             return; // no change
         }
+
+        console.trace("set parent", canvas);
 
         const elements = await this.elements.index
             .iterate({ query: getOwnedElementsQuery(this) })
@@ -539,12 +555,6 @@ export class Canvas extends Program<CanvasArgs> {
             throw new Error("Cannot move canvas with sub-elements");
         }
 
-        this.path = [
-            ...canvas.path,
-            new CanvasAddressReference({
-                canvas,
-            }),
-        ];
         let addressBefore = this.address;
         let addrsesAfter = (await this.calculateAddress({ reset: true }))
             .address;

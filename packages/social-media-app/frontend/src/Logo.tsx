@@ -1,4 +1,4 @@
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import Logo from "/android-icon-192x192.png";
 
 export const HeaderLogo = ({ onClick }: { onClick?: () => void }) => {

@@ -1,4 +1,4 @@
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router";
 import { useLocal, useOnline, usePeer, useProgram } from "@peerbit/react";
 import {
     ChessGame,

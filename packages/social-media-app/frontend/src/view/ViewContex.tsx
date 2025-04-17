@@ -17,7 +17,7 @@ import { useCanvases } from "../canvas/useCanvas";
 import { SearchRequest } from "@peerbit/document-interface";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import type { WithContext } from "@peerbit/document";
-import { useSearchParams } from "react-router-dom";
+import { useSearchParams } from "react-router";
 import { BodyStyler } from "./BodyStyler";
 
 export type ViewType = "new" | "old" | "best" | "chat";

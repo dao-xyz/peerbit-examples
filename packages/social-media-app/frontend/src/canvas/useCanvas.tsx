@@ -14,7 +14,7 @@ import {
     StaticContent,
     StaticMarkdownText,
 } from "@giga-app/interface";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { deserialize } from "@dao-xyz/borsh";

@@ -1,6 +1,6 @@
 import { usePeer, useProgram } from "@peerbit/react";
 import { useState, useEffect, useRef } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import * as tf from "@tensorflow/tfjs";
 import { Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { P2PStorage } from "./io-utils";

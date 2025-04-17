@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, Fragment, useLayoutEffect } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
 import { Canvas as CanvasDB, LOWEST_QUALITY } from "@giga-app/interface";

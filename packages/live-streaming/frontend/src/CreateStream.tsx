@@ -1,5 +1,5 @@
 import { usePeer, useProgram } from "@peerbit/react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router";
 import { getStreamPath } from "./routes";
 import { useEffect, useState } from "react";
 import { MediaStreamDB } from "@peerbit/video-lib";

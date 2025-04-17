@@ -226,7 +226,7 @@ export const Replies = (properties: {
                     )}
                     <div
                         className={`${
-                            view === "chat" ? "pl-[10px]" : ""
+                            view === "chat" ? "pl-[15px]" : ""
                         } flex flex-col gap-4 w-full`}
                     >
                         {processedReplies.map((item, i) => {

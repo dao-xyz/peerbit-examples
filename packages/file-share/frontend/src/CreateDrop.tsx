@@ -1,5 +1,5 @@
 import { usePeer } from "@peerbit/react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { useEffect, useReducer, useState } from "react";
 import { Files } from "@peerbit/please-lib";
 import { getDropAreaPath } from "./routes";

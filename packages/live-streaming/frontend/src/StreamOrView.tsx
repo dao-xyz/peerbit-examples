@@ -1,6 +1,6 @@
 import { usePeer, useProgram } from "@peerbit/react";
 import { useState, useEffect } from "react";
-import { useParams } from "react-router-dom";
+import { useParams } from "react-router";
 import { View } from "./media/viewer/View";
 import { MediaStreamDB } from "@peerbit/video-lib";
 import { Editor } from "./media/streamer/Stream";

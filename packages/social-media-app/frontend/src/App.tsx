@@ -1,7 +1,7 @@
 // Content.tsx
 import { ClientBusyError, usePeer } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
-import { HashRouter } from "react-router-dom";
+import { HashRouter } from "react-router";
 import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
 import { AppProvider } from "./content/useApps";
@@ -21,7 +21,6 @@ import {
     useHeaderVisibilityContext,
 } from "./HeaderVisibilitiyProvider";
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
-import { ToolbarProvider } from "./canvas/toolbar/ToolbarContext";
 
 export const Content = () => {
     const { error: peerError } = usePeer();

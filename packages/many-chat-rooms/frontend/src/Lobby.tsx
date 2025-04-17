@@ -1,7 +1,7 @@
 import { useEffect, useReducer, useRef, useState } from "react";
 import { Box, Button, CircularProgress, Grid, Typography } from "@mui/material";
 import { NewRoomButtom } from "./NewRoom";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { getRoomPath } from "./routes";
 import { usePeer, useProgram } from "@peerbit/react";
 import { Lobby as LobbyDB, Room } from "@peerbit/example-many-chat-rooms";

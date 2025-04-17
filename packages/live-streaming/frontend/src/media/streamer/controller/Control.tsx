@@ -24,7 +24,7 @@ import { Spinner } from "../../../utils/Spinner.js";
 import { MediaStreamDB } from "@peerbit/video-lib";
 import { SourceSelect } from "./MenuSourceSelect.js";
 import { ResolutionSelect } from "./ResolutionSelect.js";
-import { useLocation } from "react-router-dom";
+import { useLocation } from "react-router";
 import { TimeSlider } from "../../controls/TimeSlider.js";
 import { ReplicatorCoverage } from "../../controls/ReplicatorCoverage.js";
 import { Share } from "../../controls/Share.js";

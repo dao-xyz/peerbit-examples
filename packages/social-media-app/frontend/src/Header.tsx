@@ -5,7 +5,7 @@ import { ProfileButton } from "./profile/ProfileButton";
 import { usePeer } from "@peerbit/react";
 import { Spinner } from "./utils/Spinner";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { CONNECT_DEVICES, getCanvasPath } from "./routes";
 import { HeaderLogo } from "./Logo";
 import { useCanvases } from "./canvas/useCanvas";

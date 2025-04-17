@@ -6,7 +6,7 @@ import { CanvasWrapper } from "./CanvasWrapper";
 import { SaveButton } from "./SaveCanvasButton";
 import { usePeer, useProgram } from "@peerbit/react";
 import { Canvas as CanvasDB } from "@giga-app/interface";
-import { useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router";
 import { LuSprout } from "react-icons/lu";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { fromBase64, toBase64 } from "@peerbit/crypto";

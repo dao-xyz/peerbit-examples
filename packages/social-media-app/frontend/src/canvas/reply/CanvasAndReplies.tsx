@@ -378,7 +378,7 @@ height: `${spacerHeight}px`,
                                 }}
                             >
                                 {showClickToSeeMore && (
-                                    <span className="p-2 m-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
+                                    <span className="p-2 m-2 z-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
                                         Click to see more
                                     </span>
                                 )}

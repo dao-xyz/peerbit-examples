@@ -1,5 +1,5 @@
 import { usePeer, useProgram } from "@peerbit/react";
-import { useNavigate, useParams } from "react-router-dom";
+import { useNavigate, useParams } from "react-router";
 import { useEffect, useReducer, useState } from "react";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import * as Toggle from "@radix-ui/react-toggle";

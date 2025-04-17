@@ -29,7 +29,7 @@ const useHeaderVisibility = (
     const [visible, setVisible] = useState(true);
     const prevScrollTopRef = useRef(getScrollTop());
     const lastUpPositionRef = useRef(getScrollTop());
-
+    console.log("HERE");
     useEffect(() => {
         const handleScroll = () => {
             const currentScrollTop = getScrollTop();
@@ -65,6 +65,7 @@ const useHeaderVisibility = (
                         currentScrollTop - lastUpPositionRef.current >
                         downDeltaThreshold
                     ) {
+                        console.log("SCROLLING DOWN!");
                         setVisible(false);
                     }
                 }
