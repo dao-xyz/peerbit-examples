@@ -167,7 +167,7 @@ export const MarkdownContent = ({
     const handleStartEditing = () => {
         setIsEditing(true);
         setTimeout(() => {
-            textareaRef.current?.focus();
+            textareaRef.current?.focus({ preventScroll: true });
             // set the cursor to the end of the text
             textareaRef.current?.setSelectionRange(text.length, text.length);
         }, 0);
@@ -189,7 +189,7 @@ export const MarkdownContent = ({
             // Optionally, move the cursor to the end of the inserted text
             setTimeout(() => {
                 if (textareaRef.current) {
-                    textareaRef.current.focus();
+                    textareaRef.current.focus({ preventScroll: true });
                     textareaRef.current.setSelectionRange(
                         suggestReply.length,
                         suggestReply.length
