@@ -339,7 +339,7 @@ height: `${spacerHeight}px`,
         When focused, no extra wrapper is applied so the Replies render inline. */}
                         <div
                             id="replies-container"
-                            className={`box ${
+                            className={`box pt-4  ${
                                 !repliesFocused
                                     ? "absolute inset-0 overflow-y-auto hide-scrollbar "
                                     : ""
