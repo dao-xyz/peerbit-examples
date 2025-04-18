@@ -193,7 +193,7 @@ const BreadcrumbPreview = ({
                         : "w-fit"
                     : "w-6",
                 isText && "px-1",
-                "flex-none h-6 rounded overflow-hidden border border-neutral-400 dark:border-neutral-600 "
+                "flex-none h-full flex items-center justify-center rounded overflow-hidden border border-neutral-400 dark:border-neutral-600 "
             )}
         >
             <PreviewFrame
@@ -203,6 +203,7 @@ const BreadcrumbPreview = ({
                 noPadding={isText}
                 maximizeHeight
                 onClick={onClick}
+                className={"w-full h-full flex items-center justify-center"}
             />
         </div>
     );

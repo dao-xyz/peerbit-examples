@@ -20,7 +20,6 @@ interface HeaderProps {
     fullscreen?: boolean;
 }
 
-export const HEIGHT = "40px";
 const EXPANDED_BREADCRUMB_PADDING = "100px";
 
 export const Header = forwardRef((props: HeaderProps, ref) => {
@@ -41,7 +40,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
     return (
         <div
             ref={ref as any}
-            className="h-fit grid grid-rows-[auto_1fr_auto] min-h-full relative"
+            className="h-fit grid grid-rows-[auto_1fr_auto] min-h-full relative  "
         >
             {!props.fullscreen && (
                 <>
@@ -67,7 +66,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                         )}
                         <div className="col-start-7 relative flex h-full w-full items-center ">
                             <div
-                                className={`w-full z-10 h-[${HEIGHT}] overflow-visible`}
+                                className={`w-full z-10 h-[40px] overflow-visible `}
                             >
                                 <CanvasPath
                                     isBreadcrumbExpanded={isBreadcrumbExpanded}

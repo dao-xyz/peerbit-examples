@@ -70,7 +70,7 @@ export const Content = () => {
                 {/* Main header with transform animation */}
                 <div
                     ref={headerRef}
-                    className={`sticky top-0 inset-x-0 z-2 transition-transform duration-800 ease-in-out`}
+                    className={`sticky top-0    inset-x-0 z-2 transition-transform duration-800 ease-in-out`}
                     style={{
                         transform: headerVisible
                             ? "translateY(0)"

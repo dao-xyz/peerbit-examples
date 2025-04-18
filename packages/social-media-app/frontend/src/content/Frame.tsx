@@ -296,9 +296,7 @@ export const Frame = (properties: {
                 properties.className || ""
             }`}
         >
-            <div className="w-full ">
-                {renderContent({ previewLines: properties.previewLines })}
-            </div>
+            {renderContent({ previewLines: properties.previewLines })}
 
             {!properties.active && (
                 <div

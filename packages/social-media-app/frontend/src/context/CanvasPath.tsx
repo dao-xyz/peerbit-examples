@@ -99,7 +99,7 @@ export const CanvasPath = ({
         <div className="flex flex-row gap-2 h-full items-center overflow-hidden">
             {/*  {lastThreeElements && lastThreeElements.length > 0 && */}
             <button
-                className="rounded hover:bg-neutral-200  dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-400 dark:border-neutral-600 inset-shadow-xs   inset-shadow-neutral-400/30 dark:inset-shadow-neutral-800/30 i overflow-hidden"
+                className="h-full rounded hover:bg-neutral-200  dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-400 dark:border-neutral-600 inset-shadow-xs   inset-shadow-neutral-400/30 dark:inset-shadow-neutral-800/30 i overflow-hidden"
                 onClick={() =>
                     setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
                 }
