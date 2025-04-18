@@ -36,7 +36,7 @@ const ThemedIframe = (properties: {
                 border: 0,
             }}
             src={properties.src}
-            allow="camera; microphone; allowtransparency; display-capture; fullscreen; autoplay; clipboard-write;"
+            allow="camera; microphone;  display-capture; fullscreen; autoplay; clipboard-write;"
         ></iframe>
     );
 };

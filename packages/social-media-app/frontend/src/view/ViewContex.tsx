@@ -130,7 +130,12 @@ function useViewContextHook() {
         isLoading,
     } = useLocalPaginated(
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
-        { ...query, transform: calculateAddress, batchSize }
+        {
+            ...query,
+            transform: calculateAddress,
+            batchSize,
+            debug: { id: "replies" },
+        }
     );
 
     const lastReply = useMemo(() => {

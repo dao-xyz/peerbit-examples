@@ -16,6 +16,19 @@ type QueryLike = {
 };
 type QueryOptions = { query: QueryLike; id: string };
 
+const logWithId = (
+    options: { debug?: boolean | { id: string } } | undefined,
+    ...args: any[]
+) => {
+    if (!options?.debug) return;
+
+    if (typeof options.debug === "boolean") {
+        console.log(...args);
+    } else if (typeof options.debug.id === "string") {
+        console.log(options.debug.id, ...args);
+    }
+};
+
 export const useLocalPaginated = <
     T extends Record<string, any>,
     I extends Record<string, any>,
@@ -44,19 +57,12 @@ export const useLocalPaginated = <
             options?.onChanges?.(combined);
         }
 
-        if (options?.debug) {
-            let dbgId =
-                typeof options.debug === "boolean"
-                    ? undefined
-                    : options.debug.id;
-            console.log(
-                "Loading more items, new combined length",
-                dbgId,
-                combined.length
-            );
-        }
+        logWithId(
+            options,
+            "Loading more items, new combined length",
+            combined.length
+        );
 
-        console.log("updateAll", "change: " + combined.length);
         allRef.current = combined;
 
         setAll(combined);
@@ -87,13 +93,7 @@ export const useLocalPaginated = <
                     resolve: options?.resolve as any,
                 }) as any as ResultsIterator<WithContext<RT>>; // TODO types
 
-                if (options?.debug) {
-                    let dbgId =
-                        typeof options.debug === "boolean"
-                            ? undefined
-                            : options.debug.id;
-                    console.log("Create new iterator", dbgId);
-                }
+                logWithId(options, "Initializing iterator");
 
                 loadMore(); // initial load
             } catch (error) {
@@ -113,16 +113,11 @@ export const useLocalPaginated = <
                 options?.query || {},
                 options?.resolve ?? true
             );
-            console.log(
-                "merge result",
-                "change: " +
-                    (merged === allRef.current &&
-                        merged.length &&
-                        allRef.current.length === 0),
-                merged,
-                all,
-                e.detail,
-                allRef.current
+            logWithId(
+                options,
+                "handleChange",
+                merged.length,
+                allRef.current.length
             );
             if (
                 merged === allRef.current &&
@@ -151,7 +146,7 @@ export const useLocalPaginated = <
     // Define the loadMore function
     const loadMore = async () => {
         if (!iteratorRef.current || emptyResultsRef.current) {
-            console.log("loadMore: already loading or no more items", {
+            logWithId(options, "loadMore: already loading or no more items", {
                 isLoading,
                 emptyResultsRef: emptyResultsRef.current,
                 iteratorRef: !iteratorRef.current,
@@ -177,6 +172,7 @@ export const useLocalPaginated = <
             if (iteratorRef.current !== refBefore) {
                 // If the iterator has changed, we should not update the state
                 // This can happen if the iterator was closed and a new one was created
+                logWithId(options, "Iterator ref changed, not updating state");
                 return;
             }
 
@@ -189,17 +185,20 @@ export const useLocalPaginated = <
                     (x) => !prevHash.has(x.__context.head)
                 );
                 if (newItemsNoHash.length === 0) {
-                    console.log("no new items, not updating state");
+                    logWithId(options, "no new items, not updating state");
                     return;
                 }
                 const combined = options?.reverse
                     ? [...newItemsNoHash.reverse(), ...prev]
                     : [...prev, ...newItemsNoHash];
                 updateAll(combined);
+            } else {
+                logWithId(options, "no new items, not updating state");
             }
         } catch (error) {
             if (error instanceof ClosedError) {
                 // Handle closed database gracefully
+                logWithId(options, "Database closed error");
             } else {
                 throw error;
             }

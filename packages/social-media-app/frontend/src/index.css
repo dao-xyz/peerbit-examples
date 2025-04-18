@@ -13,6 +13,7 @@ body {
     -moz-osx-font-smoothing: grayscale;
 
     overflow-anchor: auto;
+    /*  scroll-snap-stop: always; */
     /* Prevents scroll anchoring (scrolling through a feed with dynamic content looks better this way) */
 }
 
@@ -692,6 +693,46 @@ code {
         white-space: nowrap;
         text-overflow: ellipsis;
     }
+
+    :root {
+        timeline-scope: --scroll;
+        animation: --scroll forwards;
+        animation-timeline: --scroll;
+        container-name: --scroll;
+        /* needed for style query */
+    }
+
+    .box {
+        scroll-timeline: --scroll;
+    }
+
+    @keyframes --scroll {
+
+        0%,
+        to {
+            --scroll: 1;
+        }
+    }
+
+    /* style query is not mandatory
+         --scroll variable is inherited by all the elements
+         so you can use it to do calculation as well
+      */
+
+
+    .overflow-container-guide {
+        display: none !important;
+    }
+
+    @container --scroll style(--scroll: 1) {
+
+        .overflow-container-guide {
+            display: flex !important;
+        }
+    }
+
+
+
 }
 
 @keyframes spinx {

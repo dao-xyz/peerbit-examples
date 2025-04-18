@@ -123,7 +123,11 @@ export const AutoReplyProvider: React.FC<{
         if (view === "chat") {
             if (processedReplies.length > 0) {
                 let last = processedReplies[processedReplies.length - 1]?.reply;
-                if (view === "chat" && last) {
+                if (
+                    view === "chat" &&
+                    last &&
+                    replyTo.address !== last.address
+                ) {
                     console.log("AUTO REPLY TO", last, processedReplies.length);
                     setReplyTo(last);
                 }

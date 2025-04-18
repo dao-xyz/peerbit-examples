@@ -58,7 +58,7 @@ const loadingTexts = [
 const textToLoad =
     loadingTexts[Math.floor(Math.random() * loadingTexts.length)];
 
-const SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT = 5;
+const SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT = 15;
 
 const shouldFocusRepliesByDefault = (view?: ViewType) => {
     // For view types other than "best" or "old", we want the new scroll-based effect.
@@ -136,14 +136,10 @@ export const CanvasAndRepliesInner = () => {
 
     const toolbarVisible = useToolbarVisibility(scrollContainerRef);
 
-    // For view types other than "best" or "old", we want the new scroll-based effect.
-
     // When using the new behavior, initially the Replies area is unfocused.
     const [repliesFocused, setRepliesFocused] = useState(
         shouldFocusRepliesByDefault(view)
     );
-
-    const [showClickToSeeMore, setShowClickToSeeMore] = useState(false);
 
     useEffect(() => {
         if (view) {
@@ -203,28 +199,36 @@ export const CanvasAndRepliesInner = () => {
     }, [repliesScrollRef.current, postRef.current, repliesFocused]);
 
     // Set up a ResizeObserver on the fixed Replies container to check for overflow.
-    useEffect(() => {
-        if (!repliesScrollRef.current || repliesFocused) {
-            // Only observe when Replies are unfocused.
-            setShowClickToSeeMore(false);
-            return;
-        }
-        const container = repliesScrollRef.current;
-        const checkOverflow = () => {
-            // Compare scrollHeight and clientHeight.
-            setShowClickToSeeMore(
-                container.scrollHeight > container.clientHeight
-            );
-        };
-        checkOverflow();
-        const observer = new ResizeObserver(() => {
-            checkOverflow();
-        });
-        observer.observe(container);
-        return () => {
-            observer.disconnect();
-        };
-    }, [repliesFocused, repliesScrollRef.current]);
+    /*  useEffect(() => {
+         if (!repliesScrollRef.current || repliesFocused) {
+             // Only observe when Replies are unfocused.
+             setShowClickToSeeMore(false);
+             return;
+         }
+         const container = repliesScrollRef.current;
+         // https://css-tip.com/overflow-detection/  do something like this instead
+         const checkOverflow = () => {
+             // Compare scrollHeight and clientHeight.
+             console.log("CHECK OVERFLOW", {
+                 scrollHeight: container.scrollHeight,
+                 clientHeight: container.clientHeight,
+                 offsetHeight: container.offsetHeight,
+                 container
+             })
+             setShowClickToSeeMore(
+                 container.scrollHeight > container.clientHeight
+             );
+         };
+      
+         checkOverflow();
+         const observer = new ResizeObserver(() => {
+             checkOverflow();
+         });
+         observer.observe(container);
+         return () => {
+             observer.disconnect();
+         };
+     }, [repliesFocused, repliesScrollRef.current]); */
 
     if (!canvases || canvases.length === 0) {
         return (
@@ -261,7 +265,10 @@ export const CanvasAndRepliesInner = () => {
         }, 100); // This seems to be necessary on IOS Safari to avoid down scrolls to trigger focus again immediately
     };
 
-    const bottomPadding = fullscreenEditorActive ? 10 : 10 + toolbarHeight;
+    const EXTRA_PADDING_BOTTOM = 10;
+    const bottomPadding = fullscreenEditorActive
+        ? EXTRA_PADDING_BOTTOM
+        : EXTRA_PADDING_BOTTOM + toolbarHeight;
 
     return (
         <>
@@ -280,7 +287,12 @@ export const CanvasAndRepliesInner = () => {
                     paddingBottom: bottomPadding,
                     height: repliesFocused
                         ? "fit-content"
-                        : `calc(100% + ${spacerHeight}px)`,
+                        : `calc(100% + ${
+                              spacerHeight -
+                              toolbarHeight +
+                              EXTRA_PADDING_BOTTOM +
+                              SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT
+                          }px)`,
                 }}
             >
                 {/* Header section */}
@@ -327,7 +339,7 @@ height: `${spacerHeight}px`,
         When focused, no extra wrapper is applied so the Replies render inline. */}
                         <div
                             id="replies-container"
-                            className={`${
+                            className={`box ${
                                 !repliesFocused
                                     ? "absolute inset-0 overflow-y-auto hide-scrollbar "
                                     : ""
@@ -335,8 +347,8 @@ height: `${spacerHeight}px`,
                             ref={repliesScrollRef}
                             style={
                                 {
-                                    /*   paddingBottom: `${!repliesFocused ? 0 : toolbarHeight
-                                      }px` */
+                                    /*   paddingBottom: `${repliesFocused ? 0 : toolbarHeight
+                                          }px` */
                                     /* For some reason we need this for focused view??? */
                                 }
                             }
@@ -360,11 +372,12 @@ height: `${spacerHeight}px`,
         This overlay is absolutely positioned over the container and does not receive pointer events. */}
                         {!repliesFocused && (
                             <div
-                                className="absolute inset-0 cursor-pointer flex flex-col justify-start items-center " /* bg-gradient-to-t from-transparent to-neutral-50 dark:from-transparent dark:to-black */
+                                className="absolute inset-0 z-3 cursor-pointer flex flex-col justify-start items-center overflow-container-guide"
                                 onClick={(e) => {
                                     if (repliesFocused) {
                                         return;
                                     }
+                                    console.log("CLICKED TO");
                                     e.preventDefault();
                                     e.stopPropagation();
                                     setRepliesFocused(true);
@@ -373,15 +386,14 @@ height: `${spacerHeight}px`,
                                     if (repliesFocused) {
                                         return;
                                     }
+                                    e.preventDefault();
                                     e.stopPropagation();
                                     setRepliesFocused(true);
                                 }}
                             >
-                                {showClickToSeeMore && (
-                                    <span className="p-2 m-2 z-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
-                                        Click to see more
-                                    </span>
-                                )}
+                                <span className="p-2 m-2 z-2 bg-white/50 dark:bg-black/50 text-neutral-950 dark:text-neutral-50 rounded text-sm font-semibold shadow-md backdrop-blur-xs">
+                                    Click to see more
+                                </span>
                             </div>
                         )}
                     </div>

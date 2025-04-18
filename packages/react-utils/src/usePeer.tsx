@@ -29,12 +29,6 @@ const isInStandaloneMode = () =>
     window.navigator["standalone"] ||
     document.referrer.includes("android-app://");
 
-if (isInStandaloneMode()) {
-    console.log("webapp is installed");
-} else {
-    console.log("webapp is not installed");
-}
-
 export class ClientBusyError extends Error {
     constructor(message: string) {
         super(message);
@@ -202,7 +196,7 @@ export const PeerProvider = (options: PeerOptions) => {
                             mutex.release(lockKey);
                         });
                         if (isInStandaloneMode()) {
-                            // PWA issue fix
+                            // PWA issue fix (? TODO is this needed ?
                             mutex.release(lockKey);
                         }
                         await mutex.lock(lockKey, () => true, {

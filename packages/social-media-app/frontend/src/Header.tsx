@@ -84,7 +84,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                         className="fixed inset-x-0   h-full sm:absolute sm:top-full z-40 sm:pb-10"
                                     >
                                         <div
-                                            className="w-full  sm:h-fit overflow-y-auto sm:border-x sm:border-b sm:rounded-b-md sm:bg-neutral-50 dark:sm:bg-neutral-950"
+                                            className="w-full  sm:h-fit overflow-y-auto sm:border-x sm:border-b sm:rounded-b-md  sm:bg-neutral-50 dark:sm:bg-neutral-950"
                                             style={{
                                                 maxHeight: `calc(100vh - ${EXPANDED_BREADCRUMB_PADDING})`,
                                             }}
