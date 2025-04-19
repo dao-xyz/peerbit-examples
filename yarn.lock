@@ -1716,7 +1716,7 @@
     "@ethersproject/rlp" "^5.8.0"
     "@ethersproject/signing-key" "^5.8.0"
 
-"@ethersproject/wallet@^5.7.0":
+"@ethersproject/wallet@^5.8.0":
   version "5.8.0"
   resolved "https://registry.yarnpkg.com/@ethersproject/wallet/-/wallet-5.8.0.tgz#49c300d10872e6986d953e8310dc33d440da8127"
   integrity sha512-G+jnzmgg6UxurVKRKvw27h0kvG75YKXZKdlLYmAHeF32TGUzHkOFd7Zn6QHOTYRFWnfjtSSFjBowKo7vfrXzPA==
@@ -1796,14 +1796,15 @@
   integrity sha512-MDWhGtE+eHw5JW7lq4qhc5yRLS11ERl1c7Z6Xd0a58DozHES6EnNNwUWbMiG4J9Cgj053Bhk8zvlhFYKVhULwg==
 
 "@headlessui/react@^2.2.0":
-  version "2.2.1"
-  resolved "https://registry.yarnpkg.com/@headlessui/react/-/react-2.2.1.tgz#f694e669b741db97d9fab8de095e8bc3942404fb"
-  integrity sha512-daiUqVLae8CKVjEVT19P/izW0aGK0GNhMSAeMlrDebKmoVZHcRRwbxzgtnEadUVDXyBsWo9/UH4KHeniO+0tMg==
+  version "2.2.2"
+  resolved "https://registry.yarnpkg.com/@headlessui/react/-/react-2.2.2.tgz#adbfed24a10b73a4951462c5a6c120a7f886d05d"
+  integrity sha512-zbniWOYBQ8GHSUIOPY7BbdIn6PzUOq0z41RFrF30HbjsxG6Rrfk+6QulR8Kgf2Vwj2a/rE6i62q5vo+2gI5dJA==
   dependencies:
     "@floating-ui/react" "^0.26.16"
     "@react-aria/focus" "^3.17.1"
     "@react-aria/interactions" "^3.21.3"
-    "@tanstack/react-virtual" "^3.11.1"
+    "@tanstack/react-virtual" "^3.13.6"
+    use-sync-external-store "^1.5.0"
 
 "@humanwhocodes/config-array@^0.13.0":
   version "0.13.0"
@@ -2076,9 +2077,9 @@
     yargs-parser "21.1.1"
 
 "@libp2p/circuit-relay-v2@^3.2.9":
-  version "3.2.10"
-  resolved "https://registry.yarnpkg.com/@libp2p/circuit-relay-v2/-/circuit-relay-v2-3.2.10.tgz#abbf18e7d89d73243bf3c4d4a89fb7ba81852e07"
-  integrity sha512-WG+8wQniqQG9fljerPz/I00PmaNC09HiqkftlSxz+B3Z9auXadU8Cw4gV21f/U2rs9jzLM+uQV2d+BWopPmb6g==
+  version "3.2.11"
+  resolved "https://registry.yarnpkg.com/@libp2p/circuit-relay-v2/-/circuit-relay-v2-3.2.11.tgz#f699ad0c58ad36095ed4aba53c04133d7fffe5d7"
+  integrity sha512-cSIYAupIDy/nDWc69FYvJp1fbLZaq3CycPzv1bl0lVDySvoVU6MsgOCXn+M8nKcuEXZrmuJGu28hAuor3noNfQ==
   dependencies:
     "@libp2p/crypto" "^5.1.1"
     "@libp2p/interface" "^2.9.0"
@@ -2294,9 +2295,9 @@
     uint8arrays "^5.1.0"
 
 "@libp2p/webrtc@^5", "@libp2p/webrtc@^5.2.10":
-  version "5.2.11"
-  resolved "https://registry.yarnpkg.com/@libp2p/webrtc/-/webrtc-5.2.11.tgz#5a0e3fd9dcbbb4817c14731563f535e5b61377d9"
-  integrity sha512-u7vE2LicfQ+tcFJdyXn5zz0Hx8qVP2hkG6lyVnELmh/RIg+NkA6cQ44y30DuYP3M6HYCHYPOfEpydWFwe0ssLw==
+  version "5.2.12"
+  resolved "https://registry.yarnpkg.com/@libp2p/webrtc/-/webrtc-5.2.12.tgz#1cce271cfffa4d41e1eb1e09678291eab9e64e41"
+  integrity sha512-ObmCeK28PmN1vqgJ52YPNHfMFrTWBlXEGAXzJlgMuuvJ4Y94of7Ej1kZWhsfGWyfrhELEcFtioPCzeaSdbeB7A==
   dependencies:
     "@chainsafe/is-ip" "^2.0.2"
     "@chainsafe/libp2p-noise" "^16.0.0"
@@ -2959,50 +2960,50 @@
   resolved "https://registry.yarnpkg.com/@peerbit/any-store-interface/-/any-store-interface-1.0.0.tgz#a3907b612c254e8779e54ea856ac794c1768e2e6"
   integrity sha512-Hlqzy0oFoynmpaxnaVzPByyagXorCZVWVAm+E179uXZRHwfa9KUZ9uGevAAIQFBh6WgiM5Vne6Whjg+9EJBxGA==
 
-"@peerbit/any-store-opfs@^1.0.8":
-  version "1.0.8"
-  resolved "https://registry.yarnpkg.com/@peerbit/any-store-opfs/-/any-store-opfs-1.0.8.tgz#76b4628c24042d75cda428bf91e9e731c1a59bd6"
-  integrity sha512-Ypgmfj6V/dOPOJKf7vayfFEw2mjfYYhbJDYSBXGFbGovbtoc353I5KyFHCUfrkmN4GAfRsQCSrtVi49UjD5TEQ==
+"@peerbit/any-store-opfs@^1.0.9":
+  version "1.0.9"
+  resolved "https://registry.yarnpkg.com/@peerbit/any-store-opfs/-/any-store-opfs-1.0.9.tgz#d417a53eb423c5a2f85594f5d9aa2f45178606c1"
+  integrity sha512-7cA4c/leRjF0xDLP9mTdOrdOyXjNS3yHClgJoEJ9YEJZi+phh0BY3J/LqrcvPyJDIANN2CmMFQ6cJdYSSUZL2A==
   dependencies:
     "@peerbit/any-store-interface" "^1.0.0"
-    "@peerbit/crypto" "^2.3.7"
+    "@peerbit/crypto" "^2.3.8"
     "@peerbit/logger" "1.0.3"
     "@peerbit/time" "2.1.0"
     uuid "^10.0.0"
 
-"@peerbit/any-store@^2.1.8":
-  version "2.1.8"
-  resolved "https://registry.yarnpkg.com/@peerbit/any-store/-/any-store-2.1.8.tgz#7bef1dcd1f14acdc33cc423da447a4216f516eac"
-  integrity sha512-Maje234KZCRQuYhq2JYxDCsup03eE0eJ15EBA8wrHIv0thWwSm/jI9IeJLpE+MJycGnnTN8Zf0v+kqOVYhy+zw==
+"@peerbit/any-store@^2.1.9":
+  version "2.1.9"
+  resolved "https://registry.yarnpkg.com/@peerbit/any-store/-/any-store-2.1.9.tgz#575f52600648b34e5d4325009d61ebb6dcac165f"
+  integrity sha512-aXidChHtmM0G2UiOi3k9G5ikI1CMEDTytG5bX+xbNMy75K+xttYSyaIOQ/9TX0eucKe6HyhOvcgdnvUHRIU3Ig==
   dependencies:
     "@peerbit/any-store-interface" "^1.0.0"
-    "@peerbit/any-store-opfs" "^1.0.8"
-    "@peerbit/crypto" "^2.3.7"
+    "@peerbit/any-store-opfs" "^1.0.9"
+    "@peerbit/crypto" "^2.3.8"
     "@peerbit/logger" "1.0.3"
     "@peerbit/time" "2.1.0"
     level "^8.0.0"
     uuid "^10.0.0"
 
-"@peerbit/blocks-interface@1.4.3", "@peerbit/blocks-interface@^1.4.3":
-  version "1.4.3"
-  resolved "https://registry.yarnpkg.com/@peerbit/blocks-interface/-/blocks-interface-1.4.3.tgz#384ccaf6e577f03f57e43ac1d56fec4f4919c57e"
-  integrity sha512-ZA6QtGY2H31uQeSg0CqYVrx+yzjMotkBjgEGSGav4oUI2PuC1IgvUztSXUC3Z4xKZmlfQEotNwq9yGtYQpDz6w==
+"@peerbit/blocks-interface@1.4.4", "@peerbit/blocks-interface@^1.4.4":
+  version "1.4.4"
+  resolved "https://registry.yarnpkg.com/@peerbit/blocks-interface/-/blocks-interface-1.4.4.tgz#dd231288ba6ffc85a7d50b9497fe43d098fe7417"
+  integrity sha512-hU7NaroCzj9h1+CANBhqbN2Z3uQs48+vvWbmNLz6M09VzwMzvgg0pFm5KphHnGWz9OIPZ7G2DQ66zKsK8g+YWg==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/crypto" "2.3.7"
-    "@peerbit/stream-interface" "^5.2.1"
+    "@peerbit/crypto" "2.3.8"
+    "@peerbit/stream-interface" "^5.2.2"
 
-"@peerbit/blocks@^2.3.3":
-  version "2.3.3"
-  resolved "https://registry.yarnpkg.com/@peerbit/blocks/-/blocks-2.3.3.tgz#abec30beb9e51bedb160726b14ef0c71ae2068dc"
-  integrity sha512-HmlD7/bjAwie3YtG9aMCQXdCESrRI6QugP5FtAlSP9U8nzTu+eGf+4HbDtEfk+tiNjMNpHmgOOPgs7Cr1ikuTw==
+"@peerbit/blocks@^2.3.4":
+  version "2.3.4"
+  resolved "https://registry.yarnpkg.com/@peerbit/blocks/-/blocks-2.3.4.tgz#8822401b17d9a3186252e7fdd3c2c0639f93814a"
+  integrity sha512-3ExPOpjY8/qIlUDY/f9lTMttiIgHwVgmeWj0RykvN5y6sAbqR27rnPqnX0/fsugIYxmdPfYd4qZyRq/wBMJjiQ==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
     "@ipld/dag-cbor" "^9.2.1"
-    "@peerbit/any-store" "^2.1.8"
-    "@peerbit/blocks-interface" "1.4.3"
-    "@peerbit/crypto" "2.3.7"
-    "@peerbit/stream" "4.3.2"
+    "@peerbit/any-store" "^2.1.9"
+    "@peerbit/blocks-interface" "1.4.4"
+    "@peerbit/crypto" "2.3.8"
+    "@peerbit/stream" "4.3.3"
     multiformats "^13.0.1"
 
 "@peerbit/cache@2.1.3", "@peerbit/cache@^2.1.3":
@@ -3012,75 +3013,75 @@
   dependencies:
     yallist "^4.0.0"
 
-"@peerbit/crypto@2.3.7", "@peerbit/crypto@^2.3.7":
-  version "2.3.7"
-  resolved "https://registry.yarnpkg.com/@peerbit/crypto/-/crypto-2.3.7.tgz#35f473225350ca85e122ea69397cd905d95ef14b"
-  integrity sha512-bCioX8q3HJLYVDJWsnTzAmiR7Yecn3EH2LOAtUfktIawzl/3qIXpC17CtmYffvSw2OCIknfvW+uZbj157ef9yg==
+"@peerbit/crypto@2.3.8", "@peerbit/crypto@^2.3.8":
+  version "2.3.8"
+  resolved "https://registry.yarnpkg.com/@peerbit/crypto/-/crypto-2.3.8.tgz#7d5b266c107af5818779ecff724c8f18a16a8960"
+  integrity sha512-gOcDfZBhkEvER8v/FpDIqTQ3G1vwXjbdbK+fp4MwI/+OsnvJ9q/nRgy1FgVRCRe3+YhSyiw+nJ/F2vPHjyBDZg==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@ethersproject/wallet" "^5.7.0"
+    "@ethersproject/wallet" "^5.8.0"
     "@libp2p/crypto" "^5.0.11"
     "@libp2p/peer-id" "^5.0.12"
     "@peerbit/cache" "^2.1.3"
     "@stablelib/sha256" "^2.0.0"
     libsodium-wrappers "^0.7.15"
 
-"@peerbit/document-interface@^2.0.27":
-  version "2.0.27"
-  resolved "https://registry.yarnpkg.com/@peerbit/document-interface/-/document-interface-2.0.27.tgz#ed2c45bf494de756d4b4c6ad564eb508b91dea18"
-  integrity sha512-sgSj4MtsXe55lMJbeZTr4vdO3vNEaihADsDzTgEfEkwr0c9CPZsovTccuBwDOOgKEzR8khXYBFkwIW6TY46IhQ==
+"@peerbit/document-interface@^2.0.28":
+  version "2.0.28"
+  resolved "https://registry.yarnpkg.com/@peerbit/document-interface/-/document-interface-2.0.28.tgz#ac85b2863b2ea3df3cd3be7487091f41c15b8da0"
+  integrity sha512-RoUa6FB7O7Cy0MwdH+SgL8/emac6W2WAEdzVNp7mtMSwhdhQ9I3UzbhqLlp15WUotZoX8JfIcwd8Okod1dyDyQ==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/crypto" "^2.3.7"
-    "@peerbit/indexer-interface" "^2.0.8"
-    "@peerbit/log" "4.0.53"
+    "@peerbit/crypto" "^2.3.8"
+    "@peerbit/indexer-interface" "^2.0.9"
+    "@peerbit/log" "4.0.54"
 
-"@peerbit/document@9.3.18", "@peerbit/document@^9":
-  version "9.3.18"
-  resolved "https://registry.yarnpkg.com/@peerbit/document/-/document-9.3.18.tgz#a871ac576cc370ac87501b25e90fb8d6252abd54"
-  integrity sha512-LmWydaox7KyFz24KraLWsPY5FjTcjavIfCdu182+mKmrLxfyfhgcwBiWAiggiNJCrO4uqQA3bEJTAPkwRmPY4A==
+"@peerbit/document@9.3.19", "@peerbit/document@^9":
+  version "9.3.19"
+  resolved "https://registry.yarnpkg.com/@peerbit/document/-/document-9.3.19.tgz#e7d8cafac2c72f096a47fedbdec7ad193873f1d1"
+  integrity sha512-0hJtRePAnYm7vwxHmqzONncDB8KtU+ivkpaWx58XWfu+ZXEDVxWz7Q6Cc9hRUPaNLTBr+bUgx8ZVVPEn0RqQmw==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/document-interface" "^2.0.27"
-    "@peerbit/indexer-interface" "^2.0.8"
-    "@peerbit/indexer-simple" "^1.1.13"
-    "@peerbit/indexer-sqlite3" "^1.2.17"
-    "@peerbit/program" "5.2.6"
-    "@peerbit/rpc" "5.2.8"
-    "@peerbit/shared-log" "11.0.5"
+    "@peerbit/document-interface" "^2.0.28"
+    "@peerbit/indexer-interface" "^2.0.9"
+    "@peerbit/indexer-simple" "^1.1.14"
+    "@peerbit/indexer-sqlite3" "^1.2.18"
+    "@peerbit/program" "5.2.7"
+    "@peerbit/rpc" "5.2.9"
+    "@peerbit/shared-log" "11.0.6"
 
-"@peerbit/indexer-interface@^2.0.8":
-  version "2.0.8"
-  resolved "https://registry.yarnpkg.com/@peerbit/indexer-interface/-/indexer-interface-2.0.8.tgz#d02b7a94deefb4a9729ea66a4ba93307fe575780"
-  integrity sha512-31geUyfojmHluye3AfLcgtgxXBN6drkpLPdW4p63pnrxgPEFweGs8lnnUWhZLIIXVwEt2/GNFsaBZ2N8f3bSdA==
+"@peerbit/indexer-interface@^2.0.9":
+  version "2.0.9"
+  resolved "https://registry.yarnpkg.com/@peerbit/indexer-interface/-/indexer-interface-2.0.9.tgz#769d5db095a0dbf176fe7328aa48d48efa8771d7"
+  integrity sha512-kwPq7lJUt7AWOkHsM84RIxtCUstMfZWpbZTk/NCPQUZLHHJ4Jr5Vz5FsCBzR/rF3UxUYtnE5npfXvpAAM+pNDQ==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/crypto" "^2.3.7"
+    "@peerbit/crypto" "^2.3.8"
     uuid "^10.0.0"
 
-"@peerbit/indexer-simple@^1.1.13":
-  version "1.1.13"
-  resolved "https://registry.yarnpkg.com/@peerbit/indexer-simple/-/indexer-simple-1.1.13.tgz#b95666ae80bdd6acd55d1aa4e8d77d05cb5ff018"
-  integrity sha512-PU4eXHxvdwiFaDr4nhr1WJHfOb76C6zI4j1t+hX2mT9RVQchRSVU18DYK4W9CToYFEg6VsNxY7Metmuz/xa3fA==
+"@peerbit/indexer-simple@^1.1.14":
+  version "1.1.14"
+  resolved "https://registry.yarnpkg.com/@peerbit/indexer-simple/-/indexer-simple-1.1.14.tgz#6b53f8e30f92707010a2fe45064312717fad36c1"
+  integrity sha512-QEhGUkYQYzcnEn0ck/WjKetxPagaZx8LY4W/3j+QbYV8EUuxZEolJqZkWTC255Fw9esSLPdt1JxZmtV2QnmKYg==
   dependencies:
-    "@peerbit/indexer-interface" "^2.0.8"
+    "@peerbit/indexer-interface" "^2.0.9"
 
-"@peerbit/indexer-sqlite3@^1.2.17":
-  version "1.2.17"
-  resolved "https://registry.yarnpkg.com/@peerbit/indexer-sqlite3/-/indexer-sqlite3-1.2.17.tgz#8912d8e4743f68945c9674dd66189528040106d0"
-  integrity sha512-gfwrvqyesysyjY72hCEfwxNskjos8jmg3wpZMgZl6miMWu40X7EKMSf8xLlM6n+RdWDiEg7Mde0RPNQbA2chhA==
+"@peerbit/indexer-sqlite3@^1.2.18":
+  version "1.2.18"
+  resolved "https://registry.yarnpkg.com/@peerbit/indexer-sqlite3/-/indexer-sqlite3-1.2.18.tgz#09bd8696c3848b5a1a9d1247c50625e6d327b500"
+  integrity sha512-8aNhmBmbqOr45RzpV6WYR1t1G7MTv9rzHdTxNESWMCHJmZbU2Ptk8GlkOxeS+wcwqB3aF2RKSjIuOsR+XgIO8Q==
   dependencies:
-    "@peerbit/indexer-interface" "^2.0.8"
+    "@peerbit/indexer-interface" "^2.0.9"
     "@sqlite.org/sqlite-wasm" "^3.49.1-build2"
     better-sqlite3 "^11.9.1"
 
-"@peerbit/keychain@^1.0.26":
-  version "1.0.26"
-  resolved "https://registry.yarnpkg.com/@peerbit/keychain/-/keychain-1.0.26.tgz#1964494b9b03065b2628949c71dd43fb4c30aaee"
-  integrity sha512-FdokxVW30jDuakA8WXNRg8H3Rm6wL8edbJA0jXUCkWqE+UKfYmccG4jdbwgi7sBo9chP/megvE4Vl2sqDvHp3Q==
+"@peerbit/keychain@^1.0.27":
+  version "1.0.27"
+  resolved "https://registry.yarnpkg.com/@peerbit/keychain/-/keychain-1.0.27.tgz#5ba919ce0be5b28d7a5b22d88bad89a6822f6d23"
+  integrity sha512-LhkCL2QbEH8XciFGYcjrXOTAzyMK1m7lS72Qx7KuyConRb+m7h/s6SkrsNwgspSFouPWA8GpejvaCIj6N4VRxQ==
   dependencies:
-    "@peerbit/any-store" "^2.1.8"
-    "@peerbit/crypto" "^2.3.7"
+    "@peerbit/any-store" "^2.1.9"
+    "@peerbit/crypto" "^2.3.8"
 
 "@peerbit/libp2p-test-utils@2.1.16":
   version "2.1.16"
@@ -3094,17 +3095,17 @@
     "@libp2p/websockets" "^9.2.9"
     libp2p "^2.8.3"
 
-"@peerbit/log@4.0.53":
-  version "4.0.53"
-  resolved "https://registry.yarnpkg.com/@peerbit/log/-/log-4.0.53.tgz#b9b20273ae3fa6f34f6c4ce0bd0caf0a5295afb1"
-  integrity sha512-4R4S7jcqvbrqUJRZMTdK0OG+40ni0PrzGASig88D7Xf5F8PjkIDIPg8Menk3mWFLMcFoL0dVn1xprpoH8e+EGQ==
+"@peerbit/log@4.0.54":
+  version "4.0.54"
+  resolved "https://registry.yarnpkg.com/@peerbit/log/-/log-4.0.54.tgz#0845d2dcd05e5b32b977d506ece3c60b0c1a9405"
+  integrity sha512-Rkf0dSr/NeVTuOuOk93Jez6yFkA1FE1zLp6nZsjfElWcdE5SO43rH0+PXbhq3WBlmGx6xDwipYCD+2Rj4818eA==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/blocks-interface" "^1.4.3"
+    "@peerbit/blocks-interface" "^1.4.4"
     "@peerbit/cache" "2.1.3"
-    "@peerbit/crypto" "2.3.7"
-    "@peerbit/indexer-interface" "^2.0.8"
-    "@peerbit/indexer-simple" "^1.1.13"
+    "@peerbit/crypto" "2.3.8"
+    "@peerbit/indexer-interface" "^2.0.9"
+    "@peerbit/indexer-simple" "^1.1.14"
     "@peerbit/logger" "1.0.3"
     "@peerbit/time" "2.1.0"
     libp2p "^2.8.3"
@@ -3119,100 +3120,100 @@
   dependencies:
     pino "^8.14.1"
 
-"@peerbit/program@5.2.6", "@peerbit/program@^5.2.6":
-  version "5.2.6"
-  resolved "https://registry.yarnpkg.com/@peerbit/program/-/program-5.2.6.tgz#70a42de6fe59e825a9c4ad979c83898dad4d2fdc"
-  integrity sha512-cGAACFt69NRp5g0kZcS3sk4zp2mEKufihCHaoJrovhdp9oJagLZrx1KkFQQ+7KBuopHRQt1TqpxRGEXDBCriFA==
+"@peerbit/program@5.2.7", "@peerbit/program@^5.2.7":
+  version "5.2.7"
+  resolved "https://registry.yarnpkg.com/@peerbit/program/-/program-5.2.7.tgz#388a3361dbbe4f6f7124f46e0d954a6967dfb9dc"
+  integrity sha512-1WRWLOz3r1BzOsSGYIaMWbgTHyLP55sVyZmN06c6R3+M2NVIask9u4Li2xve9fW+BKiNr5wnfghCWeoDy5n57Q==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
     "@peerbit/any-store-interface" "^1.0.0"
-    "@peerbit/blocks-interface" "^1.4.3"
-    "@peerbit/crypto" "2.3.7"
-    "@peerbit/keychain" "^1.0.26"
-    "@peerbit/pubsub-interface" "^4.0.0"
+    "@peerbit/blocks-interface" "^1.4.4"
+    "@peerbit/crypto" "2.3.8"
+    "@peerbit/keychain" "^1.0.27"
+    "@peerbit/pubsub-interface" "^4.0.1"
 
 "@peerbit/proxy-window@^3":
-  version "3.0.87"
-  resolved "https://registry.yarnpkg.com/@peerbit/proxy-window/-/proxy-window-3.0.87.tgz#2cc0edccf637bbf4adfe8d91be6823c3af5a8b31"
-  integrity sha512-AxoCN1jHvZudDrMM4GrQqTkDOEsOx0Cw4zMrcHcdUYoJ8HljQqZWjjTTixoXjG2ikXNE9hZK6j3QVSNGv3QdAQ==
+  version "3.0.88"
+  resolved "https://registry.yarnpkg.com/@peerbit/proxy-window/-/proxy-window-3.0.88.tgz#89a58013c72356b34a1626fb6b167ae33d33358c"
+  integrity sha512-RjpwX0+DJsuMAYW4TgKZtsCwLspRXA2k/tQQQ83uHawzOAmWqqs1kvPrzMV4Rj3+ZhNZ00y3YVOG+3f3IJ27Jg==
   dependencies:
-    "@peerbit/proxy" "^5.2.7"
+    "@peerbit/proxy" "^5.2.8"
 
-"@peerbit/proxy@^5.2.7":
-  version "5.2.7"
-  resolved "https://registry.yarnpkg.com/@peerbit/proxy/-/proxy-5.2.7.tgz#7813858df4abd4697d383398a8ef24d92ac19c94"
-  integrity sha512-5PRv6kz3JnBe291INkBZWTOyKLwp+5RTq+RGy3cIb2QoUUNHzrZVBa+bSYsbiQkwMZWGJXIsnmwBneQqa1PLeg==
+"@peerbit/proxy@^5.2.8":
+  version "5.2.8"
+  resolved "https://registry.yarnpkg.com/@peerbit/proxy/-/proxy-5.2.8.tgz#276033035be351d9d7cc76ae15a546c962ae35a8"
+  integrity sha512-mKihNNao8w19VD8MST/31gmpVP+6qdqJkp+AaJ8rVubPaTbYLuEuzltZuN6fow6PLms+BUBXgJGH1sDDHwN2Nw==
   dependencies:
     "@peerbit/any-store-interface" "^1.0.0"
-    "@peerbit/indexer-simple" "^1.1.13"
-    "@peerbit/program" "^5.2.6"
+    "@peerbit/indexer-simple" "^1.1.14"
+    "@peerbit/program" "^5.2.7"
     uuid "^10.0.0"
 
-"@peerbit/pubsub-interface@^4.0.0":
-  version "4.0.0"
-  resolved "https://registry.yarnpkg.com/@peerbit/pubsub-interface/-/pubsub-interface-4.0.0.tgz#9181d61f114f060a7172c654e51958d8fdf07d22"
-  integrity sha512-priih12h6dPv9tj/WFNSTJEyFIXpuh3So9ykyxXuUA2E1kKzx+9POPIK4UKqBYniqqSmkAGxML4HeqTUtTYSAg==
+"@peerbit/pubsub-interface@^4.0.1":
+  version "4.0.1"
+  resolved "https://registry.yarnpkg.com/@peerbit/pubsub-interface/-/pubsub-interface-4.0.1.tgz#34f11b8100579799118abb9fb81cf91fbe57dc36"
+  integrity sha512-VJ1ekXuayyftt9ua5iKkdEdjQDgMyy2399AMlWtnZl5HAECtiXmx3aWYOsTtOpH2SINYOQ5Xdm3emb4ysq5oLw==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/crypto" "2.3.7"
-    "@peerbit/stream-interface" "^5.2.1"
+    "@peerbit/crypto" "2.3.8"
+    "@peerbit/stream-interface" "^5.2.2"
 
-"@peerbit/pubsub@^4.0.1":
-  version "4.0.1"
-  resolved "https://registry.yarnpkg.com/@peerbit/pubsub/-/pubsub-4.0.1.tgz#401550e93b231e5bed8af6a22d085dcb7a68db0c"
-  integrity sha512-ZYdxYmpScWhtsp86Vl3SKNxsoHYHwnYykJ0f4RN15dYvnOkJL/7qY5nYC5HpdSrnDrXgswhc+60qH0BCCYetgw==
+"@peerbit/pubsub@^4.0.2":
+  version "4.0.2"
+  resolved "https://registry.yarnpkg.com/@peerbit/pubsub/-/pubsub-4.0.2.tgz#d6747238ea1a1febdf23cd9addfc58157ba232ef"
+  integrity sha512-nLSCSK0otibeFLFsSx59UfxwVqeRHuQ0lPJF/mpXwR+6s/zfQSzF3smFhuuh0gMdt5atX1a/fRe1GJVvH1L+gw==
   dependencies:
     "@peerbit/logger" "1.0.3"
-    "@peerbit/pubsub-interface" "^4.0.0"
-    "@peerbit/stream" "4.3.2"
+    "@peerbit/pubsub-interface" "^4.0.1"
+    "@peerbit/stream" "4.3.3"
 
 "@peerbit/riblt@1.0.6":
   version "1.0.6"
   resolved "https://registry.yarnpkg.com/@peerbit/riblt/-/riblt-1.0.6.tgz#15b9171961401c4b6aa7da53b27e9b111c81977f"
   integrity sha512-vBSe8aDJQASBUNsc+55CwbtWknFTzqMrN2iYxMENBWrrYiuyR25R3rYWNuK6JBircAJ+9XBO50swVMQntOsjww==
 
-"@peerbit/rpc@5.2.8":
-  version "5.2.8"
-  resolved "https://registry.yarnpkg.com/@peerbit/rpc/-/rpc-5.2.8.tgz#b0fa5338fde4a1e43628cb4a53e749ddc12aa99e"
-  integrity sha512-sEVDh6XQlCDrggsC5HqpI/Jh1r1O2Pty2M2O/81jZunx42UWOdmCQd8kKwfM7o9gIGPEeyfG7dPWKaTZ4Ko0Lw==
+"@peerbit/rpc@5.2.9":
+  version "5.2.9"
+  resolved "https://registry.yarnpkg.com/@peerbit/rpc/-/rpc-5.2.9.tgz#e8dc5af753a58f6c38864e7aacc645d0eb3c4f4c"
+  integrity sha512-GZURDaNPXUTznpnBzR+h4fT8iZlsfAsQ1FoKnAiKt4cKtTcY5K7Cv33y5HrdXjURqE3GjFUGmEMhhvrmRBbqxg==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/crypto" "2.3.7"
+    "@peerbit/crypto" "2.3.8"
     "@peerbit/logger" "1.0.3"
-    "@peerbit/program" "5.2.6"
+    "@peerbit/program" "5.2.7"
     "@peerbit/time" "2.1.0"
 
-"@peerbit/shared-log@11.0.5", "@peerbit/shared-log@^11.0.5":
-  version "11.0.5"
-  resolved "https://registry.yarnpkg.com/@peerbit/shared-log/-/shared-log-11.0.5.tgz#6b053e20c3f8aca4744999519b6b6615b068144b"
-  integrity sha512-G+2zwZLf/Tdzs0dZL8IniUftm8xoPr5Bgg+HFNYozlMmt5+k3ac21YGfD2evl9aV5vHKRd9AGW67hzxqxfJv0g==
+"@peerbit/shared-log@11.0.6", "@peerbit/shared-log@^11.0.6":
+  version "11.0.6"
+  resolved "https://registry.yarnpkg.com/@peerbit/shared-log/-/shared-log-11.0.6.tgz#4e21363a60fbb4a5f034fa77f868f34ae5f3336c"
+  integrity sha512-k/YjCPuNTiaOCXh0i/vwa78zl7RC5zoZe8MxAxfGhdaPhmUAjSSEiiTQVtZw61dxpwLrs71rQRIp761Dm19lGg==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/log" "4.0.53"
+    "@peerbit/log" "4.0.54"
     "@peerbit/logger" "1.0.3"
-    "@peerbit/program" "5.2.6"
+    "@peerbit/program" "5.2.7"
     "@peerbit/riblt" "1.0.6"
-    "@peerbit/rpc" "5.2.8"
+    "@peerbit/rpc" "5.2.9"
     "@peerbit/time" "2.1.0"
 
-"@peerbit/stream-interface@^5.2.1":
-  version "5.2.1"
-  resolved "https://registry.yarnpkg.com/@peerbit/stream-interface/-/stream-interface-5.2.1.tgz#46181bab1f3140a7b5958f5f2f8d2e75f12532bc"
-  integrity sha512-hLKrhEixZLY6YTgmKIXf3DeHiZ/vSqzFpXjzYBEICpfiHK32Hk4A6S8baqg0/cH1MTP1DEI+fkpQFg3hrD9msQ==
+"@peerbit/stream-interface@^5.2.2":
+  version "5.2.2"
+  resolved "https://registry.yarnpkg.com/@peerbit/stream-interface/-/stream-interface-5.2.2.tgz#77ac051c581ec12325ec5cd85362e386f26cd9ee"
+  integrity sha512-ZpvDRTCvwW/yqR+10G8PLcMlHST/7eDupb5Jito/NBJKa1lRy6mpSq7X59ed5hRMQZAHEFDCexq8+DZhd7jlAg==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/crypto" "2.3.7"
+    "@peerbit/crypto" "2.3.8"
 
-"@peerbit/stream@4.3.2":
-  version "4.3.2"
-  resolved "https://registry.yarnpkg.com/@peerbit/stream/-/stream-4.3.2.tgz#a9bdbee846f26e1827c58fef709644bbcf9ad856"
-  integrity sha512-06HuJF/LiS+iwh/yR/353g2rS2c7a6+IBJ6PA9iU+MhpwYjPFPtWyF6Sz2kbATe2c5z6lQtqpORLhxzV46PIvg==
+"@peerbit/stream@4.3.3":
+  version "4.3.3"
+  resolved "https://registry.yarnpkg.com/@peerbit/stream/-/stream-4.3.3.tgz#bab9156c50deeeba50737995b81854dd14e70a3e"
+  integrity sha512-bC0TH3A7tVq0MMKHrvyzIYztfSjvWPhsgYHPtzdHwNF+Of0e+AN35/8BNiePulM9ul1dAe8/iig15kkM9ZQ1bg==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
     "@peerbit/cache" "2.1.3"
-    "@peerbit/crypto" "2.3.7"
+    "@peerbit/crypto" "2.3.8"
     "@peerbit/logger" "^1.0.3"
-    "@peerbit/stream-interface" "^5.2.1"
+    "@peerbit/stream-interface" "^5.2.2"
     "@peerbit/time" "^2.1.0"
     abortable-iterator "^5.0.1"
     fast-fifo "^1.3.2"
@@ -3221,24 +3222,24 @@
     yallist "^4.0.0"
 
 "@peerbit/string@^5":
-  version "5.0.79"
-  resolved "https://registry.yarnpkg.com/@peerbit/string/-/string-5.0.79.tgz#5dab0b5294afecffb4fbc12a06d386fb3bbf739f"
-  integrity sha512-SQlcaZy2kB2PRbp0NLAWat+N60FZ0G4lbi/6J8eegmLF/sbL54r1UIh4BlWiKZ8LF4jNGQ0ReMMOm4hbvzCmbA==
+  version "5.0.80"
+  resolved "https://registry.yarnpkg.com/@peerbit/string/-/string-5.0.80.tgz#afd50e162cd0e84a74e4124511845ab131b1b577"
+  integrity sha512-ms4Uo5Bjkov2IxpC+4pJD7QR23g8FWZc4grJtlzT8p2cy4WKRaPsiHj37yUIml3XZbhSgAe2ytDfL+SzqpED4A==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
     "@peerbit/logger" "1.0.3"
-    "@peerbit/program" "5.2.6"
-    "@peerbit/rpc" "5.2.8"
-    "@peerbit/shared-log" "^11.0.5"
+    "@peerbit/program" "5.2.7"
+    "@peerbit/rpc" "5.2.9"
+    "@peerbit/shared-log" "^11.0.6"
     "@peerbit/time" "2.1.0"
 
 "@peerbit/test-utils@^2":
-  version "2.1.41"
-  resolved "https://registry.yarnpkg.com/@peerbit/test-utils/-/test-utils-2.1.41.tgz#330a0c6c6f22d556da67575c79b5f98f93a0b75d"
-  integrity sha512-WG0g4kXojVL/9Wkyr4fZbivgm3QfwkF0tkzDPjR5C4Ys4JDbylzH0vpsEd4qqGWaPpSp/9lu5csObvsKLrqyqA==
+  version "2.1.42"
+  resolved "https://registry.yarnpkg.com/@peerbit/test-utils/-/test-utils-2.1.42.tgz#1ca3255f58d974f6c3b1fe2333c19bc33f6f5fb2"
+  integrity sha512-oaVE/KSCbM6s9GFdPjAXx3nsCic+J792PmmdjEvXh/kAA8GjYSbCkI+1YoFeI+Et/eoBwNVWxY1THPeC5/f+xg==
   dependencies:
     "@peerbit/libp2p-test-utils" "2.1.16"
-    peerbit "4.1.31"
+    peerbit "4.1.32"
 
 "@peerbit/time@2.1.0", "@peerbit/time@^2.1.0":
   version "2.1.0"
@@ -3246,18 +3247,18 @@
   integrity sha512-wClS4raEoDBZ7mcGrzFowRroXw9FfW0uyjzljNdQnZpHzEn/RQ10Potd4p/937CAJp0s/KxUJ22uQyyAf9H8nQ==
 
 "@peerbit/trusted-network@^4":
-  version "4.1.80"
-  resolved "https://registry.yarnpkg.com/@peerbit/trusted-network/-/trusted-network-4.1.80.tgz#04e65e3ca722604555ecd069a9b2aab124e00637"
-  integrity sha512-bzQAMEVspbs3OmvMZNDptNSubXNehkgfjK/WmCBlDwryN5pViilN+wS3sNNUyeDOeGEEzoZDXMkBU8flnhlkyw==
+  version "4.1.81"
+  resolved "https://registry.yarnpkg.com/@peerbit/trusted-network/-/trusted-network-4.1.81.tgz#6d4ac8b5fd5ba8b52649fa2503bb6dbad53d5a27"
+  integrity sha512-o3fKOqjfRlBil8WWz6ZK9F5iRAB5dFHtguvOAPK7RJ+EfOe7/Zew/syxHLFA7LpKCH6fVooCTpLfaFchPVgGVA==
   dependencies:
     "@dao-xyz/borsh" "^5.2.3"
-    "@peerbit/crypto" "2.3.7"
-    "@peerbit/document" "9.3.18"
+    "@peerbit/crypto" "2.3.8"
+    "@peerbit/document" "9.3.19"
 
 "@peerbit/vite@^1":
-  version "1.0.22"
-  resolved "https://registry.yarnpkg.com/@peerbit/vite/-/vite-1.0.22.tgz#6bb0c33dca240f2bf5c18296345f685fc74c6398"
-  integrity sha512-5bqzXbFm8hhrvPKw9Wa0Yw65IznWbTNhKJIFFEvcVvAlPIEJYGlhKOd89GfOSs1a7SwRwgze4a4gyfc4jDiYpg==
+  version "1.0.23"
+  resolved "https://registry.yarnpkg.com/@peerbit/vite/-/vite-1.0.23.tgz#66e8424c4ac75db45e002654ea5dd67f683dbd3d"
+  integrity sha512-1Clu+A/7ihy+sXkR4mUEu6gpz1P0mlrMJc6z8rkHzgUz4YjJ+57wd7u+DTOcOYpjUzHQwByqZNfcvr223H5jMg==
   dependencies:
     vite "^6.0.6"
     vite-plugin-static-copy "^1.0.0"
@@ -3309,12 +3310,12 @@
   dependencies:
     "@radix-ui/react-primitive" "2.0.2"
 
-"@radix-ui/react-arrow@1.1.3":
-  version "1.1.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-arrow/-/react-arrow-1.1.3.tgz#8926eb1d87f73c2e047eac96703949f168c85861"
-  integrity sha512-2dvVU4jva0qkNZH6HHWuSz5FN5GeU5tymvCgutF8WaXz9WnD1NgUhy73cqzkjkN4Zkn8lfTPv5JIfrC221W+Nw==
+"@radix-ui/react-arrow@1.1.4":
+  version "1.1.4"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-arrow/-/react-arrow-1.1.4.tgz#08e263c692b3a56a3f1c4bdc8405b7f73f070963"
+  integrity sha512-qz+fxrqgNxG0dYew5l7qR3c7wdgRu1XVUHGnGYX7rg5HM4p9SWaRmJwfgR3J0SgyUKayLmzQIun+N6rWRgiRKw==
   dependencies:
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
 
 "@radix-ui/react-collection@1.1.2":
   version "1.1.2"
@@ -3326,14 +3327,14 @@
     "@radix-ui/react-primitive" "2.0.2"
     "@radix-ui/react-slot" "1.1.2"
 
-"@radix-ui/react-collection@1.1.3":
-  version "1.1.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-collection/-/react-collection-1.1.3.tgz#cfd46dcea5a8ab064d91798feeb46faba4032930"
-  integrity sha512-mM2pxoQw5HJ49rkzwOs7Y6J4oYH22wS8BfK2/bBxROlI4xuR0c4jEenQP63LlTlDkO6Buj2Vt+QYAYcOgqtrXA==
+"@radix-ui/react-collection@1.1.4":
+  version "1.1.4"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-collection/-/react-collection-1.1.4.tgz#45fb4215ca26a84bd61b9b1337105e4d4e01b686"
+  integrity sha512-cv4vSf7HttqXilDnAnvINd53OTl1/bjUYVZrkFnA7nwmY9Ob2POUy0WY0sfqBAe1s5FyKsyceQlqiEGPYNTadg==
   dependencies:
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-slot" "1.2.0"
 
 "@radix-ui/react-compose-refs@1.1.1":
@@ -3357,22 +3358,22 @@
   integrity sha512-jCi/QKUM2r1Ju5a3J64TH2A5SpKAgh0LpknyqdQ4m6DCV0xJ2HG1xARRwNGPQfi1SLdLWZ1OJz6F4OMBBNiGJA==
 
 "@radix-ui/react-dialog@^1.1.2":
-  version "1.1.7"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-dialog/-/react-dialog-1.1.7.tgz#c826d997d9e512bd2a2adb3245bb9dffe56e02aa"
-  integrity sha512-EIdma8C0C/I6kL6sO02avaCRqi3fmWJpxH6mqbVScorW6nNktzKJT/le7VPho3o/7wCsyRg3z0+Q+Obr0Gy/VQ==
+  version "1.1.10"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-dialog/-/react-dialog-1.1.10.tgz#9dad3e1b268ec31302d33c147faf74ad0a503a4c"
+  integrity sha512-m6pZb0gEM5uHPSb+i2nKKGQi/HMSVjARMsLMWQfKDP+eJ6B+uqryHnXhpnohTWElw+vEcMk/o4wJODtdRKHwqg==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-dismissable-layer" "1.1.6"
+    "@radix-ui/react-dismissable-layer" "1.1.7"
     "@radix-ui/react-focus-guards" "1.1.2"
-    "@radix-ui/react-focus-scope" "1.1.3"
+    "@radix-ui/react-focus-scope" "1.1.4"
     "@radix-ui/react-id" "1.1.1"
-    "@radix-ui/react-portal" "1.1.5"
+    "@radix-ui/react-portal" "1.1.6"
     "@radix-ui/react-presence" "1.1.3"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-slot" "1.2.0"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
     aria-hidden "^1.2.4"
     react-remove-scroll "^2.6.3"
 
@@ -3397,14 +3398,14 @@
     "@radix-ui/react-use-callback-ref" "1.1.0"
     "@radix-ui/react-use-escape-keydown" "1.1.0"
 
-"@radix-ui/react-dismissable-layer@1.1.6":
-  version "1.1.6"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-dismissable-layer/-/react-dismissable-layer-1.1.6.tgz#e72c156cac7b07614fe8e3a039ab7081ce413686"
-  integrity sha512-7gpgMT2gyKym9Jz2ZhlRXSg2y6cNQIK8d/cqBZ0RBCaps8pFryCWXiUKI+uHGFrhMrbGUP7U6PWgiXzIxoyF3Q==
+"@radix-ui/react-dismissable-layer@1.1.7":
+  version "1.1.7"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-dismissable-layer/-/react-dismissable-layer-1.1.7.tgz#80b5c23a0d29cfe56850399210c603376c27091f"
+  integrity sha512-j5+WBUdhccJsmH5/H0K6RncjDtoALSEr6jbkaZu+bjw6hOPOhHycr6vEUujl+HBK8kjUfWcoCJXxP6e4lUlMZw==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
     "@radix-ui/react-compose-refs" "1.1.2"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-use-callback-ref" "1.1.1"
     "@radix-ui/react-use-escape-keydown" "1.1.1"
 
@@ -3440,13 +3441,13 @@
     "@radix-ui/react-primitive" "2.0.2"
     "@radix-ui/react-use-callback-ref" "1.1.0"
 
-"@radix-ui/react-focus-scope@1.1.3":
-  version "1.1.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-focus-scope/-/react-focus-scope-1.1.3.tgz#eac83a3aac700db17650b41b30724deffac5b28a"
-  integrity sha512-4XaDlq0bPt7oJwR+0k0clCiCO/7lO7NKZTAaJBYxDNQT/vj4ig0/UvctrRscZaFREpRvUTkpKR96ov1e6jptQg==
+"@radix-ui/react-focus-scope@1.1.4":
+  version "1.1.4"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-focus-scope/-/react-focus-scope-1.1.4.tgz#dbe9ed31b36ff9aadadf4b59aa733a4e91799d15"
+  integrity sha512-r2annK27lIW5w9Ho5NyQgqs0MmgZSTIKXWpVCJaLC1q2kZrZkcqnmHkCHMEmv8XLvsLlurKMPT+kbKkRkm/xVA==
   dependencies:
     "@radix-ui/react-compose-refs" "1.1.2"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-use-callback-ref" "1.1.1"
 
 "@radix-ui/react-icons@^1.3.0":
@@ -3493,23 +3494,23 @@
     react-remove-scroll "^2.6.3"
 
 "@radix-ui/react-popover@^1.0.7":
-  version "1.1.7"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-popover/-/react-popover-1.1.7.tgz#4397a5c1a4b2c03efe350cf467a8ddd720115c39"
-  integrity sha512-I38OYWDmJF2kbO74LX8UsFydSHWOJuQ7LxPnTefjxxvdvPLempvAnmsyX9UsBlywcbSGpRH7oMLfkUf+ij4nrw==
+  version "1.1.10"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-popover/-/react-popover-1.1.10.tgz#a6ddd0fa5ad1111fb4fcaa5dea18389e87cc957a"
+  integrity sha512-IZN7b3sXqajiPsOzKuNJBSP9obF4MX5/5UhTgWNofw4r1H+eATWb0SyMlaxPD/kzA4vadFgy1s7Z1AEJ6WMyHQ==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-dismissable-layer" "1.1.6"
+    "@radix-ui/react-dismissable-layer" "1.1.7"
     "@radix-ui/react-focus-guards" "1.1.2"
-    "@radix-ui/react-focus-scope" "1.1.3"
+    "@radix-ui/react-focus-scope" "1.1.4"
     "@radix-ui/react-id" "1.1.1"
-    "@radix-ui/react-popper" "1.2.3"
-    "@radix-ui/react-portal" "1.1.5"
+    "@radix-ui/react-popper" "1.2.4"
+    "@radix-ui/react-portal" "1.1.6"
     "@radix-ui/react-presence" "1.1.3"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-slot" "1.2.0"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
     aria-hidden "^1.2.4"
     react-remove-scroll "^2.6.3"
 
@@ -3529,16 +3530,16 @@
     "@radix-ui/react-use-size" "1.1.0"
     "@radix-ui/rect" "1.1.0"
 
-"@radix-ui/react-popper@1.2.3":
-  version "1.2.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-popper/-/react-popper-1.2.3.tgz#3b6ef3388fd209bb46341e1e40125b75f07f1304"
-  integrity sha512-iNb9LYUMkne9zIahukgQmHlSBp9XWGeQQ7FvUGNk45ywzOb6kQa+Ca38OphXlWDiKvyneo9S+KSJsLfLt8812A==
+"@radix-ui/react-popper@1.2.4":
+  version "1.2.4"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-popper/-/react-popper-1.2.4.tgz#8fd6d954fca9e5d1341c7d9153cc88e05d5ed84e"
+  integrity sha512-3p2Rgm/a1cK0r/UVkx5F/K9v/EplfjAeIFCGOPYPO4lZ0jtg4iSQXt/YGTSLWaf4x7NG6Z4+uKFcylcTZjeqDA==
   dependencies:
     "@floating-ui/react-dom" "^2.0.0"
-    "@radix-ui/react-arrow" "1.1.3"
+    "@radix-ui/react-arrow" "1.1.4"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-use-callback-ref" "1.1.1"
     "@radix-ui/react-use-layout-effect" "1.1.1"
     "@radix-ui/react-use-rect" "1.1.1"
@@ -3553,12 +3554,12 @@
     "@radix-ui/react-primitive" "2.0.2"
     "@radix-ui/react-use-layout-effect" "1.1.0"
 
-"@radix-ui/react-portal@1.1.5":
-  version "1.1.5"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-portal/-/react-portal-1.1.5.tgz#50ed6bee2d895c9a9dfc28625f24b8483b74d431"
-  integrity sha512-ps/67ZqsFm+Mb6lSPJpfhRLrVL2i2fntgCmGMqqth4eaGUf+knAuuRtWVJrNjUhExgmdRqftSgzpf0DF0n6yXA==
+"@radix-ui/react-portal@1.1.6":
+  version "1.1.6"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-portal/-/react-portal-1.1.6.tgz#4202e1bb34afdac612e4e982eca8efd36cbc611f"
+  integrity sha512-XmsIl2z1n/TsYFLIdYam2rmFwf9OC/Sh2avkbmVMDuBZIe7hSpM0cYnWPAo7nHOVx8zTuwDZGByfcqLdnzp3Vw==
   dependencies:
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-use-layout-effect" "1.1.1"
 
 "@radix-ui/react-presence@1.1.2":
@@ -3584,20 +3585,20 @@
   dependencies:
     "@radix-ui/react-slot" "1.1.2"
 
-"@radix-ui/react-primitive@2.0.3":
-  version "2.0.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-primitive/-/react-primitive-2.0.3.tgz#13c654dc4754558870a9c769f6febe5980a1bad8"
-  integrity sha512-Pf/t/GkndH7CQ8wE2hbkXA+WyZ83fhQQn5DDmwDiDo6AwN/fhaH8oqZ0jRjMrO2iaMhDi6P1HRx6AZwyMinY1g==
+"@radix-ui/react-primitive@2.1.0":
+  version "2.1.0"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-primitive/-/react-primitive-2.1.0.tgz#9233e17a22d0010195086f8b5eb1808ebbca8437"
+  integrity sha512-/J/FhLdK0zVcILOwt5g+dH4KnkonCtkVJsa2G6JmvbbtZfBEI1gMsO3QMjseL4F/SwfAMt1Vc/0XKYKq+xJ1sw==
   dependencies:
     "@radix-ui/react-slot" "1.2.0"
 
 "@radix-ui/react-progress@^1.0.3":
-  version "1.1.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-progress/-/react-progress-1.1.3.tgz#78df084607432792368070ca4b060597ebc9190a"
-  integrity sha512-F56aZPGTPb4qJQ/vDjnAq63oTu/DRoIG/Asb5XKOWj8rpefNLtUllR969j5QDN2sRrTk9VXIqQDRj5VvAuquaw==
+  version "1.1.4"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-progress/-/react-progress-1.1.4.tgz#c11e3fd6bfd39fb123bc397d2875aa648898c043"
+  integrity sha512-8rl9w7lJdcVPor47Dhws9mUHRHLE+8JEgyJRdNWCpGPa6HIlr3eh+Yn9gyx1CnCLbw5naHsI2gaO9dBWO50vzw==
   dependencies:
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
 
 "@radix-ui/react-roving-focus@1.1.2":
   version "1.1.2"
@@ -3614,61 +3615,61 @@
     "@radix-ui/react-use-callback-ref" "1.1.0"
     "@radix-ui/react-use-controllable-state" "1.1.0"
 
-"@radix-ui/react-roving-focus@1.1.3":
-  version "1.1.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-roving-focus/-/react-roving-focus-1.1.3.tgz#c992b9d30c795f5f5a668853db8f4a6e07b7284d"
-  integrity sha512-ufbpLUjZiOg4iYgb2hQrWXEPYX6jOLBbR27bDyAff5GYMRrCzcze8lukjuXVUQvJ6HZe8+oL+hhswDcjmcgVyg==
+"@radix-ui/react-roving-focus@1.1.6":
+  version "1.1.6"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-roving-focus/-/react-roving-focus-1.1.6.tgz#d956616bef9d4290f0c1113d0e31e4ddf00d1873"
+  integrity sha512-D2ReXCuIueKf5L2f1ks/wTj3bWck1SvK1pjLmEHPbwksS1nOHBsvgY0b9Hypt81FczqBqSyLHQxn/vbsQ0gDHw==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
-    "@radix-ui/react-collection" "1.1.3"
+    "@radix-ui/react-collection" "1.1.4"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
     "@radix-ui/react-direction" "1.1.1"
     "@radix-ui/react-id" "1.1.1"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-use-callback-ref" "1.1.1"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
 
 "@radix-ui/react-select@^2.1.6":
-  version "2.1.7"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-select/-/react-select-2.1.7.tgz#68561488ca54cad07352b3f2c2d29e0da28bbaa0"
-  integrity sha512-exzGIRtc7S8EIM2KjFg+7lJZsH7O7tpaBaJbBNVDnOZNhtoQ2iV+iSNfi2Wth0m6h3trJkMVvzAehB3c6xj/3Q==
+  version "2.2.2"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-select/-/react-select-2.2.2.tgz#96759b9dcf4e80f6f39c1ad706718f1b2928ba21"
+  integrity sha512-HjkVHtBkuq+r3zUAZ/CvNWUGKPfuicGDbgtZgiQuFmNcV5F+Tgy24ep2nsAW2nFgvhGPJVqeBZa6KyVN0EyrBA==
   dependencies:
     "@radix-ui/number" "1.1.1"
     "@radix-ui/primitive" "1.1.2"
-    "@radix-ui/react-collection" "1.1.3"
+    "@radix-ui/react-collection" "1.1.4"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
     "@radix-ui/react-direction" "1.1.1"
-    "@radix-ui/react-dismissable-layer" "1.1.6"
+    "@radix-ui/react-dismissable-layer" "1.1.7"
     "@radix-ui/react-focus-guards" "1.1.2"
-    "@radix-ui/react-focus-scope" "1.1.3"
+    "@radix-ui/react-focus-scope" "1.1.4"
     "@radix-ui/react-id" "1.1.1"
-    "@radix-ui/react-popper" "1.2.3"
-    "@radix-ui/react-portal" "1.1.5"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-popper" "1.2.4"
+    "@radix-ui/react-portal" "1.1.6"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-slot" "1.2.0"
     "@radix-ui/react-use-callback-ref" "1.1.1"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
     "@radix-ui/react-use-layout-effect" "1.1.1"
     "@radix-ui/react-use-previous" "1.1.1"
-    "@radix-ui/react-visually-hidden" "1.1.3"
+    "@radix-ui/react-visually-hidden" "1.2.0"
     aria-hidden "^1.2.4"
     react-remove-scroll "^2.6.3"
 
 "@radix-ui/react-slider@^1.1.2", "@radix-ui/react-slider@^1.2.1":
-  version "1.2.4"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-slider/-/react-slider-1.2.4.tgz#29cd5e53806d828f81f32af8ff88489a25c1072d"
-  integrity sha512-Vr/OgNejNJPAghIhjS7Mf/2F/EXGDT0qgtiHf2BHz71+KqgN+jndFLKq5xAB9JOGejGzejfJLIvT04Do+yzhcg==
+  version "1.3.2"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-slider/-/react-slider-1.3.2.tgz#0849ba97f841a03b1be6a3ec5622575aa356f098"
+  integrity sha512-oQnqfgSiYkxZ1MrF6672jw2/zZvpB+PJsrIc3Zm1zof1JHf/kj7WhmROw7JahLfOwYQ5/+Ip0rFORgF1tjSiaQ==
   dependencies:
     "@radix-ui/number" "1.1.1"
     "@radix-ui/primitive" "1.1.2"
-    "@radix-ui/react-collection" "1.1.3"
+    "@radix-ui/react-collection" "1.1.4"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
     "@radix-ui/react-direction" "1.1.1"
-    "@radix-ui/react-primitive" "2.0.3"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-primitive" "2.1.0"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
     "@radix-ui/react-use-layout-effect" "1.1.1"
     "@radix-ui/react-use-previous" "1.1.1"
     "@radix-ui/react-use-size" "1.1.1"
@@ -3688,76 +3689,76 @@
     "@radix-ui/react-compose-refs" "1.1.2"
 
 "@radix-ui/react-switch@^1.0.3":
-  version "1.1.4"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-switch/-/react-switch-1.1.4.tgz#a0672f67974ad11cd8e2304b04aad8ce684eb037"
-  integrity sha512-zGP6W8plLeogoeGMiTHJ/uvf+TE1C2chVsEwfP8YlvpQKJHktG+iCkUtCLGPAuDV8/qDSmIRPm4NggaTxFMVBQ==
+  version "1.2.2"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-switch/-/react-switch-1.2.2.tgz#aee51a72b93b49d625e201e32c43deb7957e4641"
+  integrity sha512-7Z8n6L+ifMIIYZ83f28qWSceUpkXuslI2FJ34+kDMTiyj91ENdpdQ7VCidrzj5JfwfZTeano/BnGBbu/jqa5rQ==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-primitive" "2.0.3"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-primitive" "2.1.0"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
     "@radix-ui/react-use-previous" "1.1.1"
     "@radix-ui/react-use-size" "1.1.1"
 
 "@radix-ui/react-tabs@^1.0.4":
-  version "1.1.4"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-tabs/-/react-tabs-1.1.4.tgz#2e43f3ef3450143281e7c1491da1e5d7941b9826"
-  integrity sha512-fuHMHWSf5SRhXke+DbHXj2wVMo+ghVH30vhX3XVacdXqDl+J4XWafMIGOOER861QpBx1jxgwKXL2dQnfrsd8MQ==
+  version "1.1.7"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-tabs/-/react-tabs-1.1.7.tgz#55caac4902824fa309caf84517cbeb683276e47e"
+  integrity sha512-sawt4HkD+6haVGjYOC3BMIiCumBpqTK6o407n6zN/6yReed2EN7bXyykNrpqg+xCfudpBUZg7Y2cJBd/x/iybA==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
     "@radix-ui/react-direction" "1.1.1"
     "@radix-ui/react-id" "1.1.1"
     "@radix-ui/react-presence" "1.1.3"
-    "@radix-ui/react-primitive" "2.0.3"
-    "@radix-ui/react-roving-focus" "1.1.3"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-primitive" "2.1.0"
+    "@radix-ui/react-roving-focus" "1.1.6"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
 
 "@radix-ui/react-toast@^1.1.4", "@radix-ui/react-toast@^1.2.6":
-  version "1.2.7"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-toast/-/react-toast-1.2.7.tgz#57954e88061c20f12a9c6ac7cbd532d2c3ca1186"
-  integrity sha512-0IWTbAUKvzdpOaWDMZisXZvScXzF0phaQjWspK8RUMEUxjLbli+886mB/kXTIC3F+t5vQ0n0vYn+dsX8s+WdfA==
+  version "1.2.10"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-toast/-/react-toast-1.2.10.tgz#2befdc5706c44d830a991c27fee2c2a2894469b5"
+  integrity sha512-lVe1mQL8Di8KPQp62CDaLgttqyUGTchPuwDiCnaZz40HGxngJKB/fOJCHYxHZh2p1BtcuiPOYOKrxTVEmrnV5A==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
-    "@radix-ui/react-collection" "1.1.3"
+    "@radix-ui/react-collection" "1.1.4"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-dismissable-layer" "1.1.6"
-    "@radix-ui/react-portal" "1.1.5"
+    "@radix-ui/react-dismissable-layer" "1.1.7"
+    "@radix-ui/react-portal" "1.1.6"
     "@radix-ui/react-presence" "1.1.3"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-use-callback-ref" "1.1.1"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
     "@radix-ui/react-use-layout-effect" "1.1.1"
-    "@radix-ui/react-visually-hidden" "1.1.3"
+    "@radix-ui/react-visually-hidden" "1.2.0"
 
 "@radix-ui/react-toggle@^1.0.3":
-  version "1.1.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-toggle/-/react-toggle-1.1.3.tgz#5e0275c3788a38f77521a47c1446d2efa840641d"
-  integrity sha512-Za5HHd9nvsiZ2t3EI/dVd4Bm/JydK+D22uHKk46fPtvuPxVCJBUo5mQybN+g5sZe35y7I6GDTTfdkVv5SnxlFg==
+  version "1.1.6"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-toggle/-/react-toggle-1.1.6.tgz#8d993d88d2abcd327fd18a6126adb2e6e0848a3c"
+  integrity sha512-3SeJxKeO3TO1zVw1Nl++Cp0krYk6zHDHMCUXXVkosIzl6Nxcvb07EerQpyD2wXQSJ5RZajrYAmPaydU8Hk1IyQ==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
-    "@radix-ui/react-primitive" "2.0.3"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
+    "@radix-ui/react-primitive" "2.1.0"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
 
 "@radix-ui/react-tooltip@^1.1.8":
-  version "1.2.0"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-tooltip/-/react-tooltip-1.2.0.tgz#aee9fed9db53e4c84f525aada3436b651464a532"
-  integrity sha512-b1Sdc75s7zN9B8ONQTGBSHL3XS8+IcjcOIY51fhM4R1Hx8s0YbgqgyNZiri4qcYMVZK8hfCZVBiyCm7N9rs0rw==
+  version "1.2.3"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-tooltip/-/react-tooltip-1.2.3.tgz#cebbceec43aa9676c882788a5f8fa683cc8b4c11"
+  integrity sha512-0KX7jUYFA02np01Y11NWkk6Ip6TqMNmD4ijLelYAzeIndl2aVeltjJFJ2gwjNa1P8U/dgjQ+8cr9Y3Ni+ZNoRA==
   dependencies:
     "@radix-ui/primitive" "1.1.2"
     "@radix-ui/react-compose-refs" "1.1.2"
     "@radix-ui/react-context" "1.1.2"
-    "@radix-ui/react-dismissable-layer" "1.1.6"
+    "@radix-ui/react-dismissable-layer" "1.1.7"
     "@radix-ui/react-id" "1.1.1"
-    "@radix-ui/react-popper" "1.2.3"
-    "@radix-ui/react-portal" "1.1.5"
+    "@radix-ui/react-popper" "1.2.4"
+    "@radix-ui/react-portal" "1.1.6"
     "@radix-ui/react-presence" "1.1.3"
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
     "@radix-ui/react-slot" "1.2.0"
-    "@radix-ui/react-use-controllable-state" "1.1.1"
-    "@radix-ui/react-visually-hidden" "1.1.3"
+    "@radix-ui/react-use-controllable-state" "1.2.2"
+    "@radix-ui/react-visually-hidden" "1.2.0"
 
 "@radix-ui/react-use-callback-ref@1.1.0":
   version "1.1.0"
@@ -3776,12 +3777,20 @@
   dependencies:
     "@radix-ui/react-use-callback-ref" "1.1.0"
 
-"@radix-ui/react-use-controllable-state@1.1.1":
-  version "1.1.1"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-use-controllable-state/-/react-use-controllable-state-1.1.1.tgz#ec9c572072a6f269df7435c1652fbeebabe0f0c1"
-  integrity sha512-YnEXIy8/ga01Y1PN0VfaNH//MhA91JlEGVBDxDzROqwrAtG5Yr2QGEPz8A/rJA3C7ZAHryOYGaUv8fLSW2H/mg==
+"@radix-ui/react-use-controllable-state@1.2.2":
+  version "1.2.2"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-use-controllable-state/-/react-use-controllable-state-1.2.2.tgz#905793405de57d61a439f4afebbb17d0645f3190"
+  integrity sha512-BjasUjixPFdS+NKkypcyyN5Pmg83Olst0+c6vGov0diwTEo6mgdqVR6hxcEgFuh4QrAs7Rc+9KuGJ9TVCj0Zzg==
   dependencies:
-    "@radix-ui/react-use-callback-ref" "1.1.1"
+    "@radix-ui/react-use-effect-event" "0.0.2"
+    "@radix-ui/react-use-layout-effect" "1.1.1"
+
+"@radix-ui/react-use-effect-event@0.0.2":
+  version "0.0.2"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-use-effect-event/-/react-use-effect-event-0.0.2.tgz#090cf30d00a4c7632a15548512e9152217593907"
+  integrity sha512-Qp8WbZOBe+blgpuUT+lw2xheLP8q0oatc9UpmiemEICxGvFLYmHm9QowVZGHtJlGbS6A6yJ3iViad/2cVjnOiA==
+  dependencies:
+    "@radix-ui/react-use-layout-effect" "1.1.1"
 
 "@radix-ui/react-use-escape-keydown@1.1.0":
   version "1.1.0"
@@ -3840,12 +3849,12 @@
   dependencies:
     "@radix-ui/react-use-layout-effect" "1.1.1"
 
-"@radix-ui/react-visually-hidden@1.1.3":
-  version "1.1.3"
-  resolved "https://registry.yarnpkg.com/@radix-ui/react-visually-hidden/-/react-visually-hidden-1.1.3.tgz#f704c49121859941a8bb50ff1e4f156058cacd0b"
-  integrity sha512-oXSF3ZQRd5fvomd9hmUCb2EHSZbPp3ZSHAHJJU/DlF9XoFkJBBW8RHU/E8WEH+RbSfJd/QFA0sl8ClJXknBwHQ==
+"@radix-ui/react-visually-hidden@1.2.0":
+  version "1.2.0"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-visually-hidden/-/react-visually-hidden-1.2.0.tgz#7692a590b4789bebf7e02d73e6d1390704a97920"
+  integrity sha512-rQj0aAWOpCdCMRbI6pLQm8r7S2BM3YhTa0SzOYD55k+hJA8oo9J+H+9wLM9oMlZWOX/wJWPTzfDfmZkf7LvCfg==
   dependencies:
-    "@radix-ui/react-primitive" "2.0.3"
+    "@radix-ui/react-primitive" "2.1.0"
 
 "@radix-ui/rect@1.1.0":
   version "1.1.0"
@@ -4364,7 +4373,7 @@
     "@tailwindcss/oxide" "4.1.4"
     tailwindcss "4.1.4"
 
-"@tanstack/react-virtual@^3.11.1":
+"@tanstack/react-virtual@^3.13.6":
   version "3.13.6"
   resolved "https://registry.yarnpkg.com/@tanstack/react-virtual/-/react-virtual-3.13.6.tgz#30243c8c3166673caf66bfbf5352e1b314a3a4cd"
   integrity sha512-WT7nWs8ximoQ0CDx/ngoFP7HbQF9Q2wQe4nh2NB+u2486eX3nZRE40P9g6ccCVq7ZfTSH5gFOuCoVH5DLNS/aA==
@@ -5157,9 +5166,9 @@
   integrity sha512-WmoN8qaIAo7WTYWbAZuG8PYEhn5fkz7dZrqTBZ7dtt//lL2Gwms1IcnQ5yHqjDfX8Ft5j4YzDM23f87zBfDe9g==
 
 "@vitejs/plugin-react@^4":
-  version "4.4.0"
-  resolved "https://registry.yarnpkg.com/@vitejs/plugin-react/-/plugin-react-4.4.0.tgz#a658e563d08f3907dbceb3be1bca5272665e6372"
-  integrity sha512-x/EztcTKVj+TDeANY1WjNeYsvZjZdfWRMP/KXi5Yn8BoTzpa13ZltaQqKfvWYbX8CE10GOHHdC5v86jY9x8i/g==
+  version "4.4.1"
+  resolved "https://registry.yarnpkg.com/@vitejs/plugin-react/-/plugin-react-4.4.1.tgz#d7d1e9c9616d7536b0953637edfee7c6cbe2fe0f"
+  integrity sha512-IpEm5ZmeXAP/osiBXVVP5KjFMzbWOonMs0NaQQl+xYnUAcq4oHUBsF2+p4MgKWG4YMmFYJU8A6sxRPuowllm6w==
   dependencies:
     "@babel/core" "^7.26.10"
     "@babel/plugin-transform-react-jsx-self" "^7.25.9"
@@ -6906,9 +6915,9 @@ ejs@^3.1.7:
     jake "^10.8.5"
 
 electron-to-chromium@^1.5.73:
-  version "1.5.137"
-  resolved "https://registry.yarnpkg.com/electron-to-chromium/-/electron-to-chromium-1.5.137.tgz#53a7fef3ea9f7eb5fcf704454050ff930c43ed92"
-  integrity sha512-/QSJaU2JyIuTbbABAo/crOs+SuAZLS+fVVS10PVrIT9hrRkmZl8Hb0xPSkKRUUWHQtYzXHpQUW3Dy5hwMzGZkA==
+  version "1.5.139"
+  resolved "https://registry.yarnpkg.com/electron-to-chromium/-/electron-to-chromium-1.5.139.tgz#56ae7d42439e2967a54badbadaeb12f748987f37"
+  integrity sha512-GGnRYOTdN5LYpwbIr0rwP/ZHOQSvAF6TG0LSzp28uCBb9JiXHJGmaaKw29qjNJc5bGnnp6kXJqRnGMQoELwi5w==
 
 elliptic@6.6.1:
   version "6.6.1"
@@ -7700,9 +7709,9 @@ fastq@^1.6.0:
     reusify "^1.0.4"
 
 fdir@^6.4.3:
-  version "6.4.3"
-  resolved "https://registry.yarnpkg.com/fdir/-/fdir-6.4.3.tgz#011cdacf837eca9b811c89dbb902df714273db72"
-  integrity sha512-PMXmW2y1hDDfTSRc9gaXIuCCRpuoz3Kaz8cUelp3smouvfT632ozg2vrT6lJsHKKOF59YLbOGfAWGUcKEfRMQw==
+  version "6.4.4"
+  resolved "https://registry.yarnpkg.com/fdir/-/fdir-6.4.4.tgz#1cfcf86f875a883e19a8fab53622cfe992e8d2f9"
+  integrity sha512-1NZP+GK4GfuAv3PqKvxQRDMjdSRZjnkq7KfhlNrCNNlZ0ygQFpebfrnfnq/W7fpUnAv9aGWmY1zKx7FYL3gwhg==
 
 figures@3.2.0, figures@^3.0.0:
   version "3.2.0"
@@ -9547,9 +9556,9 @@ libnpmpublish@7.3.0:
     ssri "^10.0.1"
 
 libp2p@^2.8.3:
-  version "2.8.4"
-  resolved "https://registry.yarnpkg.com/libp2p/-/libp2p-2.8.4.tgz#57171dcfd83d824e7db805614d8c554da66f9e6a"
-  integrity sha512-NGsbZ8MQFpuiZKP57hn8qe4QZ7r1j6LTlGx4m3FAVurPtyWHpZ702sWrqpFJveXAYl17Lk7OOA0r08T0k0SS2g==
+  version "2.8.5"
+  resolved "https://registry.yarnpkg.com/libp2p/-/libp2p-2.8.5.tgz#b51d4ae1aae12b8e6b6d61afbd83b74acd1e153f"
+  integrity sha512-K2jqFmNp3LsTeuJ15t6jG0Z9WoydLs+AfSDvhSYQa7lRTu9IANt84SxNg+PsmGxMMiTOtIoMmo27DHzF3+ON8Q==
   dependencies:
     "@chainsafe/is-ip" "^2.0.2"
     "@chainsafe/netmask" "^2.0.0"
@@ -11620,10 +11629,10 @@ pathval@^2.0.0:
   resolved "https://registry.yarnpkg.com/pathval/-/pathval-2.0.0.tgz#7e2550b422601d4f6b8e26f1301bc8f15a741a25"
   integrity sha512-vE7JKRyES09KiunauX7nd2Q9/L7lhok4smP9RZTDeD4MVs72Dp2qNFVz39Nz5a0FVEW0BJR6C0DYrq6unoziZA==
 
-peerbit@4.1.31, peerbit@^4:
-  version "4.1.31"
-  resolved "https://registry.yarnpkg.com/peerbit/-/peerbit-4.1.31.tgz#2193c3ce55f5b8a6d4078399ea5d5306a9c23f21"
-  integrity sha512-N6cNxZyB0WzJIONhVjMmgaCCW87Fnikjs9LNJBFSFUqbCh1WRL0aXpl0CF4XCU7yZlNCY8a7b/y2/WEsdCXw3w==
+peerbit@4.1.32, peerbit@^4:
+  version "4.1.32"
+  resolved "https://registry.yarnpkg.com/peerbit/-/peerbit-4.1.32.tgz#75395a31e3439413dda9db50ca9bc5b453a50bcc"
+  integrity sha512-o0Q5vxqjL45XedBy/NAVGzrO2Sa1Fs+46A1dadqxeTMv+V+Stud5AI+oD5+uEhkMjBh8KTCWm/aFYNVBXnQ2nw==
   dependencies:
     "@chainsafe/libp2p-yamux" "^7.0.1"
     "@dao-xyz/borsh" "^5.2.3"
@@ -11632,14 +11641,14 @@ peerbit@4.1.31, peerbit@^4:
     "@libp2p/tcp" "^10.1.9"
     "@libp2p/webrtc" "^5.2.10"
     "@libp2p/websockets" "^9.2.9"
-    "@peerbit/any-store" "^2.1.8"
-    "@peerbit/blocks" "^2.3.3"
-    "@peerbit/crypto" "2.3.7"
-    "@peerbit/indexer-simple" "^1.1.13"
-    "@peerbit/indexer-sqlite3" "^1.2.17"
+    "@peerbit/any-store" "^2.1.9"
+    "@peerbit/blocks" "^2.3.4"
+    "@peerbit/crypto" "2.3.8"
+    "@peerbit/indexer-simple" "^1.1.14"
+    "@peerbit/indexer-sqlite3" "^1.2.18"
     "@peerbit/logger" "1.0.3"
-    "@peerbit/program" "5.2.6"
-    "@peerbit/pubsub" "^4.0.1"
+    "@peerbit/program" "5.2.7"
+    "@peerbit/pubsub" "^4.0.2"
     datastore-level "^11.0.1"
     level "^8.0.1"
     memory-level "^1.0.0"
@@ -12141,19 +12150,11 @@ react-resizable@^3.0.5:
     prop-types "15.x"
     react-draggable "^4.0.3"
 
-react-router-dom@^7.5.0:
-  version "7.5.0"
-  resolved "https://registry.yarnpkg.com/react-router-dom/-/react-router-dom-7.5.0.tgz#03201901e7114681d828dd67885b5034af477174"
-  integrity sha512-fFhGFCULy4vIseTtH5PNcY/VvDJK5gvOWcwJVHQp8JQcWVr85ENhJ3UpuF/zP1tQOIFYNRJHzXtyhU1Bdgw0RA==
+react-router@^7.5.0:
+  version "7.5.1"
+  resolved "https://registry.yarnpkg.com/react-router/-/react-router-7.5.1.tgz#e0bae54e913d139e727e7a88d165174a2cdbeb27"
+  integrity sha512-/jjU3fcYNd2bwz9Q0xt5TwyiyoO8XjSEFXJY4O/lMAlkGTHWuHRAbR9Etik+lSDqMC7A7mz3UlXzgYT6Vl58sA==
   dependencies:
-    react-router "7.5.0"
-
-react-router@7.5.0, react-router@^7.5.0:
-  version "7.5.0"
-  resolved "https://registry.yarnpkg.com/react-router/-/react-router-7.5.0.tgz#649568e7e3b4133dee1dcf333d8a3a37b1967f58"
-  integrity sha512-estOHrRlDMKdlQa6Mj32gIks4J+AxNsYoE0DbTTxiMy2mPzZuWSDU+N85/r1IlNR7kGfznF3VCUlvc5IUO+B9g==
-  dependencies:
-    "@types/cookie" "^0.6.0"
     cookie "^1.0.1"
     set-cookie-parser "^2.6.0"
     turbo-stream "2.4.0"
@@ -14086,6 +14087,11 @@ use-sidecar@^1.1.3:
     detect-node-es "^1.1.0"
     tslib "^2.0.0"
 
+use-sync-external-store@^1.5.0:
+  version "1.5.0"
+  resolved "https://registry.yarnpkg.com/use-sync-external-store/-/use-sync-external-store-1.5.0.tgz#55122e2a3edd2a6c106174c27485e0fd59bcfca0"
+  integrity sha512-Rb46I4cGGVBmjamjphe8L/UnvJD+uPPtTkNvX5mZgqdbavhI4EbgIWJiIHXJ8bc/i9EQGPRh4DwEURJ552Do0A==
+
 utf8-byte-length@^1.0.1:
   version "1.0.5"
   resolved "https://registry.yarnpkg.com/utf8-byte-length/-/utf8-byte-length-1.0.5.tgz#f9f63910d15536ee2b2d5dd4665389715eac5c1e"
@@ -14186,9 +14192,9 @@ vite@^5.0.3:
     fsevents "~2.3.3"
 
 vite@^6.0.6:
-  version "6.3.1"
-  resolved "https://registry.yarnpkg.com/vite/-/vite-6.3.1.tgz#6b080ff907308ca691c5639c095ab6d938734c0d"
-  integrity sha512-kkzzkqtMESYklo96HKKPE5KKLkC1amlsqt+RjFMlX2AvbRB/0wghap19NdBxxwGZ+h/C6DLCrcEphPIItlGrRQ==
+  version "6.3.2"
+  resolved "https://registry.yarnpkg.com/vite/-/vite-6.3.2.tgz#4c1bb01b1cea853686a191657bbc14272a038f0a"
+  integrity sha512-ZSvGOXKGceizRQIZSz7TGJ0pS3QLlVY/9hwxVh17W3re67je1RKYzFHivZ/t0tubU78Vkyb9WnHPENSBCzbckg==
   dependencies:
     esbuild "^0.25.0"
     fdir "^6.4.3"

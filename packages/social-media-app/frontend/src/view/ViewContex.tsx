@@ -6,7 +6,7 @@ import React, {
     useMemo,
     ReactNode,
 } from "react";
-import { useLocalPaginated } from "@peerbit/react";
+import { useQuery } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Canvas,
@@ -128,13 +128,17 @@ function useViewContextHook() {
         items: sortedReplies,
         loadMore,
         isLoading,
-    } = useLocalPaginated(
+    } = useQuery(
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
         {
             ...query,
             transform: calculateAddress,
             batchSize,
             debug: { id: "replies" },
+            local: true,
+            remote: {
+                eager: true,
+            },
         }
     );
 

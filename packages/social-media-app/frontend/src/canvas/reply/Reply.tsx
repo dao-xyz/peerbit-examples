@@ -71,7 +71,6 @@ export const Reply = ({
 
     const { peer } = usePeer();
     const navigate = useNavigate();
-    const { view } = useView();
 
     // Use useLayoutEffect with a ResizeObserver to measure the container after the layout
     useLayoutEffect(() => {

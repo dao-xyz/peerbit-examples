@@ -8,6 +8,7 @@ import {
     SearchRequestIndexed,
     WithContext,
 } from "@peerbit/document";
+import { delay } from "@peerbit/time";
 import * as indexerTypes from "@peerbit/indexer-interface";
 
 type QueryLike = {
@@ -29,7 +30,7 @@ const logWithId = (
     }
 };
 
-export const useLocalPaginated = <
+export const useQuery = <
     T extends Record<string, any>,
     I extends Record<string, any>,
     R extends boolean | undefined = true,
@@ -44,6 +45,13 @@ export const useLocalPaginated = <
         debug?: boolean | { id: string };
         reverse?: boolean;
         batchSize?: number; // You can set a default batch size here
+        local?: boolean;
+        remote?:
+            | boolean
+            | {
+                  waitFor?: { timeout: number; count: number }; // wait for remote nodes to be ready, timeout in ms, count is the number of nodes to wait for
+                  eager?: boolean;
+              };
     } & QueryOptions
 ) => {
     const [all, setAll] = useState<WithContext<RT>[]>([]);
@@ -81,21 +89,21 @@ export const useLocalPaginated = <
             reset();
             return;
         }
-        const initIterator = () => {
+        const initIterator = async () => {
             try {
                 // Initialize the iterator and load initial batch.
 
                 emptyResultsRef.current = false;
                 iteratorRef.current?.close();
                 iteratorRef.current = db.index.iterate(options?.query ?? {}, {
-                    local: true,
-                    remote: false,
+                    local: options?.local ?? true,
+                    remote: options?.remote ?? true,
                     resolve: options?.resolve as any,
                 }) as any as ResultsIterator<WithContext<RT>>; // TODO types
 
                 logWithId(options, "Initializing iterator");
 
-                loadMore(); // initial load
+                await loadMore(); // initial load
             } catch (error) {
                 console.error("Error initializing iterator", error);
             }
@@ -105,7 +113,7 @@ export const useLocalPaginated = <
         reset();
         initIterator();
 
-        const handleChange = async (e: CustomEvent<DocumentsChange<T>>) => {
+        /* const handleChange = async (e: CustomEvent<DocumentsChange<T>>) => {
             // while we are iterating, we might get new documents.. so this method inserts them where they should be
             let merged = await db.index.updateResults(
                 allRef.current,
@@ -113,19 +121,28 @@ export const useLocalPaginated = <
                 options?.query || {},
                 options?.resolve ?? true
             );
-            logWithId(
-                options,
-                "handleChange",
-                merged.length,
-                allRef.current.length
-            );
+
+            const expectedDiff = e.detail.added.length - e.detail.removed.length
+
             if (
-                merged === allRef.current &&
-                merged.length &&
-                allRef.current.length === 0
+                merged === allRef.current || (
+                    expectedDiff !== 0 &&
+                    merged.length === allRef.current.length)
             ) {
                 // no change
             } else {
+                logWithId(
+                    options,
+                    "handleChange",
+                    {
+                        added: e.detail.added.length,
+                        removed: e.detail.removed.length,
+                        merged: merged.length,
+                        allRef: allRef.current.length,
+
+                    }
+                );
+
                 updateAll(options?.reverse ? merged.reverse() : merged);
             }
         };
@@ -135,7 +152,7 @@ export const useLocalPaginated = <
             db.events.removeEventListener("change", handleChange);
             iteratorRef.current?.close();
             emptyResultsRef.current = false;
-        };
+        }; */
     }, [
         db?.closed ? undefined : db?.rootAddress,
         options?.id,
@@ -144,8 +161,13 @@ export const useLocalPaginated = <
     ]);
 
     // Define the loadMore function
+    const batchSize = options?.batchSize ?? 10;
     const loadMore = async () => {
-        if (!iteratorRef.current || emptyResultsRef.current) {
+        if (
+            !iteratorRef.current ||
+            emptyResultsRef.current ||
+            iteratorRef.current.done()
+        ) {
             logWithId(options, "loadMore: already loading or no more items", {
                 isLoading,
                 emptyResultsRef: emptyResultsRef.current,
@@ -158,9 +180,9 @@ export const useLocalPaginated = <
         try {
             // Fetch next batchSize number of items:
             let refBefore = iteratorRef.current;
-
+            await db?.log.waitForReplicators({ timeout: 5e3 });
             let newItems: WithContext<RT>[] = await iteratorRef.current.next(
-                options?.batchSize ?? 10
+                batchSize
             );
 
             if (options?.transform) {

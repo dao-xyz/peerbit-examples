@@ -1033,22 +1033,30 @@ export class Canvas extends Program<CanvasArgs> {
         }
 
         await this.load();
-        const withContext = await this.origin?.replies.index.index.get(
-            toId(this.id),
-            {
-                shape: {
-                    id: true,
-                    __context: true,
-                },
-            }
-        );
+        if (!this.origin) {
+            throw new Error("Missing origin when loading context");
+        }
+        const withContext =
+            (
+                await this.origin.replies.index.index.get(toId(this.id), {
+                    shape: {
+                        id: true,
+                        __context: true,
+                    },
+                })
+            )?.value.__context ||
+            (
+                await this.origin.elements.index.get(toId(this.id), {
+                    local: true,
+                    remote: true,
+                    resolve: false,
+                })
+            )?.__context;
 
         if (!withContext) {
             throw new Error("No context found");
         }
-        return ((this as WithContext<any>).__context = (
-            withContext.value as WithContext<{ id: Uint8Array }>
-        ).__context);
+        return ((this as WithContext<any>).__context = withContext);
     }
 
     get loadedContext(): boolean {
