@@ -23,6 +23,7 @@ export const Replies = (properties: {
         processedReplies,
         loadMore: _loadMore,
         isLoading: isLoadingView,
+        viewRoot,
     } = useView();
     const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
@@ -35,14 +36,31 @@ export const Replies = (properties: {
     }>({
         nextBatchIndex: 0,
     });
+    // Track which replies have been seen for the "new messages" toast
+    const alreadySeen = useRef(new Set<string>());
 
     const loadedMoreOnce = useRef(true);
     const loadMore = async () => {
         loadedMoreOnce.current = true;
         await _loadMore();
     };
+    const pendingScrollAdjust = useRef<{
+        sentinel: HTMLElement;
+        prevScrollHeight: number;
+    } | null>(null);
 
     const lastProcessedRepliesLength = useRef(processedReplies.length);
+
+    useEffect(() => {
+        lastProcessedRepliesLength.current = processedReplies.length;
+        loadedMoreOnce.current = false;
+        alreadySeen.current.clear();
+        pendingScrollAdjust.current = null;
+        setPendingBatch({
+            nextBatchIndex: processedReplies.length,
+        });
+    }, [view, viewRoot]);
+
     useEffect(() => {
         if (processedReplies.length > 0) {
             setPendingBatch({
@@ -66,9 +84,6 @@ export const Replies = (properties: {
     const isLoadingAnything =
         isLoadingView ||
         pendingBatch.nextBatchIndex !== processedReplies.length;
-
-    // Track which replies have been seen for the "new messages" toast
-    const alreadySeen = useRef(new Set<string>());
 
     // Prepare refs array for each Reply
     const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -124,11 +139,6 @@ export const Replies = (properties: {
             );
         }
     }, [isAtBottom, processedReplies]);
-
-    const pendingScrollAdjust = useRef<{
-        sentinel: HTMLElement;
-        prevScrollHeight: number;
-    } | null>(null);
 
     // 3️⃣ After new replies render, adjust scroll by the exact delta
     useEffect(() => {
@@ -211,9 +221,8 @@ export const Replies = (properties: {
         };
     }, [contentRef.current, properties.viewRef]);
 
-    // ─────────────────────────────────────────────────────
-    // IntersectionObserver for infinite‐scroll trigger
     const lastSentintentForLoadingMore = useRef<HTMLDivElement>(null);
+
     useEffect(() => {
         const sentinel = sentinelRef.current;
         if (!sentinel || properties.viewRef !== document.body) return;
@@ -226,7 +235,7 @@ export const Replies = (properties: {
                     lastSentintentForLoadingMore.current !== sentinel &&
                     !isLoadingAnything
                 ) {
-                    console.log("LOAD MORE!");
+                    console.log("LOAD MORE FROM SENTINEL!");
 
                     lastSentintentForLoadingMore.current = sentinel;
                     pendingScrollAdjust.current = {
@@ -249,6 +258,7 @@ export const Replies = (properties: {
         observer.observe(sentinel);
         return () => {
             observer.disconnect();
+            lastSentintentForLoadingMore.current = null;
         };
     }, [
         properties.viewRef,

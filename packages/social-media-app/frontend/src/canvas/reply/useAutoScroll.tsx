@@ -137,27 +137,42 @@ export const useAutoScroll = (properties: {
             : null
     );
 
+    const lastScrollToSee = useRef<string>(null);
+
     // Update latest reply ref and scroll position before layout changes.
     useLayoutEffect(() => {
-        if (!viewIsShouldScrollToBottom) {
-            return;
-        }
         if (!properties.enabled) {
             return;
         }
         if (processedReplies.length > 0) {
-            latestReplyRef.current =
-                processedReplies[processedReplies.length - 1];
+            if (viewIsShouldScrollToBottom) {
+                let last = processedReplies[processedReplies.length - 1];
+                latestReplyRef.current =
+                    processedReplies[processedReplies.length - 1];
 
-            if (
-                latestReplyRef.current.reply.publicKey.equals(
-                    peer.identity.publicKey
-                ) &&
-                scrollMode.current === "automatic"
-            ) {
-                scrollToBottom();
+                if (
+                    last.reply.idString !== lastScrollToSee?.current &&
+                    latestReplyRef.current.reply.publicKey.equals(
+                        peer.identity.publicKey
+                    ) &&
+                    scrollMode.current === "automatic"
+                ) {
+                    scrollToBottom();
+                    lastScrollToSee.current =
+                        latestReplyRef.current.reply.idString;
+                }
+            } else {
+                let first = processedReplies[0];
+                if (
+                    first.reply.idString !== lastScrollToSee?.current &&
+                    first.reply.publicKey.equals(peer.identity.publicKey)
+                ) {
+                    scrollToTop();
+                    lastScrollToSee.current = first.reply.idString;
+                }
             }
         }
+
         bodyResizeScrollPositionRef.current = getScrollTop();
     }, [processedReplies, properties.scrollRef?.current, properties.enabled]);
 

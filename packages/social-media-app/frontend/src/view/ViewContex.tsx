@@ -6,7 +6,7 @@ import React, {
     useMemo,
     ReactNode,
 } from "react";
-import { useQuery } from "@peerbit/react";
+import { usePeer, useQuery } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Canvas,
@@ -36,6 +36,7 @@ const calculateAddress = async (p: WithContext<Canvas>) => {
 
 function useViewContextHook() {
     const { root, path: canvases, loading } = useCanvases();
+    const { peer } = usePeer();
 
     // Instead of separate view state, derive view from URL:
     const [searchParams, setSearchParams] = useSearchParams();
@@ -138,6 +139,32 @@ function useViewContextHook() {
             local: true,
             remote: {
                 eager: true,
+            },
+            onChange: {
+                merge: async (e) => {
+                    // filter only changes made by me
+                    for (const change of e.added) {
+                        const hash = change.__context.head;
+                        const entry = await viewRoot.replies.log.log.get(hash);
+                        for (const signer of await entry.getSignatures()) {
+                            if (
+                                signer.publicKey.equals(peer.identity.publicKey)
+                            ) {
+                                return e; // merge the change since it was made by me
+                            }
+                        }
+                    }
+                    return undefined;
+                },
+                update:
+                    view === "chat" || view === "new"
+                        ? undefined
+                        : (prev, e) => {
+                              // insert at the top
+                              prev.unshift(...e.added);
+                              console.log("UPDATE", prev, e.added);
+                              return prev;
+                          },
             },
         }
     );
