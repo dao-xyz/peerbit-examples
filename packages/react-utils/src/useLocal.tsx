@@ -58,6 +58,7 @@ export const useLocal = <
                             : options.debug.id;
                     console.log(
                         dbgId ? "fetched " + dbgId : "fetched",
+                        options?.id,
                         results,
                         "query",
                         options?.query
@@ -76,10 +77,7 @@ export const useLocal = <
             }
         };
 
-        const debounced = debounceLeadingTrailing(
-            _l,
-            options?.debounce ?? 1000
-        );
+        const debounced = debounceLeadingTrailing(_l, options?.debounce ?? 123);
 
         const handleChange = () => {
             if (emptyResultsRef.current) {
