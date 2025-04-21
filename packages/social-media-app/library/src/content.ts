@@ -31,7 +31,6 @@ import {
 import { RPC } from "@peerbit/rpc";
 import { concat, equals } from "uint8arrays";
 import { waitFor } from "@peerbit/time";
-import { error } from "console";
 
 @variant(0)
 export class Layout {
@@ -690,17 +689,38 @@ export class Canvas extends Program<CanvasArgs> {
         ) => {
             // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
 
-            const reIndex = async (canvas: Canvas, parent: Canvas) => {
-                await parent.load();
+            const reIndex = async (canvas: Canvas) => {
+                await canvas.load();
+                const parent = canvas.origin;
+                if (!parent) {
+                    console.error("Missing parent");
+                    return;
+                }
                 if (this.closed || parent.closed) {
                     console.error("Canvas closed, skipping re-index");
                     return;
                 }
                 let indexedCanvas = await parent.replies.index.get(canvas.id, {
                     resolve: false,
+                    local: true,
+                    remote: false,
                 });
+
                 if (!indexedCanvas) {
-                    console.warn("Missing indexed canvas, skipping re-index");
+                    // because we might index children before parents, this might be undefined
+                    // but it is fine, since when the parent is to be re-indexed, its children will be considered
+                    /*  try {
+                         let context = await canvas.loadContext();
+                         indexedCanvas = coerceWithContext(
+                             await IndexableCanvas.from(canvas, this.node),
+                             context
+                         );
+                     } catch (error) {
+                         const fff222 = [toId(canvas.id).primitive, parent.replies.index.closed, parent.replies.index["putSet"]?.size, parent.replies.index["putSet"]?.has(toId(canvas.id).primitive), parent.replies.index.index["_index"].has(toId(canvas.id).primitive)]
+ 
+                         console.error("Failed to load context", fff, fff222, error);
+                         throw error;
+                     } */
                     return;
                 }
                 try {
@@ -726,7 +746,7 @@ export class Canvas extends Program<CanvasArgs> {
                 }
                 const loadedPath = await added.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
-                    await reIndex(loadedPath[i], loadedPath[i - 1]);
+                    await reIndex(loadedPath[i]);
                 }
             }
 
@@ -739,7 +759,7 @@ export class Canvas extends Program<CanvasArgs> {
 
                 const loadedPath = await removed.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
-                    await reIndex(loadedPath[i], loadedPath[i - 1]);
+                    await reIndex(loadedPath[i]);
                 }
                 await removed.close();
             }
@@ -1046,7 +1066,7 @@ export class Canvas extends Program<CanvasArgs> {
                 })
             )?.value.__context ||
             (
-                await this.origin.elements.index.get(toId(this.id), {
+                await this.origin.replies.index.get(toId(this.id), {
                     local: true,
                     remote: true,
                     resolve: false,
