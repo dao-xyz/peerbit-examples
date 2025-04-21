@@ -182,7 +182,7 @@ export const DebugGeneratePostButton = () => {
             }
 
             // Last step – add this post as a reply to the parent.
-            leaf.replies.put(openCanvas);
+            leaf.createReply(openCanvas);
         }
     };
 

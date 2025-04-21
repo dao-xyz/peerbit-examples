@@ -15,7 +15,7 @@ import {
 } from "../content.js";
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
-import { waitForResolved } from "@peerbit/time";
+import { delay, waitForResolved } from "@peerbit/time";
 import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { StaticImage } from "../static/image.js";
 
@@ -243,6 +243,62 @@ describe("content", () => {
                 );
                 expect(allTitles.sort()).to.deep.eq(["c", "d"]);
             });
+
+            it("will use remote for sorting during warmup", async () => {
+                const rootA = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+
+                let childrenCount = {
+                    a: 1,
+                    b: 2,
+                    c: 3,
+                };
+
+                for (const [key, count] of Object.entries(childrenCount)) {
+                    for (let i = 0; i < count; i++) {
+                        // console.log("key: " + key + "key", "i", i)
+                        await rootA.getCreateRoomByPath([key, i.toString()]);
+                    }
+                }
+
+                // a has 1 reply
+                // b has 2 replies
+                // c has 3 replies
+
+                // so sorting by replies will be c, b, a
+                const results = async (root: Canvas) => {
+                    const sorted = await root.replies.index
+                        .iterate({
+                            query: getImmediateRepliesQuery(root),
+                            sort: new Sort({
+                                key: "replies",
+                                direction: SortDirection.DESC,
+                            }),
+                        })
+                        .all();
+
+                    for (const [i, r] of sorted.entries()) {
+                        if (r.closed) {
+                            sorted[i] = await root.node.open(r, {
+                                existing: "reuse",
+                            });
+                        }
+                    }
+                    const titles = await Promise.all(
+                        sorted.map((x) => x.createTitle())
+                    );
+                    expect(titles).to.deep.eq(["c", "b", "a"]);
+                };
+                await results(rootA);
+
+                const rootB = await session.peers[1].open(rootA.clone());
+                await rootB.replies.log.waitForReplicators();
+                await results(rootB);
+            });
         });
 
         describe("elements", async () => {
@@ -319,7 +375,7 @@ describe("content", () => {
                 );
 
                 await a.load();
-                await a.replies.put(subcanvasWithImage);
+                await a.createReply(subcanvasWithImage);
 
                 const ownedElements = await a.elements.index
                     .iterate({

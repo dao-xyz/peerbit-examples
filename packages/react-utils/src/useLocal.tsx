@@ -12,6 +12,19 @@ type QueryOptons = {
     id: string;
 };
 
+const logWithId = (
+    options: { debug?: boolean | { id: string } } | undefined,
+    ...args: any[]
+) => {
+    if (!options?.debug) return;
+
+    if (typeof options.debug === "boolean") {
+        console.log(...args);
+    } else if (typeof options.debug.id === "string") {
+        console.log(options.debug.id, ...args);
+    }
+};
+
 export const useLocal = <
     T extends Record<string, any>,
     I extends Record<string, any>,
@@ -36,6 +49,16 @@ export const useLocal = <
             return;
         }
 
+        logWithId(
+            options,
+            "reset local",
+            db?.closed ? undefined : db?.rootAddress,
+            options?.id,
+            options?.resolve,
+            options?.onChanges,
+            options?.transform
+        );
+
         const _l = async (args?: any) => {
             try {
                 const iterator = db.index.iterate(options?.query ?? {}, {
@@ -51,19 +74,14 @@ export const useLocal = <
                         results.map((x) => options.transform!(x))
                     );
                 }
-                if (options?.debug) {
-                    let dbgId =
-                        typeof options.debug === "boolean"
-                            ? undefined
-                            : options.debug.id;
-                    console.log(
-                        dbgId ? "fetched " + dbgId : "fetched",
-                        options?.id,
-                        results,
-                        "query",
-                        options?.query
-                    );
-                }
+                logWithId(
+                    options,
+                    options?.id,
+                    results,
+                    "query",
+                    options?.query
+                );
+
                 emptyResultsRef.current = results.length === 0;
                 setAll(() => {
                     options?.onChanges?.(results);

@@ -6,7 +6,7 @@ import React, {
     useContext,
     createContext,
 } from "react";
-import { usePeer, useProgram, useLocal } from "@peerbit/react";
+import { usePeer, useProgram, useLocal, useQuery } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Element,
@@ -16,14 +16,13 @@ import {
     StaticContent,
     StaticMarkdownText,
     StaticPartialImage,
-    StaticImage,
     SimpleWebManifest,
     getOwnedElementsQuery,
     getQualityLessThanOrEqualQuery,
     LOWEST_QUALITY,
     Quality,
 } from "@giga-app/interface";
-import { randomBytes, sha256Sync, toBase64 } from "@peerbit/crypto";
+import { randomBytes, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
@@ -84,6 +83,7 @@ export interface CanvasContextType {
     subscribeContentChange: (
         callback: (element: Element) => void
     ) => () => void;
+    isLoading: boolean;
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -132,10 +132,11 @@ export const CanvasWrapper = ({
     const [editMode, setEditMode] = useState(!!draft);
     const [isEmpty, setIsEmpty] = useState(true);
     const { announceReply } = useReplyProgress();
-    const rects = useLocal(
+    const { items: rects, isLoading } = useQuery(
         canvas?.loadedElements ? canvas.origin?.elements : null,
         {
             id: canvas?.origin?.idString + "/" + canvas?.idString,
+            debounce: 123,
             query:
                 !canvas || canvas.closed
                     ? null
@@ -154,7 +155,6 @@ export const CanvasWrapper = ({
                               new Sort({ key: ["location", "y"] }),
                           ],
                       },
-            /* debug: canvas && canvas.path.length > 0, */
         }
     );
 
@@ -655,6 +655,7 @@ export const CanvasWrapper = ({
         setEditMode,
         active,
         isEmpty,
+        isLoading,
         setActive,
         pendingRects,
         setPendingRects,

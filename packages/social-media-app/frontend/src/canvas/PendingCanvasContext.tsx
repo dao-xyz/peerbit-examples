@@ -69,8 +69,8 @@ export const PendingCanvasProvider: React.FC<{
         isSaving.current = true;
         if (viewRoot) {
             setPendingCanvasState((prev) => {
-                viewRoot.replies
-                    .put(prev)
+                viewRoot
+                    .createReply(prev)
                     .then(() => savePromise.resolve())
                     .catch(savePromise.reject)
                     .finally(() => {

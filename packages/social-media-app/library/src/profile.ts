@@ -93,7 +93,11 @@ export class Profiles extends Program {
                     );
                 } else {
                     const get = await this.profiles.index.get(
-                        operation.operation.key
+                        operation.operation.key,
+                        {
+                            local: true,
+                            remote: false, // TODO (?) this should be remote
+                        }
                     );
                     if (
                         !get ||

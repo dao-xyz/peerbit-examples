@@ -17,6 +17,7 @@ import {
 } from "./utils/rect";
 import { IoIosArrowDown, IoIosArrowUp } from "react-icons/io";
 import { MdClear } from "react-icons/md";
+import { Spinner } from "../utils/Spinner";
 
 type SizeProps = {
     width?: number;
@@ -63,6 +64,7 @@ export const Canvas = (
         removePending,
         canvas,
         mutate,
+        isLoading,
         reduceElementsForViewing, // from context!
     } = useCanvas();
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
@@ -111,152 +113,177 @@ export const Canvas = (
                                 : "max-h-[60vh] h-full"
                         }`}
                     >
-                        <Frame
-                            thumbnail={asThumbnail}
-                            active={active.has(rect.id)}
-                            className="z-1"
-                            setActive={(v) => {
-                                if (v) {
-                                    setActive(new Set(active.add(rect.id)));
-                                } else {
-                                    setActive(
-                                        new Set(
-                                            [...active].filter(
-                                                (el) => el !== rect.id
-                                            )
-                                        )
-                                    );
-                                }
-                            }}
-                            delete={deleteFn}
-                            editMode={
-                                properties.appearance === "chat-view-images"
-                                    ? false
-                                    : editMode
-                            }
-                            showEditControls={
-                                properties.appearance !== "chat-view-images" &&
-                                editMode &&
-                                filteredRects.length > 1
-                            }
-                            element={rect}
-                            onLoad={() => {}}
-                            fit={
-                                properties.appearance === "chat-view-images"
-                                    ? "cover"
-                                    : properties.appearance === "chat-view-text"
-                                    ? undefined
-                                    : "contain"
-                            }
-                            inFullscreen={
-                                properties.draft && properties.inFullScreen
-                            }
-                            editControls={
-                                <>
-                                    <button
-                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
-                                        disabled={ix === 0}
-                                        onClick={() => {
-                                            return mutate(
-                                                (element, ix) => {
-                                                    const prev =
-                                                        filteredRects[ix - 1];
-                                                    element.location.y -= 1;
-                                                    return mutate(
-                                                        (element) => {
-                                                            element.location.y += 1;
-                                                            forceUpdate();
-                                                            return true;
-                                                        },
-                                                        {
-                                                            filter: (el) =>
-                                                                el.idString ===
-                                                                prev.idString,
-                                                        }
-                                                    );
-                                                },
-                                                {
-                                                    filter: (el) =>
-                                                        el.idString ===
-                                                        rect.idString,
-                                                }
+                        {isLoading && (
+                            <div className="flex justify-center align-middle">
+                                <Spinner />
+                            </div>
+                        )}
+                        {!isLoading && (
+                            <>
+                                <Frame
+                                    thumbnail={asThumbnail}
+                                    active={active.has(rect.id)}
+                                    className="z-1"
+                                    setActive={(v) => {
+                                        if (v) {
+                                            setActive(
+                                                new Set(active.add(rect.id))
                                             );
-                                        }}
-                                    >
-                                        <IoIosArrowUp />
-                                    </button>
-                                    <button
-                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
-                                        onClick={deleteFn}
-                                    >
-                                        <MdClear />
-                                    </button>
-                                    <button
-                                        className="btn btn-elevated m-1 btn-icon btn-icon-sm"
-                                        disabled={
-                                            rectsToRender.length - 1 === ix
+                                        } else {
+                                            setActive(
+                                                new Set(
+                                                    [...active].filter(
+                                                        (el) => el !== rect.id
+                                                    )
+                                                )
+                                            );
                                         }
-                                        onClick={() => {
-                                            return mutate(
-                                                (element, ix) => {
-                                                    const next =
-                                                        filteredRects[ix + 1];
-                                                    element.location.y += 1;
+                                    }}
+                                    delete={deleteFn}
+                                    editMode={
+                                        properties.appearance ===
+                                        "chat-view-images"
+                                            ? false
+                                            : editMode
+                                    }
+                                    showEditControls={
+                                        properties.appearance !==
+                                            "chat-view-images" &&
+                                        editMode &&
+                                        filteredRects.length > 1
+                                    }
+                                    element={rect}
+                                    onLoad={() => {}}
+                                    fit={
+                                        properties.appearance ===
+                                        "chat-view-images"
+                                            ? "cover"
+                                            : properties.appearance ===
+                                              "chat-view-text"
+                                            ? undefined
+                                            : "contain"
+                                    }
+                                    inFullscreen={
+                                        properties.draft &&
+                                        properties.inFullScreen
+                                    }
+                                    editControls={
+                                        <>
+                                            <button
+                                                className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                                disabled={ix === 0}
+                                                onClick={() => {
                                                     return mutate(
-                                                        (element) => {
+                                                        (element, ix) => {
+                                                            const prev =
+                                                                filteredRects[
+                                                                    ix - 1
+                                                                ];
                                                             element.location.y -= 1;
-                                                            return true;
+                                                            return mutate(
+                                                                (element) => {
+                                                                    element.location.y += 1;
+                                                                    forceUpdate();
+                                                                    return true;
+                                                                },
+                                                                {
+                                                                    filter: (
+                                                                        el
+                                                                    ) =>
+                                                                        el.idString ===
+                                                                        prev.idString,
+                                                                }
+                                                            );
                                                         },
                                                         {
                                                             filter: (el) =>
                                                                 el.idString ===
-                                                                next.idString,
+                                                                rect.idString,
                                                         }
                                                     );
-                                                },
-                                                {
-                                                    filter: (el) =>
-                                                        el.idString ===
-                                                        rect.idString,
+                                                }}
+                                            >
+                                                <IoIosArrowUp />
+                                            </button>
+                                            <button
+                                                className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                                onClick={deleteFn}
+                                            >
+                                                <MdClear />
+                                            </button>
+                                            <button
+                                                className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                                disabled={
+                                                    rectsToRender.length - 1 ===
+                                                    ix
                                                 }
-                                            );
-                                        }}
-                                    >
-                                        <IoIosArrowDown />
-                                    </button>
-                                </>
-                            }
-                        />
-                        <svg
-                            xmlns="https://www.w3.org/2000/svg"
-                            className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
-                            version="1.1"
-                        >
-                            <filter id="gaussianBlurCanvas">
-                                <feGaussianBlur
-                                    stdDeviation="25"
-                                    result="blur"
+                                                onClick={() => {
+                                                    return mutate(
+                                                        (element, ix) => {
+                                                            const next =
+                                                                filteredRects[
+                                                                    ix + 1
+                                                                ];
+                                                            element.location.y += 1;
+                                                            return mutate(
+                                                                (element) => {
+                                                                    element.location.y -= 1;
+                                                                    return true;
+                                                                },
+                                                                {
+                                                                    filter: (
+                                                                        el
+                                                                    ) =>
+                                                                        el.idString ===
+                                                                        next.idString,
+                                                                }
+                                                            );
+                                                        },
+                                                        {
+                                                            filter: (el) =>
+                                                                el.idString ===
+                                                                rect.idString,
+                                                        }
+                                                    );
+                                                }}
+                                            >
+                                                <IoIosArrowDown />
+                                            </button>
+                                        </>
+                                    }
                                 />
-                            </filter>
-                        </svg>
-                        {!rectIsStaticMarkdownText(rect) &&
-                            properties.bgBlur && (
-                                <div className="absolute bg-white dark:bg-black w-[150%] h-[150%] left-1/2 top-1/2  -translate-x-1/2 -translate-y-1/2 ">
-                                    <div className=" opacity-30  [filter:url('#gaussianBlurCanvas')]">
-                                        <Frame
-                                            thumbnail={false}
-                                            active={false}
-                                            setActive={() => {}}
-                                            delete={() => {}}
-                                            editMode={false}
-                                            showEditControls={false}
-                                            element={rect}
-                                            onLoad={() => {}}
-                                            fit="cover"
+                                <svg
+                                    xmlns="https://www.w3.org/2000/svg"
+                                    className="border-0 clip-0 h-[1px] -m-[1px] overflow-hidden p-0 absolute w-[1px]"
+                                    version="1.1"
+                                >
+                                    <filter id="gaussianBlurCanvas">
+                                        <feGaussianBlur
+                                            stdDeviation="25"
+                                            result="blur"
                                         />
-                                    </div>
-                                </div>
-                            )}
+                                    </filter>
+                                </svg>
+                                {!rectIsStaticMarkdownText(rect) &&
+                                    properties.bgBlur && (
+                                        <div className="absolute bg-white dark:bg-black w-[150%] h-[150%] left-1/2 top-1/2  -translate-x-1/2 -translate-y-1/2 ">
+                                            <div className=" opacity-30  [filter:url('#gaussianBlurCanvas')]">
+                                                <Frame
+                                                    thumbnail={false}
+                                                    active={false}
+                                                    setActive={() => {}}
+                                                    delete={() => {}}
+                                                    editMode={false}
+                                                    showEditControls={false}
+                                                    element={rect}
+                                                    onLoad={() => {}}
+                                                    fit="cover"
+                                                />
+                                            </div>
+                                        </div>
+                                    )}
+                            </>
+                        )}
                     </div>
                 </div>
             );

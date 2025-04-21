@@ -11,7 +11,6 @@ import { sha256Sync } from "@peerbit/crypto";
 import { useCanvas } from "../../canvas/CanvasWrapper";
 import { useAIReply } from "../../ai/AIReployContext";
 import { usePeer } from "@peerbit/react";
-import pQueue from "p-queue";
 import { FaCheck } from "react-icons/fa";
 import { Spinner } from "../../utils/Spinner";
 
@@ -31,7 +30,6 @@ export const MarkdownContent = ({
     onResize,
     editable = false,
     onChange,
-    thumbnail,
     previewLines,
     noPadding,
     inFullscreen,

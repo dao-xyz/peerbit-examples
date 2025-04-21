@@ -4,13 +4,9 @@ import {
     Documents,
     DocumentsChange,
     ResultsIterator,
-    SearchRequest,
-    SearchRequestIndexed,
     WithContext,
 } from "@peerbit/document";
-import { delay } from "@peerbit/time";
 import * as indexerTypes from "@peerbit/indexer-interface";
-import { log } from "console";
 
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -197,8 +193,7 @@ export const useQuery = <
         };
     }, [
         db?.closed ? undefined : db?.address,
-        options?.id,
-        options?.query,
+        options?.id ? options?.id : options?.query,
         options?.resolve,
     ]);
 
@@ -228,7 +223,7 @@ export const useQuery = <
             logWithId(
                 options,
                 "loadMore: loading more items for iterator" +
-                    iteratorRef.current.id
+                    iteratorRef.current?.id
             );
             let newItems: WithContext<RT>[] = await iterator.iterator.next(
                 batchSize
@@ -245,7 +240,7 @@ export const useQuery = <
                 // This can happen if the iterator was closed and a new one was created
                 logWithId(options, "Iterator ref changed, not updating state", {
                     refBefore: iterator.id,
-                    currentRef: iteratorRef.current.id,
+                    currentRef: iteratorRef.current?.id,
                 });
                 return;
             }
@@ -274,7 +269,7 @@ export const useQuery = <
                 logWithId(
                     options,
                     "no new items, not updating state for iterator" +
-                        iteratorRef.current.id
+                        iteratorRef.current?.id
                 );
             }
         } catch (error) {

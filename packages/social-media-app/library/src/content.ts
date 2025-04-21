@@ -30,7 +30,8 @@ import {
 } from "./types.js";
 import { RPC } from "@peerbit/rpc";
 import { concat, equals } from "uint8arrays";
-import { waitFor } from "@peerbit/time";
+import { AbortError, waitFor } from "@peerbit/time";
+import { debouncedAccumulatorMap } from "./utils.js";
 
 @variant(0)
 export class Layout {
@@ -529,21 +530,7 @@ export class Canvas extends Program<CanvasArgs> {
             throw error;
         });
 
-        this.path = [
-            ...canvas.path,
-            new CanvasAddressReference({
-                canvas,
-            }),
-        ];
-
-        await this.save(this.node.services.blocks, { reset: true });
-
-        if (canvas.address === this.path[this.path.length - 1]?.address) {
-            return; // no change
-        }
-
-        console.trace("set parent", canvas);
-
+        // fetch elements before updating address and apth
         const elements = await this.elements.index
             .iterate({ query: getOwnedElementsQuery(this) })
             .all();
@@ -554,15 +541,21 @@ export class Canvas extends Program<CanvasArgs> {
             throw new Error("Cannot move canvas with sub-elements");
         }
 
-        let addressBefore = this.address;
-        let addrsesAfter = (await this.calculateAddress({ reset: true }))
-            .address;
+        this.path = [
+            ...canvas.path,
+            new CanvasAddressReference({
+                canvas,
+            }),
+        ];
 
-        if (addressBefore !== addrsesAfter) {
-            await this.node.services.blocks.rm(addressBefore);
+        // update address
+        let addressBefore = this.address;
+        await this.save(this.node.services.blocks, { reset: true });
+        if (addressBefore === this.address) {
+            return; // no change
         }
 
-        const newPath = [
+        const newElementPath = [
             ...this.path,
             new CanvasAddressReference({
                 canvas: this,
@@ -572,7 +565,7 @@ export class Canvas extends Program<CanvasArgs> {
         // TODO what if the origin has changed?
         // TODO implement sub canvases movements?
         for (const element of elements) {
-            element.path = newPath;
+            element.path = newElementPath;
             await this.elements.put(element);
         }
     }
@@ -591,7 +584,17 @@ export class Canvas extends Program<CanvasArgs> {
     }
     public debug: boolean = false;
     private closeController: AbortController | null = null;
+    private reIndexDebouncer: ReturnType<
+        typeof debouncedAccumulatorMap<Canvas>
+    >;
+
     async open(args?: CanvasArgs): Promise<void> {
+        this.reIndexDebouncer = debouncedAccumulatorMap<Canvas>(async (map) => {
+            for (const canvas of map.values()) {
+                this.reIndex(canvas);
+            }
+        }, 123);
+
         this.closeController = new AbortController();
         this.debug = !!args?.debug;
         if (!this.isOrigin) {
@@ -608,6 +611,7 @@ export class Canvas extends Program<CanvasArgs> {
                 console.time(this.getValueWithContext("openElements"));
             await this._elements.open({
                 type: Element,
+                timeUntilRoleMaturity: 6e4,
                 replicate: { factor: 1 }, // TODO choose better
                 canPerform: async (operation) => {
                     /**
@@ -652,6 +656,7 @@ export class Canvas extends Program<CanvasArgs> {
 
             await this._replies.open({
                 type: Canvas,
+                timeUntilRoleMaturity: 6e4,
                 replicate: { factor: 1 }, // TODO choose better
                 canOpen: () => false,
                 canPerform: async (_operation) => {
@@ -681,6 +686,62 @@ export class Canvas extends Program<CanvasArgs> {
             });
         }
     }
+
+    private async reIndex(from: Canvas) {
+        const loadedPath = await from.loadPath(true);
+        for (let i = 1; i < loadedPath.length; i++) {
+            const canvas = loadedPath[i];
+            await canvas.load();
+            const parent = canvas.origin;
+            if (!parent) {
+                console.error("Missing parent");
+                return;
+            }
+            if (this.closed || parent.closed) {
+                console.error("Canvas closed, skipping re-index");
+                return;
+            }
+            let indexedCanvas = await parent.replies.index.get(canvas.id, {
+                resolve: false,
+                local: true,
+                remote: false,
+            });
+
+            if (!indexedCanvas) {
+                // because we might index children before parents, this might be undefined
+                // but it is fine, since when the parent is to be re-indexed, its children will be considered
+                /*  try {
+                     let context = await canvas.loadContext();
+                     indexedCanvas = coerceWithContext(
+                         await IndexableCanvas.from(canvas, this.node),
+                         context
+                     );
+                 } catch (error) {
+                     const fff222 = [toId(canvas.id).primitive, parent.replies.index.closed, parent.replies.index["putSet"]?.size, parent.replies.index["putSet"]?.has(toId(canvas.id).primitive), parent.replies.index.index["_index"].has(toId(canvas.id).primitive)]
+    
+                     console.error("Failed to load context", fff, fff222, error);
+                     throw error;
+                 } */
+                return;
+            }
+            try {
+                await parent.replies.index.putWithContext(
+                    canvas,
+                    toId(canvas.id),
+                    indexedCanvas.__context
+                );
+            } catch (error) {
+                if (parent.replies.index.closed) {
+                    console.warn(
+                        `Index ${parent.replies.address} closed, skipping re-index"`
+                    );
+                    return;
+                }
+                throw error;
+            }
+        }
+    }
+
     async afterOpen(): Promise<void> {
         await super.afterOpen();
 
@@ -689,64 +750,16 @@ export class Canvas extends Program<CanvasArgs> {
         ) => {
             // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
 
-            const reIndex = async (canvas: Canvas) => {
-                await canvas.load();
-                const parent = canvas.origin;
-                if (!parent) {
-                    console.error("Missing parent");
-                    return;
-                }
-                if (this.closed || parent.closed) {
-                    console.error("Canvas closed, skipping re-index");
-                    return;
-                }
-                let indexedCanvas = await parent.replies.index.get(canvas.id, {
-                    resolve: false,
-                    local: true,
-                    remote: false,
-                });
-
-                if (!indexedCanvas) {
-                    // because we might index children before parents, this might be undefined
-                    // but it is fine, since when the parent is to be re-indexed, its children will be considered
-                    /*  try {
-                         let context = await canvas.loadContext();
-                         indexedCanvas = coerceWithContext(
-                             await IndexableCanvas.from(canvas, this.node),
-                             context
-                         );
-                     } catch (error) {
-                         const fff222 = [toId(canvas.id).primitive, parent.replies.index.closed, parent.replies.index["putSet"]?.size, parent.replies.index["putSet"]?.has(toId(canvas.id).primitive), parent.replies.index.index["_index"].has(toId(canvas.id).primitive)]
- 
-                         console.error("Failed to load context", fff, fff222, error);
-                         throw error;
-                     } */
-                    return;
-                }
-                try {
-                    await parent.replies.index.putWithContext(
-                        canvas,
-                        toId(canvas.id),
-                        indexedCanvas.__context
-                    );
-                } catch (error) {
-                    if (parent.replies.index.closed) {
-                        console.warn(
-                            `Index ${parent.replies.address} closed, skipping re-index"`
-                        );
-                        return;
-                    }
-                    throw error;
-                }
-            };
-
             for (let added of evt.detail.added) {
                 if (added.closed) {
                     added = await this.node.open(added, { existing: "reuse" });
                 }
                 const loadedPath = await added.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
-                    await reIndex(loadedPath[i]);
+                    this.reIndexDebouncer.add({
+                        key: loadedPath[i].idString,
+                        value: loadedPath[i],
+                    });
                 }
             }
 
@@ -759,7 +772,10 @@ export class Canvas extends Program<CanvasArgs> {
 
                 const loadedPath = await removed.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
-                    await reIndex(loadedPath[i]);
+                    this.reIndexDebouncer.add({
+                        key: loadedPath[i].idString,
+                        value: loadedPath[i],
+                    });
                 }
                 await removed.close();
             }
@@ -782,7 +798,7 @@ export class Canvas extends Program<CanvasArgs> {
                 "change",
                 this._repliesChangeListener
             );
-
+        this.reIndexDebouncer.close();
         return super.close(from);
     }
     private _repliesCount: bigint | null = null;
@@ -912,7 +928,7 @@ export class Canvas extends Program<CanvasArgs> {
                         parent: nextCanvas,
                     })
                 );
-                await currentCanvas.replies.put(nextCanvas);
+                await currentCanvas.createReply(nextCanvas);
                 currentCanvas = nextCanvas;
             }
             rooms = [currentCanvas];
@@ -992,16 +1008,23 @@ export class Canvas extends Program<CanvasArgs> {
 
         // TODO use the rootmost canvas with same ACL
         // for now lets just use the root
-        await waitFor(() => this.node, {
-            signal: this.closeController?.signal,
-        }).catch((error) => {
-            if (this.closed) {
-                return;
-            }
-            console.error("Not open");
-            throw error;
-        });
+        this.node
+            ? Promise.resolve(this.node)
+            : await waitFor(() => this.node, {
+                  signal: this.closeController?.signal,
+              }).catch((error) => {
+                  if (error instanceof AbortError) {
+                      return;
+                  }
+                  console.error("Not open");
+                  throw error;
+              });
+        if (!this.node && this.closed) {
+            // return silently if closed
+            return;
+        }
         const root = this.path[0];
+
         if (root) {
             const rootLoaded = (this._topMostCanvasWithSameACL =
                 await root.load(this.node));
@@ -1035,6 +1058,14 @@ export class Canvas extends Program<CanvasArgs> {
     get replies(): Documents<Canvas, IndexableCanvas, any> {
         const root: Canvas = this.origin ?? this;
         return root._replies;
+    }
+
+    async createReply(canvas: Canvas) {
+        await this.origin!.replies.put(canvas);
+        await this.reIndexDebouncer.add({
+            key: canvas.idString,
+            value: canvas,
+        });
     }
 
     get elements(): Documents<Element, IndexableElement, any> {

@@ -851,6 +851,6 @@ export const insertTextReply = async (text: string, parent: Canvas) => {
         .then(async (newCanvas) => {
             await newCanvas.load();
             await insertTextIntoCanvas(text, newCanvas);
-            return parent.replies.put(newCanvas);
+            return parent.createReply(newCanvas);
         });
 };
