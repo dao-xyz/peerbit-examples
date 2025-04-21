@@ -133,12 +133,12 @@ export const CanvasWrapper = ({
     const [isEmpty, setIsEmpty] = useState(true);
     const { announceReply } = useReplyProgress();
     const rects = useLocal(
-        canvas?.loadedElements ? canvas?.elements : undefined,
+        canvas?.loadedElements ? canvas.origin?.elements : null,
         {
-            id: canvas?.idString,
+            id: canvas?.origin?.idString + "/" + canvas?.idString,
             query:
                 !canvas || canvas.closed
-                    ? { query: { id: new Uint8Array(0) } } // use local seems to be really flaky?? we need this to prevent loading all elements by mistake
+                    ? null
                     : {
                           query: [
                               ...getOwnedElementsQuery(canvas),
@@ -154,9 +154,10 @@ export const CanvasWrapper = ({
                               new Sort({ key: ["location", "y"] }),
                           ],
                       },
-            /*  debug: canvas && canvas.path.length > 0, */
+            /* debug: canvas && canvas.path.length > 0, */
         }
     );
+
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
     const pendingCounter = useRef(0);
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
