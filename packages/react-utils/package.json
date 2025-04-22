@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/react",
-    "version": "0.0.17",
+    "version": "0.0.18",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "type": "module",
     "module": "lib/esm/index.js",
