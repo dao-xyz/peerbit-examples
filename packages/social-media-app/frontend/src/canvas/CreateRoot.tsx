@@ -28,6 +28,9 @@ export const CreateRoot = () => {
         id: pendingCanvasState?.idString,
         keepOpenOnUnmount: true,
         existing: "reuse",
+        args: {
+            replicate: true,
+        },
     });
 
     const createSetBase64 = (canvas: CanvasDB = pendingCanvas.program) => {

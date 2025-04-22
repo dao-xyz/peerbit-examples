@@ -118,11 +118,14 @@ export const CanvasWrapper = ({
     quality,
 }: CanvasWrapperProps) => {
     // Standard hooks & context from your existing code.
-    const { peer } = usePeer();
+    const { peer, persisted } = usePeer();
     const { program: canvas } = useProgram(canvasDB, {
         existing: "reuse",
         id: canvasDB?.idString,
         keepOpenOnUnmount: true,
+        args: {
+            replicate: persisted,
+        },
     });
     const setupForCanvasIdDone = useRef<string | undefined>(undefined);
     const { request } = useAIReply();
@@ -137,6 +140,9 @@ export const CanvasWrapper = ({
         {
             id: canvas?.origin?.idString + "/" + canvas?.idString,
             debounce: 123,
+            onChange: {
+                merge: true,
+            },
             query:
                 !canvas || canvas.closed
                     ? null

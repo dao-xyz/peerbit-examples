@@ -156,14 +156,16 @@ type BroadcastTabIsAvailable = {
 };
 
 /* ───── IDENTITIES (SINGLE DB) ───────────────────── */
-
-@variant("identity")
-export class Identities extends Program<{
+type IdentitiesArgs = {
     deviceName: string;
     connectTabs?: {
         id: number;
     };
-}> {
+    replicate?: boolean;
+};
+
+@variant("identity")
+export class Identities extends Program<IdentitiesArgs> {
     // The single DB for connection objects.
     @field({ type: Documents })
     connections: Documents<Connection, ConnectionIndexed>;
@@ -191,20 +193,18 @@ export class Identities extends Program<{
     set deviceName(name: string) {
         this.device = new Device(this.node.identity.publicKey, name);
     }
-    async open(args?: {
-        deviceName?: string;
-        connectTabs?: {
-            id: number;
-        };
-    }): Promise<void> {
+    async open(args?: IdentitiesArgs): Promise<void> {
         if (!this.device) {
             this.deviceName = args?.deviceName ?? "Device McDeviceface";
         }
 
         await this.connections.open({
-            replicate: {
-                factor: 1,
-            },
+            replicate:
+                args?.replicate != null
+                    ? args?.replicate
+                        ? { factor: 1 }
+                        : false
+                    : { factor: 1 }, // TODO choose better
             type: Connection,
             index: {
                 transform: async (arg, context) => {

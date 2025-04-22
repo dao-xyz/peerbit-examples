@@ -1,6 +1,6 @@
 // ProfileProvider.tsx
 import React, { useContext, useMemo, useRef } from "react";
-import { useLocal, useProgram } from "@peerbit/react";
+import { useLocal, usePeer, useProgram } from "@peerbit/react";
 import { Profile, Profiles } from "@giga-app/interface";
 import { useNavigate } from "react-router";
 import { getCanvasPath, MISSING_PROFILE } from "../routes";
@@ -16,8 +16,15 @@ export const ProfileContext = React.createContext<IProfilesContext>({} as any);
 export const useProfiles = () => useContext(ProfileContext);
 
 export const ProfileProvider = ({ children }: { children: JSX.Element }) => {
+    const { persisted } = usePeer();
+
     // Initialize the profiles program
-    const profilesProgram = useProgram(new Profiles(), { existing: "reuse" });
+    const profilesProgram = useProgram(new Profiles(), {
+        args: {
+            replicate: persisted ? true : false,
+        },
+        existing: "reuse",
+    });
     const navigate = useNavigate();
 
     // Cache for fetched profiles keyed by publicKey hash

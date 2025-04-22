@@ -58,9 +58,10 @@ export class ProfileIndexed {
         this.context = properties.context;
     }
 }
+type ProfileArgs = { replicate?: boolean };
 
 @variant("profile")
-export class Profiles extends Program {
+export class Profiles extends Program<ProfileArgs> {
     @field({ type: Documents })
     profiles: Documents<Profile, ProfileIndexed>;
 
@@ -74,10 +75,15 @@ export class Profiles extends Program {
         });
     }
 
-    async open(): Promise<void> {
+    async open(args?: ProfileArgs): Promise<void> {
         await this.profiles.open({
             type: Profile,
-            replicate: { factor: 1 }, // TODO choose better
+            replicate:
+                args?.replicate != null
+                    ? args?.replicate
+                        ? { factor: 1 }
+                        : false
+                    : { factor: 1 }, // TODO choose better
             canOpen: () => false,
             canPerform: async (operation) => {
                 /**

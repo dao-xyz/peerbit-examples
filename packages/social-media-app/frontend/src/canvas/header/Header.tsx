@@ -39,7 +39,7 @@ export const Header = ({
     const { peer } = usePeer();
     const { profiles } = useProfiles();
 
-    useEffect(() => {
+    /* useEffect(() => {
         if (!canvas) return;
         if (canvas.isOrigin) {
             return;
@@ -49,7 +49,7 @@ export const Header = ({
         }
         canvas.loadContext();
     }, [canvas]);
-
+ */
     const replyCount = useCount(
         canvas?.loadedReplies ? canvas.replies : undefined,
         !canvas || canvas.closed

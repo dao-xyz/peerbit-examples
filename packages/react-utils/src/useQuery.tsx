@@ -87,7 +87,8 @@ export const useQuery = <
 
     const reset = () => {
         emptyResultsRef.current = false;
-        iteratorRef.current?.iterator?.close();
+        iteratorRef.current?.iterator.done() &&
+            iteratorRef.current?.iterator?.close();
         iteratorRef.current = null;
         setAll([]);
         setIsLoading(false);

@@ -22,11 +22,12 @@ export const IdentitiesProvider = ({ children }: { children: JSX.Element }) => {
             : "https://giga.place/#/connect?data=";
 
     const peerContext = usePeer();
-    const { peer } = peerContext;
+    const { peer, persisted } = peerContext;
 
     const identities = useProgram(new Identities({ baseUrl }), {
         existing: "reuse",
         args: {
+            replicate: persisted,
             deviceName: generateDefaultDeviceName(),
         },
     });

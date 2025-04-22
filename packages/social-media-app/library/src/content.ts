@@ -476,7 +476,7 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
     }
 }
 
-type CanvasArgs = { debug?: boolean };
+type CanvasArgs = { debug?: boolean; replicate?: boolean };
 @variant("canvas")
 export class Canvas extends Program<CanvasArgs> {
     @id({ type: fixedArray("u8", 32) })
@@ -612,7 +612,12 @@ export class Canvas extends Program<CanvasArgs> {
             await this._elements.open({
                 type: Element,
                 timeUntilRoleMaturity: 6e4,
-                replicate: { factor: 1 }, // TODO choose better
+                replicate:
+                    args?.replicate != null
+                        ? args?.replicate
+                            ? { factor: 1 }
+                            : false
+                        : { factor: 1 }, // TODO choose better
                 canPerform: async (operation) => {
                     /**
                      * Only allow updates if we created it
@@ -657,7 +662,12 @@ export class Canvas extends Program<CanvasArgs> {
             await this._replies.open({
                 type: Canvas,
                 timeUntilRoleMaturity: 6e4,
-                replicate: { factor: 1 }, // TODO choose better
+                replicate:
+                    args?.replicate != null
+                        ? args?.replicate
+                            ? { factor: 1 }
+                            : false
+                        : { factor: 1 }, // TODO choose better
                 canOpen: () => false,
                 canPerform: async (_operation) => {
                     /**
@@ -1078,7 +1088,10 @@ export class Canvas extends Program<CanvasArgs> {
         return root._messages;
     }
 
-    async loadContext(options?: { reload?: boolean }): Promise<Context> {
+    async loadContext(options?: {
+        reload?: boolean;
+        waitFor?: boolean;
+    }): Promise<Context> {
         if ((this as WithContext<any>).__context && !options?.reload) {
             return (this as WithContext<any>).__context;
         }
