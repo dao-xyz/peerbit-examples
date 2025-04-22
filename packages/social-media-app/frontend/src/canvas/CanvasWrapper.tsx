@@ -143,6 +143,9 @@ export const CanvasWrapper = ({
             onChange: {
                 merge: true,
             },
+            debug: {
+                id: canvas?.idString,
+            },
             query:
                 !canvas || canvas.closed
                     ? null

@@ -135,7 +135,7 @@ function useViewContextHook() {
             ...query,
             transform: calculateAddress,
             batchSize,
-            debug: { id: "replies" },
+            /* debug: { id: "replies" }, */
             local: true,
             remote: {
                 eager: true,
@@ -272,7 +272,9 @@ function useViewContextHook() {
     }
 
     const processedReplies = useMemo(() => {
-        if (!viewRoot || viewRoot.closed) return [];
+        if (!viewRoot || viewRoot.closed) {
+            return [];
+        }
         if (
             view === "chat" &&
             sortedReplies &&
@@ -291,6 +293,7 @@ function useViewContextHook() {
             : [];
     }, [sortedReplies, view, viewRoot?.closed, viewRoot]);
 
+    console.log("VIEW ROOT SORTED REPLIES", sortedReplies, processedReplies);
     return {
         canvases,
         viewRoot,

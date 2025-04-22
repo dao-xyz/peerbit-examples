@@ -25,7 +25,7 @@ const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
         <div className="flex flex-row justify-start items-center overflow-x-auto w-full  no-scrollbar p-1 pr-0">
             {path?.length > 1 ? (
                 path.map((x, ix) => (
-                    <Fragment key={ix}>
+                    <Fragment key={x.idString}>
                         {ix > 1 && <span className="px-1">/</span>}
                         {ix > 0 && (
                             <CanvasWrapper canvas={x} quality={LOWEST_QUALITY}>

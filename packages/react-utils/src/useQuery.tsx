@@ -73,11 +73,16 @@ export const useQuery = <
     } | null>(null);
     const emptyResultsRef = useRef(false);
 
-    const updateAll = (combined: WithContext<RT>[]) => {
+    const updateAll = (
+        combined: WithContext<RT>[],
+        fromChange?: DocumentsChange<any> | null
+    ) => {
         logWithId(
             options,
             "Loading more items, new combined length",
-            combined.length
+            combined.length,
+            "from change",
+            fromChange
         );
 
         allRef.current = combined;
@@ -86,8 +91,10 @@ export const useQuery = <
     };
 
     const reset = () => {
+        logWithId(options, "RESET FROM " + allRef.current.length);
+
         emptyResultsRef.current = false;
-        iteratorRef.current?.iterator.done() &&
+        !iteratorRef.current?.iterator.done() &&
             iteratorRef.current?.iterator?.close();
         iteratorRef.current = null;
         setAll([]);
@@ -155,7 +162,7 @@ export const useQuery = <
                         ),
                     ];
                 } else {
-                    await db.index.updateResults(
+                    merged = await db.index.updateResults(
                         allRef.current,
                         filteredChange,
                         options?.query || {},
@@ -171,6 +178,7 @@ export const useQuery = <
                             merged.length === allRef.current.length)
                     ) {
                         // no change
+                        logWithId(options, "no change after merge");
                         return;
                     }
                 }
@@ -182,7 +190,10 @@ export const useQuery = <
                     allRef: allRef.current.length,
                 });
 
-                updateAll(options?.reverse ? merged.reverse() : merged);
+                updateAll(
+                    options?.reverse ? merged.reverse() : merged,
+                    e.detail
+                );
             };
             db.events.addEventListener("change", handleChange);
         }
@@ -265,12 +276,14 @@ export const useQuery = <
                 const combined = options?.reverse
                     ? [...newItemsNoHash.reverse(), ...prev]
                     : [...prev, ...newItemsNoHash];
-                updateAll(combined);
+                updateAll(combined, null);
             } else {
                 logWithId(
                     options,
                     "no new items, not updating state for iterator" +
-                        iteratorRef.current?.id
+                        iteratorRef.current?.id +
+                        " existing results length",
+                    allRef.current.length
                 );
             }
         } catch (error) {

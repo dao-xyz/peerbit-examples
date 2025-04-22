@@ -11,6 +11,7 @@ import {
     Element,
     Layout,
     LOWEST_QUALITY,
+    rootDevelopment,
     StaticContent,
     StaticMarkdownText,
 } from "@giga-app/interface";
@@ -18,7 +19,7 @@ import { useLocation } from "react-router";
 import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { deserialize } from "@dao-xyz/borsh";
-
+import { toId } from "@peerbit/indexer-interface";
 interface ICanvasContext {
     // root canvas
     root?: Canvas;
@@ -65,25 +66,13 @@ const getCanvasesPathFromURL = async (
     return current.loadPath(true);
 };
 
-const CanvasContext = React.createContext<ICanvasContext>({} as any);
-export const useCanvases = () => useContext(CanvasContext);
-const ROOM_ID_SEED = new TextEncoder().encode("giga | place");
-
 const GIGA_ROOT_POST = `
 # Welcome to Giga
 **A *public* and *private* media platform owned by you**
 `;
 
-const ROOT_IDENTITY_DEVELOPMENT = deserialize(
-    new Uint8Array([
-        0, 0, 100, 171, 121, 177, 143, 132, 216, 160, 114, 206, 201, 210, 133,
-        17, 161, 86, 242, 139, 211, 26, 91, 240, 38, 132, 155, 204, 167, 51, 69,
-        114, 170, 211, 0, 4, 142, 151, 39, 126, 167, 96, 33, 175, 100, 38, 167,
-        37, 133, 179, 14, 196, 158, 96, 228, 244, 241, 4, 115, 64, 172, 99, 30,
-        2, 207, 129, 237,
-    ]),
-    Ed25519Keypair
-);
+const CanvasContext = React.createContext<ICanvasContext>({} as any);
+export const useCanvases = () => useContext(CanvasContext);
 
 export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const { peer, loading: loadingPeer } = usePeer();
@@ -188,35 +177,36 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             return;
         }
 
-        peer.open(
-            new Canvas({
-                seed: ROOM_ID_SEED,
-                publicKey: ROOT_IDENTITY_DEVELOPMENT.publicKey,
-            }),
-            {
-                existing: "reuse",
-            }
-        )
+        peer.open(rootDevelopment, {
+            existing: "reuse",
+        })
             .then(async (result) => {
                 setRoot(result);
-                await result.elements.put(
-                    new Element({
-                        location: Layout.zero(),
-                        id: new Uint8Array(32),
-                        publicKey: peer.identity.publicKey,
-                        content: new StaticContent({
-                            content: new StaticMarkdownText({
-                                text: GIGA_ROOT_POST,
+                let rootElementId = new Uint8Array(32);
+                if (
+                    !(await result.elements.index.index.get(
+                        toId(rootElementId)
+                    ))
+                ) {
+                    await result.elements.put(
+                        new Element({
+                            location: Layout.zero(),
+                            id: rootElementId,
+                            publicKey: peer.identity.publicKey,
+                            content: new StaticContent({
+                                content: new StaticMarkdownText({
+                                    text: GIGA_ROOT_POST,
+                                }),
+                                quality: LOWEST_QUALITY,
+                                contentId: sha256Sync(
+                                    new TextEncoder().encode(GIGA_ROOT_POST)
+                                ),
                             }),
-                            quality: LOWEST_QUALITY,
-                            contentId: sha256Sync(
-                                new TextEncoder().encode(GIGA_ROOT_POST)
-                            ),
-                        }),
-                        parent: result,
-                    })
-                );
-                loadingPromise.current = undefined;
+                            parent: result,
+                        })
+                    );
+                    loadingPromise.current = undefined;
+                }
             })
             .catch((e) => {
                 console.error("Failed to create root canvas", e);
