@@ -95,34 +95,6 @@ describe("content", () => {
             });
         });
 
-        it("can sort by replies", async () => {
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            await root.getCreateRoomByPath(["b", "b"]);
-            await root.getCreateRoomByPath(["a", "b"]);
-            await root.getCreateRoomByPath(["c"]);
-            await root.getCreateRoomByPath(["a", "c"]);
-
-            await waitForResolved(async () => {
-                const sortedByReplies = await root.replies.index.search({
-                    query: getImmediateRepliesQuery(root),
-                    sort: new Sort({
-                        key: "replies",
-                        direction: SortDirection.DESC,
-                    }),
-                });
-                expect(
-                    await Promise.all(
-                        sortedByReplies.map((x) => x.createTitle())
-                    )
-                ).to.deep.eq(["a", "b", "c"]);
-            });
-        });
-
         it("can reload", async () => {
             let root = await session.peers[0].open(
                 new Canvas({
@@ -244,6 +216,32 @@ describe("content", () => {
                 expect(allTitles.sort()).to.deep.eq(["c", "d"]);
             });
 
+            it("can sort by replies", async () => {
+                const root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                await root.getCreateRoomByPath(["b", "b"]);
+                await root.getCreateRoomByPath(["a", "b"]);
+                await root.getCreateRoomByPath(["c"]);
+                await root.getCreateRoomByPath(["a", "c"]);
+
+                const sortedByReplies = await root.replies.index.search({
+                    query: getImmediateRepliesQuery(root),
+                    sort: new Sort({
+                        key: "replies",
+                        direction: SortDirection.DESC,
+                    }),
+                });
+                expect(
+                    await Promise.all(
+                        sortedByReplies.map((x) => x.createTitle())
+                    )
+                ).to.deep.eq(["a", "b", "c"]);
+            });
+
             it("will use remote for sorting during warmup", async () => {
                 const rootA = await session.peers[0].open(
                     new Canvas({
@@ -295,9 +293,127 @@ describe("content", () => {
                 };
                 await results(rootA);
 
-                const rootB = await session.peers[1].open(rootA.clone());
+                const rootB = await session.peers[1].open(rootA.clone(), {
+                    args: {
+                        replicate: false,
+                    },
+                });
                 await rootB.replies.log.waitForReplicators();
                 await results(rootB);
+            });
+
+            it("will use remote for sorting during warmup when not replicating", async () => {
+                const rootA = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+
+                let childrenCount = {
+                    a: 1,
+                    b: 2,
+                    c: 3,
+                };
+
+                for (const [key, count] of Object.entries(childrenCount)) {
+                    for (let i = 0; i < count; i++) {
+                        // console.log("key: " + key + "key", "i", i)
+                        await rootA.getCreateRoomByPath([key, i.toString()]);
+                    }
+                }
+
+                // a has 1 reply
+                // b has 2 replies
+                // c has 3 replies
+
+                // so sorting by replies will be c, b, a
+                const results = async (root: Canvas) => {
+                    const sorted = await root.replies.index
+                        .iterate({
+                            query: getImmediateRepliesQuery(root),
+                            sort: new Sort({
+                                key: "replies",
+                                direction: SortDirection.DESC,
+                            }),
+                        })
+                        .all();
+
+                    for (const [i, r] of sorted.entries()) {
+                        if (r.closed) {
+                            sorted[i] = await root.node.open(r, {
+                                existing: "reuse",
+                                args: {
+                                    replicate: false,
+                                },
+                            });
+                        }
+                    }
+
+                    await delay(3e3);
+                    const titles = await Promise.all(
+                        sorted.map((x) => x.createTitle())
+                    );
+                    expect(titles).to.deep.eq(["c", "b", "a"]);
+                };
+                await results(rootA);
+
+                const rootB = await session.peers[1].open(rootA.clone(), {
+                    args: {
+                        replicate: false,
+                    },
+                });
+                await rootB.replies.log.waitForReplicators({ roleAge: 5e3 });
+                await results(rootB);
+            });
+
+            it("can sort by replies after restart", async () => {
+                await session.stop();
+
+                session = await TestSession.connected(1, {
+                    directory: "./tmp/can-sort-after-restart/" + +new Date(),
+                });
+
+                let root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    })
+                );
+                await root.getCreateRoomByPath(["b", "b"]);
+                await root.getCreateRoomByPath(["a", "b"]);
+                await root.getCreateRoomByPath(["c"]);
+                await root.getCreateRoomByPath(["a", "c"]);
+
+                const checkSort = async () => {
+                    const sortedByReplies = await root.replies.index.search({
+                        query: getImmediateRepliesQuery(root),
+                        sort: new Sort({
+                            key: "replies",
+                            direction: SortDirection.DESC,
+                        }),
+                    });
+                    for (const [i, r] of sortedByReplies.entries()) {
+                        if (r.closed) {
+                            sortedByReplies[i] = await root.node.open(r, {
+                                existing: "reuse",
+                            });
+                            await sortedByReplies[i].load(); // TODO why is this needed?
+                        }
+                    }
+                    expect(
+                        await Promise.all(
+                            sortedByReplies.map((x) => x.createTitle())
+                        )
+                    ).to.deep.eq(["a", "b", "c"]);
+                };
+
+                await checkSort();
+                await root.close();
+                root = await session.peers[0].open(root.clone(), {
+                    existing: "reject",
+                });
+                await checkSort();
             });
         });
 
@@ -456,24 +572,24 @@ describe("content", () => {
                  })
              );
              const pathA = await rootA.getCreateRoomByPath(["a", "b", "c"]);
- 
+     
              await session.peers[0].stop();
              await session.peers[0].start();
- 
+     
              const rootB = await session.peers[0].open(
                  new Canvas({
                      seed,
                      rootTrust: session.peers[0].identity.publicKey,
                  })
              );
- 
+     
              expect(rootA.address).to.eq(rootB.address);
- 
+     
              const pathB = await rootB.getCreateRoomByPath(["a", "b", "c"]);
              for (const room of pathB) {
                  await session.peers[0].open(room);
              }
- 
+     
              expect(typeof pathA[pathA.length - 1].address).to.eq("string");
              expect(pathA[pathA.length - 1].address).to.eq(
                  pathB[pathB.length - 1].address

@@ -175,6 +175,7 @@ function useViewContextHook() {
         }
         return undefined;
     }, [sortedReplies]);
+    console.log({ sortedReplies });
 
     // --- Reply Processing for "chat" view, inserting quotes ---
     function replyLineTypes({

@@ -35,6 +35,7 @@ import {
 import { useReplyProgress } from "./reply/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
 import { waitFor } from "@peerbit/time";
+import { DocumentsChange } from "@peerbit/document";
 
 // Extend the context type to include a subscription function.
 export interface CanvasContextType {
@@ -141,7 +142,17 @@ export const CanvasWrapper = ({
             id: canvas?.origin?.idString + "/" + canvas?.idString,
             debounce: 123,
             onChange: {
-                merge: true,
+                merge: (change) => {
+                    const filteredForScope: DocumentsChange<
+                        Element<ElementContent>
+                    > = {
+                        added: change.added.filter((x) => canvas.isInScope(x)),
+                        removed: change.removed.filter((x) =>
+                            canvas.isInScope(x)
+                        ),
+                    };
+                    return filteredForScope;
+                },
             },
             debug: {
                 id: canvas?.idString,

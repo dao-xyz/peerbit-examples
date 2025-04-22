@@ -148,9 +148,12 @@ export const useQuery = <
                     : (change: DocumentsChange<T>) => change;
             handleChange = async (e: CustomEvent<DocumentsChange<T>>) => {
                 // while we are iterating, we might get new documents.. so this method inserts them where they should be
-
                 let filteredChange = await mergeFunction(e.detail);
-                if (!filteredChange) {
+                if (
+                    !filteredChange ||
+                    (filteredChange.added.length === 0 &&
+                        filteredChange.removed.length === 0)
+                ) {
                     return;
                 }
                 let merged: WithContext<RT>[] = [];

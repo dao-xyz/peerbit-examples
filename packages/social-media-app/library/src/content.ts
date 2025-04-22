@@ -585,13 +585,13 @@ export class Canvas extends Program<CanvasArgs> {
     public debug: boolean = false;
     private closeController: AbortController | null = null;
     private reIndexDebouncer: ReturnType<
-        typeof debouncedAccumulatorMap<Canvas>
+        typeof debouncedAccumulatorMap<Canvas | WithContext<Canvas>>
     >;
 
     async open(args?: CanvasArgs): Promise<void> {
         this.reIndexDebouncer = debouncedAccumulatorMap<Canvas>(async (map) => {
             for (const canvas of map.values()) {
-                this.reIndex(canvas);
+                await this.reIndex(canvas);
             }
         }, 123);
 
@@ -697,16 +697,29 @@ export class Canvas extends Program<CanvasArgs> {
         }
     }
 
-    private async reIndex(from: Canvas) {
-        const loadedPath = await from.loadPath(true);
-        for (let i = 1; i < loadedPath.length; i++) {
-            const canvas = loadedPath[i];
-            await canvas.load();
-            const parent = canvas.origin;
-            if (!parent) {
-                console.error("Missing parent");
-                return;
-            }
+    private async reIndex(from: Canvas | WithContext<Canvas>) {
+        const canvas = await this.node.open(from, { existing: "reuse" });
+        if (canvas.closed) {
+            console.warn("indexable canvas not open, skipping re-index");
+            return;
+        }
+        /* const canvas = await this.node.open(maybeOpenCanvas, { existing: 'reuse' });
+        await canvas.load(); */
+        if (!canvas.loadedReplies || !canvas.origin) {
+            console.error("Missing parent");
+            return;
+        }
+        if (this.closed || canvas.origin.closed) {
+            console.error("Canvas closed, skipping re-index");
+            return;
+        }
+
+        const parent = await this.node.open(canvas.origin, {
+            existing: "reuse",
+        });
+
+        let context = (canvas as WithContext<Canvas>).__context;
+        if (!context) {
             if (this.closed || parent.closed) {
                 console.error("Canvas closed, skipping re-index");
                 return;
@@ -716,8 +729,8 @@ export class Canvas extends Program<CanvasArgs> {
                 local: true,
                 remote: false,
             });
-
             if (!indexedCanvas) {
+                console.log("MISSING INDEXED CANVAS", canvas.idString);
                 // because we might index children before parents, this might be undefined
                 // but it is fine, since when the parent is to be re-indexed, its children will be considered
                 /*  try {
@@ -734,26 +747,49 @@ export class Canvas extends Program<CanvasArgs> {
                  } */
                 return;
             }
-            try {
-                await parent.replies.index.putWithContext(
-                    canvas,
-                    toId(canvas.id),
-                    indexedCanvas.__context
+            context = indexedCanvas.__context;
+        }
+
+        try {
+            await parent.replies.index.putWithContext(
+                canvas,
+                toId(canvas.id),
+                context
+            );
+        } catch (error) {
+            if (parent.replies.index.closed) {
+                console.warn(
+                    `Index ${parent.replies.address} closed, skipping re-index"`
                 );
-            } catch (error) {
-                if (parent.replies.index.closed) {
-                    console.warn(
-                        `Index ${parent.replies.address} closed, skipping re-index"`
-                    );
-                    return;
-                }
-                throw error;
+                return;
             }
+            throw error;
         }
     }
 
     async afterOpen(): Promise<void> {
         await super.afterOpen();
+
+        // re-index all canvases since the reply counter might have changed
+        /*  if (this._replies.closed === false) { // dont puss this block in the after open because renderers might invoke sort directly after open but before afterOpen
+             // TODO why do we even need this??? onChange listener will index the wrong thing
+             let promises: Promise<void>[] = [];
+             for (let canvas of await this._replies.index
+                 .iterate({}, { local: true, remote: false })
+                 .all()) {
+ 
+                 canvas = await this.node.open(canvas, { existing: "reuse" });
+                 await canvas.load();
+ 
+                 promises.push(
+                     this.reIndexDebouncer.add({
+                         key: canvas.idString,
+                         value: canvas,
+                     })
+                 );
+             }
+             await Promise.all(promises);
+         } */
 
         this._repliesChangeListener = async (
             evt: CustomEvent<DocumentsChange<Canvas>>
@@ -766,6 +802,10 @@ export class Canvas extends Program<CanvasArgs> {
                 }
                 const loadedPath = await added.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
+                    loadedPath[i] = await this.node.open(loadedPath[i], {
+                        existing: "reuse",
+                    });
+                    await loadedPath[i].load();
                     this.reIndexDebouncer.add({
                         key: loadedPath[i].idString,
                         value: loadedPath[i],
@@ -794,11 +834,8 @@ export class Canvas extends Program<CanvasArgs> {
             "change",
             this._repliesChangeListener
         );
-
         // Dont await this one!!! because this.load might load self
-        this.load().then(() => {
-            this.countReplies();
-        });
+        this.load();
     }
 
     close(from?: Program): Promise<boolean> {
@@ -811,12 +848,11 @@ export class Canvas extends Program<CanvasArgs> {
         this.reIndexDebouncer.close();
         return super.close(from);
     }
-    private _repliesCount: bigint | null = null;
 
     async loadPath(includeSelf?: boolean) {
         const path: Canvas[] = [];
-        for (const element of this.path) {
-            const next = await element.load(this.node);
+        for (const canvas of this.path) {
+            const next = await canvas.load(this.node);
             path.push(next);
         }
         if (includeSelf) {
@@ -831,10 +867,6 @@ export class Canvas extends Program<CanvasArgs> {
             throw new Error("Missing parent");
         }
         return parent.load(this.node);
-    }
-
-    get repliesCount(): bigint {
-        return this._repliesCount || 0n;
     }
 
     getCountQuery(options?: {
@@ -855,7 +887,7 @@ export class Canvas extends Program<CanvasArgs> {
                           approximate: true,
                       })
                   );
-            return (this._repliesCount = replies);
+            return replies;
         } catch (error) {
             // TODO handle errors that arrise from the database being closed
             return 0n;
@@ -993,19 +1025,29 @@ export class Canvas extends Program<CanvasArgs> {
         if (!this.loadedElements) {
             await this.load();
         }
-        const elements = await this.elements.index.index
-            .iterate({ query: getOwnedElementsQuery(this) })
-            .all();
-        let concat = "";
-        for (const element of elements) {
-            if (element.value.type !== "canvas") {
-                if (concat.length > 0) {
-                    concat += "\n";
+        try {
+            const elements = await this.elements.index
+                .iterate(
+                    { query: getOwnedElementsQuery(this) },
+                    {
+                        resolve: false,
+                        remote: { strategy: "fallback", timeout: 2e4 },
+                    }
+                )
+                .all();
+            let concat = "";
+            for (const element of elements) {
+                if (element.type !== "canvas") {
+                    if (concat.length > 0) {
+                        concat += "\n";
+                    }
+                    concat += element.content;
                 }
-                concat += element.value.content;
             }
+            return concat;
+        } catch (error) {
+            throw error;
         }
-        return concat;
     }
     private _topMostCanvasWithSameACL: Canvas | null | undefined = null;
     async load() {
@@ -1026,8 +1068,7 @@ export class Canvas extends Program<CanvasArgs> {
                   if (error instanceof AbortError) {
                       return;
                   }
-                  console.error("Not open");
-                  throw error;
+                  throw new Error("Failed to load, canvas was never opened");
               });
         if (!this.node && this.closed) {
             // return silently if closed
@@ -1072,10 +1113,15 @@ export class Canvas extends Program<CanvasArgs> {
 
     async createReply(canvas: Canvas) {
         await this.origin!.replies.put(canvas);
-        await this.reIndexDebouncer.add({
-            key: canvas.idString,
-            value: canvas,
-        });
+        const path = await canvas.loadPath(true);
+        for (let i = 1; i < path.length; i++) {
+            path[i] = await this.node.open(path[i], { existing: "reuse" });
+            await path[i].load();
+            await this.reIndexDebouncer.add({
+                key: path[i].idString,
+                value: path[i],
+            });
+        }
     }
 
     get elements(): Documents<Element, IndexableElement, any> {
@@ -1132,6 +1178,10 @@ export class Canvas extends Program<CanvasArgs> {
             return (this as WithContext<any>).__context;
         }
         return null;
+    }
+
+    isInScope(element: Element) {
+        return element.path[element.path.length - 1].address === this.address;
     }
 }
 

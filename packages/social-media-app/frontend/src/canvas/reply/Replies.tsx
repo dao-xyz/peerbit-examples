@@ -341,7 +341,7 @@ export const Replies = (properties: {
                                             (pendingBatch &&
                                             indexIsReadyToRender(i)
                                                 ? ""
-                                                : "fixed top-[-500px]") +
+                                                : "fixed top-[-5500px]") +
                                             ` ${i === sentinelIndex ? "" : ""}`
                                         }
                                     />
