@@ -24,6 +24,7 @@ import {
 import { Query, Sort, WithContext } from "@peerbit/document";
 import { createProfile } from "./profile.js";
 import { DEEP_SEEK_R1_1_5b, DEEP_SEEK_R1_7b } from "./model.js";
+import { defaultGigaReplicator, LifeCycle } from "./replication.js";
 
 // Utility to ignore specific errors.
 const ignoreTimeoutandAbort = (error: Error) => {
@@ -311,6 +312,7 @@ Your reply to the target post without any meta commentary or reasoning. Don't be
 export class CanvasAIReply extends Program<Args> {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
+
     @field({ type: RPC })
     rpc: RPC<AIRequest, AIResponse>;
 
@@ -322,6 +324,8 @@ export class CanvasAIReply extends Program<Args> {
     private serverConfig: ServerConfig | undefined;
     // Request statistics.
     private stats: RequestStats;
+
+    private replication: LifeCycle | undefined;
 
     constructor(
         properties: { id: Uint8Array } = {
@@ -450,6 +454,13 @@ export class CanvasAIReply extends Program<Args> {
             });
             requestModels().catch(ignoreTimeoutandAbort);
         }
+
+        this.replication = defaultGigaReplicator(this.node);
+    }
+
+    async close(from?: Program): Promise<boolean> {
+        await this.replication?.stop();
+        return super.close(from);
     }
 
     private getPeersWithModel(model?: string) {
