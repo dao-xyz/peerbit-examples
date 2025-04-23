@@ -124,7 +124,7 @@ function useViewContextHook() {
                 reverse: view === "new",
             });
         }
-    }, [view, viewRoot, calculateAddress]);
+    }, [view, viewRoot?.idString]);
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(5); // Default batch size
@@ -136,16 +136,16 @@ function useViewContextHook() {
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
         {
             ...query,
+            id: query.id ?? "",
             transform: calculateAddress,
             batchSize,
-            /*    debug: { id: "replies" }, */
+            debug: { id: "replies" },
             local: true,
-            remote: {
-                eager: true,
-            },
+            remote: true,
             onChange: {
                 merge: async (e) => {
                     // filter only changes made by me
+                    // TODO this can be problematic because merge changed might not be new message but just sync???
                     for (const change of e.added) {
                         const hash = change.__context.head;
                         const entry = await viewRoot.replies.log.log.get(hash);
@@ -172,50 +172,34 @@ function useViewContextHook() {
         }
     );
 
-    /*   const { items: all } = useQuery(
-          viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
-          {
-  
-              ...{
-                  ...query,
-                  query: new SearchRequestIndexed({
-                      ...query.query
-                  }),
-  
-              },
-              id: viewRoot ? getQueryId(viewRoot, view) : "",
-              transform: calculateAddress,
-              batchSize,
-              resolve: false,
-              debug: { id: "replies" },
-              onChange: {
-                   merge: async (e) => {
-                      // filter only changes made by me
-                      for (const change of e.added) {
-                          const hash = change.__context.head;
-                          const entry = await viewRoot.replies.log.log.get(hash);
-                          for (const signer of await entry.getSignatures()) {
-                              if (
-                                  signer.publicKey.equals(peer.identity.publicKey)
-                              ) {
-                                  return e; // merge the change since it was made by me
-                              }
-                          }
-                      }
-                      return undefined;
-                  },
-                  update:
-                      view === "chat" || view === "new"
-                          ? undefined
-                          : (prev, e) => {
-                              // insert at the top
-                              prev.unshift(...e.added);
-                              console.log("UPDATE", prev, e.added);
-                              return prev;
-                          },
-              },
-          }
-      ); */
+    /* const { items: all } = useQuery(
+        viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
+        {
+            ...{
+                ...query,
+                query: viewRoot
+                    ? new SearchRequestIndexed({
+                        query: getImmediateRepliesQuery(viewRoot),
+                        sort: [
+                            new Sort({
+                                key: ["replies"],
+                                direction: SortDirection.DESC,
+                            }),
+                            new Sort({
+                                key: ["__context", "created"],
+                                direction: SortDirection.DESC,
+                            }),
+                        ],
+                    })
+                    : null,
+            },
+            batchSize,
+            resolve: false,
+            local: true,
+            remote: true,
+           
+        }
+    ); */
 
     const lastReply = useMemo(() => {
         if (sortedReplies && sortedReplies.length > 0) {

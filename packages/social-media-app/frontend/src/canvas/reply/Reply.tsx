@@ -177,7 +177,7 @@ export const Reply = ({
                     : ""
             } ${styleFromFromMode} ${className}`}
         >
-            {/* ??? {lineType && lineType !== "none" && (
+            {/* {lineType && lineType !== "none" && (
                 <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">
                     <div className="w-px h-full bg-neutral-300 dark:bg-neutral-600" />
                 </div>

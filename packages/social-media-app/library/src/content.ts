@@ -305,6 +305,11 @@ export class IndexableCanvas {
             replyTo: canvas.replyTo.map((x) => x.address),
         });
     }
+
+    private _idString: string;
+    get idString() {
+        return this._idString || (this._idString = sha256Base64Sync(this.id));
+    }
 }
 
 @variant(0)

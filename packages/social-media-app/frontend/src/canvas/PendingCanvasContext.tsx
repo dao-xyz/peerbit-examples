@@ -50,15 +50,24 @@ export const PendingCanvasProvider: React.FC<{
         }
     }, [peer, viewRoot]);
 
+    useEffect(() => {
+        if (
+            pendingCanvas.program &&
+            pendingCanvas?.program !== pendingCanvasState
+        ) {
+            setPendingCanvasState(pendingCanvas.program);
+        }
+    }, [pendingCanvas?.program]);
+
     const setReplyTo = async (replyTo) => {
         _setReplyTo(replyTo);
         if (isSaving.current) {
             console.log("setReplyTo while saving, ignoring");
             return;
         }
-        if (pendingCanvasState) {
-            await pendingCanvasState.load();
-            await pendingCanvasState.setParent(replyTo || viewRoot);
+        if (pendingCanvas?.program) {
+            await pendingCanvas.program.load();
+            await pendingCanvas.program.setParent(replyTo || viewRoot);
         }
 
         setPendingCanvasState(pendingCanvasState);

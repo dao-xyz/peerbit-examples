@@ -90,10 +90,22 @@ export const useQuery = <
         setAll(combined);
     };
 
-    const reset = () => {
-        logWithId(options, "RESET FROM " + allRef.current.length);
+    const reset = (
+        fromRef: {
+            id?: string;
+            iterator: ResultsIterator<WithContext<RT>>;
+        } | null
+    ) => {
+        if (iteratorRef.current != null && iteratorRef.current !== fromRef) {
+            return;
+        }
 
         emptyResultsRef.current = false;
+        logWithId(options, "reset", {
+            id: iteratorRef.current?.id,
+            size: allRef.current.length,
+        });
+
         !iteratorRef.current?.iterator.done() &&
             iteratorRef.current?.iterator?.close();
         iteratorRef.current = null;
@@ -106,7 +118,7 @@ export const useQuery = <
     // Initialize the iterator only once or when query changes
     useEffect(() => {
         if (!db || db.closed || options?.query === null) {
-            reset();
+            reset(null);
             return;
         }
         const initIterator = () => {
@@ -114,9 +126,7 @@ export const useQuery = <
             try {
                 // Initialize the iterator and load initial batch.
 
-                emptyResultsRef.current = false;
-                iteratorRef.current?.iterator.close();
-                iteratorRef.current = {
+                const ref = {
                     id: options?.id,
                     iterator: db.index.iterate(options?.query ?? {}, {
                         local: options?.local ?? true,
@@ -124,6 +134,7 @@ export const useQuery = <
                         resolve: options?.resolve as any,
                     }) as any as ResultsIterator<WithContext<RT>>,
                 };
+                iteratorRef.current = ref;
 
                 logWithId(options, "Initializing iterator", {
                     id: options?.id,
@@ -131,20 +142,22 @@ export const useQuery = <
                 });
 
                 loadMore(); // initial load
+                return ref;
             } catch (error) {
                 console.error("Error initializing iterator", error);
+                return null;
             }
         };
 
         // Reset state when the db or query changes.
-        reset();
-        initIterator();
+        reset(iteratorRef.current);
+        const newIteratorRef = initIterator();
 
         let handleChange:
             | undefined
             | ((e: CustomEvent<DocumentsChange<T>>) => void | Promise<void>) =
             undefined;
-        if (options?.onChange) {
+        if (options?.onChange && options?.onChange?.merge !== false) {
             let mergeFunction =
                 typeof options.onChange.merge === "function"
                     ? options.onChange.merge
@@ -208,11 +221,11 @@ export const useQuery = <
         return () => {
             handleChange &&
                 db.events.removeEventListener("change", handleChange);
-            reset();
+            reset(newIteratorRef);
         };
     }, [
         db?.closed ? undefined : db?.address,
-        options?.id ? options?.id : options?.query,
+        options?.id != null ? options?.id : options?.query,
         options?.resolve,
     ]);
 
@@ -248,7 +261,10 @@ export const useQuery = <
                 "loadMore: loading more items for iterator " +
                     iteratorRef.current?.id,
                 newItems,
-                "should resolve?: " + options?.resolve
+                "should resolve?: " + options?.resolve,
+                "query local?: " + options?.local,
+                "query remote?: " + options?.remote,
+                "isReplicating: " + (await db?.log.isReplicating())
             );
 
             if (options?.transform) {
@@ -290,7 +306,7 @@ export const useQuery = <
             } else {
                 logWithId(
                     options,
-                    "no new items, not updating state for iterator" +
+                    "no new items, not updating state for iterator " +
                         iteratorRef.current?.id +
                         " existing results length",
                     allRef.current.length
