@@ -57,11 +57,7 @@ export const ProfileButton = forwardRef<
     }, [profiles, publicKey.hashcode()]);
 
     const getContent = () => {
-        if (loading) {
-            return <Spinner />;
-        }
-
-        if (profile) {
+        if (!loading && profile) {
             return (
                 <div
                     style={{ width: sizeInRem, height: sizeInRem }}

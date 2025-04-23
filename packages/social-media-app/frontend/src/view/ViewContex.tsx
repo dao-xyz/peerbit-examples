@@ -14,7 +14,10 @@ import {
     getRepliesQuery,
 } from "@giga-app/interface";
 import { useCanvases } from "../canvas/useCanvas";
-import { SearchRequest } from "@peerbit/document-interface";
+import {
+    SearchRequest,
+    SearchRequestIndexed,
+} from "@peerbit/document-interface";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
@@ -135,7 +138,7 @@ function useViewContextHook() {
             ...query,
             transform: calculateAddress,
             batchSize,
-            /* debug: { id: "replies" }, */
+            /*    debug: { id: "replies" }, */
             local: true,
             remote: {
                 eager: true,
@@ -169,13 +172,58 @@ function useViewContextHook() {
         }
     );
 
+    /*   const { items: all } = useQuery(
+          viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
+          {
+  
+              ...{
+                  ...query,
+                  query: new SearchRequestIndexed({
+                      ...query.query
+                  }),
+  
+              },
+              id: viewRoot ? getQueryId(viewRoot, view) : "",
+              transform: calculateAddress,
+              batchSize,
+              resolve: false,
+              debug: { id: "replies" },
+              onChange: {
+                   merge: async (e) => {
+                      // filter only changes made by me
+                      for (const change of e.added) {
+                          const hash = change.__context.head;
+                          const entry = await viewRoot.replies.log.log.get(hash);
+                          for (const signer of await entry.getSignatures()) {
+                              if (
+                                  signer.publicKey.equals(peer.identity.publicKey)
+                              ) {
+                                  return e; // merge the change since it was made by me
+                              }
+                          }
+                      }
+                      return undefined;
+                  },
+                  update:
+                      view === "chat" || view === "new"
+                          ? undefined
+                          : (prev, e) => {
+                              // insert at the top
+                              prev.unshift(...e.added);
+                              console.log("UPDATE", prev, e.added);
+                              return prev;
+                          },
+              },
+          }
+      ); */
+
     const lastReply = useMemo(() => {
         if (sortedReplies && sortedReplies.length > 0) {
             return sortedReplies[sortedReplies.length - 1];
         }
         return undefined;
     }, [sortedReplies]);
-    console.log({ sortedReplies });
+    /*  console.log({ sortedReplies, all }); */
 
     // --- Reply Processing for "chat" view, inserting quotes ---
     function replyLineTypes({
@@ -294,7 +342,6 @@ function useViewContextHook() {
             : [];
     }, [sortedReplies, view, viewRoot?.closed, viewRoot]);
 
-    console.log("VIEW ROOT SORTED REPLIES", sortedReplies, processedReplies);
     return {
         canvases,
         viewRoot,

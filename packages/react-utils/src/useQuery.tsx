@@ -125,7 +125,10 @@ export const useQuery = <
                     }) as any as ResultsIterator<WithContext<RT>>,
                 };
 
-                logWithId(options, "Initializing iterator", options?.id);
+                logWithId(options, "Initializing iterator", {
+                    id: options?.id,
+                    options: options,
+                });
 
                 loadMore(); // initial load
             } catch (error) {
@@ -171,6 +174,7 @@ export const useQuery = <
                         options?.query || {},
                         options?.resolve ?? true
                     );
+                    logWithId(options, "After update", allRef.current, merged);
                     const expectedDiff =
                         filteredChange.added.length -
                         filteredChange.removed.length;
@@ -235,13 +239,16 @@ export const useQuery = <
         try {
             // Fetch next batchSize number of items:
             await db?.log.waitForReplicators({ timeout: 1e4 });
-            logWithId(
-                options,
-                "loadMore: loading more items for iterator" +
-                    iteratorRef.current?.id
-            );
+
             let newItems: WithContext<RT>[] = await iterator.iterator.next(
                 batchSize
+            );
+            logWithId(
+                options,
+                "loadMore: loading more items for iterator " +
+                    iteratorRef.current?.id,
+                newItems,
+                "should resolve?: " + options?.resolve
             );
 
             if (options?.transform) {

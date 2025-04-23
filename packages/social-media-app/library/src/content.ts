@@ -1,5 +1,6 @@
 import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
+    coerceWithContext,
     Compare,
     Context,
     Documents,
@@ -284,9 +285,13 @@ export class IndexableCanvas {
         this.pathDepth = properties.path.length;
     }
 
-    static async from(canvas: Canvas, node: ProgramClient) {
+    static async from(
+        canvas: Canvas,
+        node: ProgramClient,
+        args: { replicate?: boolean; replicas?: { min?: number } }
+    ) {
         if (canvas.closed) {
-            canvas = await node.open(canvas, { existing: "reuse" });
+            canvas = await node.open(canvas, { existing: "reuse", args });
         }
         const indexable = await canvas.createTitle();
         const replies = await canvas.countReplies();
@@ -476,7 +481,11 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
     }
 }
 
-type CanvasArgs = { debug?: boolean; replicate?: boolean };
+type CanvasArgs = {
+    debug?: boolean;
+    replicate?: boolean;
+    replicas?: { min?: number };
+};
 @variant("canvas")
 export class Canvas extends Program<CanvasArgs> {
     @id({ type: fixedArray("u8", 32) })
@@ -611,6 +620,7 @@ export class Canvas extends Program<CanvasArgs> {
                 console.time(this.getValueWithContext("openElements"));
             await this._elements.open({
                 type: Element,
+                replicas: args?.replicas,
                 timeUntilRoleMaturity: 6e4,
                 replicate:
                     args?.replicate != null
@@ -662,6 +672,7 @@ export class Canvas extends Program<CanvasArgs> {
             await this._replies.open({
                 type: Canvas,
                 timeUntilRoleMaturity: 6e4,
+                replicas: args?.replicas,
                 replicate:
                     args?.replicate != null
                         ? args?.replicate
@@ -679,7 +690,10 @@ export class Canvas extends Program<CanvasArgs> {
                 index: {
                     type: IndexableCanvas,
                     transform: async (arg, _context) => {
-                        return IndexableCanvas.from(arg, this.node);
+                        return IndexableCanvas.from(arg, this.node, {
+                            replicate: args?.replicate,
+                            replicas: args?.replicas,
+                        });
                     },
                 },
             });
@@ -698,7 +712,7 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     private async reIndex(from: Canvas | WithContext<Canvas>) {
-        const canvas = await this.node.open(from, { existing: "reuse" });
+        const canvas = await this.openWithSameSettings(from);
         if (canvas.closed) {
             console.warn("indexable canvas not open, skipping re-index");
             return;
@@ -714,9 +728,7 @@ export class Canvas extends Program<CanvasArgs> {
             return;
         }
 
-        const parent = await this.node.open(canvas.origin, {
-            existing: "reuse",
-        });
+        const parent = await this.openWithSameSettings(canvas.origin);
 
         let context = (canvas as WithContext<Canvas>).__context;
         if (!context) {
@@ -798,7 +810,8 @@ export class Canvas extends Program<CanvasArgs> {
 
             for (let added of evt.detail.added) {
                 if (added.closed) {
-                    added = await this.node.open(added, { existing: "reuse" });
+                    const context = added.__context;
+                    added = await this.openWithSameSettings(added);
                 }
                 const loadedPath = await added.loadPath(true);
                 for (let i = 1; i < loadedPath.length; i++) {
@@ -1112,6 +1125,10 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     async createReply(canvas: Canvas) {
+        if (!this.origin!.replies.log.isReplicating()) {
+            await this.origin!.replies.log.waitForReplicators();
+        }
+
         await this.origin!.replies.put(canvas);
         const path = await canvas.loadPath(true);
         for (let i = 1; i < path.length; i++) {
@@ -1182,6 +1199,25 @@ export class Canvas extends Program<CanvasArgs> {
 
     isInScope(element: Element) {
         return element.path[element.path.length - 1].address === this.address;
+    }
+
+    async openWithSameSettings<T extends Canvas | WithContext<Canvas>>(
+        other: T
+    ): Promise<T> {
+        let context = (other as WithContext<any>).__context;
+        const replies = this._replies.closed ? this.replies : this._replies;
+        let replicating = await replies.log.isReplicating();
+        let minReplicas = replies.log.replicas.min.getValue(replies.log);
+        const out = await this.node.open<Canvas>(other, {
+            existing: "reuse",
+            args: {
+                replicate: replicating,
+                replicas: {
+                    min: minReplicas,
+                },
+            },
+        });
+        return (context ? coerceWithContext(out, context) : out) as T;
     }
 }
 

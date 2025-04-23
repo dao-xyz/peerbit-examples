@@ -415,6 +415,112 @@ describe("content", () => {
                 });
                 await checkSort();
             });
+
+            it("can sort by replies as non replicator", async () => {
+                let root = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    }),
+                    {
+                        args: {
+                            replicate: false,
+                        },
+                    }
+                );
+                let replicator = await session.peers[1].open(root.clone());
+
+                await root.getCreateRoomByPath(["b", "b"]);
+                await root.getCreateRoomByPath(["a", "b"]);
+                await root.getCreateRoomByPath(["c"]);
+                await root.getCreateRoomByPath(["a", "c"]);
+
+                await waitForResolved(() =>
+                    expect(replicator.replies.log.log.length).to.eq(6)
+                );
+
+                const checkSort = async () => {
+                    const sortedByReplies = await root.replies.index.search({
+                        query: getImmediateRepliesQuery(root),
+                        sort: new Sort({
+                            key: "replies",
+                            direction: SortDirection.DESC,
+                        }),
+                    });
+                    for (const [i, r] of sortedByReplies.entries()) {
+                        if (r.closed) {
+                            sortedByReplies[i] = await root.node.open(r, {
+                                existing: "reuse",
+                            });
+                            await sortedByReplies[i].load(); // TODO why is this needed?
+                        }
+                    }
+                    expect(
+                        await Promise.all(
+                            sortedByReplies.map((x) => x.createTitle())
+                        )
+                    ).to.deep.eq(["a", "b", "c"]);
+                };
+
+                await checkSort();
+                await root.close();
+                root = await session.peers[0].open(root.clone(), {
+                    existing: "reject",
+                    args: {
+                        replicate: false,
+                    },
+                });
+                await checkSort();
+            });
+
+            it("can index partially", async () => {
+                let viewer = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    }),
+                    {
+                        args: {
+                            replicate: false,
+                            replicas: {
+                                min: 1,
+                            },
+                        },
+                    }
+                );
+                let replicator = await session.peers[1].open(viewer.clone(), {
+                    args: {
+                        replicas: {
+                            min: 1,
+                        },
+                    },
+                });
+                await replicator.getCreateRoomByPath(["a", "b"]);
+
+                const all = await viewer.replies.index.search({
+                    sort: new Sort({
+                        key: "replies",
+                        direction: SortDirection.DESC,
+                    }),
+                });
+                expect(await all[0].createTitle()).to.eq("a");
+
+                console.log(
+                    "VIEWER REPLICATE",
+                    viewer.node.identity.publicKey.hashcode(),
+                    all[0].__context.head
+                );
+
+                await viewer.replies.log.replicate(
+                    await viewer.replies.log.log.get(all[0].__context.head)
+                );
+
+                await delay(2e3);
+                await waitForResolved(() =>
+                    expect(viewer.replies.log.log.length).to.eq(1)
+                );
+                expect(await viewer.replies.log.isReplicating()).to.be.true;
+            });
         });
 
         describe("elements", async () => {

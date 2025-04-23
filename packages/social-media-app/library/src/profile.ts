@@ -123,10 +123,19 @@ export class Profiles extends Program<ProfileArgs> {
                         id: arg.id,
                         profile: await IndexableCanvas.from(
                             arg.profile,
-                            this.node
+                            this.node,
+                            {
+                                replicate: args?.replicate,
+                            }
                         ),
                         context: arg.context
-                            ? await IndexableCanvas.from(arg.context, this.node)
+                            ? await IndexableCanvas.from(
+                                  arg.context,
+                                  this.node,
+                                  {
+                                      replicate: args?.replicate,
+                                  }
+                              )
                             : undefined,
                     });
                 },

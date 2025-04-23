@@ -68,6 +68,7 @@ export const Reply = ({
     const [showMore, setShowMore] = useState(false);
     const [isOverflowing, setIsOverflowing] = useState(false);
     const previewContainerRef = useRef<HTMLDivElement>(null);
+    const { viewRoot } = useView();
 
     const { peer } = usePeer();
     const navigate = useNavigate();
@@ -128,7 +129,7 @@ export const Reply = ({
     const handleCanvasClick = async () => {
         let viewAfterNavigation: ViewType = "chat";
         canvas = canvas.closed
-            ? await peer.open(canvas, { existing: "reuse" })
+            ? await viewRoot.openWithSameSettings(canvas)
             : canvas;
         await canvas.load();
 

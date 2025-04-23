@@ -37,6 +37,7 @@ export const AutoReplyProvider: React.FC<{
         let canvasOrRoot = canvas || viewRoot;
         _setReplyTo(canvasOrRoot);
         await setReplyToCanvas(canvasOrRoot);
+        lastPendingCanvasId.current = pendingCanvas?.idString;
     };
 
     useEffect(() => {
@@ -61,20 +62,21 @@ export const AutoReplyProvider: React.FC<{
         });
     }, [pendingCanvas?.closed === false ? pendingCanvas?.address : undefined]); // important is to observe address changes, not just path changes because address depends on the path
 
-    useEffect(() => {
-        // reset replyTo when pending canvas changes
-        if (
-            pendingCanvas &&
-            pendingCanvas.idString !== lastPendingCanvasId.current
-        ) {
-            lastPendingCanvasId.current = pendingCanvas?.idString;
-            console.log("SET REPLY TO VIEWROOT", viewRoot);
-            setReplyTo(replyTo ?? viewRoot);
-
-            enabled.current = true; // we can enable auto reply again, because we are going into a new canvas draft
-        }
-    }, [pendingCanvas?.idString]);
-
+    /*  useEffect(() => { TODO when do we neeed this?
+         // reset replyTo when pending canvas changes
+         console.log(pendingCanvas?.idString)
+         if (
+             pendingCanvas &&
+             pendingCanvas.idString !== lastPendingCanvasId.current
+         ) {
+             lastPendingCanvasId.current = pendingCanvas?.idString;
+             console.log("SET REPLY TO VIEWROOT", viewRoot);
+             setReplyTo(replyTo ?? viewRoot);
+ 
+             enabled.current = true; // we can enable auto reply again, because we are going into a new canvas draft
+         }
+     }, [pendingCanvas?.idString]);
+  */
     const autoReplyFunctionality = () => {
         let last = processedReplies[processedReplies.length - 1]?.reply;
         if (

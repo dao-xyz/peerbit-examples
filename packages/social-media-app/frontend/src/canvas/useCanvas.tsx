@@ -75,7 +75,7 @@ const CanvasContext = React.createContext<ICanvasContext>({} as any);
 export const useCanvases = () => useContext(CanvasContext);
 
 export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
-    const { peer, loading: loadingPeer } = usePeer();
+    const { peer, loading: loadingPeer, persisted } = usePeer();
     const [root, _setRoot] = useState<Canvas>(undefined);
     const [leaf, setLeaf] = useState<Canvas>(undefined);
 
@@ -106,10 +106,10 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                     throw new Error("Root not found");
                 }
                 return getCanvasesPathFromURL(peer, root)
-                    .then((rooms) => {
+                    .then((canvases) => {
                         return Promise.all(
-                            rooms.map((room) =>
-                                peer.open(room, { existing: "reuse" })
+                            canvases.map((canvas) =>
+                                root.openWithSameSettings(canvas)
                             )
                         ).then((openRooms) => {
                             console.log("OPEN ROOMS", openRooms);
@@ -179,6 +179,9 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
 
         peer.open(rootDevelopment, {
             existing: "reuse",
+            args: {
+                replicate: persisted,
+            },
         })
             .then(async (result) => {
                 setRoot(result);

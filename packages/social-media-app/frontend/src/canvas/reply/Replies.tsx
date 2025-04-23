@@ -140,7 +140,6 @@ export const Replies = (properties: {
         }
     }, [isAtBottom, processedReplies]);
 
-    // 3️⃣ After new replies render, adjust scroll by the exact delta
     useEffect(() => {
         if (
             pendingBatch.nextBatchIndex < processedReplies.length ||

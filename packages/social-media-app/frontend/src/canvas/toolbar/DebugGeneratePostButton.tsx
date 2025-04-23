@@ -132,7 +132,7 @@ export const DebugGeneratePostButton = () => {
             });
 
             // Open the canvas so we can insert elements.
-            const openCanvas = await peer.open(canvas, { existing: "reuse" });
+            const openCanvas = await leaf.openWithSameSettings(canvas);
 
             for (const [ix, type] of typeArray.entries()) {
                 let mockContent: ElementContent;

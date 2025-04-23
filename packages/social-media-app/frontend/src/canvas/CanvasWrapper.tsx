@@ -154,9 +154,9 @@ export const CanvasWrapper = ({
                     return filteredForScope;
                 },
             },
-            debug: {
-                id: canvas?.idString,
-            },
+            /*   debug: {
+                  id: canvas?.idString,
+              }, */
             query:
                 !canvas || canvas.closed
                     ? null

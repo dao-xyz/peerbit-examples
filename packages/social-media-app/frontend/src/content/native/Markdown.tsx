@@ -80,18 +80,18 @@ export const MarkdownContent = ({
                             return; // no self reply
                         }
                         console.log("SUGGEST!");
-                        suggest(loadedParent, 2e4).then((reply) => {
-                            if (
-                                suggestStartRef !==
-                                canvas.path[canvas.path.length - 1].address
-                            ) {
-                                console.log(
-                                    "SUGGESTED reply parent change, skipping"
-                                );
-                                return; // the parent has changed, ignore the suggestion
-                            }
-                            setSuggestedReply(reply);
-                        });
+                        /*   suggest(loadedParent, 2e4).then((reply) => {
+                              if (
+                                  suggestStartRef !==
+                                  canvas.path[canvas.path.length - 1].address
+                              ) {
+                                  console.log(
+                                      "SUGGESTED reply parent change, skipping"
+                                  );
+                                  return; // the parent has changed, ignore the suggestion
+                              }
+                              setSuggestedReply(reply);
+                          }); */
                     } finally {
                         setLoadingSuggestedReply(false);
                     }
