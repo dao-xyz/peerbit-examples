@@ -187,9 +187,12 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                 setRoot(result);
                 let rootElementId = new Uint8Array(32);
                 if (
-                    !(await result.elements.index.index.get(
-                        toId(rootElementId)
-                    ))
+                    !(await result.elements.index.get(toId(rootElementId), {
+                        local: true,
+                        remote: {
+                            eager: true,
+                        },
+                    }))
                 ) {
                     await result.elements.put(
                         new Element({
