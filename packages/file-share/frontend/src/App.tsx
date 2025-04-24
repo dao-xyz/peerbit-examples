@@ -1,5 +1,6 @@
-import { PeerProvider, usePeer } from "@peerbit/react";
+import { PeerProvider } from "@peerbit/react";
 import { BaseRoutes } from "./routes";
+
 import { HashRouter } from "react-router";
 import { Footer } from "./Footer";
 /* import { enable } from "@libp2p/logger";
