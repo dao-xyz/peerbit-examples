@@ -8,6 +8,7 @@ import { CreateRoot } from "./canvas/CreateRoot";
 import { MissingProfile } from "./profile/MissingProfile";
 import { ConnectDevices } from "./identity/ConnectDevices";
 import { ViewType } from "./view/ViewContex";
+import { NavigationEffects } from "./NavigationEffects";
 
 const textDecoder = new TextDecoder();
 export const getStreamPath = (node: PublicSignKey) =>
@@ -36,14 +37,17 @@ export const NEW_SPACE = "/new";
 
 export function BaseRoutes() {
     return (
-        <Routes>
-            {/* <Route path={USER_BY_KEY_NAME} element={<Canvas />} /> */}
-            <Route path={CONNECT_DEVICES} element={<ConnectDevices />} />
-            <Route path={MISSING_PROFILE} element={<MissingProfile />} />
-            <Route path={NEW_ROOT} element={<CreateRoot />} />
-            <Route path="/path/*" element={<Home />} />
-            <Route path="/*" element={<Home />} />
-        </Routes>
+        <>
+            <NavigationEffects />
+            <Routes>
+                {/* <Route path={USER_BY_KEY_NAME} element={<Canvas />} /> */}
+                <Route path={CONNECT_DEVICES} element={<ConnectDevices />} />
+                <Route path={MISSING_PROFILE} element={<MissingProfile />} />
+                <Route path={NEW_ROOT} element={<CreateRoot />} />
+                <Route path="/path/*" element={<Home />} />
+                <Route path="/*" element={<Home />} />
+            </Routes>
+        </>
     );
 }
 
