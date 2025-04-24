@@ -292,14 +292,7 @@ export abstract class TrackSource {
     }
 
     async waitForReplicators() {
-        try {
-            await waitFor(
-                async () => (await this.chunks.log.getReplicators()).size > 0,
-                { timeout: 5e3 }
-            );
-        } catch (error) {
-            throw new Error("No replicators found for track");
-        }
+        await this.chunks.log.waitForReplicators({ coverageThreshold: 0.1 }); // TODO wait for replicators only for the domeain (time domain) of interest
     }
 
     async waitForStreamer() {
@@ -322,7 +315,10 @@ export abstract class TrackSource {
      */
     async iterate(
         time: number,
-        options?: { local?: boolean; remote?: { eager?: boolean } }
+        options?: {
+            local?: boolean;
+            remote?: { eager?: boolean; replicate?: boolean };
+        }
     ) {
         await this.waitForReplicators();
 
@@ -345,7 +341,7 @@ export abstract class TrackSource {
             {
                 remote: options?.remote ?? {
                     eager: true, // TODO eager needed?
-                    replicate: true,
+                    replicate: options?.remote?.replicate ?? true,
                 },
                 local: options?.local ?? true,
             }
@@ -1333,8 +1329,10 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
     async iterate(
         progress: number | "live",
         opts?: {
+            debug?: boolean;
             bufferTime?: number; // how much time to buffer
-            bufferSize?: number; // if below bufferTime how big chunks should we buffer from remote
+            bufferSize?: number | ((queuedChunks: number) => number); // if below bufferTime how big chunks should we buffer from remote
+            preloadingBufferSize?: number; // how much time to buffer from remote before starting playing
             preload?: number; /// how much preload time
             keepTracksOpen?: boolean;
             changeProcessor?: TrackChangeProcessor;
@@ -1352,10 +1350,21 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                 hash: string;
                 track: Track;
             }) => void;
+            replicate?: boolean;
         }
     ): Promise<TracksIterator> {
         const bufferTime = (opts?.bufferTime ?? 6e3) * 1e3; // micro seconds
-        const bufferSize = opts?.bufferSize ?? 160;
+        let bufferSizeInvocations = 0;
+        const bufferSize =
+            opts?.bufferSize == null
+                ? (_number: number) => {
+                      bufferSizeInvocations++;
+                      return Math.min(10 * bufferSizeInvocations, 160);
+                  }
+                : typeof opts?.bufferSize === "number"
+                ? () => opts.bufferSize as number
+                : opts.bufferSize;
+        const preloadingBufferSize = opts?.preloadingBufferSize ?? 60;
         const openTrackQueue = new PQueue({ concurrency: 1 });
         const changeProcessor =
             opts?.changeProcessor || oneVideoAndOneAudioChangeProcessor;
@@ -1474,19 +1483,20 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
             ) {
                 // if the frame to add to the buffer is not the latest and also the start time for the latest is earlier, skip this. TODO this logic does not make sense if we have  a covering track ?
                 // here we might end up if we do preloading and we end up with frames we dont need!
-                console.log("---------> skip pending: ", {
-                    currentPlayedTime:
-                        properties.chunk.time + properties.track.startTime,
-                    startTime: properties.track.startTime,
-                    latestPendingFrame: latestPendingFrame.get(
-                        properties.track.source.mediaType
-                    )?.time,
-                    latestPlayedFrame: latestPlayedFrame.get(
-                        properties.track.source.mediaType
-                    )?.time,
-                    track: properties.track.toString(),
-                    latestTrack: latestTrack.toString(),
-                });
+                opts?.debug &&
+                    console.log("---------> skip pending: ", {
+                        currentPlayedTime:
+                            properties.chunk.time + properties.track.startTime,
+                        startTime: properties.track.startTime,
+                        latestPendingFrame: latestPendingFrame.get(
+                            properties.track.source.mediaType
+                        )?.time,
+                        latestPlayedFrame: latestPlayedFrame.get(
+                            properties.track.source.mediaType
+                        )?.time,
+                        track: properties.track.toString(),
+                        latestTrack: latestTrack.toString(),
+                    });
                 return;
             }
 
@@ -1566,7 +1576,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                 Number(hrtimeMicroSeconds()) > preloadEndAt ||
                 new Set(
                     [...currentTracks.values()]
-                        .filter((x) => x.chunks.length > bufferSize)
+                        .filter((x) => x.chunks.length > preloadingBufferSize)
                         .map((x) => x.track.source.mediaType)
                 ).size >= 2
             );
@@ -1615,11 +1625,12 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                 if (trackOptionIndex >= 0) {
                     currentTrackOptions.splice(trackOptionIndex, 1);
                     opts?.onTrackOptionsChange?.(currentTrackOptions);
-                    console.log(
-                        "REMOVE TRACK OPTION",
-                        properties.track.toString(),
-                        properties.ended
-                    );
+                    opts?.debug &&
+                        console.log(
+                            "REMOVE TRACK OPTION",
+                            properties.track.toString(),
+                            properties.ended
+                        );
                 }
             }
 
@@ -1761,6 +1772,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                                 break;
                             }
                         } else {
+                            opts?.debug && console.log("SKIP OLD FRAME");
                             spliceSize++; // ignore old frames
                         }
                     }
@@ -1775,7 +1787,8 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                         (currentTracks.get(track.idString)?.closing ||
                             !currentTracks.has(track.idString))
                     ) {
-                        console.log("RM track after empty buffer", address);
+                        opts?.debug &&
+                            console.log("RM track after empty buffer", address);
                         removeTrack({ track, ended: true, clearPending: true });
                     }
                 }
@@ -2010,7 +2023,12 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                             ) - track.startTime,
                             0
                         );
-                        return track.source.iterate(startTimeInTrack);
+                        return track.source.iterate(startTimeInTrack, {
+                            local: true,
+                            remote: {
+                                replicate: opts?.replicate ?? true,
+                            },
+                        });
                     }
                     return undefined;
                 };
@@ -2057,8 +2075,18 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                                 return;
                             }
 
-                            const newChunks = await iterator.next(bufferSize);
+                            const newChunks = await iterator.next(
+                                bufferSize(trackWithBuffer.chunks.length)
+                            );
                             if (newChunks.length > 0) {
+                                opts?.debug &&
+                                    console.log(
+                                        "BUFFERING",
+                                        newChunks.length,
+                                        track.toString(),
+                                        iterator?.done(),
+                                        trackWithBuffer.chunks.length
+                                    );
                                 for (const chunk of newChunks) {
                                     await onPending({ chunk, track });
                                 }
@@ -2090,15 +2118,16 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                                     startTimer();
                                 }
 
-                                console.log("RM TRACK NO MORE CHUNKS", {
-                                    deleteImmediately:
-                                        trackWithBuffer.chunks.length === 0,
-                                    done: iterator?.done(),
-                                    pendingFrames:
-                                        trackWithBuffer.chunks.length,
-                                    track: track.toString(),
-                                    address: track.address,
-                                });
+                                opts?.debug &&
+                                    console.log("RM TRACK NO MORE CHUNKS", {
+                                        deleteImmediately:
+                                            trackWithBuffer.chunks.length === 0,
+                                        done: iterator?.done(),
+                                        pendingFrames:
+                                            trackWithBuffer.chunks.length,
+                                        track: track.toString(),
+                                        address: track.address,
+                                    });
 
                                 if (trackWithBuffer.chunks.length === 0) {
                                     return removeTrack({
@@ -2127,16 +2156,19 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                         0
                     );
 
-                    /* console.log("---> ", {
-                        delay: timeTillRunningOutOfFrames,
-                        bufferTime,
-                        timeLeftOnBuffer,
-                        latestPending: (latestPendingFrame.get(
-                            track.source.mediaType
-                        ) || 0),
-                        latestPlayed: (latestPlayedFrame.get(track.source.mediaType) ||
-                            track.startTimeBigInt)
-                    }) */
+                    opts?.debug &&
+                        console.log("---> ", {
+                            delay: timeTillRunningOutOfFrames,
+                            bufferTime,
+                            timeLeftOnBuffer,
+                            latestPending:
+                                latestPendingFrame.get(
+                                    track.source.mediaType
+                                ) || 0,
+                            latestPlayed:
+                                latestPlayedFrame.get(track.source.mediaType) ||
+                                track.startTimeBigInt,
+                        });
 
                     delay(timeTillRunningOutOfFrames, {
                         signal: pauseController.signal,
@@ -2351,7 +2383,12 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                                   }),
                               ],
                           }),
-                    { remote: true, local: true }
+                    {
+                        local: true,
+                        remote: {
+                            replicate: opts?.replicate ?? true,
+                        },
+                    }
                 );
             };
 
@@ -2392,7 +2429,8 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                         fetchedOnce = true;
 
                         for (const track of current) {
-                            /*  console.log("ADD OPTION", track.startTime); */
+                            opts?.debug &&
+                                console.log("ADD OPTION", track.startTime);
                             addTrackAsOption(track);
                         }
 
