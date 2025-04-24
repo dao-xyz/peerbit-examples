@@ -456,6 +456,7 @@ export class CanvasAIReply extends Program<Args> {
         }
 
         this.replication = defaultGigaReplicator(this.node);
+        await this.replication?.start();
     }
 
     async close(from?: Program): Promise<boolean> {
