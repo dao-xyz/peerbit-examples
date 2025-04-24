@@ -61,6 +61,9 @@ export class BrowsingHistory extends Program {
     async open(): Promise<void> {
         return this.visits.open({
             type: Visit,
+            replicate: {
+                factor: 1,
+            },
             canPerform: async (props) => {
                 /**
                  * Only allow self
