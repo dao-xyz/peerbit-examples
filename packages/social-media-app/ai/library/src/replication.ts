@@ -14,6 +14,9 @@ export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
                 return;
             }
             canvas = await client.open(rootDevelopment.clone());
+            console.log(
+                "Starting replicator at canvas root: " + canvas.address
+            );
         },
         stop: async () => {
             if (!canvas) {
