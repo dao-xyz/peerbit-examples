@@ -43,6 +43,7 @@ export type RequestStats = {
 };
 
 export type Args = {
+    replicate?: boolean; // whether to replicate giga (default true)
     server?: boolean;
     onRequest?: (
         query: ChatQuery | ModelRequest | SuggestedReplyQuery,
@@ -455,8 +456,13 @@ export class CanvasAIReply extends Program<Args> {
             requestModels().catch(ignoreTimeoutandAbort);
         }
 
-        this.replication = defaultGigaReplicator(this.node);
-        await this.replication?.start();
+        if (
+            args?.replicate ||
+            (args?.replicate === undefined && args?.server)
+        ) {
+            this.replication = defaultGigaReplicator(this.node);
+            await this.replication?.start();
+        }
     }
 
     async close(from?: Program): Promise<boolean> {

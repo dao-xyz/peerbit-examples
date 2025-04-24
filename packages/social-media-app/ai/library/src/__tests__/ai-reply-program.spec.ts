@@ -5,12 +5,11 @@ import {
     ModelRequest,
     ModelResponse,
     QueryResponse,
-    SuggestedReplyQuery,
     SuggestedReplyResponse,
 } from "../ai-reply-program";
 import { expect } from "chai";
 import { DEEP_SEEK_R1_1_5b, DEEP_SEEK_R1_7b } from "../model.js";
-import { Canvas } from "@giga-app/interface";
+import { rootDevelopment, Canvas } from "@giga-app/interface";
 import { waitForResolved } from "@peerbit/time";
 import { ProgramClient } from "@peerbit/program";
 
@@ -114,6 +113,25 @@ describe("AIResponseProgram", () => {
         );
         const [text] = await canvas.replies.index.iterate({}).all();
         expect((await text.getText()).length).to.be.greaterThan(0);
+    });
+
+    it("replicates by default", async () => {
+        await session.peers[0].open(new CanvasAIReply(), {
+            args: { server: true, llm: "ollama" },
+        });
+
+        const clientCanvasRoot = await session.peers[1].open<Canvas>(
+            rootDevelopment.clone(),
+            {
+                args: {
+                    replicate: false,
+                },
+            }
+        );
+        await clientCanvasRoot.replies.log.waitForReplicators();
+        expect([
+            ...(await clientCanvasRoot.replies.log.getReplicators()),
+        ]).to.deep.eq([session.peers[0].identity.publicKey.hashcode()]);
     });
 
     /*  it("chatgpt", async () => {

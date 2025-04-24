@@ -13,7 +13,7 @@ export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
             if (canvas) {
                 return;
             }
-            canvas = await client.open(new Canvas(rootDevelopment));
+            canvas = await client.open(rootDevelopment.clone());
         },
         stop: async () => {
             if (!canvas) {
