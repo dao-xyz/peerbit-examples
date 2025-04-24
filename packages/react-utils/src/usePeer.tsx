@@ -2,7 +2,6 @@ import React, { useContext } from "react";
 import { Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
 import { DirectSub } from "@peerbit/pubsub";
-import { yamux } from "@chainsafe/libp2p-yamux";
 import {
     getFreeKeypair,
     getClientId,
@@ -80,12 +79,16 @@ type IFrameOptions = {
     targetOrigin: string;
 };
 
+export type NetworkOption = {
+    type: "local" | "remote";
+    bootstrap?: (Multiaddr | string)[];
+};
+
 type NodeOptions = {
     type?: "node";
-    network: "local" | "remote";
+    network: "local" | "remote" | NetworkOption;
     waitForConnnected?: boolean;
     keypair?: Ed25519Keypair;
-    bootstrap?: (Multiaddr | string)[];
     host?: boolean;
     singleton?: boolean;
 };
@@ -112,9 +115,7 @@ export const PeerProvider = (options: PeerOptions) => {
     const [promise, setPromise] = React.useState<Promise<void> | undefined>(
         undefined
     );
-    const [persisted, setPersisted] = React.useState<boolean | undefined>(
-        undefined
-    );
+    const [persisted, setPersisted] = React.useState<boolean>(false);
     const [loading, setLoading] = React.useState<boolean>(true);
     const [connectionState, setConnectionState] =
         React.useState<ConnectionStatus>("disconnected");
@@ -246,33 +247,36 @@ export const PeerProvider = (options: PeerOptions) => {
                 console.log("Create client");
                 newPeer = await Peerbit.create({
                     libp2p: {
-                        addresses: { listen: ["/p2p-circuit"] },
+                        addresses: {
+                            listen: [
+                                /* "/p2p-circuit" */
+                            ],
+                        },
                         connectionEncrypters: [noise()],
                         peerId,
                         connectionManager: { maxConnections: 100 },
                         connectionMonitor: { enabled: false },
-                        streamMuxers: [yamux()],
                         ...(nodeOptions.network === "local"
                             ? {
                                   connectionGater: {
                                       denyDialMultiaddr: () => false,
                                   },
                                   transports: [
-                                      webSockets({ filter: filters.all }),
-                                      circuitRelayTransport(),
+                                      webSockets({ filter: filters.all }) /* ,
+                                    circuitRelayTransport(), */,
                                   ],
                               }
                             : {
                                   transports: [
-                                      webSockets({ filter: filters.wss }),
-                                      circuitRelayTransport(),
+                                      webSockets({ filter: filters.wss }) /* ,
+                                    circuitRelayTransport(), */,
                                   ],
-                              }),
+                              }) /* 
                         services: {
                             pubsub: (c) =>
                                 new DirectSub(c, { canRelayMessage: true }),
                             identify: identify(),
-                        },
+                        }, */,
                     },
                     directory,
                 });
@@ -287,7 +291,12 @@ export const PeerProvider = (options: PeerOptions) => {
 
                 const connectFn = async () => {
                     try {
-                        if (nodeOptions.network === "local") {
+                        const network = nodeOptions.network;
+                        if (
+                            network === "local" ||
+                            ((network as NetworkOption).type === "local" &&
+                                !(network as NetworkOption).bootstrap)
+                        ) {
                             await newPeer.dial(
                                 "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
                                     (await (
@@ -296,13 +305,15 @@ export const PeerProvider = (options: PeerOptions) => {
                                         )
                                     ).text())
                             );
+                        } else if (
+                            !network ||
+                            network === "remote" ||
+                            (network.type === "remote" && !network.bootstrap)
+                        ) {
+                            await newPeer["bootstrap"]?.();
                         } else {
-                            if (nodeOptions.bootstrap) {
-                                for (const addr of nodeOptions.bootstrap) {
-                                    await newPeer.dial(addr);
-                                }
-                            } else {
-                                await newPeer["bootstrap"]?.();
+                            for (const addr of network.bootstrap!) {
+                                await newPeer.dial(addr);
                             }
                         }
                         setConnectionState("connected");

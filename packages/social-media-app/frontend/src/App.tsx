@@ -21,6 +21,7 @@ import {
     useHeaderVisibilityContext,
 } from "./HeaderVisibilitiyProvider";
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
+import type { NetworkOption } from "@peerbit/react";
 
 export const Content = () => {
     const { error: peerError } = usePeer();
@@ -89,25 +90,28 @@ export const Content = () => {
     );
 };
 
+const networkConfig: NetworkOption =
+    import.meta.env.MODE === "development"
+        ? {
+              type: "local",
+              bootstrap: [
+                  "/dns4/7f3841d84d733483dc891eaf02c91b9068f2b5fe.peerchecker.com/tcp/4003/wss/p2p/12D3KooWLCuFnpGy81s4HEscLj2mNqGou15N3pBPSbYq8J9xXZvk",
+              ],
+          }
+        : {
+              type: "remote",
+              bootstrap: [
+                  "/dns4/7f3841d84d733483dc891eaf02c91b9068f2b5fe.peerchecker.com/tcp/4003/wss/p2p/12D3KooWLCuFnpGy81s4HEscLj2mNqGou15N3pBPSbYq8J9xXZvk",
+              ],
+          };
+
 export const App = () => {
     return (
         <HashRouter basename="/">
             <ErrorProvider>
                 <ThemeProvider>
                     <PeerProvider
-                        network={
-                            import.meta.env.MODE === "development"
-                                ? "local"
-                                : "remote"
-                        }
-                        top={{
-                            type: "node",
-                            network:
-                                import.meta.env.MODE === "development"
-                                    ? "local"
-                                    : "remote",
-                            host: true,
-                        }}
+                        network={networkConfig}
                         iframe={{ type: "proxy", targetOrigin: "*" }}
                         waitForConnnected={false}
                         inMemory={false}

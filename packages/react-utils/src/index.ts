@@ -3,6 +3,7 @@ export {
     PeerContext,
     usePeer,
     ClientBusyError,
+    type NetworkOption,
 } from "./usePeer.js";
 export * from "./utils.js";
 export { FastMutex } from "./lockstorage.js";
