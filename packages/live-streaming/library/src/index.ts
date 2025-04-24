@@ -2611,6 +2611,8 @@ export class MediaStreamDBs extends Program {
     ) => void;
     async open(args?: { replicate: boolean }) {
         this._replicateAll = args?.replicate ?? true;
+        console.log("Starting media streams library");
+        console.log("Replicating: " + this._replicateAll);
         if (this._replicateAll) {
             this._streamListener = async (
                 ev: CustomEvent<DocumentsChange<MediaStreamDB>>
@@ -2640,7 +2642,7 @@ export class MediaStreamDBs extends Program {
             index: {
                 type: MediaStreamDBIndexable,
             },
-            replicate: args?.replicate
+            replicate: this._replicateAll
                 ? {
                       factor: 1,
                   }
