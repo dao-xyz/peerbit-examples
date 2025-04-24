@@ -444,6 +444,8 @@ export const View = (properties: DBArgs) => {
             );
             streamListener.current = await properties.stream.iterate(progress, {
                 keepTracksOpen: true,
+                /*     debug: true, */
+                replicate: false,
                 onUnderflow: () => {
                     console.log("underflow");
                     setIsBuffering(true);
@@ -520,9 +522,9 @@ export const View = (properties: DBArgs) => {
                 setStreamerOnline(true);
             })
             .catch((e) => {
-                setStreamerOnline(false);
+                setStreamerOnline(false); /* 
                 console.error("Failed to find streamer");
-                console.error(e);
+                console.error(e); */
             });
 
         return () => {};
