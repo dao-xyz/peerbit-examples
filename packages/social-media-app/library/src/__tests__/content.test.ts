@@ -521,6 +521,43 @@ describe("content", () => {
                 );
                 expect(await viewer.replies.log.isReplicating()).to.be.true;
             });
+
+            it("two way replication", async () => {
+                let first = await session.peers[0].open(
+                    new Canvas({
+                        publicKey: session.peers[0].identity.publicKey,
+                        seed: new Uint8Array(),
+                    }),
+                    {
+                        args: {
+                            replicate: true,
+                        },
+                    }
+                );
+                await first.getCreateRoomByPath(["a", "b"]);
+
+                let second = await session.peers[1].open(first.clone(), {
+                    args: {
+                        replicate: true,
+                    },
+                });
+
+                await waitForResolved(() =>
+                    expect(second.replies.log.log.length).to.eq(2)
+                );
+
+                await first.close();
+
+                first = await session.peers[0].open(second.clone(), {
+                    existing: "reuse",
+                    args: {
+                        replicate: true,
+                    },
+                });
+                await waitForResolved(() =>
+                    expect(first.replies.log.log.length).to.eq(2)
+                );
+            });
         });
 
         describe("elements", async () => {
