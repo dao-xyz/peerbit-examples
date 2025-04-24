@@ -8,7 +8,12 @@ export const CreateStream = () => {
     const { peer } = usePeer();
     const mediaStream = useProgram<MediaStreamDB>(
         peer && new MediaStreamDB(peer.identity.publicKey),
-        { existing: "reuse" }
+        {
+            existing: "reuse",
+            args: {
+                replicateTracksByDefault: true,
+            },
+        }
     );
     const navigate = useNavigate();
     const location = useLocation();

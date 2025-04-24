@@ -2640,6 +2640,11 @@ export class MediaStreamDBs extends Program {
             index: {
                 type: MediaStreamDBIndexable,
             },
+            replicate: args?.replicate
+                ? {
+                      factor: 1,
+                  }
+                : false,
             canOpen: () => false, // we do it manually below
         });
     }
