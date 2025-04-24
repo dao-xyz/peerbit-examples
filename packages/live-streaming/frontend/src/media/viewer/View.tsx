@@ -598,10 +598,11 @@ export const View = (properties: DBArgs) => {
                                 id="stream-playback"
                                 style={{
                                     display: "block",
-                                    width: styleWidth,
-                                    height: styleHeight,
+                                    maxWidth: styleWidth,
+                                    maxHeight: styleHeight,
                                     justifyContent: "center",
                                 }}
+                                className="w-full h-full"
                                 /*    style={{ width: "100%", height: "auto" }} */
                                 ref={(node) => {
                                     if (
