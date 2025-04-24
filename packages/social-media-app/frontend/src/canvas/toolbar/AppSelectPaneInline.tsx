@@ -73,7 +73,7 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
                     <>
                         <span className="ganja-font">Native apps</span>
                         <div className="flex gap-2">
-                            {import.meta.env.MODE === "development" && (
+                            {window.location.hostname !== "giga.place" && (
                                 <DebugGeneratePostButton />
                             )}
                             {nativeApps.map((app) => (
