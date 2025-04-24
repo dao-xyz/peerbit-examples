@@ -14,65 +14,12 @@ import {
     StaticMarkdownText,
 } from "@giga-app/interface";
 import { Ed25519Keypair, randomBytes } from "@peerbit/crypto";
-
-const generateATextInMarkdown = (length: number = 100) => {
-    let text = "";
-    // Decide randomly if we will use markdown formatting.
-    const useMarkdown = Math.random() < 0.5;
-
-    // List of realistic titles that people might actually write.
-    const titles = [
-        "Debugging Session",
-        "Bug Report",
-        "Test Output",
-        "Development Log",
-        "Error Analysis",
-        "Application Crash Report",
-        "Code Debugging Summary",
-        "Issue Investigation",
-    ];
-
-    // Optionally add a realistic markdown heading.
-    if (useMarkdown) {
-        const title = titles[Math.floor(Math.random() * titles.length)];
-        text += `# ${title}\n\n`;
-    }
-
-    // Array of sample words for pseudo text.
-    const words = [
-        "lorem",
-        "ipsum",
-        "dolor",
-        "sit",
-        "amet",
-        "consectetur",
-        "adipiscing",
-        "elit",
-        "debug",
-        "message",
-        "code",
-        "example",
-        "function",
-        "variable",
-    ];
-
-    // Build text until it reaches the desired length.
-    while (text.length < length) {
-        // Pick a random word.
-        let word = words[Math.floor(Math.random() * words.length)];
-
-        // If markdown is enabled, randomly apply formatting.
-        if (useMarkdown) {
-            const formatChance = Math.random();
-            if (formatChance < 0.3) {
-                word = `**${word}**`; // Bold formatting.
-            } else if (formatChance < 0.6) {
-                word = `*${word}*`; // Italic formatting.
-            }
-        }
-
-        text += word + " ";
-    }
+import { MOCK_TEXTS } from "./MockTexts";
+/**
+ * Returns one of the pre‑written markdown snippets
+ */
+const getSampleMarkdown = (): string => {
+    let text = MOCK_TEXTS[Math.floor(Math.random() * MOCK_TEXTS.length)];
     return text.trim();
 };
 
@@ -148,9 +95,7 @@ export const DebugGeneratePostButton = () => {
                 } else if (type === "text") {
                     mockContent = new StaticContent({
                         content: new StaticMarkdownText({
-                            text: generateATextInMarkdown(
-                                Math.round(Math.max(Math.random() * 200, 10))
-                            ),
+                            text: getSampleMarkdown(),
                         }),
                         contentId: randomBytes(32),
                         quality: LOWEST_QUALITY,
