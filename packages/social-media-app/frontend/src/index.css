@@ -537,8 +537,19 @@ code {
 
     /* Container for your content with “animated border” behavior */
     .animated-border {
+        /* default/fallback */
         position: relative;
+        --corner-color: theme('colors.gray.400');
     }
+
+    .animated-border.focused {
+        --corner-color: theme('colors.primary.500');
+    }
+
+    .animated-border.unfocused {
+        --corner-color: theme('colors.gray.400');
+    }
+
 
 
 
@@ -568,25 +579,11 @@ code {
 
     }
 
-    .animated-border .corner.top-left .arc {
-        border-top: 4px solid theme('colors.primary.500');
-        border-left: 4px solid theme('colors.primary.500');
-        border-top-left-radius: 8px;
-
-    }
-
     /* Top-right corner (inside) */
     .animated-border .corner.top-right {
         top: 0;
         right: 0;
         transform: translate(-10%, 10%);
-    }
-
-    .animated-border .corner.top-right .arc {
-        border-top: 4px solid theme('colors.primary.500');
-        border-right: 4px solid theme('colors.primary.500');
-        border-top-right-radius: 8px;
-
     }
 
     /* Bottom-left corner (inside) */
@@ -596,13 +593,6 @@ code {
         transform: translate(10%, -10%);
     }
 
-    .animated-border .corner.bottom-left .arc {
-        border-bottom: 4px solid theme('colors.primary.500');
-        border-left: 4px solid theme('colors.primary.500');
-        border-bottom-left-radius: 8px;
-
-    }
-
     /* Bottom-right corner (inside) */
     .animated-border .corner.bottom-right {
         bottom: 0;
@@ -610,12 +600,36 @@ code {
         transform: translate(-10%, -10%);
     }
 
-    .animated-border .corner.bottom-right .arc {
-        border-bottom: 4px solid theme('colors.primary.500');
-        border-right: 4px solid theme('colors.primary.500');
-        border-bottom-right-radius: 8px;
 
+    /* Top-left corner */
+    .animated-border .corner.top-left .arc {
+        border-top: 4px solid var(--corner-color);
+        border-left: 4px solid var(--corner-color);
+        border-top-left-radius: 4px;
     }
+
+    /* Top-right corner */
+    .animated-border .corner.top-right .arc {
+        border-top: 4px solid var(--corner-color);
+        border-right: 4px solid var(--corner-color);
+        border-top-right-radius: 4px;
+    }
+
+    /* Bottom-left corner */
+    .animated-border .corner.bottom-left .arc {
+        border-bottom: 4px solid var(--corner-color);
+        border-left: 4px solid var(--corner-color);
+        border-bottom-left-radius: 4px;
+    }
+
+    /* Bottom-right corner */
+    .animated-border .corner.bottom-right .arc {
+        border-bottom: 4px solid var(--corner-color);
+        border-right: 4px solid var(--corner-color);
+        border-bottom-right-radius: 4px;
+    }
+
+
 
     .arc {
         filter: opacity(0.5);
