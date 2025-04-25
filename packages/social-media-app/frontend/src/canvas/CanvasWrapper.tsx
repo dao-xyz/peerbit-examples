@@ -139,7 +139,7 @@ export const CanvasWrapper = ({
     const { items: rects, isLoading } = useQuery(
         canvas?.loadedElements ? canvas.origin?.elements : null,
         {
-            id: canvas?.origin?.idString + "/" + canvas?.idString,
+            id: canvas?.idString,
             debounce: 123,
             onChange: {
                 merge: (change) => {
