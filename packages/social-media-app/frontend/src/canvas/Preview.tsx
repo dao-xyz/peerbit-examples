@@ -360,7 +360,7 @@ const PostPreview = ({
                 <button
                     onClick={onClick}
                     className={
-                        "col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative " +
+                        "btn col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative " +
                         className
                     }
                     ref={forwardRef}
@@ -377,7 +377,7 @@ const PostPreview = ({
             {secondaryApps.length > 0 && (
                 <div
                     className={
-                        "col-span-full flex overflow-x-scroll no-scrollbar gap-2 pt-2 " +
+                        "px-2 col-span-full flex overflow-x-scroll  no-scrollbar gap-2 pt-2 " +
                         className
                     }
                     ref={forwardRef}
@@ -385,7 +385,7 @@ const PostPreview = ({
                     {secondaryApps.map((app, i) => (
                         <button
                             onClick={onClick}
-                            className="aspect-[1] w-12 rounded-md overflow-hidden"
+                            className="btn aspect-[1] w-12  rounded overflow-hidden"
                             key={i}
                         >
                             <PreviewFrame
