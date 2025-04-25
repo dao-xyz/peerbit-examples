@@ -5,6 +5,7 @@ import React, {
     useEffect,
     useMemo,
     ReactNode,
+    useRef,
 } from "react";
 import { usePeer, useQuery } from "@peerbit/react";
 import {
@@ -22,6 +23,23 @@ import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
 import { BodyStyler } from "./BodyStyler";
+
+/**
+ * Debounce any primitive or reference value *together* so React effects that depend on multiple
+ * pieces of state run **once** instead of once‑per‑piece. The update is flushed after `delay` ms.
+ */
+function useDebounced<T>(value: T, delay: number): T {
+    const [debounced, setDebounced] = useState(value);
+    const timeout = useRef<ReturnType<typeof setTimeout>>();
+
+    useEffect(() => {
+        clearTimeout(timeout.current);
+        timeout.current = setTimeout(() => setDebounced(value), delay);
+        return () => clearTimeout(timeout.current);
+    }, [value, delay]);
+
+    return debounced;
+}
 
 export type ViewType = "new" | "old" | "best" | "chat";
 export type LineType = "start" | "end" | "end-and-start" | "none" | "middle";
@@ -62,10 +80,17 @@ function useViewContextHook() {
         }
     }, [canvases, root?.closed, root?.address]);
 
+    /* =====================================================================================
+     *  🚀 Debounce *both* values together so the next effect fires only once per change‑set.
+     * ===================================================================================== */
+    const { view: debouncedView, viewRoot: debouncedViewRoot } = useDebounced(
+        { view, viewRoot },
+        123
+    );
+
     // --- Query & Reply Fetching Management ---
-    const getQueryId = (canvas: CanvasDB, sortCriteria: ViewType) => {
-        return canvas.idString + sortCriteria;
-    };
+    const getQueryId = (canvas: CanvasDB, sortCriteria: ViewType) =>
+        canvas.idString + sortCriteria;
 
     // Set the query based on view and viewRoot.
     const [query, setQuery] = useState<{
@@ -75,11 +100,12 @@ function useViewContextHook() {
     }>({ query: null, id: "" });
 
     useEffect(() => {
-        if (!viewRoot) return;
-        if (view === "chat") {
+        if (!debouncedViewRoot) return;
+
+        if (debouncedView === "chat") {
             setQuery({
                 query: new SearchRequest({
-                    query: getRepliesQuery(viewRoot),
+                    query: getRepliesQuery(debouncedViewRoot),
                     sort: [
                         new Sort({
                             key: ["__context", "created"],
@@ -87,13 +113,13 @@ function useViewContextHook() {
                         }),
                     ],
                 }),
-                id: getQueryId(viewRoot, view),
+                id: getQueryId(debouncedViewRoot, debouncedView),
                 reverse: true,
             });
-        } else if (view === "best") {
+        } else if (debouncedView === "best") {
             setQuery({
                 query: new SearchRequest({
-                    query: getImmediateRepliesQuery(viewRoot),
+                    query: getImmediateRepliesQuery(debouncedViewRoot),
                     sort: [
                         new Sort({
                             key: ["replies"],
@@ -105,26 +131,26 @@ function useViewContextHook() {
                         }),
                     ],
                 }),
-                id: getQueryId(viewRoot, view),
+                id: getQueryId(debouncedViewRoot, debouncedView),
             });
         } else {
             // "new" or "old"
             setQuery({
                 query: new SearchRequest({
-                    query: getImmediateRepliesQuery(viewRoot),
+                    query: getImmediateRepliesQuery(debouncedViewRoot),
                     sort: new Sort({
                         key: ["__context", "created"],
                         direction:
-                            view === "new"
+                            debouncedView === "new"
                                 ? SortDirection.DESC
                                 : SortDirection.ASC,
                     }),
                 }),
-                id: getQueryId(viewRoot, view),
-                reverse: view === "new",
+                id: getQueryId(debouncedViewRoot, debouncedView),
+                reverse: debouncedView === "new",
             });
         }
-    }, [view, viewRoot?.idString]);
+    }, [debouncedView, debouncedViewRoot]);
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(5); // Default batch size
@@ -133,7 +159,9 @@ function useViewContextHook() {
         loadMore,
         isLoading,
     } = useQuery(
-        viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
+        debouncedViewRoot && debouncedViewRoot.loadedReplies
+            ? debouncedViewRoot.replies
+            : undefined,
         {
             ...query,
             id: query.id ?? "",
@@ -144,11 +172,10 @@ function useViewContextHook() {
             remote: true,
             onChange: {
                 merge: async (e) => {
-                    // filter only changes made by me
-                    // TODO this can be problematic because merge changed might not be new message but just sync???
                     for (const change of e.added) {
                         const hash = change.__context.head;
-                        const entry = await viewRoot.replies.log.log.get(hash);
+                        const entry =
+                            await debouncedViewRoot!.replies.log.log.get(hash);
                         for (const signer of await entry.getSignatures()) {
                             if (
                                 signer.publicKey.equals(peer.identity.publicKey)
@@ -160,46 +187,15 @@ function useViewContextHook() {
                     return undefined;
                 },
                 update:
-                    view === "chat" || view === "new"
+                    debouncedView === "chat" || debouncedView === "new"
                         ? undefined
                         : (prev, e) => {
-                              // insert at the top
                               prev.unshift(...e.added);
-                              console.log("UPDATE", prev, e.added);
                               return prev;
                           },
             },
         }
     );
-
-    /* const { items: all } = useQuery(
-        viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
-        {
-            ...{
-                ...query,
-                query: viewRoot
-                    ? new SearchRequestIndexed({
-                        query: getImmediateRepliesQuery(viewRoot),
-                        sort: [
-                            new Sort({
-                                key: ["replies"],
-                                direction: SortDirection.DESC,
-                            }),
-                            new Sort({
-                                key: ["__context", "created"],
-                                direction: SortDirection.DESC,
-                            }),
-                        ],
-                    })
-                    : null,
-            },
-            batchSize,
-            resolve: false,
-            local: true,
-            remote: true,
-           
-        }
-    ); */
 
     const lastReply = useMemo(() => {
         if (sortedReplies && sortedReplies.length > 0) {
@@ -207,7 +203,6 @@ function useViewContextHook() {
         }
         return undefined;
     }, [sortedReplies]);
-    /*  console.log({ sortedReplies, all }); */
 
     // --- Reply Processing for "chat" view, inserting quotes ---
     function replyLineTypes({
@@ -239,13 +234,12 @@ function useViewContextHook() {
         current: WithContext<Canvas>;
         next?: Canvas;
     }): WithContext<Canvas>[] {
-        if (next === undefined || next.path.length === 0) return [];
+        if (!next || next.path.length === 0) return [];
         const lastElements = {
             next: next.path[next.path.length - 1],
-            current:
-                current.path?.length > 0
-                    ? current.path[current.path.length - 1]
-                    : undefined,
+            current: current.path?.length
+                ? current.path[current.path.length - 1]
+                : undefined,
         };
         return lastElements.next.address !== lastElements.current?.address &&
             current.address !== lastElements.next.address
@@ -305,16 +299,16 @@ function useViewContextHook() {
     }
 
     const processedReplies = useMemo(() => {
-        if (!viewRoot || viewRoot.closed) {
+        if (!debouncedViewRoot || debouncedViewRoot.closed) {
             return [];
         }
         if (
-            view === "chat" &&
+            debouncedView === "chat" &&
             sortedReplies &&
             sortedReplies.length > 0 &&
-            viewRoot
+            debouncedViewRoot
         ) {
-            return insertQuotes(sortedReplies, viewRoot);
+            return insertQuotes(sortedReplies, debouncedViewRoot);
         }
         return sortedReplies
             ? sortedReplies.map((reply) => ({
@@ -324,12 +318,17 @@ function useViewContextHook() {
                   id: reply.idString,
               }))
             : [];
-    }, [sortedReplies, view, viewRoot?.closed, viewRoot]);
+    }, [
+        sortedReplies,
+        debouncedView,
+        debouncedViewRoot?.closed,
+        debouncedViewRoot,
+    ]);
 
     return {
         canvases,
-        viewRoot,
-        view,
+        viewRoot: debouncedViewRoot,
+        view: debouncedView,
         setView: changeView, // now changes update the URL
         loadMore,
         isLoading,
@@ -344,7 +343,7 @@ function useViewContextHook() {
 }
 
 // Define the context type.
-type ViewContextType = ReturnType<typeof useViewContextHook>;
+export type ViewContextType = ReturnType<typeof useViewContextHook>;
 
 // Create the context.
 const ViewContext = createContext<ViewContextType | undefined>(undefined);
