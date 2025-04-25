@@ -22,6 +22,7 @@ import {
 } from "./HeaderVisibilitiyProvider";
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
 import type { NetworkOption } from "@peerbit/react";
+import { BlurOnOutsidePointerProvider } from "./view/BlurOnScrollProvider";
 
 export const Content = () => {
     const { error: peerError } = usePeer();
@@ -114,17 +115,19 @@ export const App = () => {
                         <IdentitiesProvider>
                             <AppProvider>
                                 <HeaderVisibilityProvider>
-                                    <CanvasProvider>
-                                        <ReplyProgressProvider>
-                                            <ProfileProvider>
-                                                <AIReplyProvider>
-                                                    <HostRegistryProvider>
-                                                        <Content />
-                                                    </HostRegistryProvider>
-                                                </AIReplyProvider>
-                                            </ProfileProvider>
-                                        </ReplyProgressProvider>
-                                    </CanvasProvider>
+                                    <BlurOnOutsidePointerProvider>
+                                        <CanvasProvider>
+                                            <ReplyProgressProvider>
+                                                <ProfileProvider>
+                                                    <AIReplyProvider>
+                                                        <HostRegistryProvider>
+                                                            <Content />
+                                                        </HostRegistryProvider>
+                                                    </AIReplyProvider>
+                                                </ProfileProvider>
+                                            </ReplyProgressProvider>
+                                        </CanvasProvider>
+                                    </BlurOnOutsidePointerProvider>
                                 </HeaderVisibilityProvider>
                             </AppProvider>
                         </IdentitiesProvider>
