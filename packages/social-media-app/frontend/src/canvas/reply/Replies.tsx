@@ -25,9 +25,10 @@ export const Replies = (properties: {
         isLoading: isLoadingView,
         viewRoot,
     } = useView();
+
     const { peer } = usePeer();
     const repliesContainerRef = useRef<HTMLDivElement>(null);
-    const { replyTo } = useAutoReply();
+    const { replyTo, typedOnce } = useAutoReply();
     const sentinelRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
 
@@ -332,9 +333,13 @@ export const Replies = (properties: {
                                             view === "chat" ? "chat" : "thread"
                                         }
                                         isQuote={item.type === "quote"}
-                                        isHighlighted={
+                                        highlightType={
                                             replyTo?.idString ===
                                             item.reply.idString
+                                                ? typedOnce === true
+                                                    ? "selected"
+                                                    : "pre-selected"
+                                                : undefined
                                         }
                                         className={
                                             (pendingBatch &&

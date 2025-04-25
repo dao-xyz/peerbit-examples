@@ -42,7 +42,8 @@ type BaseReplyPropsType = {
     contentRef?: React.Ref<HTMLDivElement>;
     headerRef?: React.Ref<HTMLDivElement>;
     forwardRef?: React.Ref<HTMLDivElement>;
-    isHighlighted?: boolean;
+    highlightType?: "pre-selected" | "selected";
+    classNameHighlight?: string;
     className?: string;
 };
 
@@ -62,8 +63,9 @@ export const Reply = ({
     contentRef: contentRef,
     headerRef: headerRef,
     forwardRef: forwardRef,
-    isHighlighted,
+    highlightType,
     className,
+    classNameHighlight,
 }: ReplyPropsType) => {
     const [showMore, setShowMore] = useState(false);
     const [isOverflowing, setIsOverflowing] = useState(false);
@@ -90,14 +92,6 @@ export const Reply = ({
                     maxHeightStr === "none"
                         ? Infinity
                         : parseFloat(maxHeightStr);
-
-                // Debug output
-                /*    console.log(
-                       "ResizeObserver:",
-                       "current height:", currentHeight,
-                       "computed max-height:", maxHeight,
-                       "overflowing:", currentHeight >= maxHeight
-                   ); */
 
                 if (currentHeight >= maxHeight) {
                     setIsOverflowing(true);
@@ -161,7 +155,13 @@ export const Reply = ({
     const isChat = variant === "chat";
     const isThread = variant === "thread";
 
-    const highlightStyle = isHighlighted ? "animated-border p-0" : "";
+    const highlightStyle =
+        (highlightType
+            ? "animated-border p-0 " +
+              (highlightType === "pre-selected" ? "unfocused" : "focused")
+            : "") +
+        " " +
+        (classNameHighlight ?? "");
     const styleFromFromMode = isChat
         ? ""
         : "bg-neutral-50 dark:bg-neutral-800 shadow  rounded-lg p-2";
