@@ -156,6 +156,8 @@ export class Profiles extends Program<ProfileArgs> {
         if (previous) {
             await this.profiles.del(previous.id);
         }
+
+        return profileIndexed;
     }
 
     async get(publicKey: PublicSignKey, identities?: Identities) {

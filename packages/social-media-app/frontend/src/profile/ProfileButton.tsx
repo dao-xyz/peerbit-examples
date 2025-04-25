@@ -7,8 +7,7 @@ import { CanvasPreview } from "../canvas/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";
-import { Spinner } from "../utils/Spinner";
-import { debounceLeadingTrailing } from "@peerbit/react";
+import { debounceLeadingTrailing, usePeer } from "@peerbit/react";
 
 function pxToRem(px: number) {
     // Convert pixels to rem using the root font-size
@@ -28,7 +27,8 @@ export const ProfileButton = forwardRef<
         size?: number;
     } & React.ButtonHTMLAttributes<HTMLButtonElement>
 >(({ size, publicKey, direction, setBgColor, onClick, ...rest }, ref) => {
-    const { profiles, navigateTo, getProfile } = useProfiles();
+    const { profiles, create, navigateTo, getProfile } = useProfiles();
+    const { peer } = usePeer();
     const [profile, setProfile] = useState<ProfileData | undefined>();
     const { identities } = useIdentities();
     const sizeDefined = size ?? 32;
@@ -36,13 +36,21 @@ export const ProfileButton = forwardRef<
     const [loading, setLoading] = useState(false);
 
     useEffect(() => {
-        if (!profiles) return;
+        if (!profiles || profiles.closed || !identities || identities.closed)
+            return;
 
         const listener = debounceLeadingTrailing(() => {
             setLoading(true);
             // Use the cached getProfile helper here
+            console.log("CHANGE?");
             getProfile(publicKey, identities)
                 .then((profileData) => {
+                    console.log(
+                        "PROFILE DATA?",
+                        peer.identity.publicKey.equals(publicKey),
+                        profileData
+                    );
+
                     setProfile(profileData);
                 })
                 .finally(() => setLoading(false));
@@ -54,7 +62,13 @@ export const ProfileButton = forwardRef<
         return () => {
             profiles.profiles.events.removeEventListener("change", listener);
         };
-    }, [profiles, publicKey.hashcode()]);
+    }, [
+        profiles,
+        identities,
+        identities?.closed,
+        profiles?.closed,
+        publicKey.hashcode(),
+    ]);
 
     const getContent = () => {
         if (!loading && profile) {

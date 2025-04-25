@@ -1,13 +1,14 @@
 // ProfileProvider.tsx
 import React, { useContext, useMemo, useRef } from "react";
 import { useLocal, usePeer, useProgram } from "@peerbit/react";
-import { Profile, Profiles } from "@giga-app/interface";
+import { Canvas, Profile, Profiles } from "@giga-app/interface";
 import { useNavigate } from "react-router";
 import { getCanvasPath, MISSING_PROFILE } from "../routes";
 import { PublicSignKey } from "@peerbit/crypto";
 
 interface IProfilesContext {
-    profiles?: Profiles;
+    profiles: Profiles | undefined;
+    create: (properties: { profile: Canvas }) => Promise<void>;
     navigateTo: (profile: Profile | undefined) => void;
     getProfile: (publicKey: PublicSignKey, identities: any) => Promise<Profile>;
 }
@@ -87,6 +88,23 @@ export const ProfileProvider = ({ children }: { children: JSX.Element }) => {
     // Memoize context values for improved performance
     const memo = useMemo<IProfilesContext>(
         () => ({
+            create: async (properties: { profile: Canvas }) => {
+                if (!profilesProgram?.program) {
+                    throw new Error("Profiles program not available");
+                }
+
+                pendingRequests.current.delete(
+                    properties.profile.publicKey.hashcode()
+                );
+                const created = await profilesProgram.program.create(
+                    properties
+                );
+
+                profileCache.current.set(
+                    properties.profile.publicKey.hashcode(),
+                    created
+                );
+            },
             profiles: profilesProgram?.program,
             navigateTo: navigationHandler,
             getProfile,
