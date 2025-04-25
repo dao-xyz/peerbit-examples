@@ -268,7 +268,7 @@ export const PeerProvider = (options: PeerOptions) => {
                               }
                             : {
                                   transports: [
-                                      webSockets({ filter: filters.wss }) /* ,
+                                      webSockets() /* ,
                                     circuitRelayTransport(), */,
                                   ],
                               }) /* 
@@ -297,14 +297,13 @@ export const PeerProvider = (options: PeerOptions) => {
                             ((network as NetworkOption).type === "local" &&
                                 !(network as NetworkOption).bootstrap)
                         ) {
-                            await newPeer.dial(
+                            const localAddress =
                                 "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
-                                    (await (
-                                        await fetch(
-                                            "http://localhost:8082/peer/id"
-                                        )
-                                    ).text())
-                            );
+                                (await (
+                                    await fetch("http://localhost:8082/peer/id")
+                                ).text());
+                            console.log("Dialing local address", localAddress);
+                            await newPeer.dial(localAddress);
                         } else if (
                             !network ||
                             network === "remote" ||
