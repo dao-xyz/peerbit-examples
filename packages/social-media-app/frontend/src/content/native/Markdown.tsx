@@ -162,19 +162,23 @@ export const MarkdownContent = ({
     }, [text, isEditing, autoResize]);
 
     // When the user clicks the container (and we're editable), start editing.
-    const handleStartEditing = () => {
+    const handleStartEditing = (focus: boolean) => {
         setIsEditing(true);
-        setTimeout(() => {
-            textareaRef.current?.focus({ preventScroll: true });
-            // set the cursor to the end of the text
-            textareaRef.current?.setSelectionRange(text.length, text.length);
-        }, 0);
+        focus &&
+            setTimeout(() => {
+                textareaRef.current?.focus({ preventScroll: true });
+                // set the cursor to the end of the text
+                textareaRef.current?.setSelectionRange(
+                    text.length,
+                    text.length
+                );
+            }, 0);
     };
 
     useEffect(() => {
         if (editable && containerRef.current) {
             if (content.text.length === 0) {
-                handleStartEditing();
+                handleStartEditing(false);
             }
         }
     }, [editable, content.text]);
@@ -270,7 +274,11 @@ export const MarkdownContent = ({
             className={`${commonClasses} w-full text-left ${
                 editable ? "cursor-text" : ""
             }`}
-            onClick={editable && !isEditing ? handleStartEditing : undefined}
+            onClick={
+                editable && !isEditing
+                    ? () => handleStartEditing(true)
+                    : undefined
+            }
         >
             {editable && isEditing ? (
                 <div className="flex flex-row items-start">
