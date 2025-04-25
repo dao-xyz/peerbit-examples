@@ -37,7 +37,7 @@ export const Header = ({
 }) => {
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
-    const { profiles } = useProfiles();
+    const { create } = useProfiles();
 
     /* useEffect(() => {
         if (!canvas) return;
@@ -203,7 +203,7 @@ export const Header = ({
                                         <DropdownMenu.Item
                                             className="menu-item"
                                             onSelect={() => {
-                                                return profiles.create({
+                                                return create({
                                                     profile: canvas,
                                                 });
                                             }}
