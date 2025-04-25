@@ -253,18 +253,18 @@ export const useQuery = <
             // Fetch next batchSize number of items:
             await db?.log.waitForReplicators({ timeout: 1e4 });
 
-            let newItems: WithContext<RT>[] = await iterator.iterator.next(
-                batchSize
-            );
             logWithId(
                 options,
                 "loadMore: loading more items for iterator " +
                     iteratorRef.current?.id,
-                newItems,
                 "should resolve?: " + options?.resolve,
                 "query local?: " + options?.local,
                 "query remote?: " + options?.remote,
                 "isReplicating: " + (await db?.log.isReplicating())
+            );
+
+            let newItems: WithContext<RT>[] = await iterator.iterator.next(
+                batchSize
             );
 
             if (options?.transform) {
