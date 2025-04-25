@@ -1831,25 +1831,25 @@
   integrity sha512-H9XAx3hc0BQHY6l+IFSWHDySypcXsvsuLhgYLUGywmJ5pswRVQJUHpOsobnLYp2ZUaUlKiKDrgWWhosOwAEM8Q==
 
 "@iframe-resizer/child@^5":
-  version "5.4.5"
-  resolved "https://registry.yarnpkg.com/@iframe-resizer/child/-/child-5.4.5.tgz#e1a7f5ab889527fc24455e9ae18903aee3d9bc11"
-  integrity sha512-VgTq7YkfjHgv3Iqr4+Px3dp2NdBVM4AyS3qpaYGL5vThXCEEKDwq4k/XxxcyiyMrUfEOawQqfKLAfEWh3O9cwg==
+  version "5.4.6"
+  resolved "https://registry.yarnpkg.com/@iframe-resizer/child/-/child-5.4.6.tgz#64a45eac55f2e20760ec96a034a6e0433aa8a02d"
+  integrity sha512-Ch64w05Q3HEATwfotqHaSms8gjtTVTMJc7Sqf8tfVKL7+B+PIfq7m2SXFW94WW7iJmanHZu4trTwxvVuv7g8uQ==
   dependencies:
     auto-console-group "1.2.9"
 
-"@iframe-resizer/core@5.4.5":
-  version "5.4.5"
-  resolved "https://registry.yarnpkg.com/@iframe-resizer/core/-/core-5.4.5.tgz#be1d81ebc81cb2378641ba5e34e42ad40106062d"
-  integrity sha512-Z5euppksu94VgJ+kM15eE3H0LDHpYjEq9Hh64HpswL2N3dt9i0ryD4AKAq0AcqJMDAUls4tkRfS9bGd1ZC+t4w==
+"@iframe-resizer/core@5.4.6":
+  version "5.4.6"
+  resolved "https://registry.yarnpkg.com/@iframe-resizer/core/-/core-5.4.6.tgz#f4e61e408e17dba82721548bb33ee7071328d6f6"
+  integrity sha512-LfBQ2hyZuGEuAUpj5SENgFlmaNT1LugXdJzQKyIGP8Q+mpcd3ltciXa5qDur362Y0GQMgej8mD+XrEuRj5IAsQ==
   dependencies:
     auto-console-group "1.2.9"
 
 "@iframe-resizer/parent@^5":
-  version "5.4.5"
-  resolved "https://registry.yarnpkg.com/@iframe-resizer/parent/-/parent-5.4.5.tgz#562a7b7f9575148dfa2cd01d292a4536650c87f4"
-  integrity sha512-pyukh5DJILIylEiEvWTKdsN2bS9z75QAObkAGXxEbeXEwUvSsHC/CR06W3yW9J3WIYgdven6V4GlEVoAfnK/9g==
+  version "5.4.6"
+  resolved "https://registry.yarnpkg.com/@iframe-resizer/parent/-/parent-5.4.6.tgz#d03257af57a4d43cc74fe6fea7e7e9732bebb759"
+  integrity sha512-fEBqJoQ0KomOtBvhsvZpIWaXbW/noAzMgSZYfpeWUAmBGqvZhK6i5rCD7RuttfM7Ae4vja04fy1xpUIwioLWcA==
   dependencies:
-    "@iframe-resizer/core" "5.4.5"
+    "@iframe-resizer/core" "5.4.6"
     auto-console-group "1.2.9"
 
 "@inquirer/core@^9.1.0":
@@ -2489,9 +2489,9 @@
     eslint-scope "5.1.1"
 
 "@noble/ciphers@^1.1.3":
-  version "1.2.1"
-  resolved "https://registry.yarnpkg.com/@noble/ciphers/-/ciphers-1.2.1.tgz#3812b72c057a28b44ff0ad4aff5ca846e5b9cdc9"
-  integrity sha512-rONPWMC7PeExE077uLE4oqWrZ1IvAfz3oH9LibVAcVCopJiA9R62uavnbEzdkVmJYI6M6Zgkbeb07+tWjlq2XA==
+  version "1.3.0"
+  resolved "https://registry.yarnpkg.com/@noble/ciphers/-/ciphers-1.3.0.tgz#f64b8ff886c240e644e5573c097f86e5b43676dc"
+  integrity sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==
 
 "@noble/curves@^1.1.0", "@noble/curves@^1.7.0":
   version "1.9.0"
@@ -4817,9 +4817,9 @@
     "@types/node" "*"
 
 "@types/node@*", "@types/node@^22.5.5":
-  version "22.14.1"
-  resolved "https://registry.yarnpkg.com/@types/node/-/node-22.14.1.tgz#53b54585cec81c21eee3697521e31312d6ca1e6f"
-  integrity sha512-u0HuPQwe/dHrItgHHpmw3N2fYCR6x4ivMNbPHRkBVP4CvN+kiRrKHWk3i8tXiO/joPwXLMYvF9TTF0eqgHIuOw==
+  version "22.15.0"
+  resolved "https://registry.yarnpkg.com/@types/node/-/node-22.15.0.tgz#5fcf430c079da64e96028b87cbffc218a02685db"
+  integrity sha512-99S8dWD2DkeE6PBaEDw+In3aar7hdoBvjyJMR6vaKBTzpvR0P00ClzJMOoVrj9D2+Sy/YCwACYHnBTpMhg1UCA==
   dependencies:
     undici-types "~6.21.0"
 
@@ -5634,9 +5634,9 @@ axe-core@^4.10.0:
   integrity sha512-Xm7bpRXnDSX2YE2YFfBk2FnF0ep6tmG7xPh8iHee8MIcrgq762Nkce856dYtJYLkuIoYZvGfTs/PbZhideTcEg==
 
 axios@^1.4.0, axios@^1.6.0:
-  version "1.8.4"
-  resolved "https://registry.yarnpkg.com/axios/-/axios-1.8.4.tgz#78990bb4bc63d2cae072952d374835950a82f447"
-  integrity sha512-eBSYY4Y68NNlHbHBMdeDmKNtDgXWhQsJcGqzO3iLUM0GraQFSS9cVgPX5I9b3lbdFKyYoAEGAZF1DwhTaljNAw==
+  version "1.9.0"
+  resolved "https://registry.yarnpkg.com/axios/-/axios-1.9.0.tgz#25534e3b72b54540077d33046f77e3b8d7081901"
+  integrity sha512-re4CqKTJaURpzbLHtIi6XpDv20/CnpXOtjRY5/CU32L8gU8ek9UIivcfvSWvmKEngmVbrUtPpdDwWDWL7DNHvg==
   dependencies:
     follow-redirects "^1.15.6"
     form-data "^4.0.0"
@@ -6915,9 +6915,9 @@ ejs@^3.1.7:
     jake "^10.8.5"
 
 electron-to-chromium@^1.5.73:
-  version "1.5.141"
-  resolved "https://registry.yarnpkg.com/electron-to-chromium/-/electron-to-chromium-1.5.141.tgz#11776289d95385ca26d8cf95f31692ee58ee3a06"
-  integrity sha512-qS+qH9oqVYc1ooubTiB9l904WVyM6qNYxtOEEGReoZXw3xlqeYdFr5GclNzbkAufWgwWLEPoDi3d9MoRwwIjGw==
+  version "1.5.142"
+  resolved "https://registry.yarnpkg.com/electron-to-chromium/-/electron-to-chromium-1.5.142.tgz#1de55d0d19b24b07768c4bfc90f41bd7f248d043"
+  integrity sha512-Ah2HgkTu/9RhTDNThBtzu2Wirdy4DC9b0sMT1pUhbkZQ5U/iwmE+PHZX1MpjD5IkJCc2wSghgGG/B04szAx07w==
 
 elliptic@6.6.1:
   version "6.6.1"
@@ -12151,9 +12151,9 @@ react-resizable@^3.0.5:
     react-draggable "^4.0.3"
 
 react-router@^7.5.0:
-  version "7.5.1"
-  resolved "https://registry.yarnpkg.com/react-router/-/react-router-7.5.1.tgz#e0bae54e913d139e727e7a88d165174a2cdbeb27"
-  integrity sha512-/jjU3fcYNd2bwz9Q0xt5TwyiyoO8XjSEFXJY4O/lMAlkGTHWuHRAbR9Etik+lSDqMC7A7mz3UlXzgYT6Vl58sA==
+  version "7.5.2"
+  resolved "https://registry.yarnpkg.com/react-router/-/react-router-7.5.2.tgz#889137b9ce91dadc06eb40997f57f08199845973"
+  integrity sha512-9Rw8r199klMnlGZ8VAsV/I8WrIF6IyJ90JQUdboupx1cdkgYqwnrYjH+I/nY/7cA1X5zia4mDJqH36npP7sxGQ==
   dependencies:
     cookie "^1.0.1"
     set-cookie-parser "^2.6.0"
