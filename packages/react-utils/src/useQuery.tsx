@@ -37,6 +37,7 @@ export const useQuery = <
     db?: Documents<T, I>,
     options?: {
         resolve?: R;
+        waitForReplicators?: boolean | { timeout?: number };
         transform?: (result: WithContext<RT>) => Promise<WithContext<RT>>;
         debounce?: number;
         debug?: boolean | { id: string };
@@ -257,18 +258,28 @@ export const useQuery = <
         loadingMoreRef.current = true;
         try {
             // Fetch next batchSize number of items:
-            await db?.log
-                .waitForReplicators({
-                    timeout: 1e4,
-                    signal: closeControllerRef.current?.signal,
-                })
-                .catch((e) => {
-                    if (e instanceof AbortError) {
-                        // Ignore abort error
-                        return;
-                    }
-                    throw e;
-                });
+            logWithId(
+                options,
+                "wait for replicators for iterator " + iterator.id
+            );
+            if (options?.waitForReplicators !== false) {
+                let timeout = 5e3;
+                if (typeof options?.waitForReplicators === "object") {
+                    timeout = options.waitForReplicators.timeout ?? 1e4;
+                }
+                await db?.log
+                    .waitForReplicators({
+                        timeout,
+                        signal: closeControllerRef.current?.signal,
+                    })
+                    .catch((e) => {
+                        if (e instanceof AbortError) {
+                            // Ignore abort error
+                            return;
+                        }
+                        console.warn("Remote replicators not ready", e);
+                    });
+            }
 
             logWithId(
                 options,
