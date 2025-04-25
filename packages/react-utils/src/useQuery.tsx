@@ -72,6 +72,7 @@ export const useQuery = <
         iterator: ResultsIterator<WithContext<RT>>;
     } | null>(null);
     const emptyResultsRef = useRef(false);
+    const closeControllerRef = useRef<AbortController | null>(null);
 
     const updateAll = (
         combined: WithContext<RT>[],
@@ -99,6 +100,8 @@ export const useQuery = <
         if (iteratorRef.current != null && iteratorRef.current !== fromRef) {
             return;
         }
+        closeControllerRef.current?.abort();
+        closeControllerRef.current = new AbortController();
 
         emptyResultsRef.current = false;
         logWithId(options, "reset", {
@@ -121,6 +124,7 @@ export const useQuery = <
             reset(null);
             return;
         }
+
         const initIterator = () => {
             // Don't make this async, it will cause issues with the iterator refs
             try {
@@ -151,6 +155,7 @@ export const useQuery = <
 
         // Reset state when the db or query changes.
         reset(iteratorRef.current);
+
         const newIteratorRef = initIterator();
 
         let handleChange:
@@ -251,7 +256,10 @@ export const useQuery = <
         loadingMoreRef.current = true;
         try {
             // Fetch next batchSize number of items:
-            await db?.log.waitForReplicators({ timeout: 1e4 });
+            await db?.log.waitForReplicators({
+                timeout: 1e4,
+                signal: closeControllerRef.current?.signal,
+            });
 
             logWithId(
                 options,
