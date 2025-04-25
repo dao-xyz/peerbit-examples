@@ -181,6 +181,9 @@ function useViewContextHook() {
             debug: { id: "replies" },
             local: true,
             remote: true,
+            waitForReplicators: {
+                timeout: 5e3,
+            },
             onChange: {
                 merge: async (e) => {
                     for (const change of e.added) {
