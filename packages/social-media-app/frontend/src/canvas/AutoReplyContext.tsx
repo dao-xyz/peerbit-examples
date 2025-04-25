@@ -13,6 +13,7 @@ import { useCanvas } from "./CanvasWrapper";
 import { useView } from "../view/ViewContex";
 
 interface AutoReplyContextType {
+    typedOnce: boolean;
     replyTo?: Canvas | undefined;
     setReplyTo: (canvas: Canvas | undefined) => void;
     disable: () => void;
@@ -142,6 +143,7 @@ export const AutoReplyProvider: React.FC<{
     return (
         <AutoReplyContext.Provider
             value={{
+                typedOnce: typedOnce.current,
                 replyTo,
                 setReplyTo,
                 disable: () => {
