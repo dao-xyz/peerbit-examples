@@ -28,15 +28,25 @@ import { BodyStyler } from "./BodyStyler";
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
  * pieces of state run **once** instead of once‑per‑piece. The update is flushed after `delay` ms.
  */
-function useDebounced<T>(value: T, delay: number): T {
-    const [debounced, setDebounced] = useState(value);
+function useCombinedDebounced<A, B>(a: A, b: B, delay: number): { a: A; b: B } {
+    const [debounced, setDebounced] = useState<{ a: A; b: B }>({
+        a,
+        b,
+    });
     const timeout = useRef<ReturnType<typeof setTimeout>>();
 
     useEffect(() => {
         clearTimeout(timeout.current);
-        timeout.current = setTimeout(() => setDebounced(value), delay);
+        timeout.current = setTimeout(
+            () =>
+                setDebounced({
+                    a,
+                    b,
+                }),
+            delay
+        );
         return () => clearTimeout(timeout.current);
-    }, [value, delay]);
+    }, [a, b, delay]);
 
     return debounced;
 }
@@ -83,8 +93,9 @@ function useViewContextHook() {
     /* =====================================================================================
      *  🚀 Debounce *both* values together so the next effect fires only once per change‑set.
      * ===================================================================================== */
-    const { view: debouncedView, viewRoot: debouncedViewRoot } = useDebounced(
-        { view, viewRoot },
+    const { a: debouncedView, b: debouncedViewRoot } = useCombinedDebounced(
+        view,
+        viewRoot,
         123
     );
 
