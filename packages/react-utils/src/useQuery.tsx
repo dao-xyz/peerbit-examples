@@ -7,6 +7,7 @@ import {
     WithContext,
 } from "@peerbit/document";
 import * as indexerTypes from "@peerbit/indexer-interface";
+import { AbortError } from "@peerbit/time";
 
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -256,10 +257,18 @@ export const useQuery = <
         loadingMoreRef.current = true;
         try {
             // Fetch next batchSize number of items:
-            await db?.log.waitForReplicators({
-                timeout: 1e4,
-                signal: closeControllerRef.current?.signal,
-            });
+            await db?.log
+                .waitForReplicators({
+                    timeout: 1e4,
+                    signal: closeControllerRef.current?.signal,
+                })
+                .catch((e) => {
+                    if (e instanceof AbortError) {
+                        // Ignore abort error
+                        return;
+                    }
+                    throw e;
+                });
 
             logWithId(
                 options,
@@ -287,9 +296,20 @@ export const useQuery = <
                 logWithId(options, "Iterator ref changed, not updating state", {
                     refBefore: iterator.id,
                     currentRef: iteratorRef.current?.id,
+                    ignoredItems: newItems.length,
                 });
                 return;
             }
+
+            logWithId(
+                options,
+                "loadMore: loaded more items for iterator " +
+                    iteratorRef.current?.id,
+                "new items length",
+                newItems.length,
+                "all items length",
+                allRef.current.length
+            );
 
             emptyResultsRef.current = newItems.length === 0;
 
