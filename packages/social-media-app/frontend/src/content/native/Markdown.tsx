@@ -79,8 +79,8 @@ export const MarkdownContent = ({
                         if (loadedParent.publicKey.equals(canvas.publicKey)) {
                             return; // no self reply
                         }
-                        console.log("SUGGEST!");
-                        /*   suggest(loadedParent, 2e4).then((reply) => {
+                        /*   console.log("SUGGEST!");
+                          suggest(loadedParent, 2e4).then((reply) => {
                               if (
                                   suggestStartRef !==
                                   canvas.path[canvas.path.length - 1].address
