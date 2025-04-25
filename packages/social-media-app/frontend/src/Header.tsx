@@ -125,7 +125,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                         <DropdownMenu.Item
                                             className="menu-item"
                                             onSelect={() =>
-                                                console.log("Shareß profile")
+                                                console.log("Share profile")
                                             }
                                         >
                                             Share Profile
