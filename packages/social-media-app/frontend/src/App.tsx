@@ -99,7 +99,7 @@ const networkConfig: NetworkOption =
         : {
               type: "remote",
               bootstrap: [
-                  "/dns4/30c401611e3fe096fb0786dc1a0c9a3fd4057df4.peerchecker.com/tcp/4003/wss/p2p/12D3KooWCt4N9oVUmKVVA3Dq4goX1rRJJU8TtXGmCXXExrks87e9",
+                  "/dns4/d5e730c396668fdddb2e787cbc614045150b4f45.peerchecker.com/tcp/4003/wss/p2p/12D3KooWHSZAWN5wXZuywHY4SnUyzEDRGkTmD6CbDN5XBrnwHEom",
               ],
           };
 
