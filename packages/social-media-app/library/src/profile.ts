@@ -117,6 +117,18 @@ export class Profiles extends Program<ProfileArgs> {
                 }
             },
             index: {
+                prefetch: {
+                    strict: false,
+                },
+                cache: {
+                    query: {
+                        strategy: "auto",
+                        maxSize: 50,
+                        maxTotalSize: 1e4,
+                        keepAlive: 1e4,
+                        prefetchThreshold: 3,
+                    },
+                },
                 type: ProfileIndexed,
                 transform: async (arg, _context) => {
                     return new ProfileIndexed({

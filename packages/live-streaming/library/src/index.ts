@@ -278,7 +278,7 @@ export abstract class TrackSource {
                     });
                 },
             },
-            replicate: "resume",
+            replicate: { type: "resume", default: false },
             domain: createDocumentDomain({
                 resolution: "u64",
                 canProjectToOneSegment: () => true, // TODO
@@ -2599,13 +2599,16 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
     }
 
     async close(args?: any) {
-        this._trackChangeListener &&
-            this.tracks.events.removeEventListener(
-                "change",
-                this._trackChangeListener
-            );
-        await this.closeOpenTracks();
-        return super.close(args);
+        const closed = await super.close(args);
+        if (closed) {
+            this._trackChangeListener &&
+                this.tracks.events.removeEventListener(
+                    "change",
+                    this._trackChangeListener
+                );
+            await this.closeOpenTracks();
+        }
+        return closed;
     }
 
     async drop(args?: any) {

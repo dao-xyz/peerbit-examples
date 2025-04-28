@@ -653,6 +653,18 @@ export class Canvas extends Program<CanvasArgs> {
                 },
                 index: {
                     type: IndexableElement,
+                    prefetch: {
+                        strict: false,
+                    },
+                    cache: {
+                        query: {
+                            strategy: "auto",
+                            maxSize: 50,
+                            maxTotalSize: 1e4,
+                            keepAlive: 1e4,
+                            prefetchThreshold: 3,
+                        },
+                    },
                     transform: async (arg, _context) => {
                         const indexable = await arg.content.toIndex();
                         return new IndexableElement({
@@ -693,6 +705,18 @@ export class Canvas extends Program<CanvasArgs> {
                     return true;
                 },
                 index: {
+                    prefetch: {
+                        strict: false,
+                    },
+                    cache: {
+                        query: {
+                            strategy: "auto",
+                            maxSize: 50,
+                            maxTotalSize: 1e4,
+                            keepAlive: 1e4,
+                            prefetchThreshold: 3,
+                        },
+                    },
                     type: IndexableCanvas,
                     transform: async (arg, _context) => {
                         return IndexableCanvas.from(arg, this.node, {

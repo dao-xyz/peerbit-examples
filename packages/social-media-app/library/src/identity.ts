@@ -207,6 +207,18 @@ export class Identities extends Program<IdentitiesArgs> {
                     : { factor: 1 }, // TODO choose better
             type: Connection,
             index: {
+                prefetch: {
+                    strict: false,
+                },
+                cache: {
+                    query: {
+                        strategy: "auto",
+                        maxSize: 50,
+                        maxTotalSize: 1e4,
+                        keepAlive: 1e4,
+                        prefetchThreshold: 3,
+                    },
+                },
                 transform: async (arg, context) => {
                     return new ConnectionIndexed({
                         id: arg.id,
@@ -252,8 +264,11 @@ export class Identities extends Program<IdentitiesArgs> {
         }
     }
     async close(from?: Program): Promise<boolean> {
-        this.broadcastChannel?.close();
-        return super.close(from);
+        const closed = await super.close(from);
+        if (closed) {
+            this.broadcastChannel?.close();
+        }
+        return closed;
     }
 
     setupBroadcastChannel() {

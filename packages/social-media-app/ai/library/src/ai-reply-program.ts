@@ -466,8 +466,11 @@ export class CanvasAIReply extends Program<Args> {
     }
 
     async close(from?: Program): Promise<boolean> {
-        await this.replication?.stop();
-        return super.close(from);
+        const closed = await super.close(from);
+        if (closed) {
+            await this.replication?.stop();
+        }
+        return closed;
     }
 
     private getPeersWithModel(model?: string) {

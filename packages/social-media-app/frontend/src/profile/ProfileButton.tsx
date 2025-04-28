@@ -42,7 +42,6 @@ export const ProfileButton = forwardRef<
         const listener = debounceLeadingTrailing(() => {
             setLoading(true);
             // Use the cached getProfile helper here
-            console.log("CHANGE?");
             getProfile(publicKey, identities)
                 .then((profileData) => {
                     console.log(
@@ -84,11 +83,13 @@ export const ProfileButton = forwardRef<
             );
         }
         return (
-            <ProfilePhotoGenerated
-                size={sizeDefined}
-                publicKey={publicKey}
-                onColorGenerated={setBgColor}
-            />
+            <>
+                <ProfilePhotoGenerated
+                    size={sizeDefined}
+                    publicKey={publicKey}
+                    onColorGenerated={setBgColor}
+                />
+            </>
         );
     };
 
