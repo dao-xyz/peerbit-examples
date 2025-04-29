@@ -38,26 +38,39 @@ export const useProgram = <
             return;
         }
         setLoading(true);
-        let changeListener: () => void;
+        let changeListener: (() => void) | undefined = undefined;
 
         closingRef.current.then(() => {
             programLoadingRef.current = peer
                 ?.open(addressOrOpen, { ...options, existing: "reuse" })
                 .then((p) => {
-                    changeListener = () => {
-                        p.getReady().then((set) => {
-                            setPeers([...set.values()]);
-                        });
-                    };
-                    p.events.addEventListener("join", changeListener);
-                    p.events.addEventListener("leave", changeListener);
-                    p.getReady()
-                        .then((set) => {
-                            setPeers([...set.values()]);
-                        })
-                        .catch((e) => {
-                            console.log("Error getReady()", e);
-                        });
+                    // if program has topics do change listening on peers
+                    if (
+                        [p, ...p.allPrograms].filter(
+                            (x) =>
+                                x.closed === false &&
+                                x.getTopics &&
+                                x.getTopics?.().length > 0
+                        ).length === 0
+                    ) {
+                        setPeers([peer.identity.publicKey]);
+                    } else {
+                        changeListener = () => {
+                            p.getReady().then((set) => {
+                                setPeers([...set.values()]);
+                            });
+                        };
+                        p.events.addEventListener("join", changeListener);
+                        p.events.addEventListener("leave", changeListener);
+                        p.getReady()
+                            .then((set) => {
+                                setPeers([...set.values()]);
+                            })
+                            .catch((e) => {
+                                console.log("Error getReady()", e);
+                            });
+                    }
+
                     setProgram(p);
                     forceUpdate();
                     if (options?.id) {
@@ -83,14 +96,16 @@ export const useProgram = <
                 closingRef.current =
                     programLoadingRef.current.then((p) => {
                         const unsubscribe = () => {
-                            p.events.removeEventListener(
-                                "join",
-                                changeListener
-                            );
-                            p.events.removeEventListener(
-                                "leave",
-                                changeListener
-                            );
+                            changeListener &&
+                                p.events.removeEventListener(
+                                    "join",
+                                    changeListener
+                                );
+                            changeListener &&
+                                p.events.removeEventListener(
+                                    "leave",
+                                    changeListener
+                                );
                         };
                         if (options?.keepOpenOnUnmount) {
                             unsubscribe();
