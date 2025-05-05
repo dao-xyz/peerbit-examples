@@ -208,7 +208,6 @@ export const ImageContent = ({
                 <Dialog.Title className="sr-only">Image Preview</Dialog.Title>
                 <div className="w-full h-full flex justify-center max-w-4xl max-h-[100vh]">
                     <img
-                        decoding="sync"
                         src={imgUrl}
                         alt={content.alt ?? ""}
                         className="h-full object-contain"
@@ -249,7 +248,6 @@ export const ImageContent = ({
                     <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
                         <Dialog.Trigger asChild>
                             <img
-                                decoding="sync"
                                 src={imgUrl}
                                 alt={content.alt ?? ""}
                                 className={`w-full h-full ${fitClass}`}
@@ -260,7 +258,6 @@ export const ImageContent = ({
                 ) : (
                     <>
                         <img
-                            decoding="sync"
                             src={imgUrl}
                             alt={content.alt ?? ""}
                             className={`w-full h-full ${fitClass}`}
@@ -281,7 +278,6 @@ export const ImageContent = ({
                 )
             ) : (
                 <img
-                    decoding="sync"
                     src={imgUrl}
                     alt={content.alt ?? ""}
                     className={`w-full h-full ${fitClass}`}
