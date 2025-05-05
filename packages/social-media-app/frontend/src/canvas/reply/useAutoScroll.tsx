@@ -208,7 +208,6 @@ export const useAutoScroll = (properties: {
                 behavior: "instant",
             });
         } else {
-            console.error("WINDOW");
             properties.debug &&
                 console.log("scroll to bottom using window: ", {
                     top: document.documentElement.scrollHeight,
