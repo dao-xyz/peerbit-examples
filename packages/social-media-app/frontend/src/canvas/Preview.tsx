@@ -6,7 +6,11 @@ import {
 } from "@giga-app/interface";
 import { useMemo } from "react";
 import { Frame } from "../content/Frame";
-import { rectIsStaticMarkdownText } from "./utils/rect";
+import {
+    rectIsStaticImage,
+    rectIsStaticMarkdownText,
+    rectIsStaticPartialImage,
+} from "./utils/rect";
 import { tw } from "../utils/tailwind";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { toString } from "mdast-util-to-string";
@@ -116,6 +120,7 @@ const PreviewFrame = ({
                     : className)
             }
         />
+
         {bgBlur && (
             <BlurredBackground element={element} noPadding={noPadding} />
         )}
@@ -167,29 +172,32 @@ const BlurredBackground = ({
 }: {
     element: Element<ElementContent>;
     noPadding?: boolean;
-}) => (
+}) =>
     /* one absolutely‑positioned layer, never re‑rendered by React */
-    <div
-        className="absolute inset-0 overflow-hidden pointer-events-none
+    rectIsStaticImage(element) || rectIsStaticPartialImage(element) ? (
+        <div
+            className="absolute inset-0 overflow-hidden pointer-events-none
                  select-none will-change-transform will-change-filter"
-    >
-        <Frame
-            /* ← same props you already pass elsewhere */
-            thumbnail={false}
-            active={false}
-            setActive={() => {}}
-            delete={() => {}}
-            editMode={false}
-            showEditControls={false}
-            element={element}
-            onLoad={() => {}}
-            fit="cover"
-            /* ⚡ key performance classes */
-            className="w-full h-full object-cover
-                   scale-110 blur-md opacity-30"
-        />
-    </div>
-);
+        >
+            <Frame
+                /* ← same props you already pass elsewhere */
+                thumbnail={false}
+                active={false}
+                setActive={() => {}}
+                delete={() => {}}
+                editMode={false}
+                showEditControls={false}
+                element={element}
+                onLoad={() => {}}
+                fit="cover"
+                /* ⚡ key performance classes */
+                className="w-full h-full object-cover
+                   scale-110 blur-xl opacity-30"
+            />
+        </div>
+    ) : (
+        <></>
+    );
 
 const TinyPreview = ({
     rect,
