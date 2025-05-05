@@ -122,7 +122,7 @@ const PreviewFrame = ({
     </div>
 );
 
-const BlurredBackground = ({
+/* const BlurredBackground = ({
     element,
     noPadding,
 }: {
@@ -148,17 +148,47 @@ const BlurredBackground = ({
                 <Frame
                     thumbnail={false}
                     active={false}
-                    setActive={() => {}}
-                    delete={() => {}}
+                    setActive={() => { }}
+                    delete={() => { }}
                     editMode={false}
                     showEditControls={false}
                     element={element}
-                    onLoad={() => {}}
+                    onLoad={() => { }}
                     fit="cover"
                 />
             </div>
         </div>
     </>
+); */
+
+const BlurredBackground = ({
+    element,
+    noPadding,
+}: {
+    element: Element<ElementContent>;
+    noPadding?: boolean;
+}) => (
+    /* one absolutely‑positioned layer, never re‑rendered by React */
+    <div
+        className="absolute inset-0 overflow-hidden pointer-events-none
+                 select-none will-change-transform will-change-filter"
+    >
+        <Frame
+            /* ← same props you already pass elsewhere */
+            thumbnail={false}
+            active={false}
+            setActive={() => {}}
+            delete={() => {}}
+            editMode={false}
+            showEditControls={false}
+            element={element}
+            onLoad={() => {}}
+            fit="cover"
+            /* ⚡ key performance classes */
+            className="w-full h-full object-cover
+                   scale-110 blur-md opacity-30"
+        />
+    </div>
 );
 
 const TinyPreview = ({
