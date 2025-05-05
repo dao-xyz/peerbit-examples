@@ -6,6 +6,17 @@ import React, {
     useRef,
 } from "react";
 
+export const getViewportHeight = () =>
+    window.visualViewport ? window.visualViewport.height : window.innerHeight;
+
+export const keyboardIsOpen = (
+    baseline: number,
+    tolerance = 100 // px shrink before we call it “keyboard”
+) =>
+    window.visualViewport
+        ? baseline - window.visualViewport.height > tolerance
+        : false;
+
 export const getScrollTop = () => {
     return window.scrollY || document.documentElement.scrollTop;
 };
@@ -26,11 +37,35 @@ const useHeaderVisibility = (
     downDeltaThreshold = 20, // amount to scroll down from last upward position to hide header
     bottomBounceTolerance = 50 // tolerance for bounce near bottom
 ) => {
+    // inside HeaderVisibilityProvider or a top‑level layout component
+    const baseViewportHeightRef = useRef(getViewportHeight());
+
+    useEffect(() => {
+        const handleVpResize = () => {
+            // refresh the baseline after the keyboard has been closed for a moment
+            if (!keyboardIsOpen(baseViewportHeightRef.current)) {
+                baseViewportHeightRef.current = getViewportHeight();
+            }
+        };
+        window.visualViewport?.addEventListener("resize", handleVpResize);
+        return () =>
+            window.visualViewport?.removeEventListener(
+                "resize",
+                handleVpResize
+            );
+    }, []);
+
     const [visible, setVisible] = useState(true);
     const prevScrollTopRef = useRef(getScrollTop());
     const lastUpPositionRef = useRef(getScrollTop());
+    const baseViewportHeight = baseViewportHeightRef.current; // inject via context
+
     useEffect(() => {
         const handleScroll = () => {
+            if (keyboardIsOpen(baseViewportHeight)) {
+                return;
+            }
+
             const currentScrollTop = getScrollTop();
             const maxScrollTop = getMaxScrollTop();
 
