@@ -30,7 +30,7 @@ export const SubHeader = ({
     onViewChange,
     onCollapse,
 }: SubHeaderProps) => {
-    const { view, viewRoot, setView: _setView } = useView();
+    const { view, setView: _setView } = useView();
     const viewAsReadable = useMemo(() => readableView(view), [view]);
     const setView = (view: ViewType) => {
         _setView(view);
