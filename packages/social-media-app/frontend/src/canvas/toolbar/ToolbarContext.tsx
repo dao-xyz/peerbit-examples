@@ -1,16 +1,6 @@
 // ToolbarContext.tsx
-import React, {
-    useState,
-    useRef,
-    useEffect,
-    createContext,
-    ReactNode,
-    useContext,
-} from "react";
+import React, { useState, createContext, ReactNode, useContext } from "react";
 import { CanvasWrapper } from "../CanvasWrapper";
-import ToolbarContent from "./ToolbarContent";
-import { AppSelectPaneInline } from "./AppSelectPaneInline";
-import { SimpleWebManifest } from "@giga-app/interface";
 import { usePendingCanvas } from "../PendingCanvasContext";
 import { AutoReplyProvider } from "../AutoReplyContext";
 
