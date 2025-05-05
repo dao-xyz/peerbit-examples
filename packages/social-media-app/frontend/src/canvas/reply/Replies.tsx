@@ -6,7 +6,7 @@ import { useView } from "../../view/ViewContex";
 import { usePeer } from "@peerbit/react";
 import { StraightReplyLine } from "./StraightReplyLine";
 import { useAutoReply } from "../AutoReplyContext";
-import { useAutoScroll } from "./useAutoScroll";
+import { useAutoScroll, ScrollSettings } from "./useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
 import { Spinner } from "../../utils/Spinner";
 
@@ -14,8 +14,8 @@ const LOAD_TIMEOUT = 5e2;
 const SPINNNER_HEIGHT = 40;
 
 export const Replies = (properties: {
-    focused: boolean;
-    scrollRef?: React.RefObject<any>;
+    scrollSettings: ScrollSettings;
+    parentRef: React.RefObject<HTMLDivElement>;
     viewRef: HTMLElement;
 }) => {
     const {
@@ -51,40 +51,90 @@ export const Replies = (properties: {
     } | null>(null);
 
     const lastProcessedRepliesLength = useRef(processedReplies.length);
+    const lastProcessedRepliesRef = useRef<any>(null);
 
+    const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+    /* ------------------------------------------------------------------ */
+    /* 1. effect – update pending batch whenever processedReplies changes */
+    /* ------------------------------------------------------------------ */
     useEffect(() => {
-        lastProcessedRepliesLength.current = processedReplies.length;
+        // always clear any previous timeout before scheduling a new one
+        if (loadTimeoutRef.current) {
+            clearTimeout(loadTimeoutRef.current);
+            loadTimeoutRef.current = null;
+        }
+
+        if (lastProcessedRepliesRef.current !== processedReplies) {
+            lastProcessedRepliesRef.current = processedReplies;
+
+            if (processedReplies.length > 0) {
+                setPendingBatch({
+                    nextBatchIndex: lastProcessedRepliesLength.current,
+                });
+
+                const length = processedReplies.length;
+                lastProcessedRepliesLength.current = length;
+
+                loadTimeoutRef.current = setTimeout(() => {
+                    setPendingBatch((prev) => ({
+                        nextBatchIndex: Math.max(prev.nextBatchIndex, length),
+                    }));
+                    loadTimeoutRef.current = null; // finished
+                }, LOAD_TIMEOUT);
+            }
+        }
+
+        // extra cleanup if processedReplies updates again
+        return () => {
+            if (loadTimeoutRef.current) {
+                clearTimeout(loadTimeoutRef.current);
+                loadTimeoutRef.current = null;
+            }
+        };
+    }, [processedReplies]);
+
+    /* ------------------------------------------------------------------ */
+    /* 2. effect – reset lazy‑loading state whenever the view changes     */
+    /* ------------------------------------------------------------------ */
+    const resetLazyState = () => {
+        console.log("RESET PENDING BATCH");
+
+        // kill any pending timeout from the previous view
+        if (loadTimeoutRef.current) {
+            clearTimeout(loadTimeoutRef.current);
+            loadTimeoutRef.current = null;
+        }
+
+        lastProcessedRepliesLength.current = 0;
         loadedMoreOnce.current = false;
         alreadySeen.current.clear();
         pendingScrollAdjust.current = null;
-        setPendingBatch({
-            nextBatchIndex: processedReplies.length,
-        });
-    }, [view, viewRoot]);
+        setPendingBatch({ nextBatchIndex: 0 });
+    };
+
+    const prevView = useRef(view);
+    const prevRoot = useRef(viewRoot);
 
     useEffect(() => {
-        if (processedReplies.length > 0) {
-            setPendingBatch({
-                nextBatchIndex: lastProcessedRepliesLength.current,
-            });
-            let length = processedReplies.length;
-            lastProcessedRepliesLength.current = length;
-            const timeout = setTimeout(() => {
-                setPendingBatch((prev) => {
-                    return {
-                        nextBatchIndex: Math.max(prev.nextBatchIndex, length),
-                    };
-                });
-            }, LOAD_TIMEOUT);
-            return () => {
-                clearTimeout(timeout);
-            };
+        if (prevView.current !== view || prevRoot.current !== viewRoot) {
+            resetLazyState();
+            prevView.current = view;
+            prevRoot.current = viewRoot;
         }
-    }, [processedReplies]);
+    }, [view, viewRoot]);
 
     const isLoadingAnything =
         isLoadingView ||
         pendingBatch.nextBatchIndex !== processedReplies.length;
+
+    /* console.log({
+        isLoadingAnything,
+        isLoadingView,
+        diff: pendingBatch.nextBatchIndex !== processedReplies.length,
+        pending: pendingBatch.nextBatchIndex,
+        processLength: processedReplies.length
+    }) */
 
     // Prepare refs array for each Reply
     const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -98,7 +148,8 @@ export const Replies = (properties: {
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
         repliesContainerRef,
-        scrollRef: properties.scrollRef,
+        parentRef: properties.parentRef,
+        setting: properties.scrollSettings,
         enabled: true,
         debug: false,
         lastElementRef: () =>
@@ -263,7 +314,7 @@ export const Replies = (properties: {
     }, [
         properties.viewRef,
         processedReplies,
-        properties.focused,
+        properties.scrollSettings,
         isLoadingAnything,
     ]);
 

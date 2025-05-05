@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useView } from "../../view/ViewContex";
+import { useView, ViewType } from "../../view/ViewContex";
 import { Canvas } from "@giga-app/interface";
 import { debounce, throttle } from "lodash";
 import { usePeer } from "@peerbit/react";
@@ -25,27 +25,38 @@ function getScrollBottomOffset(scrollPosition) {
 
 const DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED = 300;
 
+export type ScrollSettings = {
+    scrollUsingWindow?: boolean;
+    view: ViewType /*  we pass view here because scrollUsingWindow should be updated at the same time as view! */;
+};
+
 export const useAutoScroll = (properties: {
     replies: { reply: Canvas }[];
     repliesContainerRef: React.RefObject<any>;
     lastElementRef?: () => HTMLElement;
-    scrollRef?: React.RefObject<any>;
-
+    parentRef: React.RefObject<any>;
+    setting: ScrollSettings;
     enabled: boolean;
     debug?: boolean;
 }) => {
-    const { replies: processedReplies, repliesContainerRef } = properties;
-    const { view } = useView();
+    const {
+        replies: processedReplies,
+        repliesContainerRef,
+        setting,
+    } = properties;
     const { peer } = usePeer();
-
     const disableScrollUpEvents = useRef(false);
     const forceScrollToBottom = useRef(false);
     const scrollMode = useRef<"automatic" | "manual">("automatic");
     const [isAtBottom, setIsAtBottom] = useState(true);
 
-    const viewIsShouldScrollToBottom = view === "chat" || view === "new";
+    const viewIsShouldScrollToBottom =
+        setting?.view === "chat" || setting?.view === "new";
     const triggerScroll = () => {
-        if (view === "best" || view === "old") {
+        if (!setting) {
+            return;
+        }
+        if (setting.view === "best" || setting.view === "old") {
             scrollToTop();
         } else {
             scrollToBottom();
@@ -76,49 +87,43 @@ export const useAutoScroll = (properties: {
 
         // trigger scroll to bottom when the view changes
         properties.debug &&
-            console.log("trigger scroll because the view changed");
+            console.log("trigger scroll because the view changed", setting);
         triggerScroll();
-    }, [view, properties.scrollRef?.current, properties.enabled]);
+    }, [setting, properties.enabled]);
 
-    const lastScrollRef = useRef(properties.scrollRef?.current);
-    const lastRepliesContainerRef = useRef(repliesContainerRef.current);
-
-    useEffect(() => {
-        if (!properties.enabled) {
-            return;
-        }
-        /*  if (!properties.scrollRef?.current) {
-             return;
-         } */
-
-        /*  if (!repliesContainerRef.current) {
-             return;
-         } */
-
-        if (
-            properties.scrollRef?.current !== lastScrollRef.current ||
-            lastRepliesContainerRef.current !== repliesContainerRef.current
-        ) {
-            lastRepliesContainerRef.current = repliesContainerRef.current;
-            lastScrollRef.current = properties.scrollRef?.current;
-
-            // trigger scroll because the replies container has changed
-            properties.debug &&
-                console.log(
-                    "trigger scroll because the replies container has changed"
-                );
-            triggerScroll();
-        }
-        return () => {
-            lastScrollRef.current = undefined;
-            lastRepliesContainerRef.current = undefined;
-        };
-    }, [
-        properties.scrollRef,
-        properties.scrollRef?.current,
-        repliesContainerRef.current,
-        properties.enabled,
-    ]);
+    /* 
+        useEffect(() => {
+            if (!properties.enabled) {
+                return;
+            }
+    
+    
+            if (
+                lastRepliesContainerRef.current !== repliesContainerRef.current
+            ) {
+    
+                // trigger scroll because the replies container has changed
+                properties.debug &&
+                    console.log(
+                        "trigger scroll because the replies container has changed",
+                        "from",
+                        repliesContainerRef.current,
+                        "to",
+                        lastRepliesContainerRef.current
+    
+                    );
+                lastRepliesContainerRef.current = repliesContainerRef.current;
+    
+                triggerScroll();
+            }
+            return () => {
+                lastRepliesContainerRef.current = undefined;
+            };
+        }, [
+    
+            repliesContainerRef.current,
+            properties.enabled,
+        ]); */
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
@@ -150,6 +155,14 @@ export const useAutoScroll = (properties: {
                 latestReplyRef.current =
                     processedReplies[processedReplies.length - 1];
 
+                console.log(
+                    "Reply change, should scroll to bottom?",
+                    last.reply.idString !== lastScrollToSee?.current &&
+                        latestReplyRef.current.reply.publicKey.equals(
+                            peer.identity.publicKey
+                        ) &&
+                        scrollMode.current === "automatic"
+                );
                 if (
                     last.reply.idString !== lastScrollToSee?.current &&
                     latestReplyRef.current.reply.publicKey.equals(
@@ -174,11 +187,11 @@ export const useAutoScroll = (properties: {
         }
 
         bodyResizeScrollPositionRef.current = getScrollTop();
-    }, [processedReplies, properties.scrollRef?.current, properties.enabled]);
+    }, [processedReplies, properties.enabled]);
 
     // UPDATED scrollToBottom: scroll the container if available.
     const scrollToBottom = () => {
-        if (properties.scrollRef?.current) {
+        if (!setting.scrollUsingWindow) {
             if (!repliesContainerRef.current) {
                 properties.debug && console.log("No replies container ref");
                 return;
@@ -187,14 +200,15 @@ export const useAutoScroll = (properties: {
             properties.debug &&
                 console.log(
                     "scroll to bottom using scroll ref!",
-                    properties.scrollRef.current
+                    properties.parentRef.current
                 );
-            properties.scrollRef.current.scrollTo({
-                top: properties.scrollRef.current.scrollHeight,
+            properties.parentRef.current.scrollTo({
+                top: properties.parentRef.current.scrollHeight,
                 left: 0,
                 behavior: "instant",
             });
         } else {
+            console.error("WINDOW");
             properties.debug &&
                 console.log("scroll to bottom using window: ", {
                     top: document.documentElement.scrollHeight,
@@ -213,8 +227,8 @@ export const useAutoScroll = (properties: {
 
     const scrollToTop = () => {
         properties.debug && console.log("scroll to top!");
-        if (properties.scrollRef?.current) {
-            properties.scrollRef.current.scrollTo({
+        if (!setting.scrollUsingWindow) {
+            properties.parentRef.current.scrollTo({
                 top: 0,
                 left: 0,
                 behavior: "instant",
@@ -277,7 +291,7 @@ export const useAutoScroll = (properties: {
             handleResizeThrottled.cancel();
             setup.cancel();
         };
-    }, [view, properties.scrollRef?.current, properties.enabled]);
+    }, [setting, properties.enabled]);
 
     // detect scroll up events to prevent automatic down scrolling to happen
     let lastScrollTop = useRef(-1);
@@ -332,7 +346,7 @@ export const useAutoScroll = (properties: {
         return () => {
             window.removeEventListener("scroll", listener);
         };
-    }, [view, lastScrollTop, properties.enabled]);
+    }, [setting, lastScrollTop, properties.enabled]);
 
     // Handle body resize events due to new replies being inserted.
     useEffect(() => {
@@ -380,13 +394,7 @@ export const useAutoScroll = (properties: {
             resizeObserver.disconnect();
             handleBodyResizeDebounced.cancel();
         };
-    }, [
-        view,
-        peer,
-        properties.scrollRef?.current,
-        repliesContainerRef.current,
-        properties.enabled,
-    ]);
+    }, [setting, peer, repliesContainerRef.current, properties.enabled]);
 
     return {
         isAtBottom,

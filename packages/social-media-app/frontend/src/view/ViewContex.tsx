@@ -178,7 +178,7 @@ function useViewContextHook() {
             id: query.id ?? "",
             transform: calculateAddress,
             batchSize,
-            debug: { id: "replies" },
+            debug: false, // { id: "replies" },
             local: true,
             remote: true,
             waitForReplicators: {

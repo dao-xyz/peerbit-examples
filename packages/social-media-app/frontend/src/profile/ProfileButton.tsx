@@ -27,8 +27,7 @@ export const ProfileButton = forwardRef<
         size?: number;
     } & React.ButtonHTMLAttributes<HTMLButtonElement>
 >(({ size, publicKey, direction, setBgColor, onClick, ...rest }, ref) => {
-    const { profiles, create, navigateTo, getProfile } = useProfiles();
-    const { peer } = usePeer();
+    const { profiles, navigateTo, getProfile } = useProfiles();
     const [profile, setProfile] = useState<ProfileData | undefined>();
     const { identities } = useIdentities();
     const sizeDefined = size ?? 32;
@@ -44,12 +43,6 @@ export const ProfileButton = forwardRef<
             // Use the cached getProfile helper here
             getProfile(publicKey, identities)
                 .then((profileData) => {
-                    console.log(
-                        "PROFILE DATA?",
-                        peer.identity.publicKey.equals(publicKey),
-                        profileData
-                    );
-
                     setProfile(profileData);
                 })
                 .finally(() => setLoading(false));

@@ -11,6 +11,7 @@ import { DetailedView } from "../detailed/DetailedView.js";
 import { SubHeader } from "./SubHeader.js";
 import { AnimatedStickyToolbar } from "./AnimatedStickyToolbar.js";
 import { ToolbarProvider, useToolbar } from "../toolbar/ToolbarContext.js";
+import { ScrollSettings } from "./useAutoScroll.js";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",
@@ -98,6 +99,8 @@ export const CanvasAndRepliesInner = () => {
     const { loading, canvases, viewRoot, lastReply, view } = useView();
 
     const lastScrollTopRef = useRef(-1);
+    const lastHeightTopRef = useRef(-1);
+
     const repliesScrollRef = useRef<HTMLDivElement>(null);
 
     const postRef = useRef<HTMLDivElement>(null);
@@ -137,14 +140,35 @@ export const CanvasAndRepliesInner = () => {
     const toolbarVisible = useToolbarVisibility(scrollContainerRef);
 
     // When using the new behavior, initially the Replies area is unfocused.
-    const [repliesFocused, setRepliesFocused] = useState(
+    const [repliesFocused, _setRepliesFocused] = useState(
         shouldFocusRepliesByDefault(view)
     );
+
+    const [scrollSettings, setScrollSettings] =
+        useState<ScrollSettings>(undefined);
+    const setRepliesFocused = (focused: boolean) => {
+        _setRepliesFocused(focused);
+        return setScrollSettings((prev) => {
+            return {
+                ...prev,
+                view,
+                scrollUsingWindow: focused,
+            };
+        });
+    };
 
     useEffect(() => {
         if (view) {
             if (!repliesFocused) {
                 setRepliesFocused(shouldFocusRepliesByDefault(view));
+            } else {
+                setScrollSettings((prev) => {
+                    return {
+                        ...prev,
+                        scrollUsingWindow: shouldFocusRepliesByDefault(view),
+                        view,
+                    };
+                });
             }
         }
         return () => {
@@ -168,27 +192,44 @@ export const CanvasAndRepliesInner = () => {
                 return;
             }
             if (repliesScrollRef.current) {
-                const rect = repliesScrollRef.current.getBoundingClientRect();
+                const repliesScrollRect =
+                    repliesScrollRef.current.getBoundingClientRect();
 
                 // If the scroll position is greater than the last scroll position, we are scrolling down
                 // If we are scrolling down and the replies area is not focused, we want to focus it
                 let lastScrollTop = lastScrollTopRef.current;
                 let downscroll = false;
                 if (lastScrollTop > 0) {
-                    if (lastScrollTop > rect.top) {
+                    if (
+                        lastScrollTop > repliesScrollRect.top &&
+                        lastHeightTopRef.current >= repliesScrollRect.height
+                    ) {
+                        // the last condition is because if the rect get larger it can be so that we falsely identify a scroll down event
                         // Scrolling down
                         downscroll = true;
-                    } else if (lastScrollTop < rect.top) {
+                    } else if (lastScrollTop < repliesScrollRect.top) {
                         // Scrolling up
                         downscroll = false;
                     }
                 }
-                //    console.log("downscroll", downscroll, rect.top, window.innerHeight, { split1: window.innerHeight / 3 - threshold, bbb: rect.top < window.innerHeight / 3 - threshold });
 
-                lastScrollTopRef.current = rect.top;
-                if (rect.top < getSnapToRepliesViewThreshold(0) && downscroll) {
+                lastScrollTopRef.current = repliesScrollRect.top;
+
+                if (
+                    repliesScrollRect.top < getSnapToRepliesViewThreshold(0) &&
+                    downscroll
+                ) {
+                    console.log(
+                        "snap to focus replies!",
+                        repliesScrollRect.top <
+                            getSnapToRepliesViewThreshold(0) && downscroll,
+                        repliesScrollRect.top,
+                        getSnapToRepliesViewThreshold(0),
+                        downscroll
+                    );
                     setRepliesFocused(true);
                 }
+                lastHeightTopRef.current = repliesScrollRect.height;
             }
         };
 
@@ -360,12 +401,8 @@ height: `${spacerHeight}px`,
                                         ? document.body
                                         : repliesScrollRef.current
                                 }
-                                focused={repliesFocused}
-                                scrollRef={
-                                    repliesFocused
-                                        ? undefined
-                                        : repliesScrollRef
-                                }
+                                scrollSettings={scrollSettings}
+                                parentRef={repliesScrollRef}
                             />
                         </div>
                         {/* Render the gradient overlay only when unfocused.
