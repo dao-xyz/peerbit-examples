@@ -13,6 +13,7 @@ import { IoIosArrowBack } from "react-icons/io";
 import ExpandedContext from "./context/ExpandedContext";
 import { useThemeContext } from "./theme/useTheme";
 import { useHeaderVisibilityContext } from "./HeaderVisibilitiyProvider";
+import { buildCommit } from "./utils";
 
 // Define props interface
 interface HeaderProps {
@@ -174,6 +175,12 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                                                     </div>
                                                 )}
                                             </div>
+                                        </DropdownMenu.Item>
+                                        <DropdownMenu.Item
+                                            disabled /* keeps menu open */
+                                            className="menu-item cursor-default select-text text-xs text-neutral-500"
+                                        >
+                                            {`Version ${buildCommit}`}
                                         </DropdownMenu.Item>
                                     </DropdownMenu.Content>
                                 </DropdownMenu.Root>

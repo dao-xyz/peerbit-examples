@@ -8,6 +8,8 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    env:
+      COMMIT_HASH: ${{ github.sha }}
     steps:
     - name: Checkout
       uses: actions/checkout@v1
@@ -19,8 +21,28 @@ jobs:
         aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
         aws-region: us-east-1
 
-    - name: Build
-      run: yarn install && yarn build
+
+    - name: Build every frontend with the commit hash
+      run: |
+        yarn install --immutable
+        SHORT_SHA=$(echo $COMMIT_HASH | cut -c1-7)
+
+        # --- Build each package -----------------
+        for PKG in \
+          packages/live-streaming/frontend \
+          packages/one-chat-room/frontend \
+          packages/social-media-app/frontend \
+          packages/collaborative-learning/frontend \
+          packages/text-document/frontend \
+          packages/file-share/frontend \
+          packages/chess/frontend
+        do
+          echo "Building $PKG with commit $SHORT_SHA"
+          (cd $PKG && \
+            VITE_COMMIT_HASH=$SHORT_SHA \
+            REACT_APP_COMMIT_HASH=$SHORT_SHA \
+            yarn build)
+        done
 
     - name: Deploy stream
       run: |
