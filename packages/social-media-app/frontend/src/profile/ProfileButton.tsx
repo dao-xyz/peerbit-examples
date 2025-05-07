@@ -32,7 +32,7 @@ export const ProfileButton = forwardRef<
     const { identities } = useIdentities();
     const sizeDefined = size ?? 32;
     const sizeInRem = pxToRem(sizeDefined);
-    const [loading, setLoading] = useState(false);
+    const [loading, setLoading] = useState(true);
 
     useEffect(() => {
         if (!profiles || profiles.closed || !identities || identities.closed)
@@ -63,7 +63,11 @@ export const ProfileButton = forwardRef<
     ]);
 
     const getContent = () => {
-        if (!loading && profile) {
+        if (loading) {
+            return <div className={`${sizeInRem} ${sizeInRem}`} />;
+        }
+
+        if (profile) {
             return (
                 <div
                     style={{ width: sizeInRem, height: sizeInRem }}
@@ -79,13 +83,11 @@ export const ProfileButton = forwardRef<
             );
         }
         return (
-            <>
-                <ProfilePhotoGenerated
-                    size={sizeDefined}
-                    publicKey={publicKey}
-                    onColorGenerated={setBgColor}
-                />
-            </>
+            <ProfilePhotoGenerated
+                size={sizeDefined}
+                publicKey={publicKey}
+                onColorGenerated={setBgColor}
+            />
         );
     };
 

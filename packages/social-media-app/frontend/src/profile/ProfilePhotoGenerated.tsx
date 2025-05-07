@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useLayoutEffect, useRef } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
 
 interface ProfilePhotoGeneratedProps {
@@ -17,7 +17,7 @@ export const ProfilePhotoGenerated = ({
     const cells = 5; // grid dimensions
     const cellSize = sizeDefined / cells;
 
-    useEffect(() => {
+    useLayoutEffect(() => {
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext("2d");
@@ -75,7 +75,7 @@ export const ProfilePhotoGenerated = ({
                 }
             }
         }
-    }, [publicKey, cellSize, cells, size]);
+    }, [publicKey?.hashcode(), cellSize, cells, size]);
 
     return <canvas ref={canvasRef} width={sizeDefined} height={sizeDefined} />;
 };
