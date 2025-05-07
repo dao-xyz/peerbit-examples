@@ -18,7 +18,11 @@ export const keyboardIsOpen = (
         : false;
 
 export const getScrollTop = () => {
-    return window.scrollY || document.documentElement.scrollTop;
+    return (
+        window.visualViewport?.pageTop ||
+        window.scrollY ||
+        document.documentElement.scrollTop
+    );
 };
 
 export const getMaxScrollTop = () => {
