@@ -111,7 +111,7 @@ export const App = () => {
                     <PeerProvider
                         network={networkConfig}
                         iframe={{ type: "proxy", targetOrigin: "*" }}
-                        waitForConnnected={false}
+                        waitForConnnected={true}
                         inMemory={false}
                         singleton
                     >
