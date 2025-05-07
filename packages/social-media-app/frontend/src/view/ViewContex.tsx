@@ -164,7 +164,7 @@ function useViewContextHook() {
     }, [debouncedView, debouncedViewRoot]);
 
     // For lazy loading, we use a paginated hook.
-    const [batchSize, setBatchSize] = useState(5); // Default batch size
+    const [batchSize, setBatchSize] = useState(10); // Default batch size
     const {
         items: sortedReplies,
         loadMore,
@@ -178,7 +178,7 @@ function useViewContextHook() {
             id: query.id ?? "",
             transform: calculateAddress,
             batchSize,
-            debug: false, // { id: "replies" },
+            debug: false /* { id: "replies" }, */,
             local: true,
             remote: true,
             waitForReplicators: {
@@ -289,7 +289,7 @@ function useViewContextHook() {
                 next: next.reply,
                 replies,
             });
-            if (quotes.length > 0) {
+            /* if (quotes.length > 0) {
                 repliesAndQuotes.splice(
                     i + 1,
                     0,
@@ -300,7 +300,7 @@ function useViewContextHook() {
                     }))
                 );
                 i += quotes.length;
-            }
+            } */
         }
         return repliesAndQuotes.map((item, i, arr) => {
             const current = item.reply;
