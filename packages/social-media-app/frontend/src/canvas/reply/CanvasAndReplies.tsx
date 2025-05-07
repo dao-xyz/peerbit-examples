@@ -12,6 +12,9 @@ import { SubHeader } from "./SubHeader.js";
 import { AnimatedStickyToolbar } from "./AnimatedStickyToolbar.js";
 import { ToolbarProvider, useToolbar } from "../toolbar/ToolbarContext.js";
 import { ScrollSettings } from "./useAutoScroll.js";
+import { TbBuildingCommunity } from "react-icons/tb";
+import { FaUserFriends } from "react-icons/fa";
+import { IoIosNotifications } from "react-icons/io";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",
@@ -344,8 +347,29 @@ export const CanvasAndRepliesInner = () => {
                     }`}
                 >
                     <div className="z-5 flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
-                        <div className="py-6 max-w-[876px] mx-auto w-full">
-                            <DetailedView />
+                        <div className="max-w-[876px] mx-auto w-full">
+                            {!viewRoot || canvases.length === 1 ? (
+                                <div>
+                                    <div className="flex flex-row">
+                                        <button className="btn btn-icon btn-icon-md gap-2">
+                                            <TbBuildingCommunity />
+                                            Places
+                                        </button>
+                                        <button className="btn btn-icon  btn-icon-md gap-2">
+                                            <FaUserFriends />
+                                            Friends
+                                        </button>
+                                        <button className="btn btn-icon btn-icon-md gap-2">
+                                            <IoIosNotifications />
+                                            Notifications
+                                        </button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div className="py-6">
+                                    <DetailedView />
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
