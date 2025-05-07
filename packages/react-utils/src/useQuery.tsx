@@ -8,6 +8,7 @@ import {
 } from "@peerbit/document";
 import * as indexerTypes from "@peerbit/indexer-interface";
 import { AbortError } from "@peerbit/time";
+import { NoPeersError } from "@peerbit/shared-log";
 
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -107,6 +108,7 @@ export const useQuery = <
 
         emptyResultsRef.current = false;
         logWithId(options, "reset", {
+            fromRef: fromRef?.id,
             id: iteratorRef.current?.id,
             size: allRef.current.length,
         });
@@ -272,12 +274,20 @@ export const useQuery = <
                         timeout,
                         signal: closeControllerRef.current?.signal,
                     })
-                    .catch((e) => {
-                        if (e instanceof AbortError) {
+                    .catch(async (e) => {
+                        if (
+                            e instanceof AbortError ||
+                            e instanceof NoPeersError
+                        ) {
                             // Ignore abort error
                             return;
                         }
-                        console.warn("Remote replicators not ready", e);
+                        console.warn(
+                            "Remote replicators not ready",
+                            "Total count: " +
+                                (await db.log.getReplicators()).size,
+                            e
+                        );
                     });
             }
 
