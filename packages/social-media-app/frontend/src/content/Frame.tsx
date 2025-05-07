@@ -1,4 +1,4 @@
-import React, { SyntheticEvent, useEffect, useRef, useState } from "react";
+import React, { SyntheticEvent, useCallback, useEffect, useState } from "react";
 import { IFrameContent, Element, StaticContent } from "@giga-app/interface";
 import { useNavigate } from "react-router";
 import { EditableStaticContent } from "./native/NativeContent";
@@ -76,7 +76,7 @@ export const Frame = (properties: {
     fit?: "cover" | "contain";
     previewLines?: number;
     noPadding?: boolean;
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     // edit related stuff
     inFullscreen?: boolean;
     canOpenFullscreen?: boolean;
@@ -191,6 +191,8 @@ export const Frame = (properties: {
         );
     };
 
+    const onResize = useCallback(() => {}, []);
+
     const renderContent = ({ previewLines }: { previewLines?: number }) => {
         // For iframes, continue to use the iframe as before.
         if (properties.element.content instanceof IFrameContent) {
@@ -251,7 +253,7 @@ export const Frame = (properties: {
                     editable={properties.editMode}
                     thumbnail={properties.thumbnail}
                     canOpenFullscreen={properties.canOpenFullscreen}
-                    onResize={() => {}}
+                    onResize={onResize}
                     onChange={async (newContent, options) => {
                         if (Array.isArray(newContent)) {
                             throw new Error(

@@ -219,14 +219,14 @@ export const CanvasAndRepliesInner = () => {
                     repliesScrollRect.top < getSnapToRepliesViewThreshold(0) &&
                     downscroll
                 ) {
-                    console.log(
-                        "snap to focus replies!",
-                        repliesScrollRect.top <
-                            getSnapToRepliesViewThreshold(0) && downscroll,
-                        repliesScrollRect.top,
-                        getSnapToRepliesViewThreshold(0),
-                        downscroll
-                    );
+                    /*  console.log(
+                         "snap to focus replies!",
+                         repliesScrollRect.top <
+                             getSnapToRepliesViewThreshold(0) && downscroll,
+                         repliesScrollRect.top,
+                         getSnapToRepliesViewThreshold(0),
+                         downscroll
+                     ); */
                     setRepliesFocused(true);
                 }
                 lastHeightTopRef.current = repliesScrollRect.height;

@@ -41,12 +41,15 @@ export const PendingCanvasProvider: React.FC<{
 
     useEffect(() => {
         if (peer && viewRoot) {
-            setPendingCanvasState(
-                new Canvas({
+            if (!pendingCanvasState) {
+                const newPendingCanvas = new Canvas({
                     publicKey: peer.identity.publicKey,
                     parent: replyTo || viewRoot,
-                })
-            );
+                });
+                setPendingCanvasState(newPendingCanvas);
+            } else {
+                // set reply to ? we already have auto reply which also does this...
+            }
         }
     }, [peer, viewRoot]);
 
@@ -70,6 +73,7 @@ export const PendingCanvasProvider: React.FC<{
             await pendingCanvas.program.setParent(replyTo || viewRoot);
         }
 
+        /*  console.log("UPDATE REPLY TO", { replyTo: replyTo?.idString, viewRoot: viewRoot?.idString, idString: pendingCanvas.program?.idString, address: pendingCanvas.program?.address }); */
         setPendingCanvasState(pendingCanvasState);
     };
 

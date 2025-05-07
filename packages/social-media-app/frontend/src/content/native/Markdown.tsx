@@ -268,17 +268,34 @@ export const MarkdownContent = ({
         ? "text-base leading-6 "
         : "p-1 pt-0.5 text-base leading-6";
 
+    // Utility function to check if a text selection is present
+    const isTextSelected = () => {
+        const selection = window.getSelection();
+        return (
+            selection &&
+            selection.type === "Range" &&
+            selection.toString().length > 0
+        );
+    };
+
+    // Click handler that stops propagation only if there's no selection
+    const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+        if (editable && !isEditing) {
+            handleStartEditing(true);
+            return;
+        }
+        if (isTextSelected()) {
+            e.stopPropagation();
+        }
+    };
+
     return (
         <div
             ref={containerRef}
             className={`${commonClasses} w-full text-left ${
                 editable ? "cursor-text" : ""
             }`}
-            onClick={
-                editable && !isEditing
-                    ? () => handleStartEditing(true)
-                    : undefined
-            }
+            onClick={handleClick}
         >
             {editable && isEditing ? (
                 <div className="flex flex-row items-start">

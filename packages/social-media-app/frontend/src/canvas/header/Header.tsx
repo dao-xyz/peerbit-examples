@@ -2,7 +2,6 @@ import React, { useEffect, useState } from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
-import { FaSpinner } from "react-icons/fa";
 import { useCount, usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
 import {

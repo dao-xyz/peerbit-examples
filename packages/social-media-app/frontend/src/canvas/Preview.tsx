@@ -26,7 +26,7 @@ type VariantType =
     | AlignedVariantType;
 
 type BaseCanvasPreviewProps = {
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     variant: VariantType;
     // forward ref
     forwardRef?: React.Ref<any>;
@@ -91,7 +91,7 @@ const PreviewFrame = ({
     maximizeHeight?: boolean;
     fit?: "cover" | "contain";
     noPadding?: boolean;
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     className?: string | ((element: Element<ElementContent>) => string);
 }) => (
     <div
@@ -204,7 +204,7 @@ const TinyPreview = ({
     onClick,
 }: {
     rect: Element<ElementContent>;
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
 }) => (
     <PreviewFrame element={rect} fit="cover" maximizeHeight onClick={onClick} />
 );
@@ -214,7 +214,7 @@ const BreadcrumbPreview = ({
     onClick,
 }: {
     rect: Element<ElementContent>;
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
 }) => {
     let isText = false;
     let textLength: number | undefined = undefined;
@@ -253,7 +253,7 @@ const ExpandedBreadcrumbPreview = ({
     forwardedRef,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     forwardedRef?: React.Ref<HTMLDivElement>;
 }) => {
     const { other: apps, text } = rects;
@@ -304,7 +304,7 @@ const PostQuotePreview = ({
         text?: Element<StaticContent<StaticMarkdownText>>;
         other: Element<ElementContent>[];
     };
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     author?: string;
     forwardedRef?: React.Ref<HTMLDivElement>;
 }) => {
@@ -384,7 +384,7 @@ const PostPreview = ({
         text?: Element<StaticContent<StaticMarkdownText>>;
         other: Element<ElementContent>[];
     };
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((element: Element<ElementContent>) => string);
@@ -395,7 +395,7 @@ const PostPreview = ({
     return (
         <>
             {firstApp && (
-                <button
+                <div
                     onClick={onClick}
                     className={
                         "btn col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative " +
@@ -410,7 +410,7 @@ const PostPreview = ({
                         maximizeHeight
                         className={classNameContent}
                     />
-                </button>
+                </div>
             )}
             {secondaryApps.length > 0 && (
                 <div
@@ -424,7 +424,7 @@ const PostPreview = ({
                         <button
                             onClick={onClick}
                             className="btn aspect-[1] w-12  rounded overflow-hidden"
-                            key={i}
+                            key={app.idString}
                         >
                             <PreviewFrame
                                 element={app}
@@ -437,13 +437,13 @@ const PostPreview = ({
                 </div>
             )}
             {text && (
-                <button
+                <div
                     onClick={onClick}
                     className={"col-start-2 col-span-1 rounded-md py-1 "}
                     ref={forwardRef}
                 >
                     <PreviewFrame element={text} className={classNameContent} />
-                </button>
+                </div>
             )}
         </>
     );
@@ -457,7 +457,7 @@ const ChatMessagePreview = ({
     classNameContent,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
-    onClick?: () => void;
+    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((element: Element<ElementContent>) => string);
@@ -466,7 +466,7 @@ const ChatMessagePreview = ({
     return (
         <div className={className} ref={forwardRef}>
             {apps.map((app) => (
-                <button
+                <div
                     key={app.id.toString()}
                     onClick={onClick}
                     className="w-fit max-h-[40vh]  max-height-inherit-children flex flex-col overflow-hidden h-full rounded-md relative"
@@ -478,10 +478,10 @@ const ChatMessagePreview = ({
                         maximizeHeight
                         className={classNameContent}
                     />
-                </button>
+                </div>
             ))}
             {text && (
-                <button
+                <div
                     onClick={onClick} /* bg-neutral-50 dark:bg-neutral-950  */
                     className="max-w-prose rounded-md px-2 py-1"
                 >
@@ -491,7 +491,7 @@ const ChatMessagePreview = ({
                         noPadding
                         className={classNameContent}
                     />
-                </button>
+                </div>
             )}
         </div>
     );

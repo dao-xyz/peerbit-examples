@@ -125,7 +125,8 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
                 </div>
 
                 {/* First row: Input field */}
-                <div className="pt-1">
+                <div className="pt-1 min-h-10">
+                    {/* We set the min height here because without it switching views might lead to flickering behaviour where the input field gets removed and re-added */}
                     <Canvas
                         fitWidth
                         draft={true}

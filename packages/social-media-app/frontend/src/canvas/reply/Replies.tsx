@@ -1,4 +1,10 @@
-import React, { Fragment, useRef, useState, useEffect } from "react";
+import React, {
+    Fragment,
+    useRef,
+    useState,
+    useEffect,
+    useLayoutEffect,
+} from "react";
 import * as Toast from "@radix-ui/react-toast";
 import { Reply } from "./Reply";
 import { tw } from "../../utils/tailwind";
@@ -24,6 +30,7 @@ export const Replies = (properties: {
         loadMore: _loadMore,
         isLoading: isLoadingView,
         viewRoot,
+        batchSize,
     } = useView();
 
     const { peer } = usePeer();
@@ -98,8 +105,6 @@ export const Replies = (properties: {
     /* 2. effect – reset lazy‑loading state whenever the view changes     */
     /* ------------------------------------------------------------------ */
     const resetLazyState = () => {
-        console.log("RESET PENDING BATCH");
-
         // kill any pending timeout from the previous view
         if (loadTimeoutRef.current) {
             clearTimeout(loadTimeoutRef.current);
@@ -192,7 +197,7 @@ export const Replies = (properties: {
         }
     }, [isAtBottom, processedReplies]);
 
-    useEffect(() => {
+    useLayoutEffect(() => {
         if (
             pendingBatch.nextBatchIndex < processedReplies.length ||
             !pendingScrollAdjust.current
@@ -217,21 +222,20 @@ export const Replies = (properties: {
         let first = true;
         const scrollEffect = () => {
             const newScrollHeight = properties.viewRef.scrollHeight;
-            console.log("ADJUST SCROLL", {
-                DIFF: newScrollHeight - prevScrollHeight,
-                "SCROLL HEIGHT": newScrollHeight,
-                "PREV SCROLL HEIGHT": prevScrollHeight,
-            });
-            const spinnerOffset = first ? SPINNNER_HEIGHT : 0;
+            /*  console.log("ADJUST SCROLL", {
+                 DIFF: newScrollHeight - prevScrollHeight,
+                 "SCROLL HEIGHT": newScrollHeight,
+                 "PREV SCROLL HEIGHT": prevScrollHeight,
+             }); */
+            const spinnerOffset = 0; /* first ? SPINNNER_HEIGHT : 0; TODO correctly */
             const heightDiff =
-                newScrollHeight -
-                prevScrollHeight -
-                spinnerOffset; /*  newTop - prevTop; */
+                newScrollHeight - prevScrollHeight - spinnerOffset;
 
             first = false;
             prevScrollHeight = newScrollHeight;
 
             if (heightDiff > 0) {
+                //   console.log({ "scroll adjust": heightDiff });
                 if (isWindow) {
                     window.scrollBy({
                         top: heightDiff,
@@ -245,10 +249,10 @@ export const Replies = (properties: {
             pendingScrollAdjust.current = null;
         };
         scrollEffect();
-        let timeout = setTimeout(scrollEffect, 0);
+        // let timeout = setTimeout(scrollEffect, 0);
 
         return () => {
-            clearTimeout(timeout);
+            // clearTimeout(timeout);
         };
     }, [pendingBatch.nextBatchIndex]);
 
@@ -286,14 +290,12 @@ export const Replies = (properties: {
                     lastSentintentForLoadingMore.current !== sentinel &&
                     !isLoadingAnything
                 ) {
-                    console.log("LOAD MORE FROM SENTINEL!");
-
                     lastSentintentForLoadingMore.current = sentinel;
                     pendingScrollAdjust.current = {
                         sentinel,
                         prevScrollHeight: properties.viewRef.scrollHeight,
                     };
-
+                    observer.unobserve(sentinel);
                     loadMore();
                 }
             },
@@ -320,7 +322,11 @@ export const Replies = (properties: {
 
     // Decide where the sentinel goes
     const insertAtStart = view === "chat" || view === "new";
-    const sentinelIndex = insertAtStart ? 0 : processedReplies.length - 1;
+
+    const sentinalIndexPadding = Math.floor(batchSize / 2);
+    const sentinelIndex = insertAtStart
+        ? sentinalIndexPadding
+        : processedReplies.length - (1 + sentinalIndexPadding);
 
     const indexIsReadyToRender = (i: number) => {
         if (scrollUpForMore) {
@@ -337,8 +343,9 @@ export const Replies = (properties: {
     return (
         <>
             {scrollUpForMore && isLoadingAnything && (
+                /*  We do absolute positioning here because the recalculations of the scroll positions becomes wrong the other way (TODO FIX) */
                 <div
-                    className="w-full flex justify-center items-center overflow-hidden"
+                    className="w-full flex absolute top-1 z-1 justify-center items-center overflow-hidden"
                     style={{ height: SPINNNER_HEIGHT }}
                 >
                     <Spinner />
@@ -364,7 +371,6 @@ export const Replies = (properties: {
                                 )}
                             />
                         )}
-
                         <div
                             className={`${
                                 view === "chat" ? "pl-[15px]" : ""
@@ -393,11 +399,10 @@ export const Replies = (properties: {
                                                 : undefined
                                         }
                                         className={
-                                            (pendingBatch &&
+                                            pendingBatch &&
                                             indexIsReadyToRender(i)
-                                                ? ""
-                                                : "fixed top-[-5500px]") +
-                                            ` ${i === sentinelIndex ? "" : ""}`
+                                                ? "visible"
+                                                : "hidden"
                                         }
                                     />
                                 </Fragment>
@@ -435,7 +440,8 @@ export const Replies = (properties: {
 
             {!scrollUpForMore && isLoadingAnything && (
                 <div
-                    className="w-full flex justify-center items-center overflow-hidden"
+                    /*  We do absolute positioning here because the recalculations of the scroll positions becomes wrong the other way (TODO FIX) */
+                    className="w-full flex absolute bottom-1 z-1 justify-center items-center overflow-hidden"
                     style={{ height: SPINNNER_HEIGHT }}
                 >
                     <Spinner />

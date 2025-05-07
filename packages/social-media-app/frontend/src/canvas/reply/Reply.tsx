@@ -120,7 +120,7 @@ export const Reply = ({
         return () => observer.disconnect();
     }, [canvas, showMore]); // Re-run if canvas content or showMore toggles
 
-    const handleCanvasClick = async () => {
+    const handleCanvasClick = async (e?: any) => {
         let viewAfterNavigation: ViewType = "chat";
         canvas = canvas.closed
             ? await viewRoot.openWithSameSettings(canvas)
@@ -143,7 +143,6 @@ export const Reply = ({
         }
         viewAfterNavigation = "chat";
 
-        console.log("navigate to canvas", canvas.idString, viewAfterNavigation);
         navigate(getCanvasPath(canvas, viewAfterNavigation), {});
         onClick && onClick();
     };

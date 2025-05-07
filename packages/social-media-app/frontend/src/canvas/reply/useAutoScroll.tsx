@@ -155,14 +155,14 @@ export const useAutoScroll = (properties: {
                 latestReplyRef.current =
                     processedReplies[processedReplies.length - 1];
 
-                console.log(
-                    "Reply change, should scroll to bottom?",
-                    last.reply.idString !== lastScrollToSee?.current &&
-                        latestReplyRef.current.reply.publicKey.equals(
-                            peer.identity.publicKey
-                        ) &&
-                        scrollMode.current === "automatic"
-                );
+                /*  console.log(
+                     "Reply change, should scroll to bottom?",
+                     last.reply.idString !== lastScrollToSee?.current &&
+                         latestReplyRef.current.reply.publicKey.equals(
+                             peer.identity.publicKey
+                         ) &&
+                         scrollMode.current === "automatic"
+                 ); */
                 if (
                     last.reply.idString !== lastScrollToSee?.current &&
                     latestReplyRef.current.reply.publicKey.equals(
