@@ -131,7 +131,6 @@ export const AutoReplyProvider: React.FC<{
                     last &&
                     replyTo.address !== last.address
                 ) {
-                    console.log("AUTO REPLY TO", last, processedReplies.length);
                     setReplyTo(last);
                 }
             }
