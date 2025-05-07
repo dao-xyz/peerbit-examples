@@ -24,7 +24,7 @@ jobs:
 
     - name: Build every frontend with the commit hash
       run: |
-        yarn install --immutable
+        yarn install
         SHORT_SHA=$(echo $COMMIT_HASH | cut -c1-7)
 
         # --- Build each package -----------------
