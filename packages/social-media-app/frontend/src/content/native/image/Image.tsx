@@ -1,58 +1,88 @@
-import React, { useRef, useEffect, useState } from "react";
+import React, {
+    useEffect,
+    useRef,
+    useState,
+    memo,
+    ChangeEvent,
+    DragEvent,
+    TouchEvent,
+} from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FiMaximize, FiX } from "react-icons/fi";
 import { StaticImage } from "@giga-app/interface";
+import { sha256Base64Sync } from "@peerbit/crypto";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
-import { sha256Base64Sync } from "@peerbit/crypto";
+
+/* -------------------------------------------------------------------------
+ * ImageContent – stable‑height version
+ * -------------------------------------------------------------------------
+ * ➤ Reserves the final block size immediately via CSS `aspect-ratio`, so the
+ *   row height that react‑virtuoso measures never changes.
+ * ➤ Shows a lightweight, animated skeleton until the actual image blob is
+ *   decoded, preventing layout shifts.
+ * ---------------------------------------------------------------------- */
 
 export type ImageContentProps = {
-    content: StaticImage;
+    content: StaticImage & {
+        /** Intrinsic bitmap width */
+        width?: number;
+        /** Intrinsic bitmap height */
+        height?: number;
+    };
     onResize: (dims: { width: number; height: number }) => void;
     editable?: boolean;
     onChange?: ChangeCallback;
     thumbnail?: boolean;
     fit?: "cover" | "contain";
     canOpenFullscreen?: boolean;
+    /** If width/height are missing, fall back to this ratio (w / h). */
+    fallbackRatio?: number;
 };
 
-export const ImageContent = ({
+export const ImageContent = memo(function ImageContent({
     content,
     onResize,
     editable = false,
     onChange,
     fit,
     canOpenFullscreen = true,
-}: ImageContentProps) => {
+    fallbackRatio = 4 / 3,
+}: ImageContentProps) {
+    /* ------------------------------------------------------------------- */
+    /* Internal state                                                      */
+    /* ------------------------------------------------------------------- */
     const containerRef = useRef<HTMLDivElement>(null);
-    const lastDims = useRef<{ width: number; height: number } | null>(null);
-    const threshold = 1;
-    const [isDragOver, setIsDragOver] = useState(false);
-    const [imgUrl, setImgUrl] = useState("");
+    const [imgUrl, setImgUrl] = useState<string | null>(null);
     const [dialogOpen, setDialogOpen] = useState(false);
-    const lastImageHash = useRef<string | null>(null);
+    const [isDragOver, setIsDragOver] = useState(false);
 
-    // States for swipe animation.
-    const [translateY, setTranslateY] = useState(0);
-    const [isDragging, setIsDragging] = useState(false);
-    const touchStartYRef = useRef<number | null>(null);
-    const swipeThreshold = 100; // pixels
+    /* ------------------------------------------------------------------- */
+    /* Pre‑decode image & emit resize                                      */
+    /* ------------------------------------------------------------------- */
+    const lastHashRef = useRef<string | null>(null);
 
-    // Create a Blob URL from the raw binary data stored in content.data.
     useEffect(() => {
         if (!content.data || !content.mimeType) return;
-        let hash = sha256Base64Sync(content.data); // TODO use StaticContent contentId instead
-        if (lastImageHash.current === hash) {
-            return;
-        }
-        lastImageHash.current = hash;
 
-        const originalBlob = new Blob([content.data], {
-            type: content.mimeType,
-        });
-        const originalUrl = URL.createObjectURL(originalBlob);
+        const hash = sha256Base64Sync(content.data);
+
+        /* ❶ skip if we already kicked off a load for this hash */
+        if (lastHashRef.current === hash) return;
+        lastHashRef.current = hash;
+
+        const blob = new Blob([content.data], { type: content.mimeType });
+        const objectUrl = URL.createObjectURL(blob);
 
         const img = new Image();
+        img.onload = () => {
+            onResize({ width: img.width, height: img.height });
+            setImgUrl(`${objectUrl}#${hash}`);
+        };
+
+        img.src = objectUrl;
+
+        /*  This kind of rendering might lead to better colors (TODO investigate)
         img.onload = () => {
             const canvas = document.createElement("canvas");
             canvas.width = img.width;
@@ -75,150 +105,123 @@ export const ImageContent = ({
             canvas.remove();
         };
         img.src = originalUrl;
+        */
 
+        /* ❷ cleanup: clear the ref only if *this* load is being abandoned */
         return () => {
-            lastImageHash.current = null;
-            URL.revokeObjectURL(originalUrl);
+            URL.revokeObjectURL(objectUrl);
+            if (lastHashRef.current === hash) lastHashRef.current = null;
         };
-    }, [content.data, content.mimeType]);
+    }, [content.data, content.mimeType, onResize]);
 
-    // Resize observer to trigger onResize.
-    useEffect(() => {
-        if (!containerRef.current) return;
-        const observer = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                const { width, height } = entry.contentRect;
-                const newDims = { width, height };
-                if (
-                    lastDims.current &&
-                    Math.abs(lastDims.current.width - newDims.width) <
-                        threshold &&
-                    Math.abs(lastDims.current.height - newDims.height) <
-                        threshold
-                ) {
-                    continue;
-                }
-                lastDims.current = newDims;
-                onResize(newDims);
-            }
-        });
-        observer.observe(containerRef.current);
-        return () => observer.disconnect();
-    }, [onResize, threshold]);
-
-    const handleFileChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files && e.target.files[0];
+    /* ------------------------------------------------------------------- */
+    /* File‑drop / picker handlers                                         */
+    /* ------------------------------------------------------------------- */
+    const handleFile = async (file?: File | null) => {
+        if (!file || !onChange) return;
         const image = await readFileAsImage(file);
-        onChange && onChange(image);
+        onChange(image);
     };
 
-    const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
-        e.preventDefault();
-        setIsDragOver(true);
-    };
+    const onInputChange = (e: ChangeEvent<HTMLInputElement>) =>
+        handleFile(e.target.files?.[0]);
 
-    const handleDragLeave = (e: React.DragEvent<HTMLDivElement>) => {
+    const onDrop = (e: DragEvent<HTMLDivElement>) => {
         e.preventDefault();
         setIsDragOver(false);
+        handleFile(e.dataTransfer.files?.[0]);
     };
 
-    const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
-        e.preventDefault();
-        setIsDragOver(false);
-        const file = e.dataTransfer.files && e.dataTransfer.files[0];
-        const image = await readFileAsImage(file);
-        onChange && onChange(image);
+    /* ------------------------------------------------------------------- */
+    /* Touch/swipe to dismiss full‑screen                                  */
+    /* ------------------------------------------------------------------- */
+    const [translateY, setTranslateY] = useState(0);
+    const [isDragging, setIsDragging] = useState(false);
+    const touchStartY = useRef<number | null>(null);
+    const swipeThreshold = 100;
+
+    const start = (e: TouchEvent<HTMLDivElement>) => {
+        touchStartY.current = e.touches[0].clientY;
+        setIsDragging(true);
+    };
+    const move = (e: TouchEvent<HTMLDivElement>) => {
+        if (touchStartY.current == null) return;
+        setTranslateY(e.touches[0].clientY - touchStartY.current);
+    };
+    const end = () => {
+        setIsDragging(false);
+        if (Math.abs(translateY) >= swipeThreshold) {
+            setTranslateY(
+                translateY > 0 ? window.innerHeight : -window.innerHeight
+            );
+        } else {
+            setTranslateY(0);
+        }
+        touchStartY.current = null;
+    };
+    const resetAfterTransition = () => {
+        if (Math.abs(translateY) >= window.innerHeight) {
+            setDialogOpen(false);
+            setTranslateY(0);
+        }
     };
 
-    // Determine object-fit class based on the `fit` prop.
+    /* ------------------------------------------------------------------- */
+    /* Derived values                                                      */
+    /* ------------------------------------------------------------------- */
+    const ratio =
+        content.width && content.height
+            ? content.width / content.height
+            : fallbackRatio;
     const fitClass =
         fit === "cover"
             ? "object-cover"
             : fit === "contain"
             ? "object-contain"
             : "";
-
-    // --- SWIPE HANDLERS WITH UP & DOWN SUPPORT AND BACKGROUND FADE ---
-    const handleTouchStart = (e: React.TouchEvent<HTMLDivElement>) => {
-        touchStartYRef.current = e.touches[0].clientY;
-        setIsDragging(true);
-    };
-
-    const handleTouchMove = (e: React.TouchEvent<HTMLDivElement>) => {
-        if (touchStartYRef.current !== null) {
-            const deltaY = e.touches[0].clientY - touchStartYRef.current;
-            setTranslateY(deltaY);
-        }
-    };
-
-    const handleTouchEnd = () => {
-        setIsDragging(false);
-        if (Math.abs(translateY) >= swipeThreshold) {
-            // Animate offscreen in the swipe direction.
-            if (translateY > 0) {
-                setTranslateY(window.innerHeight);
-            } else {
-                setTranslateY(-window.innerHeight);
-            }
-        } else {
-            // Animate back to original position.
-            setTranslateY(0);
-        }
-        touchStartYRef.current = null;
-    };
-
-    const handleTransitionEnd = () => {
-        if (Math.abs(translateY) >= window.innerHeight) {
-            // If the image has animated offscreen, close the dialog.
-            setDialogOpen(false);
-            // Reset the position for next time.
-            setTranslateY(0);
-        }
-    };
-
-    // Calculate overlay opacity: fades out as the image is swiped away.
     const overlayOpacity =
-        1 * (1 - Math.min(Math.abs(translateY) / window.innerHeight, 1));
+        1 - Math.min(Math.abs(translateY) / window.innerHeight, 1);
 
-    // Fullscreen preview container.
-    const FullscreenPreview = (
+    /* ------------------------------------------------------------------- */
+    /* Full‑screen portal                                                 */
+    /* ------------------------------------------------------------------- */
+    const fullScreen = (
         <Dialog.Portal>
             <Dialog.Overlay
                 onClick={() => setDialogOpen(false)}
                 style={{
-                    backgroundColor: `rgba(0, 0, 0, ${overlayOpacity})`,
+                    backgroundColor: `rgba(0,0,0,${overlayOpacity})`,
                     transition: isDragging
                         ? "none"
-                        : "background-color 0.3s ease",
+                        : "background-color .3s ease",
                 }}
                 className="fixed inset-0 z-[10000]"
             />
             <Dialog.Content
                 className="fixed inset-0 z-[10001] flex items-center justify-center"
                 onClick={(e) => e.stopPropagation()}
-                onTouchStart={handleTouchStart}
-                onTouchMove={handleTouchMove}
-                onTouchEnd={handleTouchEnd}
-                onTransitionEnd={handleTransitionEnd}
+                onTouchStart={start}
+                onTouchMove={move}
+                onTouchEnd={end}
+                onTransitionEnd={resetAfterTransition}
                 style={{
                     transform: `translateY(${translateY}px)`,
-                    transition: isDragging ? "none" : "transform 0.3s ease",
+                    transition: isDragging ? "none" : "transform .3s ease",
                 }}
             >
                 <Dialog.Title className="sr-only">Image Preview</Dialog.Title>
                 <div className="w-full h-full flex justify-center max-w-4xl max-h-[100vh]">
-                    <img
-                        src={imgUrl}
-                        alt={content.alt ?? ""}
-                        className="h-full object-contain"
-                    />
+                    {imgUrl && (
+                        <img
+                            src={imgUrl}
+                            alt={content.alt ?? ""}
+                            className="h-full object-contain"
+                        />
+                    )}
                 </div>
                 {translateY === 0 && (
                     <Dialog.Close asChild>
-                        <button
-                            className="absolute btn top-0 right-0 w-10 h-10 text-white bg-black opacity-60 text-2xl"
-                            style={{ borderRadius: "0" }}
-                        >
+                        <button className="absolute btn top-0 right-0 w-10 h-10 text-white bg-black opacity-60 text-2xl rounded-none">
                             <FiX />
                         </button>
                     </Dialog.Close>
@@ -227,62 +230,91 @@ export const ImageContent = ({
         </Dialog.Portal>
     );
 
+    /* ------------------------------------------------------------------- */
+    /* Render                                                              */
+    /* ------------------------------------------------------------------- */
     return (
         <div
             ref={containerRef}
-            onDragOver={editable ? handleDragOver : undefined}
-            onDragLeave={editable ? handleDragLeave : undefined}
-            onDrop={editable ? handleDrop : undefined}
-            className={`relative w-full h-full ${
+            style={{ aspectRatio: ratio }}
+            className={`relative w-full h-auto ${
                 editable
-                    ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150 bg-neutral-50 dark:bg-neutral-800"
+                    ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150"
                     : ""
             } ${
                 editable && isDragOver
                     ? "border-primary-500 bg-primary-50 dark:bg-primary-900"
                     : ""
             }`}
+            onDragOver={
+                editable
+                    ? (e) => {
+                          e.preventDefault();
+                          setIsDragOver(true);
+                      }
+                    : undefined
+            }
+            onDragLeave={
+                editable
+                    ? (e) => {
+                          e.preventDefault();
+                          setIsDragOver(false);
+                      }
+                    : undefined
+            }
+            onDrop={editable ? onDrop : undefined}
         >
-            {canOpenFullscreen ? (
-                !editable ? (
-                    <Dialog.Root open={dialogOpen} onOpenChange={setDialogOpen}>
-                        <Dialog.Trigger asChild>
+            {/* skeleton while loading */}
+            {!imgUrl && (
+                <div className="w-full h-full animate-pulse bg-neutral-300 dark:bg-neutral-700 rounded" />
+            )}
+
+            {/* actual image */}
+            {imgUrl &&
+                (canOpenFullscreen ? (
+                    !editable ? (
+                        <Dialog.Root
+                            open={dialogOpen}
+                            onOpenChange={setDialogOpen}
+                        >
+                            <Dialog.Trigger asChild>
+                                <img
+                                    src={imgUrl}
+                                    alt={content.alt ?? ""}
+                                    className={`w-full h-full ${fitClass}`}
+                                />
+                            </Dialog.Trigger>
+                            {fullScreen}
+                        </Dialog.Root>
+                    ) : (
+                        <>
                             <img
                                 src={imgUrl}
                                 alt={content.alt ?? ""}
                                 className={`w-full h-full ${fitClass}`}
                             />
-                        </Dialog.Trigger>
-                        {FullscreenPreview}
-                    </Dialog.Root>
+                            <button
+                                onClick={() => setDialogOpen(true)}
+                                className="absolute bottom-4 right-4 p-2 bg-black bg-opacity-50 rounded-full text-white"
+                            >
+                                <FiMaximize />
+                            </button>
+                            <Dialog.Root
+                                open={dialogOpen}
+                                onOpenChange={setDialogOpen}
+                            >
+                                {fullScreen}
+                            </Dialog.Root>
+                        </>
+                    )
                 ) : (
-                    <>
-                        <img
-                            src={imgUrl}
-                            alt={content.alt ?? ""}
-                            className={`w-full h-full ${fitClass}`}
-                        />
-                        <button
-                            onClick={() => setDialogOpen(true)}
-                            className="absolute bottom-4 right-4 p-2 bg-black bg-opacity-50 rounded-full text-white"
-                        >
-                            <FiMaximize />
-                        </button>
-                        <Dialog.Root
-                            open={dialogOpen}
-                            onOpenChange={setDialogOpen}
-                        >
-                            {FullscreenPreview}
-                        </Dialog.Root>
-                    </>
-                )
-            ) : (
-                <img
-                    src={imgUrl}
-                    alt={content.alt ?? ""}
-                    className={`w-full h-full ${fitClass}`}
-                />
-            )}
+                    <img
+                        src={imgUrl}
+                        alt={content.alt ?? ""}
+                        className={`w-full h-full ${fitClass}`}
+                    />
+                ))}
+
             {editable && (
                 <>
                     <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
@@ -293,11 +325,13 @@ export const ImageContent = ({
                     <input
                         type="file"
                         accept="image/*"
-                        onChange={handleFileChange}
+                        onChange={onInputChange}
                         className="absolute inset-0 opacity-0 cursor-pointer"
                     />
                 </>
             )}
         </div>
     );
-};
+});
+
+ImageContent.displayName = "ImageContent";
