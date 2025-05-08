@@ -141,6 +141,12 @@ export const CanvasWrapper = ({
         {
             id: canvas?.idString,
             debounce: 123,
+            local: true,
+            remote: true,
+            waitForReplicators: {
+                timeout: 5e3,
+                type: "once",
+            },
             onChange: {
                 merge: (change) => {
                     const filteredForScope: DocumentsChange<
@@ -379,7 +385,7 @@ export const CanvasWrapper = ({
                 });
             } else {
                 console.log("Save pending into", canvas.elements);
-                canvas.elements.put(element);
+                canvas.createElement(element);
             }
             results.push(element);
         }
