@@ -105,7 +105,7 @@ export const Header = ({
                     }
                 >
                     <div
-                        className={`overflow-hidden flex mr-1 ${
+                        className={`overflow-hidden flex mr-1   ${
                             variant === "tiny" || variant === "medium"
                                 ? "rounded-full"
                                 : "rounded-lg"
@@ -174,7 +174,9 @@ export const Header = ({
                                 e.preventDefault();
                             }}
                         >
-                            <button className={"btn btn-icon btn-icon-sm "}>
+                            <button
+                                className={"ml-auto btn btn-icon btn-icon-sm "}
+                            >
                                 <HiDotsHorizontal size={20} />
                             </button>
                         </DropdownMenu.Trigger>
