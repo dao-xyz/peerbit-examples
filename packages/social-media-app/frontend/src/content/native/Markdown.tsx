@@ -292,7 +292,7 @@ export const MarkdownContent = ({
     return (
         <div
             ref={containerRef}
-            className={`${commonClasses} w-full text-left ${
+            className={`${commonClasses} w-full text-left  ${
                 editable ? "cursor-text" : ""
             }`}
             onClick={handleClick}
@@ -345,6 +345,14 @@ export const MarkdownContent = ({
                         }
                         unwrapDisallowed
                         remarkPlugins={[remarkGfm]}
+                        components={{
+                            a: ({ node, ...props }) => (
+                                <a
+                                    {...props}
+                                    className=" wrap-anywhere underline "
+                                />
+                            ),
+                        }}
                     >
                         {text}
                     </Markdown>
