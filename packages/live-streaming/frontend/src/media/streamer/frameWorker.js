@@ -1,6 +1,6 @@
 // Create a persistent offscreen canvas and its 2D context.
 const offscreen = new OffscreenCanvas(1, 1);
-const ctx = offscreen.getContext("2d");
+const ctx = offscreen.getContext("2d"); // TODO test willReadFrequently options performance
 if (!ctx) {
     throw new Error("2D context not available on OffscreenCanvas");
 }
