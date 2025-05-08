@@ -85,6 +85,7 @@ export class Profiles extends Program<ProfileArgs> {
                         : false
                     : { factor: 1 }, // TODO choose better
             canOpen: () => false,
+            keep: "self",
             canPerform: async (operation) => {
                 /**
                  * Only allow updates if we created it

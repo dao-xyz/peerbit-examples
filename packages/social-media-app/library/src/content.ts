@@ -627,6 +627,7 @@ export class Canvas extends Program<CanvasArgs> {
                 type: Element,
                 replicas: args?.replicas,
                 timeUntilRoleMaturity: 6e4,
+                keep: "self",
                 replicate:
                     args?.replicate != null
                         ? args?.replicate
@@ -704,6 +705,7 @@ export class Canvas extends Program<CanvasArgs> {
                      */
                     return true;
                 },
+                keep: "self",
                 index: {
                     prefetch: {
                         strict: false,
@@ -768,10 +770,13 @@ export class Canvas extends Program<CanvasArgs> {
             let indexedCanvas = await parent.replies.index.get(canvas.id, {
                 resolve: false,
                 local: true,
-                remote: false,
+                remote: {
+                    strategy: "fallback",
+                    timeout: 1e4,
+                },
             });
             if (!indexedCanvas) {
-                console.log("MISSING INDEXED CANVAS", canvas.idString);
+                console.trace("MISSING INDEXED CANVAS", canvas.idString);
                 // because we might index children before parents, this might be undefined
                 // but it is fine, since when the parent is to be re-indexed, its children will be considered
                 /*  try {
@@ -1168,6 +1173,10 @@ export class Canvas extends Program<CanvasArgs> {
                 value: path[i],
             });
         }
+    }
+
+    createElement(element: Element) {
+        return this.origin!.elements.put(element);
     }
 
     get elements(): Documents<Element, IndexableElement, any> {
