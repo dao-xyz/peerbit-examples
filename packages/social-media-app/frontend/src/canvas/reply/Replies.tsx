@@ -16,14 +16,25 @@ import { useAutoScroll, ScrollSettings } from "./useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
 import { Spinner } from "../../utils/Spinner";
 
-const LOAD_TIMEOUT = 5e2;
-const SPINNNER_HEIGHT = 40;
+/** How long we keep newly-fetched replies hidden (ms) */
+const LOAD_TIMEOUT = 200;
+const SPINNER_HEIGHT = 40;
 
+/**
+ * Replies
+ * -------
+ * Handles lazy-rendering, infinite scroll and auto-scroll behaviour while
+ * ensuring we never reveal a half-loaded batch when `processedReplies`
+ * arrives in several rapid chunks.
+ */
 export const Replies = (properties: {
     scrollSettings: ScrollSettings;
     parentRef: React.RefObject<HTMLDivElement>;
     viewRef: HTMLElement;
 }) => {
+    /* ------------------------------------------------------------------ */
+    /* Context & state                                                    */
+    /* ------------------------------------------------------------------ */
     const {
         view,
         processedReplies,
@@ -39,60 +50,80 @@ export const Replies = (properties: {
     const sentinelRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
 
+    /**
+     * `pendingBatch.nextBatchIndex` is *how many* replies we are allowed to
+     * show. It always grows monotonically.
+     */
     const [pendingBatch, setPendingBatch] = useState<{
         nextBatchIndex: number;
     }>({
         nextBatchIndex: 0,
     });
-    // Track which replies have been seen for the "new messages" toast
+
+    /** Keeps track of how many replies are already visible */
+    const committedLengthRef = useRef(0);
+
+    /** For the “new messages” toast */
     const alreadySeen = useRef(new Set<string>());
 
-    const loadedMoreOnce = useRef(true);
-    const loadMore = async () => {
-        loadedMoreOnce.current = true;
-        await _loadMore();
-    };
+    /* Imperative refs --------------------------------------------------- */
+    const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastProcessedRepliesRef = useRef<typeof processedReplies | null>(
+        null
+    );
+
+    /**
+     * During pagination (scroll-up-for-more) we need to maintain scroll
+     * position so the user doesn’t lose context. We remember how tall the
+     * scroll container was *before* loading more, then after the new batch
+     * becomes visible we nudge the scrollTop by exactly that delta.
+     */
     const pendingScrollAdjust = useRef<{
         sentinel: HTMLElement;
         prevScrollHeight: number;
     } | null>(null);
 
-    const lastProcessedRepliesLength = useRef(processedReplies.length);
-    const lastProcessedRepliesRef = useRef<any>(null);
-
-    const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
     /* ------------------------------------------------------------------ */
-    /* 1. effect – update pending batch whenever processedReplies changes */
+    /* 1. Hide freshly-fetched replies for a short while                   */
     /* ------------------------------------------------------------------ */
     useEffect(() => {
-        // always clear any previous timeout before scheduling a new one
-        if (loadTimeoutRef.current) {
-            clearTimeout(loadTimeoutRef.current);
+        /* ------------------------------------------------------------------
+         *  Early exits / bookkeeping
+         * ------------------------------------------------------------------ */
+        if (lastProcessedRepliesRef.current === processedReplies) return;
+        lastProcessedRepliesRef.current = processedReplies;
+
+        const newLength = processedReplies.length;
+        const oldLength = committedLengthRef.current;
+        if (newLength <= oldLength) return; // no growth → nothing to do
+
+        /* ------------------------------------------------------------------
+         *  Helper that actually reveals the new items
+         * ------------------------------------------------------------------ */
+        const reveal = () => {
+            setPendingBatch((prev) => ({
+                nextBatchIndex: Math.max(prev.nextBatchIndex, newLength),
+            }));
+            committedLengthRef.current = newLength; // mark as visible
             loadTimeoutRef.current = null;
+        };
+
+        /* ------------------------------------------------------------------
+         *  Decide if we wait (top-prepend) or reveal immediately (bottom-append)
+         * ------------------------------------------------------------------ */
+        const isLazyLoadBatch = pendingScrollAdjust.current !== null;
+
+        if (isLazyLoadBatch) {
+            if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
+            loadTimeoutRef.current = setTimeout(reveal, LOAD_TIMEOUT);
+        } else {
+            // New item at the tail: show it right away
+            reveal();
         }
 
-        if (lastProcessedRepliesRef.current !== processedReplies) {
-            lastProcessedRepliesRef.current = processedReplies;
-
-            if (processedReplies.length > 0) {
-                setPendingBatch({
-                    nextBatchIndex: lastProcessedRepliesLength.current,
-                });
-
-                const length = processedReplies.length;
-                lastProcessedRepliesLength.current = length;
-
-                loadTimeoutRef.current = setTimeout(() => {
-                    setPendingBatch((prev) => ({
-                        nextBatchIndex: Math.max(prev.nextBatchIndex, length),
-                    }));
-                    loadTimeoutRef.current = null; // finished
-                }, LOAD_TIMEOUT);
-            }
-        }
-
-        // extra cleanup if processedReplies updates again
+        /* ------------------------------------------------------------------
+         *  Cleanup when the effect re-runs or unmounts
+         * ------------------------------------------------------------------ */
         return () => {
             if (loadTimeoutRef.current) {
                 clearTimeout(loadTimeoutRef.current);
@@ -102,17 +133,14 @@ export const Replies = (properties: {
     }, [processedReplies]);
 
     /* ------------------------------------------------------------------ */
-    /* 2. effect – reset lazy‑loading state whenever the view changes     */
+    /* 2. Reset lazy-state whenever the view changes                      */
     /* ------------------------------------------------------------------ */
     const resetLazyState = () => {
-        // kill any pending timeout from the previous view
         if (loadTimeoutRef.current) {
             clearTimeout(loadTimeoutRef.current);
             loadTimeoutRef.current = null;
         }
-
-        lastProcessedRepliesLength.current = 0;
-        loadedMoreOnce.current = false;
+        committedLengthRef.current = 0;
         alreadySeen.current.clear();
         pendingScrollAdjust.current = null;
         setPendingBatch({ nextBatchIndex: 0 });
@@ -120,7 +148,6 @@ export const Replies = (properties: {
 
     const prevView = useRef(view);
     const prevRoot = useRef(viewRoot);
-
     useEffect(() => {
         if (prevView.current !== view || prevRoot.current !== viewRoot) {
             resetLazyState();
@@ -129,19 +156,14 @@ export const Replies = (properties: {
         }
     }, [view, viewRoot]);
 
+    /* ------------------------------------------------------------------ */
+    /* 3. Loading flags & helpers                                         */
+    /* ------------------------------------------------------------------ */
     const isLoadingAnything =
         isLoadingView ||
         pendingBatch.nextBatchIndex !== processedReplies.length;
 
-    /* console.log({
-        isLoadingAnything,
-        isLoadingView,
-        diff: pendingBatch.nextBatchIndex !== processedReplies.length,
-        pending: pendingBatch.nextBatchIndex,
-        processLength: processedReplies.length
-    }) */
-
-    // Prepare refs array for each Reply
+    // Stable array of refs (same length as processedReplies)
     const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
     if (replyContentRefs.current.length !== processedReplies.length) {
         replyContentRefs.current = new Array(processedReplies.length).fill(
@@ -149,7 +171,7 @@ export const Replies = (properties: {
         );
     }
 
-    // Auto‑scroll when at bottom
+    /* Auto-scroll behaviour */
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
         repliesContainerRef,
@@ -161,32 +183,36 @@ export const Replies = (properties: {
             replyContentRefs.current[replyContentRefs.current.length - 1],
     });
 
-    // Toast for new messages
+    /* ------------------------------------------------------------------ */
+    /* 4. Toast for new messages                                          */
+    /* ------------------------------------------------------------------ */
     const [showNewMessagesToast, setShowNewMessagesToast] = useState(false);
     const prevRepliesCountRef = useRef(processedReplies.length);
-
     const scrollUpForMore = view === "chat" || view === "new";
 
     useEffect(() => {
-        let shouldShowFromView = scrollUpForMore;
-        const last =
-            processedReplies[processedReplies.length - 1]?.reply.publicKey;
-        const lastId =
-            processedReplies[processedReplies.length - 1]?.reply.idString;
+        const lastReply = processedReplies.at(-1);
+        const fromSomeoneElse =
+            lastReply &&
+            !lastReply.reply.publicKey.equals(peer.identity.publicKey);
 
         if (
-            shouldShowFromView &&
+            scrollUpForMore &&
             processedReplies.length > prevRepliesCountRef.current &&
             !isAtBottom &&
-            last &&
-            !last.equals(peer.identity.publicKey) &&
-            lastId &&
-            !alreadySeen.current.has(lastId)
+            fromSomeoneElse &&
+            lastReply &&
+            !alreadySeen.current.has(lastReply.reply.idString)
         ) {
             setShowNewMessagesToast(true);
         }
         prevRepliesCountRef.current = processedReplies.length;
-    }, [processedReplies, isAtBottom, view, peer.identity.publicKey]);
+    }, [
+        processedReplies,
+        isAtBottom,
+        scrollUpForMore,
+        peer.identity.publicKey,
+    ]);
 
     useEffect(() => {
         if (isAtBottom) {
@@ -197,86 +223,14 @@ export const Replies = (properties: {
         }
     }, [isAtBottom, processedReplies]);
 
-    useLayoutEffect(() => {
-        if (
-            pendingBatch.nextBatchIndex < processedReplies.length ||
-            !pendingScrollAdjust.current
-        ) {
-            return;
-        }
+    /* ------------------------------------------------------------------ */
+    /* 5. Sentinel & infinite scroll (load older)                          */
+    /* ------------------------------------------------------------------ */
+    const loadMore = async () => {
+        await _loadMore();
+    };
 
-        if (!scrollUpForMore) {
-            return;
-        }
-
-        const isWindow = properties.viewRef === document.body;
-        const scroller = isWindow
-            ? (document.scrollingElement as HTMLElement)
-            : (properties.viewRef as HTMLElement);
-
-        let prevScrollHeight = pendingScrollAdjust.current.prevScrollHeight;
-
-        if (!pendingScrollAdjust.current) {
-            return;
-        }
-        let first = true;
-        const scrollEffect = () => {
-            const newScrollHeight = properties.viewRef.scrollHeight;
-            /*  console.log("ADJUST SCROLL", {
-                 DIFF: newScrollHeight - prevScrollHeight,
-                 "SCROLL HEIGHT": newScrollHeight,
-                 "PREV SCROLL HEIGHT": prevScrollHeight,
-             }); */
-            const spinnerOffset = 0; /* first ? SPINNNER_HEIGHT : 0; TODO correctly */
-            const heightDiff =
-                newScrollHeight - prevScrollHeight - spinnerOffset;
-
-            first = false;
-            prevScrollHeight = newScrollHeight;
-
-            if (heightDiff > 0) {
-                //   console.log({ "scroll adjust": heightDiff });
-                if (isWindow) {
-                    window.scrollBy({
-                        top: heightDiff,
-                        behavior: "instant",
-                    });
-                } else {
-                    scroller.scrollTop += heightDiff;
-                }
-            }
-
-            pendingScrollAdjust.current = null;
-        };
-        scrollEffect();
-        // let timeout = setTimeout(scrollEffect, 0);
-
-        return () => {
-            // clearTimeout(timeout);
-        };
-    }, [pendingBatch.nextBatchIndex]);
-
-    useEffect(() => {
-        if (!contentRef.current || !properties.viewRef) return;
-        const viewObserver = new ResizeObserver(() => {
-            // if the view has resized and there is a pending scroll adjust, we need to adjust the scroll target height
-            if (
-                pendingBatch.nextBatchIndex < processedReplies.length &&
-                pendingScrollAdjust.current
-            ) {
-                pendingScrollAdjust.current.prevScrollHeight =
-                    properties.viewRef.scrollHeight;
-            }
-        });
-        viewObserver.observe(contentRef.current);
-        viewObserver.observe(properties.viewRef);
-
-        return () => {
-            viewObserver.disconnect();
-        };
-    }, [contentRef.current, properties.viewRef]);
-
-    const lastSentintentForLoadingMore = useRef<HTMLDivElement>(null);
+    const lastSentinelForLoadingMore = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const sentinel = sentinelRef.current;
@@ -287,15 +241,15 @@ export const Replies = (properties: {
                 const entry = entries[0];
                 if (
                     entry.isIntersecting &&
-                    lastSentintentForLoadingMore.current !== sentinel &&
+                    lastSentinelForLoadingMore.current !== sentinel &&
                     !isLoadingAnything
                 ) {
-                    lastSentintentForLoadingMore.current = sentinel;
+                    lastSentinelForLoadingMore.current = sentinel;
+                    // remember scroll height *before* fetching more so we can adjust later
                     pendingScrollAdjust.current = {
                         sentinel,
                         prevScrollHeight: properties.viewRef.scrollHeight,
                     };
-                    observer.unobserve(sentinel);
                     loadMore();
                 }
             },
@@ -311,46 +265,97 @@ export const Replies = (properties: {
         observer.observe(sentinel);
         return () => {
             observer.disconnect();
-            lastSentintentForLoadingMore.current = null;
+            lastSentinelForLoadingMore.current = null;
         };
-    }, [
-        properties.viewRef,
-        processedReplies,
-        properties.scrollSettings,
-        isLoadingAnything,
-    ]);
+    }, [properties.viewRef, isLoadingAnything, processedReplies]);
 
-    // Decide where the sentinel goes
-    const insertAtStart = view === "chat" || view === "new";
+    /* ------------------------------------------------------------------ */
+    /* 6. Maintain scroll position after older batch becomes visible       */
+    /* ------------------------------------------------------------------ */
+    useLayoutEffect(() => {
+        if (!scrollUpForMore) return;
+        if (!pendingScrollAdjust.current) return;
+        if (pendingBatch.nextBatchIndex < processedReplies.length) return; // still hidden
 
-    const sentinalIndexPadding = Math.floor(batchSize / 2);
-    const sentinelIndex = insertAtStart
-        ? sentinalIndexPadding
-        : processedReplies.length - (1 + sentinalIndexPadding);
+        const isWindow = properties.viewRef === document.body;
+        const scroller = isWindow
+            ? (document.scrollingElement as HTMLElement)
+            : (properties.viewRef as HTMLElement);
 
-    const indexIsReadyToRender = (i: number) => {
-        if (scrollUpForMore) {
-            if (i > processedReplies.length - 1 - pendingBatch.nextBatchIndex) {
-                return true;
-            }
-        } else {
-            if (i < pendingBatch.nextBatchIndex) {
-                return true;
+        let prevHeight = pendingScrollAdjust.current.prevScrollHeight;
+        const newHeight = properties.viewRef.scrollHeight;
+        const spinnerOffset = 0; // could tweak if spinner overlays content
+        const diff = newHeight - prevHeight - spinnerOffset;
+
+        if (diff > 0) {
+            console.log({
+                diff,
+                newHeight,
+                prevHeight,
+            });
+
+            if (isWindow) {
+                window.scrollBy({
+                    top: diff,
+                    behavior: "instant" as ScrollBehavior,
+                });
+            } else {
+                scroller.scrollTop += diff;
             }
         }
+
+        pendingScrollAdjust.current = null;
+    }, [pendingBatch.nextBatchIndex, processedReplies.length, scrollUpForMore]);
+
+    /* If the view resizes before the batch is revealed we need to update
+       the stored height so the adjustment is accurate. */
+    useEffect(() => {
+        if (!contentRef.current || !properties.viewRef) return;
+        const viewObserver = new ResizeObserver(() => {
+            if (
+                scrollUpForMore &&
+                pendingScrollAdjust.current &&
+                pendingBatch.nextBatchIndex < processedReplies.length
+            ) {
+                pendingScrollAdjust.current.prevScrollHeight =
+                    properties.viewRef.scrollHeight;
+            }
+        });
+        viewObserver.observe(contentRef.current);
+        viewObserver.observe(properties.viewRef);
+        return () => viewObserver.disconnect();
+    }, [contentRef.current, properties.viewRef, scrollUpForMore]);
+
+    /* ------------------------------------------------------------------ */
+    /* 7. Helpers                                                         */
+    /* ------------------------------------------------------------------ */
+    const indexIsReadyToRender = (i: number) => {
+        if (scrollUpForMore) {
+            return i >= processedReplies.length - pendingBatch.nextBatchIndex;
+        }
+        return i < pendingBatch.nextBatchIndex;
     };
 
+    const insertAtStart = scrollUpForMore;
+    const sentinelIndexPadding = Math.floor(batchSize / 2);
+    const sentinelIndex = insertAtStart
+        ? sentinelIndexPadding
+        : processedReplies.length - (1 + sentinelIndexPadding);
+
+    /* ------------------------------------------------------------------ */
+    /* 8. Render                                                          */
+    /* ------------------------------------------------------------------ */
     return (
         <>
             {scrollUpForMore && isLoadingAnything && (
-                /*  We do absolute positioning here because the recalculations of the scroll positions becomes wrong the other way (TODO FIX) */
                 <div
                     className="w-full flex absolute top-1 z-1 justify-center items-center overflow-hidden"
-                    style={{ height: SPINNNER_HEIGHT }}
+                    style={{ height: SPINNER_HEIGHT }}
                 >
                     <Spinner />
                 </div>
             )}
+
             <div
                 className="flex flex-col relative w-full mt-0 px-2"
                 ref={contentRef}
@@ -371,6 +376,7 @@ export const Replies = (properties: {
                                 )}
                             />
                         )}
+
                         <div
                             className={`${
                                 view === "chat" ? "pl-[15px]" : ""
@@ -382,7 +388,8 @@ export const Replies = (properties: {
                                         forwardRef={(ref) => {
                                             replyContentRefs.current[i] = ref;
                                             if (i === sentinelIndex) {
-                                                sentinelRef.current = ref;
+                                                sentinelRef.current =
+                                                    ref as HTMLDivElement | null;
                                             }
                                         }}
                                         canvas={item.reply}
@@ -399,7 +406,6 @@ export const Replies = (properties: {
                                                 : undefined
                                         }
                                         className={
-                                            pendingBatch &&
                                             indexIsReadyToRender(i)
                                                 ? "visible"
                                                 : "hidden"
@@ -440,9 +446,8 @@ export const Replies = (properties: {
 
             {!scrollUpForMore && isLoadingAnything && (
                 <div
-                    /*  We do absolute positioning here because the recalculations of the scroll positions becomes wrong the other way (TODO FIX) */
                     className="w-full flex absolute bottom-1 z-1 justify-center items-center overflow-hidden"
-                    style={{ height: SPINNNER_HEIGHT }}
+                    style={{ height: SPINNER_HEIGHT }}
                 >
                     <Spinner />
                 </div>

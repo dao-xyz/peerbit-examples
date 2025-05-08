@@ -145,6 +145,58 @@ export const useAutoScroll = (properties: {
     const lastScrollToSee = useRef<string>(null);
 
     // Update latest reply ref and scroll position before layout changes.
+    // Scroll listener for useAutoScroll – immediate up‑scroll detection
+    useEffect(() => {
+        // Only active in chat & new views, and when the hook is enabled
+        if (!viewIsShouldScrollToBottom) return;
+        if (!properties.enabled) return;
+
+        /* ------------------------------------------------------------------
+         * Helper – switch to manual mode the moment the user scrolls up
+         * ------------------------------------------------------------------ */
+        const markManual = () => {
+            if (disableScrollUpEvents.current) return; // temporarily blocked
+            if (scrollMode.current !== "manual") {
+                properties.debug &&
+                    console.log("⇡  user scrolled up → manual mode");
+                scrollMode.current = "manual";
+                forceScrollToBottom.current = false;
+                setIsAtBottom(false);
+            }
+        };
+
+        /* ------------------------------------------------------------------
+         * Main scroll listener
+         * ------------------------------------------------------------------ */
+        const listener = () => {
+            const { scrollHeight, clientHeight } = document.documentElement;
+            const scrollTop = getScrollTop();
+
+            // When we hit the very bottom, flip back to automatic mode
+            if (Math.abs(scrollHeight - clientHeight - scrollTop) < 1) {
+                properties.debug &&
+                    console.log("⇣  at bottom → automatic mode");
+                scrollMode.current = "automatic";
+                setIsAtBottom(true);
+            }
+
+            /* Detect up‑scroll immediately (no 300 ms delay) */
+            if (
+                lastScrollTop.current !== -1 &&
+                scrollTop < lastScrollTop.current
+            ) {
+                markManual();
+            }
+
+            lastScrollTop.current = scrollTop;
+        };
+
+        window.addEventListener("scroll", listener);
+        return () => {
+            window.removeEventListener("scroll", listener);
+        };
+    }, [setting, properties.enabled]);
+
     useLayoutEffect(() => {
         if (!properties.enabled) {
             return;
