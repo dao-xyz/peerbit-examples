@@ -178,11 +178,12 @@ function useViewContextHook() {
             id: query.id ?? "",
             transform: calculateAddress,
             batchSize,
-            debug: false /* { id: "replies" }, */,
+            debug: false, //{ id: "replies" },
             local: true,
             remote: true,
             waitForReplicators: {
                 timeout: 5e3,
+                type: "once",
             },
             onChange: {
                 merge: async (e) => {
