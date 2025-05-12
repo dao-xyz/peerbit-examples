@@ -4,6 +4,7 @@ import React, {
     useState,
     useEffect,
     useLayoutEffect,
+    useCallback,
 } from "react";
 import * as Toast from "@radix-ui/react-toast";
 import { Reply } from "./Reply";
@@ -15,9 +16,15 @@ import { useAutoReply } from "../AutoReplyContext";
 import { useAutoScroll, ScrollSettings } from "./useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
 import { Spinner } from "../../utils/Spinner";
+import {
+    useLeaveSnapshot,
+    useRestoreFeed,
+    LeaveSnapshotContext,
+    FeedSnapshot,
+} from "./feedRestoration";
 
 /** How long we keep newly-fetched replies hidden (ms) */
-const LOAD_TIMEOUT = 200;
+const LOAD_TIMEOUT = 100;
 const SPINNER_HEIGHT = 40;
 
 /**
@@ -31,6 +38,7 @@ export const Replies = (properties: {
     scrollSettings: ScrollSettings;
     parentRef: React.RefObject<HTMLDivElement>;
     viewRef: HTMLElement;
+    onSnapshot: (snap: FeedSnapshot) => void;
 }) => {
     /* ------------------------------------------------------------------ */
     /* Context & state                                                    */
@@ -42,6 +50,10 @@ export const Replies = (properties: {
         isLoading: isLoadingView,
         viewRoot,
         batchSize,
+        setView,
+        canvases,
+        hasMore,
+        iteratorId,
     } = useView();
 
     const { peer } = usePeer();
@@ -49,6 +61,8 @@ export const Replies = (properties: {
     const { replyTo, typedOnce } = useAutoReply();
     const sentinelRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
+
+    const restoredScrollPositionOnce = useRef(false);
 
     /**
      * `pendingBatch.nextBatchIndex` is *how many* replies we are allowed to
@@ -71,6 +85,35 @@ export const Replies = (properties: {
     const lastProcessedRepliesRef = useRef<typeof processedReplies | null>(
         null
     );
+    /*  flag: have we already shown at least one batch? */
+    const firstBatchHandled = useRef(false);
+
+    const loadMore = () => {
+        /* If restore requested more pages, mimic sentinel behaviour so
+     the ‘hide-freshly-fetched’ effect treats it as a prepend batch */
+        if (!firstBatchHandled.current) {
+            /* pretend we’re in lazy-load mode so the effect waits LOAD_TIMEOUT */
+            pendingScrollAdjust.current = {
+                sentinel: null as any,
+                prevScrollHeight: properties.viewRef.scrollHeight,
+            };
+        }
+
+        return _loadMore();
+    };
+
+    /* once the Hide-Until-Timeout effect actually reveals that batch,
+   mark it as handled so subsequent fetches use normal logic */
+    useEffect(() => {
+        if (
+            !firstBatchHandled.current &&
+            committedLengthRef.current > 0 && // something rendered
+            pendingBatch.nextBatchIndex >= committedLengthRef.current
+        ) {
+            firstBatchHandled.current = true;
+            pendingScrollAdjust.current = null; // clean up for future
+        }
+    }, [pendingBatch.nextBatchIndex]);
 
     /**
      * During pagination (scroll-up-for-more) we need to maintain scroll
@@ -140,9 +183,11 @@ export const Replies = (properties: {
             clearTimeout(loadTimeoutRef.current);
             loadTimeoutRef.current = null;
         }
+        restoredScrollPositionOnce.current = false;
         committedLengthRef.current = 0;
         alreadySeen.current.clear();
         pendingScrollAdjust.current = null;
+        firstBatchHandled.current = false;
         setPendingBatch({ nextBatchIndex: 0 });
     };
 
@@ -171,14 +216,60 @@ export const Replies = (properties: {
         );
     }
 
+    const scrollUpForMore = view === "chat" || view === "new";
+
+    const indexIsReadyToRender = useCallback(
+        (i: number) => {
+            if (scrollUpForMore) {
+                return (
+                    i >= processedReplies.length - pendingBatch.nextBatchIndex
+                );
+            }
+            return i < pendingBatch.nextBatchIndex;
+        },
+        [scrollUpForMore, processedReplies.length, pendingBatch.nextBatchIndex]
+    );
+
+    const isReplyVisible = useCallback(
+        (id: string) => {
+            const idx = processedReplies.findIndex(
+                (x) => x.reply.idString == id
+            );
+            return idx === undefined ? false : indexIsReadyToRender(idx);
+        },
+        [indexIsReadyToRender, processedReplies.length]
+    );
+
+    const { restoring } = useRestoreFeed({
+        hasMore,
+        replies: processedReplies,
+        loadMore,
+        replyRefs: replyContentRefs.current,
+        setView: setView, // from useView()
+        setViewRootById: (id) => {
+            if (viewRoot?.idString !== id) {
+                const found = canvases.find((c) => c.idString === id);
+                found && found.load();
+            }
+        },
+        onSnapshot: (snap) => {
+            properties.onSnapshot(snap);
+        },
+        onRestore: (snap) => {
+            restoredScrollPositionOnce.current = true;
+        },
+        isReplyVisible,
+    });
+
     /* Auto-scroll behaviour */
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
         repliesContainerRef,
         parentRef: properties.parentRef,
         setting: properties.scrollSettings,
-        enabled: true,
-        debug: false,
+        scrollOnViewChange: !restoredScrollPositionOnce.current,
+        enabled: false,
+        debug: true,
         lastElementRef: () =>
             replyContentRefs.current[replyContentRefs.current.length - 1],
     });
@@ -188,7 +279,6 @@ export const Replies = (properties: {
     /* ------------------------------------------------------------------ */
     const [showNewMessagesToast, setShowNewMessagesToast] = useState(false);
     const prevRepliesCountRef = useRef(processedReplies.length);
-    const scrollUpForMore = view === "chat" || view === "new";
 
     useEffect(() => {
         const lastReply = processedReplies.at(-1);
@@ -226,9 +316,13 @@ export const Replies = (properties: {
     /* ------------------------------------------------------------------ */
     /* 5. Sentinel & infinite scroll (load older)                          */
     /* ------------------------------------------------------------------ */
-    const loadMore = async () => {
-        await _loadMore();
-    };
+
+    const leaveSnapshot = useLeaveSnapshot({
+        replies: processedReplies,
+        replyRefs: replyContentRefs.current,
+        view,
+        viewRoot,
+    });
 
     const lastSentinelForLoadingMore = useRef<HTMLDivElement>(null);
 
@@ -288,12 +382,6 @@ export const Replies = (properties: {
         const diff = newHeight - prevHeight - spinnerOffset;
 
         if (diff > 0) {
-            console.log({
-                diff,
-                newHeight,
-                prevHeight,
-            });
-
             if (isWindow) {
                 window.scrollBy({
                     top: diff,
@@ -329,12 +417,6 @@ export const Replies = (properties: {
     /* ------------------------------------------------------------------ */
     /* 7. Helpers                                                         */
     /* ------------------------------------------------------------------ */
-    const indexIsReadyToRender = (i: number) => {
-        if (scrollUpForMore) {
-            return i >= processedReplies.length - pendingBatch.nextBatchIndex;
-        }
-        return i < pendingBatch.nextBatchIndex;
-    };
 
     const insertAtStart = scrollUpForMore;
     const sentinelIndexPadding = Math.floor(batchSize / 2);
@@ -343,10 +425,21 @@ export const Replies = (properties: {
         : processedReplies.length - (1 + sentinelIndexPadding);
 
     /* ------------------------------------------------------------------ */
-    /* 8. Render                                                          */
+    /* 9. Render                                                          */
+    /* ------------------------------------------------------------------ */
+
+    useEffect(() => {
+        if (!iteratorId) {
+            return;
+        }
+        loadMore?.();
+    }, [iteratorId]);
+
+    /* ------------------------------------------------------------------ */
+    /* 10. Render                                                          */
     /* ------------------------------------------------------------------ */
     return (
-        <>
+        <LeaveSnapshotContext.Provider value={leaveSnapshot}>
             {scrollUpForMore && isLoadingAnything && (
                 <div
                     className="w-full flex absolute top-1 z-1 justify-center items-center overflow-hidden"
@@ -452,6 +545,6 @@ export const Replies = (properties: {
                     <Spinner />
                 </div>
             )}
-        </>
+        </LeaveSnapshotContext.Provider>
     );
 };

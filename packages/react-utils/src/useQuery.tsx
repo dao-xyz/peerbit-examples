@@ -38,6 +38,7 @@ export const useQuery = <
         debug?: boolean | { id: string };
         reverse?: boolean;
         batchSize?: number;
+        prefetch?: boolean;
         onChange?: {
             merge?:
                 | boolean
@@ -122,8 +123,10 @@ export const useQuery = <
                 }) as ResultsIterator<Item>,
             };
             iteratorRef.current = ref;
+            if (options?.prefetch) {
+                loadMore();
+            }
             log("Iterator initialised", ref.id);
-            loadMore(); // initial batch
             return ref;
         };
 
@@ -232,8 +235,9 @@ export const useQuery = <
             emptyResultsRef.current ||
             iteratorRef.current.iterator.done() ||
             loadingMoreRef.current
-        )
-            return;
+        ) {
+            return false;
+        }
 
         const iterator = iteratorRef.current;
         setIsLoading(true);
@@ -265,7 +269,9 @@ export const useQuery = <
                 newItems = await Promise.all(newItems.map(options.transform));
 
             /* iterator might have been reset while we were async… */
-            if (iteratorRef.current !== iterator) return;
+            if (iteratorRef.current !== iterator) {
+                return false;
+            }
 
             emptyResultsRef.current = newItems.length === 0;
 
@@ -284,6 +290,7 @@ export const useQuery = <
                     : [...prev, ...unique];
                 updateAll(combined);
             }
+            return !iteratorRef.current.iterator.done();
         } catch (e) {
             if (!(e instanceof ClosedError)) throw e;
         } finally {
@@ -293,5 +300,11 @@ export const useQuery = <
     };
 
     /* ────────────── public API ────────────── */
-    return { items: all, loadMore, isLoading, empty: emptyResultsRef.current };
+    return {
+        items: all,
+        loadMore,
+        isLoading,
+        empty: emptyResultsRef.current,
+        id: iteratorRef.current?.id,
+    };
 };

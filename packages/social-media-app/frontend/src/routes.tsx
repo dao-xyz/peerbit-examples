@@ -9,6 +9,7 @@ import { MissingProfile } from "./profile/MissingProfile";
 import { ConnectDevices } from "./identity/ConnectDevices";
 import { ViewType } from "./view/ViewContex";
 import { NavigationEffects } from "./NavigationEffects";
+import { useRecordLocation } from "./useNavHistory";
 
 const textDecoder = new TextDecoder();
 export const getStreamPath = (node: PublicSignKey) =>
@@ -36,6 +37,7 @@ export const USER_BY_KEY_NAME = "/k/:key";
 export const NEW_SPACE = "/new";
 
 export function BaseRoutes() {
+    useRecordLocation();
     return (
         <>
             <NavigationEffects />

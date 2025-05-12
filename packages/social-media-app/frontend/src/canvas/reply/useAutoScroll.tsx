@@ -38,6 +38,7 @@ export const useAutoScroll = (properties: {
     setting: ScrollSettings;
     enabled: boolean;
     debug?: boolean;
+    scrollOnViewChange?: boolean;
 }) => {
     const {
         replies: processedReplies,
@@ -66,6 +67,10 @@ export const useAutoScroll = (properties: {
         if (!properties.enabled) {
             return;
         }
+        if (!properties.scrollOnViewChange) {
+            return;
+        }
+
         // TODO is this needed?
         if (viewIsShouldScrollToBottom) {
             properties.debug &&
@@ -90,40 +95,6 @@ export const useAutoScroll = (properties: {
             console.log("trigger scroll because the view changed", setting);
         triggerScroll();
     }, [setting, properties.enabled]);
-
-    /* 
-        useEffect(() => {
-            if (!properties.enabled) {
-                return;
-            }
-    
-    
-            if (
-                lastRepliesContainerRef.current !== repliesContainerRef.current
-            ) {
-    
-                // trigger scroll because the replies container has changed
-                properties.debug &&
-                    console.log(
-                        "trigger scroll because the replies container has changed",
-                        "from",
-                        repliesContainerRef.current,
-                        "to",
-                        lastRepliesContainerRef.current
-    
-                    );
-                lastRepliesContainerRef.current = repliesContainerRef.current;
-    
-                triggerScroll();
-            }
-            return () => {
-                lastRepliesContainerRef.current = undefined;
-            };
-        }, [
-    
-            repliesContainerRef.current,
-            properties.enabled,
-        ]); */
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));

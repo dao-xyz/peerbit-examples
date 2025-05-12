@@ -80,18 +80,18 @@ export const MarkdownContent = ({
                             return; // no self reply
                         }
                         // console.log("SUGGEST!");
-                        suggest(loadedParent, 2e4).then((reply) => {
-                            if (
-                                suggestStartRef !==
-                                canvas.path[canvas.path.length - 1].address
-                            ) {
-                                console.log(
-                                    "SUGGESTED reply parent change, skipping"
-                                );
-                                return; // the parent has changed, ignore the suggestion
-                            }
-                            setSuggestedReply(reply);
-                        });
+                        /*  suggest(loadedParent, 2e4).then((reply) => {
+                             if (
+                                 suggestStartRef !==
+                                 canvas.path[canvas.path.length - 1].address
+                             ) {
+                                 console.log(
+                                     "SUGGESTED reply parent change, skipping"
+                                 );
+                                 return; // the parent has changed, ignore the suggestion
+                             }
+                             setSuggestedReply(reply);
+                         }); */
                     } finally {
                         setLoadingSuggestedReply(false);
                     }
@@ -176,12 +176,12 @@ export const MarkdownContent = ({
     };
 
     useEffect(() => {
-        if (editable && containerRef.current) {
-            if (content.text.length === 0) {
-                handleStartEditing(false);
+        if (editable && containerRef.current && canvas) {
+            if (!suggestReply) {
+                handleStartEditing(true);
             }
         }
-    }, [editable, content.text]);
+    }, [editable, content.text, containerRef.current, canvas?.idString]);
 
     // New helper to insert the suggested reply
     const handleInsertSuggestion = () => {

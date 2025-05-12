@@ -14,6 +14,7 @@ import ExpandedContext from "./context/ExpandedContext";
 import { useThemeContext } from "./theme/useTheme";
 import { useHeaderVisibilityContext } from "./HeaderVisibilitiyProvider";
 import { buildCommit } from "./utils";
+import { useBackToParent } from "./canvas/useBackToParent";
 
 // Define props interface
 interface HeaderProps {
@@ -31,6 +32,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
     const { path } = useCanvases();
     const navigate = useNavigate();
     const headerIsVisible = useHeaderVisibilityContext();
+    const backToParent = useBackToParent(path[path.length - 2]);
 
     useEffect(() => {
         if (!headerIsVisible) {
@@ -56,10 +58,7 @@ export const Header = forwardRef((props: HeaderProps, ref) => {
                             <button
                                 className="col-start-5 btn btn-icon flex flex-row items-center gap-1 h-8 self-center"
                                 onClick={() => {
-                                    navigate(
-                                        getCanvasPath(path[path.length - 2]),
-                                        {}
-                                    );
+                                    backToParent();
                                 }}
                             >
                                 <IoIosArrowBack size={15} />

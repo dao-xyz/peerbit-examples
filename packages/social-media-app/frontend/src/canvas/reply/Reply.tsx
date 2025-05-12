@@ -15,6 +15,7 @@ import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
 import { useView, ViewType } from "../../view/ViewContex.js";
 import { rectIsStaticMarkdownText } from "../utils/rect.js";
+import { useLeaveSnapshotFn } from "./feedRestoration.js";
 
 const ReplyButton = ({
     children,
@@ -71,9 +72,10 @@ export const Reply = ({
     const [isOverflowing, setIsOverflowing] = useState(false);
     const previewContainerRef = useRef<HTMLDivElement>(null);
     const { viewRoot } = useView();
-
     const { peer } = usePeer();
+
     const navigate = useNavigate();
+    const leaveSnapshot = useLeaveSnapshotFn();
 
     // Use useLayoutEffect with a ResizeObserver to measure the container after the layout
     useLayoutEffect(() => {
@@ -121,6 +123,7 @@ export const Reply = ({
     }, [canvas, showMore]); // Re-run if canvas content or showMore toggles
 
     const handleCanvasClick = async (e?: any) => {
+        leaveSnapshot(canvas);
         let viewAfterNavigation: ViewType = "chat";
         canvas = canvas.closed
             ? await viewRoot.openWithSameSettings(canvas)

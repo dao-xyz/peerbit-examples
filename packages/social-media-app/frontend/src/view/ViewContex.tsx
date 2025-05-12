@@ -66,7 +66,8 @@ const calculateAddress = async (p: WithContext<Canvas>) => {
 };
 
 function useViewContextHook() {
-    const { root, path: canvases, loading } = useCanvases();
+    const { path: canvases, loading } = useCanvases();
+
     const { peer } = usePeer();
 
     // Instead of separate view state, derive view from URL:
@@ -82,21 +83,21 @@ function useViewContextHook() {
         }
     };
 
-    // View root state: latest canvas from the list of canvases.
-    const [viewRoot, setViewRoot] = useState<CanvasDB | undefined>(undefined);
-    useEffect(() => {
-        if (canvases && canvases.length > 0) {
-            setViewRoot(canvases[canvases.length - 1]);
-        }
-    }, [canvases, root?.closed, root?.address]);
-
     /* =====================================================================================
      *  🚀 Debounce *both* values together so the next effect fires only once per change‑set.
      * ===================================================================================== */
-    const { a: debouncedView, b: debouncedViewRoot } = useCombinedDebounced(
+    const { a: debouncedView, b: debouncedCanvases } = useCombinedDebounced(
         view,
-        viewRoot,
+        canvases,
         123
+    );
+
+    const viewRoot = React.useMemo<CanvasDB | undefined>(
+        () =>
+            debouncedCanvases.length
+                ? debouncedCanvases[debouncedCanvases.length - 1]
+                : undefined,
+        [debouncedCanvases]
     );
 
     // --- Query & Reply Fetching Management ---
@@ -111,12 +112,12 @@ function useViewContextHook() {
     }>({ query: null, id: "" });
 
     useEffect(() => {
-        if (!debouncedViewRoot) return;
+        if (!viewRoot) return;
 
         if (debouncedView === "chat") {
             setQuery({
                 query: new SearchRequest({
-                    query: getRepliesQuery(debouncedViewRoot),
+                    query: getRepliesQuery(viewRoot),
                     sort: [
                         new Sort({
                             key: ["__context", "created"],
@@ -124,13 +125,13 @@ function useViewContextHook() {
                         }),
                     ],
                 }),
-                id: getQueryId(debouncedViewRoot, debouncedView),
+                id: getQueryId(viewRoot, debouncedView),
                 reverse: true,
             });
         } else if (debouncedView === "best") {
             setQuery({
                 query: new SearchRequest({
-                    query: getImmediateRepliesQuery(debouncedViewRoot),
+                    query: getImmediateRepliesQuery(viewRoot),
                     sort: [
                         new Sort({
                             key: ["replies"],
@@ -142,13 +143,13 @@ function useViewContextHook() {
                         }),
                     ],
                 }),
-                id: getQueryId(debouncedViewRoot, debouncedView),
+                id: getQueryId(viewRoot, debouncedView),
             });
         } else {
             // "new" or "old"
             setQuery({
                 query: new SearchRequest({
-                    query: getImmediateRepliesQuery(debouncedViewRoot),
+                    query: getImmediateRepliesQuery(viewRoot),
                     sort: new Sort({
                         key: ["__context", "created"],
                         direction:
@@ -157,11 +158,11 @@ function useViewContextHook() {
                                 : SortDirection.ASC,
                     }),
                 }),
-                id: getQueryId(debouncedViewRoot, debouncedView),
+                id: getQueryId(viewRoot, debouncedView),
                 reverse: debouncedView === "new",
             });
         }
-    }, [debouncedView, debouncedViewRoot]);
+    }, [debouncedView, viewRoot]);
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(10); // Default batch size
@@ -169,10 +170,10 @@ function useViewContextHook() {
         items: sortedReplies,
         loadMore,
         isLoading,
+        empty,
+        id: iteratorId,
     } = useQuery(
-        debouncedViewRoot && debouncedViewRoot.loadedReplies
-            ? debouncedViewRoot.replies
-            : undefined,
+        viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
         {
             ...query,
             id: query.id ?? "",
@@ -189,8 +190,7 @@ function useViewContextHook() {
                 merge: async (e) => {
                     for (const change of e.added) {
                         const hash = change.__context.head;
-                        const entry =
-                            await debouncedViewRoot!.replies.log.log.get(hash);
+                        const entry = await viewRoot!.replies.log.log.get(hash);
                         for (const signer of await entry.getSignatures()) {
                             if (
                                 signer.publicKey.equals(peer.identity.publicKey)
@@ -290,7 +290,8 @@ function useViewContextHook() {
                 next: next.reply,
                 replies,
             });
-            /* if (quotes.length > 0) {
+            /* TODO 
+            if (quotes.length > 0) {
                 repliesAndQuotes.splice(
                     i + 1,
                     0,
@@ -314,16 +315,16 @@ function useViewContextHook() {
     }
 
     const processedReplies = useMemo(() => {
-        if (!debouncedViewRoot || debouncedViewRoot.closed) {
+        if (!viewRoot || viewRoot.closed) {
             return [];
         }
         if (
             debouncedView === "chat" &&
             sortedReplies &&
             sortedReplies.length > 0 &&
-            debouncedViewRoot
+            viewRoot
         ) {
-            return insertQuotes(sortedReplies, debouncedViewRoot);
+            return insertQuotes(sortedReplies, viewRoot);
         }
         return sortedReplies
             ? sortedReplies.map((reply) => ({
@@ -333,21 +334,18 @@ function useViewContextHook() {
                   id: reply.idString,
               }))
             : [];
-    }, [
-        sortedReplies,
-        debouncedView,
-        debouncedViewRoot?.closed,
-        debouncedViewRoot,
-    ]);
+    }, [sortedReplies, debouncedView, viewRoot?.closed, viewRoot]);
 
     return {
-        canvases,
-        viewRoot: debouncedViewRoot,
+        canvases: debouncedCanvases,
+        viewRoot,
         view: debouncedView,
         setView: changeView, // now changes update the URL
         loadMore,
+        hasMore: !empty,
         isLoading,
         query,
+        iteratorId,
         lastReply,
         sortedReplies,
         processedReplies,

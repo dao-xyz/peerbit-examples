@@ -15,6 +15,8 @@ import { ScrollSettings } from "./useAutoScroll.js";
 import { TbBuildingCommunity } from "react-icons/tb";
 import { FaUserFriends } from "react-icons/fa";
 import { IoIosNotifications } from "react-icons/io";
+import { getSnapshot } from "./feedRestoration.js";
+import { useLocation } from "react-router";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",
@@ -143,8 +145,10 @@ export const CanvasAndRepliesInner = () => {
     const toolbarVisible = useToolbarVisibility(scrollContainerRef);
 
     // When using the new behavior, initially the Replies area is unfocused.
+    const hasSnap = !!getSnapshot(useLocation().key);
+
     const [repliesFocused, _setRepliesFocused] = useState(
-        shouldFocusRepliesByDefault(view)
+        hasSnap || shouldFocusRepliesByDefault(view)
     );
 
     const [scrollSettings, setScrollSettings] =
@@ -175,7 +179,7 @@ export const CanvasAndRepliesInner = () => {
             }
         }
         return () => {
-            setRepliesFocused(false); // seem to be necessary to prevent old values to interfer
+            // setRepliesFocused(false); // we can't have this unmount it seems. Feed restoration does not work (i.e. focus can not be set autmatically, because this will cancel it)
         };
     }, [view]);
 
@@ -298,6 +302,10 @@ export const CanvasAndRepliesInner = () => {
         scrollToSnapEnabled.current = false;
         lastScrollTopRef.current = -1;
 
+        console.log(
+            "SET REPLEIS FOCUSEED BY GO TO TOP ",
+            shouldFocusRepliesByDefault(view)
+        );
         setRepliesFocused(shouldFocusRepliesByDefault(view));
 
         window.scrollTo({
@@ -427,6 +435,9 @@ height: `${spacerHeight}px`,
                                 }
                                 scrollSettings={scrollSettings}
                                 parentRef={repliesScrollRef}
+                                onSnapshot={(_snap) => {
+                                    setRepliesFocused(true);
+                                }}
                             />
                         </div>
                         {/* Render the gradient overlay only when unfocused.
