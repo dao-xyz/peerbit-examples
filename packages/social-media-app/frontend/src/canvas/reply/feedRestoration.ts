@@ -66,6 +66,7 @@ interface RestoreArgs {
     onSnapshot: (snap: FeedSnapshot) => void;
     onRestore: (snap: FeedSnapshot) => void;
     isReplyVisible: (id: string) => boolean;
+    debug?: boolean;
 }
 
 const nextFrame = () =>
@@ -78,6 +79,7 @@ export function useRestoreFeed(a: RestoreArgs) {
     const snapRef = useRef<FeedSnapshot | undefined>(undefined);
     const doneRef = useRef(false);
     const [restoring, setRestoring] = useState(false);
+    let log = a.debug ? console.log : (args: any) => {};
 
     useEffect(() => {
         const next = getSnapshot(key);
@@ -96,7 +98,7 @@ export function useRestoreFeed(a: RestoreArgs) {
     /* ────────────────────────────────────────────────────────────────── */
     useLayoutEffect(() => {
         if (snapRef.current && !doneRef.current) {
-            console.log(tag, "restore view/root", snapRef.current);
+            log(tag, "restore view/root", snapRef.current);
             a.setView(snapRef.current.view);
             a.setViewRootById(snapRef.current.rootId);
         }
@@ -121,7 +123,7 @@ export function useRestoreFeed(a: RestoreArgs) {
         const maxTicks = 1000;
         let ticks = 0;
 
-        console.log(tag, "loadMore()");
+        log(tag, "loadMore()");
         await a.loadMore();
 
         while (lenRef.current === before && ticks < maxTicks) {
@@ -129,7 +131,7 @@ export function useRestoreFeed(a: RestoreArgs) {
             ticks++;
         }
 
-        console.log(
+        log(
             tag,
             `loadMore finished – list ${
                 lenRef.current > before ? "grew" : "timeout"
@@ -141,7 +143,7 @@ export function useRestoreFeed(a: RestoreArgs) {
     };
 
     const needMore = () => {
-        console.log(tag, "done?", {
+        log(tag, "done?", {
             len: lenRef.current,
             len2: repliesRef.current.length,
             found: repliesRef.current.some(
@@ -166,21 +168,21 @@ export function useRestoreFeed(a: RestoreArgs) {
 
         if (!needMore()) return;
 
-        console.log(tag, "start fetching loop", { snap });
+        log(tag, "start fetching loop", { snap });
         fetching.current = true;
 
         (async () => {
             let guard = 30;
             while (guard-- && needMore()) {
-                console.log(tag, `loop guard=${guard + 1}`);
+                log(tag, `loop guard=${guard + 1}`);
                 await loadMoreAndWait();
                 if (!a.hasMore) {
-                    console.log(tag, "No more elements to load");
+                    log(tag, "No more elements to load");
                     break;
                 }
             }
             fetching.current = false;
-            console.log(tag, "fetching loop done");
+            log(tag, "fetching loop done");
         })();
     }, [key]);
 
@@ -190,11 +192,11 @@ export function useRestoreFeed(a: RestoreArgs) {
     useEffect(() => {
         const snap = snapRef.current;
         if (doneRef.current) {
-            console.log(tag, "Already done");
+            log(tag, "Already done");
             return;
         }
         if (!snap) {
-            console.log(tag, "Missing snapshot");
+            log(tag, "Missing snapshot");
             return;
         }
 
@@ -202,30 +204,28 @@ export function useRestoreFeed(a: RestoreArgs) {
             (r) => r.reply.idString === snap.anchorId
         );
         if (idx === -1) {
-            console.log(tag, "anchor reply not found yet");
+            log(tag, "anchor reply not found yet");
             return;
         }
 
         const node = a.replyRefs[idx];
         if (!node) {
-            console.log(tag, "anchor DOM node not attached yet");
+            log(tag, "anchor DOM node not attached yet");
             return;
         }
 
         if (!a.isReplyVisible(a.replies[idx].reply.idString)) {
-            console.log(tag, "anchor reply not visible yet");
+            log(tag, "anchor reply not visible yet");
             return;
         }
 
-        const delta = node.getBoundingClientRect().top - snap.offsetY;
-        console.log(tag, "scroll correction", { idx, delta });
-        if (delta !== 0) {
-            console.log("SCROLL", {
-                currentTop: node.getBoundingClientRect().top,
-                offsetY: snap.offsetY,
-            });
-            window.scrollBy(0, delta);
-        }
+        setTimeout(() => {
+            const delta = node.getBoundingClientRect().top - snap.offsetY;
+            log(tag, "scroll correction", { idx, delta });
+            if (delta !== 0) {
+                window.scrollBy(0, delta);
+            }
+        }, 0);
 
         doneRef.current = true;
         consumeSnapshot(key);
