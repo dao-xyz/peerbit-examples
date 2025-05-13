@@ -69,10 +69,12 @@ export const useQuery = <
     const iteratorRef = useRef<{
         id?: string;
         iterator: ResultsIterator<Item>;
+        itemsConsumed: number;
     } | null>(null);
     const emptyResultsRef = useRef(false);
     const closeControllerRef = useRef<AbortController | null>(null);
     const waitedOnceRef = useRef(false);
+    const [id, setId] = useState<string | undefined>(options?.id);
 
     /* ────────────── util ────────────── */
     const log = (...a: any[]) => {
@@ -92,18 +94,22 @@ export const useQuery = <
             iterator: ResultsIterator<Item>;
         } | null
     ) => {
-        if (iteratorRef.current && iteratorRef.current !== fromRef) return;
+        const toClose = iteratorRef.current;
+        if (toClose && fromRef && toClose !== fromRef) return;
+        iteratorRef.current = null;
+
         closeControllerRef.current?.abort();
         closeControllerRef.current = new AbortController();
         waitedOnceRef.current = false;
         emptyResultsRef.current = false;
 
-        iteratorRef.current?.iterator.close();
-        iteratorRef.current = null;
+        toClose?.iterator.close();
         allRef.current = [];
         setAll([]);
         setIsLoading(false);
         loadingMoreRef.current = false;
+        log(options, "Iterator reset", toClose?.id, fromRef?.id);
+        setId(undefined);
     };
 
     /* ────────────── effect: (re)create iterator ────────────── */
@@ -121,11 +127,14 @@ export const useQuery = <
                     remote: options?.remote ?? true,
                     resolve: options?.resolve,
                 }) as ResultsIterator<Item>,
+                itemsConsumed: 0,
             };
             iteratorRef.current = ref;
             if (options?.prefetch) {
                 loadMore();
             }
+            setId(options.id);
+
             log("Iterator initialised", ref.id);
             return ref;
         };
@@ -230,16 +239,16 @@ export const useQuery = <
     };
 
     const loadMore = async () => {
+        const iterator = iteratorRef.current;
         if (
-            !iteratorRef.current ||
+            !iterator ||
             emptyResultsRef.current ||
-            iteratorRef.current.iterator.done() ||
+            iterator.iterator.done() ||
             loadingMoreRef.current
         ) {
             return false;
         }
 
-        const iterator = iteratorRef.current;
         setIsLoading(true);
         loadingMoreRef.current = true;
 
@@ -269,13 +278,32 @@ export const useQuery = <
                 newItems = await Promise.all(newItems.map(options.transform));
 
             /* iterator might have been reset while we were async… */
+
             if (iteratorRef.current !== iterator) {
+                log(options, "Iterator reset while loading more");
                 return false;
             }
+
+            iterator.itemsConsumed += newItems.length;
 
             emptyResultsRef.current = newItems.length === 0;
 
             if (newItems.length) {
+                log(
+                    options?.id,
+                    "Loaded more items for iterator",
+                    iterator.id,
+                    "current id",
+                    iteratorRef.current?.id,
+                    "new items",
+                    newItems.length,
+                    "previous results",
+                    allRef.current.length,
+                    "batchSize",
+                    batchSize,
+                    "items consumed",
+                    iterator.itemsConsumed
+                );
                 const prev = allRef.current;
                 const dedup = new Set(
                     prev.map((x) => (x as any).__context.head)
@@ -290,7 +318,7 @@ export const useQuery = <
                     : [...prev, ...unique];
                 updateAll(combined);
             }
-            return !iteratorRef.current.iterator.done();
+            return !iterator.iterator.done();
         } catch (e) {
             if (!(e instanceof ClosedError)) throw e;
         } finally {
@@ -305,6 +333,6 @@ export const useQuery = <
         loadMore,
         isLoading,
         empty: emptyResultsRef.current,
-        id: iteratorRef.current?.id,
+        id: id,
     };
 };
