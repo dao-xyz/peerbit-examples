@@ -94,7 +94,7 @@ function useViewContextHook() {
 
     const viewRoot = React.useMemo<CanvasDB | undefined>(
         () =>
-            debouncedCanvases.length
+            debouncedCanvases?.length
                 ? debouncedCanvases[debouncedCanvases.length - 1]
                 : undefined,
         [debouncedCanvases]
@@ -102,67 +102,50 @@ function useViewContextHook() {
 
     // --- Query & Reply Fetching Management ---
     const getQueryId = (canvas: CanvasDB, sortCriteria: ViewType) =>
-        canvas.idString + sortCriteria;
+        !canvas ? null : canvas.idString + sortCriteria;
 
     // Set the query based on view and viewRoot.
-    const [query, setQuery] = useState<{
-        query: SearchRequest | null;
-        id: string;
-        reverse?: boolean;
-    }>({ query: null, id: "" });
-
-    useEffect(() => {
-        if (!viewRoot) return;
+    const queryObj = useMemo(() => {
+        if (!viewRoot) return null;
 
         if (debouncedView === "chat") {
-            setQuery({
-                query: new SearchRequest({
-                    query: getRepliesQuery(viewRoot),
-                    sort: [
-                        new Sort({
-                            key: ["__context", "created"],
-                            direction: SortDirection.DESC,
-                        }),
-                    ],
-                }),
-                id: getQueryId(viewRoot, debouncedView),
-                reverse: true,
-            });
-        } else if (debouncedView === "best") {
-            setQuery({
-                query: new SearchRequest({
-                    query: getImmediateRepliesQuery(viewRoot),
-                    sort: [
-                        new Sort({
-                            key: ["replies"],
-                            direction: SortDirection.DESC,
-                        }),
-                        new Sort({
-                            key: ["__context", "created"],
-                            direction: SortDirection.DESC,
-                        }),
-                    ],
-                }),
-                id: getQueryId(viewRoot, debouncedView),
-            });
-        } else {
-            // "new" or "old"
-            setQuery({
-                query: new SearchRequest({
-                    query: getImmediateRepliesQuery(viewRoot),
-                    sort: new Sort({
+            return new SearchRequest({
+                query: getRepliesQuery(viewRoot),
+                sort: [
+                    new Sort({
                         key: ["__context", "created"],
-                        direction:
-                            debouncedView === "new"
-                                ? SortDirection.DESC
-                                : SortDirection.ASC,
+                        direction: SortDirection.DESC,
                     }),
-                }),
-                id: getQueryId(viewRoot, debouncedView),
-                reverse: debouncedView === "new",
+                ],
             });
         }
-    }, [debouncedView, viewRoot]);
+        if (debouncedView === "best") {
+            return new SearchRequest({
+                query: getImmediateRepliesQuery(viewRoot),
+                sort: [
+                    new Sort({
+                        key: ["replies"],
+                        direction: SortDirection.DESC,
+                    }),
+                    new Sort({
+                        key: ["__context", "created"],
+                        direction: SortDirection.DESC,
+                    }),
+                ],
+            });
+        }
+        // "new" | "old"
+        return new SearchRequest({
+            query: getImmediateRepliesQuery(viewRoot),
+            sort: new Sort({
+                key: ["__context", "created"],
+                direction:
+                    debouncedView === "new"
+                        ? SortDirection.DESC
+                        : SortDirection.ASC,
+            }),
+        });
+    }, [viewRoot, debouncedView]);
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(10); // Default batch size
@@ -175,11 +158,12 @@ function useViewContextHook() {
     } = useQuery(
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
         {
-            ...query,
-            id: query.id ?? "",
+            query: viewRoot ? queryObj : undefined,
+            id: getQueryId(viewRoot, debouncedView),
+            reverse: debouncedView === "new" || debouncedView === "chat",
             transform: calculateAddress,
             batchSize,
-            debug: false, //{ id: "replies" },
+            debug: false, // { id: "replies" },
             local: true,
             remote: true,
             waitForReplicators: {
@@ -344,7 +328,7 @@ function useViewContextHook() {
         loadMore,
         hasMore: !empty,
         isLoading,
-        query,
+        query: queryObj,
         iteratorId,
         lastReply,
         sortedReplies,

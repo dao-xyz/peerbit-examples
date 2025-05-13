@@ -23,26 +23,20 @@ import {
     FeedSnapshot,
 } from "./feedRestoration";
 
-/** How long we keep newly-fetched replies hidden (ms) */
-const LOAD_TIMEOUT = 100;
+const LOAD_TIMEOUT = 2e2;
 const SPINNER_HEIGHT = 40;
 
-/**
- * Replies
- * -------
- * Handles lazy-rendering, infinite scroll and auto-scroll behaviour while
- * ensuring we never reveal a half-loaded batch when `processedReplies`
- * arrives in several rapid chunks.
- */
-export const Replies = (properties: {
+interface HiddenState {
+    head: number; // hidden items at start
+    tail: number; // hidden items at end
+}
+
+export const Replies = (props: {
     scrollSettings: ScrollSettings;
     parentRef: React.RefObject<HTMLDivElement>;
     viewRef: HTMLElement;
     onSnapshot: (snap: FeedSnapshot) => void;
 }) => {
-    /* ------------------------------------------------------------------ */
-    /* Context & state                                                    */
-    /* ------------------------------------------------------------------ */
     const {
         view,
         processedReplies,
@@ -57,116 +51,92 @@ export const Replies = (properties: {
     } = useView();
 
     const { peer } = usePeer();
+
     const repliesContainerRef = useRef<HTMLDivElement>(null);
     const { replyTo, typedOnce } = useAutoReply();
     const sentinelRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
 
-    const restoredScrollPositionOnce = useRef(false);
+    const hiddenRef = useRef<HiddenState>({ head: 0, tail: 0 });
+    const [hidden, setHidden] = useState<HiddenState>({ head: 0, tail: 0 });
 
-    /**
-     * `pendingBatch.nextBatchIndex` is *how many* replies we are allowed to
-     * show. It always grows monotonically.
-     */
-    const [pendingBatch, setPendingBatch] = useState<{
-        nextBatchIndex: number;
-    }>({
-        nextBatchIndex: 0,
-    });
-
-    /** Keeps track of how many replies are already visible */
+    const committedIds = useRef<{
+        firstId: string | null;
+        lastId: string | null;
+    }>({ firstId: null, lastId: null });
     const committedLengthRef = useRef(0);
 
-    /** For the “new messages” toast */
+    const restoredScrollPositionOnce = useRef(false);
     const alreadySeen = useRef(new Set<string>());
-
-    /* Imperative refs --------------------------------------------------- */
     const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-    const lastProcessedRepliesRef = useRef<typeof processedReplies | null>(
-        null
-    );
-    /*  flag: have we already shown at least one batch? */
     const firstBatchHandled = useRef(false);
-
-    const loadMore = () => {
-        /* If restore requested more pages, mimic sentinel behaviour so
-     the ‘hide-freshly-fetched’ effect treats it as a prepend batch */
-        if (!firstBatchHandled.current) {
-            /* pretend we’re in lazy-load mode so the effect waits LOAD_TIMEOUT */
-            pendingScrollAdjust.current = {
-                sentinel: null as any,
-                prevScrollHeight: properties.viewRef.scrollHeight,
-            };
-        }
-
-        return _loadMore();
-    };
-
-    /* once the Hide-Until-Timeout effect actually reveals that batch,
-   mark it as handled so subsequent fetches use normal logic */
-    useEffect(() => {
-        if (
-            !firstBatchHandled.current &&
-            committedLengthRef.current > 0 && // something rendered
-            pendingBatch.nextBatchIndex >= committedLengthRef.current
-        ) {
-            firstBatchHandled.current = true;
-            pendingScrollAdjust.current = null; // clean up for future
-        }
-    }, [pendingBatch.nextBatchIndex]);
-
-    /**
-     * During pagination (scroll-up-for-more) we need to maintain scroll
-     * position so the user doesn’t lose context. We remember how tall the
-     * scroll container was *before* loading more, then after the new batch
-     * becomes visible we nudge the scrollTop by exactly that delta.
-     */
     const pendingScrollAdjust = useRef<{
-        sentinel: HTMLElement;
+        sentinel: HTMLElement | null;
         prevScrollHeight: number;
     } | null>(null);
 
+    const loadMore = () => {
+        if (!firstBatchHandled.current) {
+            pendingScrollAdjust.current = {
+                sentinel: null,
+                prevScrollHeight: props.viewRef?.scrollHeight || 0, // how can viewRef be null?
+            };
+        }
+        return _loadMore();
+    };
+
     /* ------------------------------------------------------------------ */
-    /* 1. Hide freshly-fetched replies for a short while                   */
+    /* Detect new items at either end                                     */
     /* ------------------------------------------------------------------ */
-    useEffect(() => {
-        /* ------------------------------------------------------------------
-         *  Early exits / bookkeeping
-         * ------------------------------------------------------------------ */
-        if (lastProcessedRepliesRef.current === processedReplies) return;
-        lastProcessedRepliesRef.current = processedReplies;
+    useLayoutEffect(() => {
+        const list = processedReplies;
+        if (list.length === 0) return;
 
-        const newLength = processedReplies.length;
-        const oldLength = committedLengthRef.current;
-        if (newLength <= oldLength) return; // no growth → nothing to do
+        const oldFirst = committedIds.current.firstId;
+        const oldLast = committedIds.current.lastId;
 
-        /* ------------------------------------------------------------------
-         *  Helper that actually reveals the new items
-         * ------------------------------------------------------------------ */
-        const reveal = () => {
-            setPendingBatch((prev) => ({
-                nextBatchIndex: Math.max(prev.nextBatchIndex, newLength),
-            }));
-            committedLengthRef.current = newLength; // mark as visible
-            loadTimeoutRef.current = null;
-        };
+        let newHead = 0;
+        let newTail = 0;
 
-        /* ------------------------------------------------------------------
-         *  Decide if we wait (top-prepend) or reveal immediately (bottom-append)
-         * ------------------------------------------------------------------ */
-        const isLazyLoadBatch = pendingScrollAdjust.current !== null;
-
-        if (isLazyLoadBatch) {
-            if (loadTimeoutRef.current) clearTimeout(loadTimeoutRef.current);
-            loadTimeoutRef.current = setTimeout(reveal, LOAD_TIMEOUT);
+        if (oldFirst) {
+            const idx = list.findIndex((r) => r.reply.idString === oldFirst);
+            newHead = idx === -1 ? list.length : idx;
         } else {
-            // New item at the tail: show it right away
-            reveal();
+            newHead = list.length; // first paint → hide all
+        }
+        if (oldLast) {
+            const idx = list.findIndex((r) => r.reply.idString === oldLast);
+            newTail = idx === -1 ? list.length : list.length - 1 - idx;
+        } else {
+            newTail = list.length;
         }
 
-        /* ------------------------------------------------------------------
-         *  Cleanup when the effect re-runs or unmounts
-         * ------------------------------------------------------------------ */
+        if (newHead === 0 && newTail === 0) {
+            return;
+        }
+
+        const nextHidden = {
+            head: hiddenRef.current.head + newHead,
+            tail: hiddenRef.current.tail + newTail,
+        };
+        hiddenRef.current = nextHidden; // ← sync update
+        setHidden(nextHidden); // ← async render update
+
+        const reveal = () => {
+            committedIds.current.firstId = list[0]?.reply.idString ?? null;
+            committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
+            committedLengthRef.current = list.length;
+
+            hiddenRef.current = { head: 0, tail: 0 };
+            setHidden({ head: 0, tail: 0 });
+
+            loadTimeoutRef.current = null;
+        };
+        if (loadTimeoutRef.current) {
+            clearTimeout(loadTimeoutRef.current);
+        }
+        loadTimeoutRef.current = setTimeout(reveal, LOAD_TIMEOUT);
+
         return () => {
             if (loadTimeoutRef.current) {
                 clearTimeout(loadTimeoutRef.current);
@@ -175,20 +145,30 @@ export const Replies = (properties: {
         };
     }, [processedReplies]);
 
-    /* ------------------------------------------------------------------ */
-    /* 2. Reset lazy-state whenever the view changes                      */
-    /* ------------------------------------------------------------------ */
+    useEffect(() => {
+        if (
+            !firstBatchHandled.current &&
+            committedLengthRef.current > 0 &&
+            hidden.head === 0 &&
+            hidden.tail === 0
+        ) {
+            firstBatchHandled.current = true;
+            pendingScrollAdjust.current = null;
+        }
+    }, [hidden.head, hidden.tail]);
+
     const resetLazyState = () => {
         if (loadTimeoutRef.current) {
             clearTimeout(loadTimeoutRef.current);
             loadTimeoutRef.current = null;
         }
-        restoredScrollPositionOnce.current = false;
+        setHidden({ head: 0, tail: 0 });
+        committedIds.current = { firstId: null, lastId: null };
         committedLengthRef.current = 0;
         alreadySeen.current.clear();
         pendingScrollAdjust.current = null;
         firstBatchHandled.current = false;
-        setPendingBatch({ nextBatchIndex: 0 });
+        restoredScrollPositionOnce.current = false;
     };
 
     const prevView = useRef(view);
@@ -201,82 +181,23 @@ export const Replies = (properties: {
         }
     }, [view, viewRoot]);
 
-    /* ------------------------------------------------------------------ */
-    /* 3. Loading flags & helpers                                         */
-    /* ------------------------------------------------------------------ */
-    const isLoadingAnything =
-        isLoadingView ||
-        pendingBatch.nextBatchIndex !== processedReplies.length;
-
-    // Stable array of refs (same length as processedReplies)
-    const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
-    if (replyContentRefs.current.length !== processedReplies.length) {
-        replyContentRefs.current = new Array(processedReplies.length).fill(
-            null
-        );
-    }
+    const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
 
     const scrollUpForMore = view === "chat" || view === "new";
 
-    const indexIsReadyToRender = useCallback(
-        (i: number) => {
-            if (scrollUpForMore) {
-                return (
-                    i >= processedReplies.length - pendingBatch.nextBatchIndex
-                );
-            }
-            return i < pendingBatch.nextBatchIndex;
-        },
-        [scrollUpForMore, processedReplies.length, pendingBatch.nextBatchIndex]
-    );
-
-    const isReplyVisible = useCallback(
-        (id: string) => {
-            const idx = processedReplies.findIndex(
-                (x) => x.reply.idString == id
-            );
-            return idx === undefined ? false : indexIsReadyToRender(idx);
-        },
-        [indexIsReadyToRender, processedReplies.length]
-    );
-
-    const { restoring } = useRestoreFeed({
-        hasMore,
-        replies: processedReplies,
-        loadMore,
-        replyRefs: replyContentRefs.current,
-        setView: setView, // from useView()
-        setViewRootById: (id) => {
-            if (viewRoot?.idString !== id) {
-                const found = canvases.find((c) => c.idString === id);
-                found && found.load();
-            }
-        },
-        onSnapshot: (snap) => {
-            properties.onSnapshot(snap);
-        },
-        onRestore: (snap) => {
-            restoredScrollPositionOnce.current = true;
-        },
-        isReplyVisible,
-    });
-
-    /* Auto-scroll behaviour */
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
         repliesContainerRef,
-        parentRef: properties.parentRef,
-        setting: properties.scrollSettings,
+        parentRef: props.parentRef,
+        setting: props.scrollSettings,
         scrollOnViewChange: !restoredScrollPositionOnce.current,
-        enabled: false,
-        debug: true,
+        enabled: true,
+        debug: false,
         lastElementRef: () =>
             replyContentRefs.current[replyContentRefs.current.length - 1],
     });
 
-    /* ------------------------------------------------------------------ */
-    /* 4. Toast for new messages                                          */
-    /* ------------------------------------------------------------------ */
+    /* -------------------------- UI helpers --------------------------- */
     const [showNewMessagesToast, setShowNewMessagesToast] = useState(false);
     const prevRepliesCountRef = useRef(processedReplies.length);
 
@@ -313,22 +234,11 @@ export const Replies = (properties: {
         }
     }, [isAtBottom, processedReplies]);
 
-    /* ------------------------------------------------------------------ */
-    /* 5. Sentinel & infinite scroll (load older)                          */
-    /* ------------------------------------------------------------------ */
-
-    const leaveSnapshot = useLeaveSnapshot({
-        replies: processedReplies,
-        replyRefs: replyContentRefs.current,
-        view,
-        viewRoot,
-    });
-
     const lastSentinelForLoadingMore = useRef<HTMLDivElement>(null);
 
     useEffect(() => {
         const sentinel = sentinelRef.current;
-        if (!sentinel || properties.viewRef !== document.body) return;
+        if (!sentinel || props.viewRef !== document.body) return;
 
         const observer = new IntersectionObserver(
             (entries) => {
@@ -339,19 +249,15 @@ export const Replies = (properties: {
                     !isLoadingAnything
                 ) {
                     lastSentinelForLoadingMore.current = sentinel;
-                    // remember scroll height *before* fetching more so we can adjust later
                     pendingScrollAdjust.current = {
                         sentinel,
-                        prevScrollHeight: properties.viewRef.scrollHeight,
+                        prevScrollHeight: props.viewRef.scrollHeight,
                     };
                     loadMore();
                 }
             },
             {
-                root:
-                    properties.viewRef === document.body
-                        ? null
-                        : properties.viewRef,
+                root: props.viewRef === document.body ? null : props.viewRef,
                 threshold: 0,
             }
         );
@@ -361,83 +267,113 @@ export const Replies = (properties: {
             observer.disconnect();
             lastSentinelForLoadingMore.current = null;
         };
-    }, [properties.viewRef, isLoadingAnything, processedReplies]);
+    }, [props.viewRef, isLoadingAnything, processedReplies]);
 
-    /* ------------------------------------------------------------------ */
-    /* 6. Maintain scroll position after older batch becomes visible       */
-    /* ------------------------------------------------------------------ */
     useLayoutEffect(() => {
         if (!scrollUpForMore) return;
         if (!pendingScrollAdjust.current) return;
-        if (pendingBatch.nextBatchIndex < processedReplies.length) return; // still hidden
+        if (hidden.head > 0) return;
+        if (!props.viewRef) return;
 
-        const isWindow = properties.viewRef === document.body;
+        const isWindow = props.viewRef === document.body;
         const scroller = isWindow
             ? (document.scrollingElement as HTMLElement)
-            : (properties.viewRef as HTMLElement);
+            : (props.viewRef as HTMLElement);
 
-        let prevHeight = pendingScrollAdjust.current.prevScrollHeight;
-        const newHeight = properties.viewRef.scrollHeight;
-        const spinnerOffset = 0; // could tweak if spinner overlays content
-        const diff = newHeight - prevHeight - spinnerOffset;
+        const prevHeight = pendingScrollAdjust.current.prevScrollHeight;
+        const newHeight = props.viewRef.scrollHeight;
+        const diff = newHeight - prevHeight;
 
         if (diff > 0) {
-            if (isWindow) {
-                window.scrollBy({
-                    top: diff,
-                    behavior: "instant" as ScrollBehavior,
-                });
-            } else {
-                scroller.scrollTop += diff;
-            }
+            if (isWindow)
+                window.scrollBy({ top: diff, behavior: "instant" as any });
+            else scroller.scrollTop += diff;
         }
-
         pendingScrollAdjust.current = null;
-    }, [pendingBatch.nextBatchIndex, processedReplies.length, scrollUpForMore]);
+    }, [hidden.head, scrollUpForMore, props.viewRef]);
 
-    /* If the view resizes before the batch is revealed we need to update
-       the stored height so the adjustment is accurate. */
     useEffect(() => {
-        if (!contentRef.current || !properties.viewRef) return;
+        if (!contentRef.current || !props.viewRef) return;
         const viewObserver = new ResizeObserver(() => {
             if (
                 scrollUpForMore &&
                 pendingScrollAdjust.current &&
-                pendingBatch.nextBatchIndex < processedReplies.length
+                hidden.head > 0
             ) {
                 pendingScrollAdjust.current.prevScrollHeight =
-                    properties.viewRef.scrollHeight;
+                    props.viewRef.scrollHeight;
             }
         });
         viewObserver.observe(contentRef.current);
-        viewObserver.observe(properties.viewRef);
+        viewObserver.observe(props.viewRef);
         return () => viewObserver.disconnect();
-    }, [contentRef.current, properties.viewRef, scrollUpForMore]);
+    }, [contentRef.current, props.viewRef, scrollUpForMore, hidden.head]);
 
-    /* ------------------------------------------------------------------ */
-    /* 7. Helpers                                                         */
-    /* ------------------------------------------------------------------ */
-
-    const insertAtStart = scrollUpForMore;
     const sentinelIndexPadding = Math.floor(batchSize / 2);
-    const sentinelIndex = insertAtStart
+    const sentinelIndex = scrollUpForMore
         ? sentinelIndexPadding
-        : processedReplies.length - (1 + sentinelIndexPadding);
+        : processedReplies.length - 1 - sentinelIndexPadding;
 
-    /* ------------------------------------------------------------------ */
-    /* 9. Render                                                          */
-    /* ------------------------------------------------------------------ */
+    const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
+    if (replyContentRefs.current.length !== processedReplies.length) {
+        replyContentRefs.current = new Array(processedReplies.length).fill(
+            null
+        );
+    }
+
+    const indexIsReadyToRender = useCallback(
+        (i: number) =>
+            i >= hiddenRef.current.head &&
+            i < processedReplies.length - hiddenRef.current.tail,
+        [processedReplies.length]
+    );
+
+    const isReplyVisible = useCallback(
+        (id: string) => {
+            const idx = processedReplies.findIndex(
+                (r) => r.reply.idString === id
+            );
+            const isReady = idx === -1 ? false : indexIsReadyToRender(idx);
+            // dbg and see if we can be ready even if head is 0
+            return isReady;
+        },
+        [indexIsReadyToRender, hidden.head, hidden.tail, processedReplies]
+    );
+
+    const leaveSnapshot = useLeaveSnapshot({
+        replies: processedReplies,
+        replyRefs: replyContentRefs.current,
+        view,
+        viewRoot,
+    });
+
+    useRestoreFeed({
+        hasMore,
+        replies: processedReplies,
+        loadMore,
+        replyRefs: replyContentRefs.current,
+        setView,
+        setViewRootById: (id) => {
+            if (viewRoot?.idString !== id) {
+                const found = canvases.find((c) => c.idString === id);
+                found && found.load();
+            }
+        },
+        onSnapshot: props.onSnapshot,
+        onRestore: () => {
+            restoredScrollPositionOnce.current = true;
+        },
+        isReplyVisible,
+        debug: false,
+    });
 
     useEffect(() => {
-        if (!iteratorId) {
-            return;
+        if (iteratorId) {
+            loadMore?.();
         }
-        loadMore?.();
     }, [iteratorId]);
 
-    /* ------------------------------------------------------------------ */
-    /* 10. Render                                                          */
-    /* ------------------------------------------------------------------ */
+    /* --------------------------- RENDER ------------------------------ */
     return (
         <LeaveSnapshotContext.Provider value={leaveSnapshot}>
             {scrollUpForMore && isLoadingAnything && (
@@ -537,6 +473,7 @@ export const Replies = (properties: {
                 </Toast.Provider>
             </div>
 
+            {/* Spinner at bottom (append lazy-load) */}
             {!scrollUpForMore && isLoadingAnything && (
                 <div
                     className="w-full flex absolute bottom-1 z-1 justify-center items-center overflow-hidden"
