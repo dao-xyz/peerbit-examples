@@ -130,8 +130,8 @@ const resolvePathFromProperties = (
 
 type PathProperties =
     | {
-          parent: Canvas;
-      }
+        parent: Canvas;
+    }
     | { path: CanvasReference[] }
     | {};
 
@@ -333,8 +333,8 @@ export class CanvasAddressReference extends CanvasReference {
         return this.reference && !this.reference.closed
             ? this.reference
             : (this.reference = await node.open<Canvas>(this.canvas, {
-                  existing: "reuse",
-              }));
+                existing: "reuse",
+            }));
     }
 
     get address() {
@@ -346,27 +346,29 @@ export const getImmediateRepliesQuery = (to: {
     address: string;
     path: any[];
 }) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-    new IntegerCompare({
-        key: "pathDepth",
-        value: to.path.length + 1,
-        compare: Compare.Equal,
-    }),
-];
+        new StringMatch({
+            key: "path",
+            value: to.address,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+        new IntegerCompare({
+            key: "pathDepth",
+            value: to.path.length + 1,
+            compare: Compare.Equal,
+        }),
+    ];
 
-export const getRepliesQuery = (to: { address: string }) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-];
+export const getRepliesQuery = (to: { address: string }) => {
+    return [
+        new StringMatch({
+            key: "path",
+            value: to.address,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+    ];
+};
 
 export const getQualityLessThanOrEqualQuery = (quality: number) => {
     return [
@@ -388,45 +390,50 @@ export const getQualityEqualsQuery = (quality: number) => {
     ];
 };
 
-export const getOwnedElementsQuery = (to: { address: string; path: any[] }) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-    new IntegerCompare({
-        key: "pathDepth",
-        value: to.path.length + 1,
-        compare: Compare.Equal,
-    }),
-];
+export const getOwnedElementsQuery = (to: { address: string; path: any[] }) => {
+    return [
+        new StringMatch({
+            key: "path",
+            value: to.address,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+        new IntegerCompare({
+            key: "pathDepth",
+            value: to.path.length + 1,
+            compare: Compare.Equal,
+        }),
+    ];
+};
 
-export const getOwnedAndSubownedElementsQuery = (to: { address: string }) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-];
+export const getOwnedAndSubownedElementsQuery = (to: { address: string }) => {
+    console.trace("Get owned and subowned elements");
+    return [
+        new StringMatch({
+            key: "path",
+            value: to.address,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+    ];
+};
 
 export const getSubownedElementsQuery = (to: {
     address: string;
     path: any[];
 }) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-    new IntegerCompare({
-        key: "pathDepth",
-        value: to.path.length + 1,
-        compare: Compare.Greater,
-    }),
-];
+        new StringMatch({
+            key: "path",
+            value: to.address,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+        new IntegerCompare({
+            key: "pathDepth",
+            value: to.path.length + 1,
+            compare: Compare.Greater,
+        }),
+    ];
 
 export const getTextElementsQuery = () =>
     new StringMatch({
@@ -452,7 +459,7 @@ export const getImagesQuery = () =>
         }),
     ]);
 
-export abstract class CanvasMessage {}
+export abstract class CanvasMessage { }
 
 @variant(0)
 export class ReplyingInProgresss extends CanvasMessage {
@@ -465,8 +472,8 @@ export class ReplyingInProgresss extends CanvasMessage {
             properties.reference instanceof CanvasReference
                 ? properties.reference
                 : new CanvasAddressReference({
-                      canvas: properties.reference,
-                  });
+                    canvas: properties.reference,
+                });
     }
 }
 
@@ -481,8 +488,8 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
             properties.reference instanceof CanvasReference
                 ? properties.reference
                 : new CanvasAddressReference({
-                      canvas: properties.reference,
-                  });
+                    canvas: properties.reference,
+                });
     }
 }
 
@@ -737,7 +744,7 @@ export class Canvas extends Program<CanvasArgs> {
                 topic: sha256Base64Sync(
                     concat([this.id, new TextEncoder().encode("messages")])
                 ),
-                responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
+                responseHandler: async () => { }, // need an empty response handle to make response events to emit TODO fix this?
             });
         }
     }
@@ -929,11 +936,11 @@ export class Canvas extends Program<CanvasArgs> {
             const replies = this.replies.index.closed
                 ? 0n
                 : BigInt(
-                      await this.replies.count({
-                          query: this.getCountQuery(options),
-                          approximate: true,
-                      })
-                  );
+                    await this.replies.count({
+                        query: this.getCountQuery(options),
+                        approximate: true,
+                    })
+                );
             return replies;
         } catch (error) {
             // TODO handle errors that arrise from the database being closed
@@ -1073,15 +1080,16 @@ export class Canvas extends Program<CanvasArgs> {
             await this.load();
         }
         try {
-            const elements = await this.elements.index
+            const elements: any[] = []; /* await this.elements.index
                 .iterate(
                     { query: getOwnedElementsQuery(this) },
                     {
                         resolve: false,
+                        local: true,
                         remote: { strategy: "fallback", timeout: 2e4 },
                     }
                 )
-                .all();
+                .all();  TODO make this work efficiently when non replicators is requesting content, we somehow get a double fetch for this -> requesting all in true value, then we can actually calculate the indexed version, but we yet need to request the owned elements anyways ? */
             let concat = "";
             for (const element of elements) {
                 if (element.type !== "canvas") {
@@ -1110,13 +1118,13 @@ export class Canvas extends Program<CanvasArgs> {
         this.node
             ? Promise.resolve(this.node)
             : await waitFor(() => this.node, {
-                  signal: this.closeController?.signal,
-              }).catch((error) => {
-                  if (error instanceof AbortError) {
-                      return;
-                  }
-                  throw new Error("Failed to load, canvas was never opened");
-              });
+                signal: this.closeController?.signal,
+            }).catch((error) => {
+                if (error instanceof AbortError) {
+                    return;
+                }
+                throw new Error("Failed to load, canvas was never opened");
+            });
         if (!this.node && this.closed) {
             // return silently if closed
             return;
