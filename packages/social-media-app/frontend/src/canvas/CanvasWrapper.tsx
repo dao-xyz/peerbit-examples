@@ -5,6 +5,7 @@ import React, {
     useRef,
     useContext,
     createContext,
+    useMemo,
 } from "react";
 import { usePeer, useProgram, useLocal, useQuery } from "@peerbit/react";
 import {
@@ -136,6 +137,25 @@ export const CanvasWrapper = ({
     const [editMode, setEditMode] = useState(!!draft);
     const [isEmpty, setIsEmpty] = useState(true);
     const { announceReply } = useReplyProgress();
+    const query = useMemo(() => {
+        return !canvas || canvas.closed
+            ? null
+            : {
+                  query: [
+                      ...getOwnedElementsQuery(canvas),
+                      ...getQualityLessThanOrEqualQuery(
+                          quality ?? LOWEST_QUALITY
+                      ),
+                  ],
+                  sort: [
+                      new Sort({
+                          key: ["quality"],
+                          direction: SortDirection.ASC,
+                      }),
+                      new Sort({ key: ["location", "y"] }),
+                  ],
+              };
+    }, [canvas?.closed, canvas?.idString, quality]);
     const { items: rects, isLoading } = useQuery(
         canvas?.loadedElements ? canvas.origin?.elements : null,
         {
@@ -164,24 +184,7 @@ export const CanvasWrapper = ({
             /*   debug: {
                   id: canvas?.idString,
               }, */
-            query:
-                !canvas || canvas.closed
-                    ? null
-                    : {
-                          query: [
-                              ...getOwnedElementsQuery(canvas),
-                              ...getQualityLessThanOrEqualQuery(
-                                  quality ?? LOWEST_QUALITY
-                              ),
-                          ],
-                          sort: [
-                              new Sort({
-                                  key: ["quality"],
-                                  direction: SortDirection.ASC,
-                              }),
-                              new Sort({ key: ["location", "y"] }),
-                          ],
-                      },
+            query,
         }
     );
 

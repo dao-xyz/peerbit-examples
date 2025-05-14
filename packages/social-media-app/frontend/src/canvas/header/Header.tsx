@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
@@ -49,14 +49,18 @@ export const Header = ({
         canvas.loadContext();
     }, [canvas]);
  */
-    const replyCount = useCount(
-        canvas?.loadedReplies ? canvas.replies : undefined,
-        !canvas || canvas.closed
+    const countQuery = useMemo(() => {
+        return !canvas || canvas.closed
             ? undefined
             : {
                   id: canvas.address.toString(),
                   query: canvas.getCountQuery(),
-              }
+              };
+    }, [canvas?.closed, canvas?.idString]);
+
+    const replyCount = useCount(
+        canvas?.loadedReplies ? canvas.replies : undefined,
+        countQuery
     );
 
     // State for controlling the More Info dialog and its content.
