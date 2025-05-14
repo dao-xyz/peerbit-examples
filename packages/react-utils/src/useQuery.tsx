@@ -255,6 +255,7 @@ export const useQuery = <
         try {
             /* ── optional replicate-wait ── */
             if (shouldWait()) {
+                log(options, "Wait for replicators", iterator.id);
                 await db?.log
                     .waitForReplicators({
                         timeout: waitTimeout,
@@ -269,13 +270,19 @@ export const useQuery = <
                         console.warn("Remote replicators not ready", e);
                     });
                 markWaited();
+            } else {
+                log(options, "Skip wait for replicators", iterator.id);
             }
 
             /* ── fetch next batch ── */
+            log(options, "Retrieve next batch", iterator.id);
             let newItems = await iterator.iterator.next(batchSize);
+            if (options?.transform) {
+                log(options, "Transform start", iterator.id);
 
-            if (options?.transform)
                 newItems = await Promise.all(newItems.map(options.transform));
+                log(options, "Transform end", iterator.id);
+            }
 
             /* iterator might have been reset while we were async… */
 
@@ -317,6 +324,8 @@ export const useQuery = <
                     ? [...unique.reverse(), ...prev]
                     : [...prev, ...unique];
                 updateAll(combined);
+            } else {
+                log(options, "No new items", iterator.id);
             }
             return !iterator.iterator.done();
         } catch (e) {
