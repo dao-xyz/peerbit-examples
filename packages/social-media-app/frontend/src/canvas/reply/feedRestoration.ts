@@ -120,15 +120,19 @@ export function useRestoreFeed(a: RestoreArgs) {
 
     const loadMoreAndWait = async (): Promise<boolean> => {
         const before = lenRef.current;
-        const maxTicks = 1000;
+        const maxWaitTime = 5e3; // ms
         let ticks = 0;
 
         log(tag, "loadMore()");
         await a.loadMore();
-
-        while (lenRef.current === before && ticks < maxTicks) {
+        let t0 = Date.now();
+        while (lenRef.current === before) {
             await nextFrame();
             ticks++;
+            if (Date.now() - t0 > maxWaitTime) {
+                log(tag, "loadMore() timeout");
+                break;
+            }
         }
 
         log(
