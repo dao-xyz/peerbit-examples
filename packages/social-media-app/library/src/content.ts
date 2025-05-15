@@ -407,7 +407,6 @@ export const getOwnedElementsQuery = (to: { address: string; path: any[] }) => {
 };
 
 export const getOwnedAndSubownedElementsQuery = (to: { address: string }) => {
-    console.trace("Get owned and subowned elements");
     return [
         new StringMatch({
             key: "path",
