@@ -265,12 +265,14 @@ export const ImageContent = memo(function ImageContent({
             onDrop={editable ? onDrop : undefined}
         >
             {/* skeleton while loading */}
-            {!imgUrl && (
+            {/* If image loads fast this will just look like a flicker so we disabled this for now
+                We might want to be able to load image size before image data so we can show this in advance in a better way
+              {!imgUrl && (
                 <div
                     className="w-full animate-pulse bg-neutral-300 dark:bg-neutral-700 rounded"
                     style={{ aspectRatio: ratio }}
                 />
-            )}
+            )} */}
 
             {/* actual image */}
             {imgUrl &&
