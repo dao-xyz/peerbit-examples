@@ -15,7 +15,7 @@ type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
     sort?: indexerTypes.Sort[] | indexerTypes.Sort | indexerTypes.SortLike;
 };
-type QueryOptions = { query: QueryLike; id: string };
+type QueryOptions = { query: QueryLike; id?: string };
 
 type WaitForReplicatorsOption =
     | boolean

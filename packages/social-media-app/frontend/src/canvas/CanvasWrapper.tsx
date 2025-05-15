@@ -159,7 +159,6 @@ export const CanvasWrapper = ({
     const { items: rects, isLoading } = useQuery(
         canvas?.loadedElements ? canvas.origin?.elements : null,
         {
-            id: canvas?.idString,
             debounce: 123,
             local: true,
             remote: true,
