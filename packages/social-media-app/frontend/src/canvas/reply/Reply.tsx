@@ -214,8 +214,8 @@ export const Reply = ({
                 {/* Preview / Canvas Section with a ref and Tailwind classes for transition */}
                 <div
                     ref={previewContainerRef}
-                    className={` relative overflow-hidden flex flex-col ${
-                        showMore ? "max-h-full" : "max-h-40vh"
+                    className={` relative overflow-hidden flex flex-col min-h-0 max-height-inherit-children ${
+                        showMore ? "max-h-full" : "max-h-[40vh]"
                     }`}
                 >
                     <CanvasWrapper canvas={canvas} quality={MEDIUM_QUALITY}>

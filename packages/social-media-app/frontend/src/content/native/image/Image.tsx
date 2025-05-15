@@ -110,6 +110,7 @@ export const ImageContent = memo(function ImageContent({
         /* ❷ cleanup: clear the ref only if *this* load is being abandoned */
         return () => {
             URL.revokeObjectURL(objectUrl);
+            if (imgUrl) URL.revokeObjectURL(imgUrl);
             if (lastHashRef.current === hash) lastHashRef.current = null;
         };
     }, [content.data, content.mimeType, onResize]);
@@ -236,8 +237,7 @@ export const ImageContent = memo(function ImageContent({
     return (
         <div
             ref={containerRef}
-            style={{ aspectRatio: ratio }}
-            className={`relative w-full h-auto ${
+            className={`relative w-full h-full ${
                 editable
                     ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150"
                     : ""
@@ -266,7 +266,10 @@ export const ImageContent = memo(function ImageContent({
         >
             {/* skeleton while loading */}
             {!imgUrl && (
-                <div className="w-full h-full animate-pulse bg-neutral-300 dark:bg-neutral-700 rounded" />
+                <div
+                    className="w-full animate-pulse bg-neutral-300 dark:bg-neutral-700 rounded"
+                    style={{ aspectRatio: ratio }}
+                />
             )}
 
             {/* actual image */}
@@ -281,7 +284,7 @@ export const ImageContent = memo(function ImageContent({
                                 <img
                                     src={imgUrl}
                                     alt={content.alt ?? ""}
-                                    className={`w-full h-full ${fitClass}`}
+                                    className={`w-full  ${fitClass}`}
                                 />
                             </Dialog.Trigger>
                             {fullScreen}
@@ -291,6 +294,7 @@ export const ImageContent = memo(function ImageContent({
                             <img
                                 src={imgUrl}
                                 alt={content.alt ?? ""}
+                                style={{ aspectRatio: ratio }}
                                 className={`w-full h-full ${fitClass}`}
                             />
                             <button

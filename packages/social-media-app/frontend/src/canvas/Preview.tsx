@@ -391,7 +391,6 @@ const PostPreview = ({
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
     const text = rects.text;
-
     return (
         <>
             {firstApp && (
@@ -463,13 +462,14 @@ const ChatMessagePreview = ({
     classNameContent?: string | ((element: Element<ElementContent>) => string);
 }) => {
     const { other: apps, text } = rects;
+
     return (
         <div className={className} ref={forwardRef}>
             {apps.map((app) => (
                 <div
-                    key={app.id.toString()}
+                    key={app.idString}
                     onClick={onClick}
-                    className="w-fit max-h-[40vh]  max-height-inherit-children flex flex-col overflow-hidden h-full rounded-md relative"
+                    className="w-fit max-height-inherit-children flex flex-col overflow-hidden h-full rounded-md relative"
                 >
                     <PreviewFrame
                         bgBlur
@@ -506,16 +506,17 @@ export const CanvasPreview = ({
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
-    const variantRects = useMemo(
-        () =>
-            getRectsForVariant(
-                separateAndSortRects([...rects, ...pendingRects]),
-                variant
-            ),
-        [rects, pendingRects, variant]
-    );
+    const variantRects = useMemo(() => {
+        const out = getRectsForVariant(
+            separateAndSortRects([...rects, ...pendingRects]),
+            variant
+        );
+        return out;
+    }, [rects, pendingRects, variant]);
 
-    if (!variantRects) return null;
+    if (!variantRects) {
+        return null;
+    }
 
     switch (variant) {
         case "tiny":
