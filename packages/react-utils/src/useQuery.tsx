@@ -9,6 +9,7 @@ import {
 import * as indexerTypes from "@peerbit/indexer-interface";
 import { AbortError } from "@peerbit/time";
 import { NoPeersError } from "@peerbit/shared-log";
+import { v4 as uuid } from "uuid";
 
 /* ────────────── helper types ────────────── */
 type QueryLike = {
@@ -74,7 +75,12 @@ export const useQuery = <
     const emptyResultsRef = useRef(false);
     const closeControllerRef = useRef<AbortController | null>(null);
     const waitedOnceRef = useRef(false);
-    const [id, setId] = useState<string | undefined>(options?.id);
+    const [id, setId] = useState<string | undefined>(undefined);
+
+    const reverseRef = useRef(options?.reverse);
+    useEffect(() => {
+        reverseRef.current = options?.reverse;
+    }, [options?.reverse]);
 
     /* ────────────── util ────────────── */
     const log = (...a: any[]) => {
@@ -120,8 +126,9 @@ export const useQuery = <
         }
 
         const initIterator = () => {
+            let id = options?.id ?? uuid();
             const ref = {
-                id: options.id,
+                id,
                 iterator: db.index.iterate(options.query ?? {}, {
                     local: options?.local ?? true,
                     remote: options?.remote ?? true,
@@ -133,7 +140,7 @@ export const useQuery = <
             if (options?.prefetch) {
                 loadMore();
             }
-            setId(options.id);
+            setId(id);
 
             log("Iterator initialised", ref.id);
             return ref;
@@ -205,6 +212,7 @@ export const useQuery = <
         db?.closed ? undefined : db?.address,
         options?.id ?? options?.query,
         options?.resolve,
+        options?.reverse,
     ]);
 
     /* ────────────── loadMore (once-wait aware) ────────────── */
@@ -297,7 +305,6 @@ export const useQuery = <
 
             if (newItems.length) {
                 log(
-                    options?.id,
                     "Loaded more items for iterator",
                     iterator.id,
                     "current id",
@@ -320,7 +327,7 @@ export const useQuery = <
                 );
                 if (!unique.length) return;
 
-                const combined = options?.reverse
+                const combined = reverseRef.current
                     ? [...unique.reverse(), ...prev]
                     : [...prev, ...unique];
                 updateAll(combined);
@@ -341,7 +348,7 @@ export const useQuery = <
         items: all,
         loadMore,
         isLoading,
-        empty: emptyResultsRef.current,
+        empty: () => emptyResultsRef.current,
         id: id,
     };
 };
