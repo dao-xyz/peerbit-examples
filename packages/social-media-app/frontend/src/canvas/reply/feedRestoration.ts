@@ -59,7 +59,7 @@ export function useLeaveSnapshot(args: LeaveArgs) {
 interface RestoreArgs {
     replies: { reply: { idString: string } }[];
     loadMore: () => Promise<boolean>;
-    hasMore: boolean;
+    hasMore: () => boolean;
     replyRefs: (HTMLDivElement | null)[];
     setView: (v: ViewType) => void;
     setViewRootById: (id: string) => void;
@@ -81,7 +81,11 @@ export function useRestoreFeed(a: RestoreArgs) {
     const [restoring, setRestoring] = useState(false);
     let log = a.debug ? console.log : (args: any) => {};
 
-    useEffect(() => {
+    /* ────────────────────────────────────────────────────────────────── */
+    /* 1. restore view & root (once)                                     */
+    /* ────────────────────────────────────────────────────────────────── */
+    useLayoutEffect(() => {
+        console.log("NAV KEY CHANGE", key);
         const next = getSnapshot(key);
         const current = snapRef.current;
         if (current !== next && next) {
@@ -91,12 +95,7 @@ export function useRestoreFeed(a: RestoreArgs) {
         setRestoring(!!next);
         snapRef.current = next;
         doneRef.current = false;
-    }, [key]);
 
-    /* ────────────────────────────────────────────────────────────────── */
-    /* 1. restore view & root (once)                                     */
-    /* ────────────────────────────────────────────────────────────────── */
-    useLayoutEffect(() => {
         if (snapRef.current && !doneRef.current) {
             log(tag, "restore view/root", snapRef.current);
             a.setView(snapRef.current.view);
@@ -147,6 +146,9 @@ export function useRestoreFeed(a: RestoreArgs) {
     };
 
     const needMore = () => {
+        if (!snapRef.current) {
+            return false;
+        }
         log(tag, "done?", {
             len: lenRef.current,
             len2: repliesRef.current.length,

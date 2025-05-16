@@ -72,14 +72,14 @@ export const Replies = (props: {
     const firstBatchHandled = useRef(false);
     const pendingScrollAdjust = useRef<{
         sentinel: HTMLElement | null;
-        prevScrollHeight: number;
+        prevScrollHeight: number | undefined;
     } | null>(null);
 
     const loadMore = () => {
         if (!firstBatchHandled.current) {
             pendingScrollAdjust.current = {
                 sentinel: null,
-                prevScrollHeight: props.viewRef?.scrollHeight || 0, // how can viewRef be null?
+                prevScrollHeight: undefined, // how can viewRef be null?
             };
         }
         return _loadMore();
@@ -169,11 +169,14 @@ export const Replies = (props: {
         pendingScrollAdjust.current = null;
         firstBatchHandled.current = false;
         restoredScrollPositionOnce.current = false;
+        console.log("RESET LAZY STATE");
     };
 
     const prevView = useRef(view);
     const prevRoot = useRef(viewRoot);
-    useEffect(() => {
+
+    useLayoutEffect(() => {
+        // needs to be useLayoutEffect, else we might trigger unwanted scrolls
         if (prevView.current !== view || prevRoot.current !== viewRoot) {
             resetLazyState();
             prevView.current = view;
@@ -183,7 +186,7 @@ export const Replies = (props: {
 
     const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
 
-    const scrollUpForMore = view === "chat" || view === "new";
+    const scrollUpForMore = view === "chat" || view === "old";
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
@@ -281,13 +284,20 @@ export const Replies = (props: {
             : (props.viewRef as HTMLElement);
 
         const prevHeight = pendingScrollAdjust.current.prevScrollHeight;
+        if (prevHeight != null) {
+            // prevent scroll adjust on the first batch (where set the prevScrollHeight to undefined)
+            return;
+        }
         const newHeight = props.viewRef.scrollHeight;
         const diff = newHeight - prevHeight;
 
         if (diff > 0) {
-            if (isWindow)
+            console.log("scroll diff", { isWindow, scrollUpForMore, diff });
+            if (isWindow) {
                 window.scrollBy({ top: diff, behavior: "instant" as any });
-            else scroller.scrollTop += diff;
+            } else {
+                scroller.scrollTop += diff;
+            }
         }
         pendingScrollAdjust.current = null;
     }, [hidden.head, scrollUpForMore, props.viewRef]);
@@ -364,7 +374,7 @@ export const Replies = (props: {
             restoredScrollPositionOnce.current = true;
         },
         isReplyVisible,
-        debug: false,
+        debug: true,
     });
 
     useEffect(() => {

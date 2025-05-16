@@ -186,7 +186,7 @@ export const CanvasAndRepliesInner = () => {
     useEffect(() => {
         lastScrollTopRef.current = -1;
         setCollapsed(false);
-    }, [viewRoot]);
+    }, [viewRoot?.idString]);
 
     // catch scroll events, and if the replies scroll ref top is above 50vh, go into focused mode
     useEffect(() => {

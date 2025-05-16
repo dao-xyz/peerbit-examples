@@ -40,7 +40,6 @@ type BaseReplyPropsType = {
     onClick?: () => void;
     hideHeader?: boolean;
     lineType?: "start" | "middle" | "end" | "end-and-start" | "none";
-    contentRef?: React.Ref<HTMLDivElement>;
     headerRef?: React.Ref<HTMLDivElement>;
     forwardRef?: React.Ref<HTMLDivElement>;
     highlightType?: "pre-selected" | "selected";
@@ -59,9 +58,7 @@ export const Reply = ({
     onClick,
     variant = "thread",
     hideHeader = false,
-    lineType,
     isQuote,
-    contentRef: contentRef,
     headerRef: headerRef,
     forwardRef: forwardRef,
     highlightType,
@@ -71,6 +68,8 @@ export const Reply = ({
     const [showMore, setShowMore] = useState(false);
     const [isOverflowing, setIsOverflowing] = useState(false);
     const previewContainerRef = useRef<HTMLDivElement>(null);
+    const contentRef = useRef<HTMLDivElement>(null);
+
     const { viewRoot } = useView();
     const { peer } = usePeer();
 
@@ -78,50 +77,54 @@ export const Reply = ({
     const leaveSnapshot = useLeaveSnapshotFn();
 
     // Use useLayoutEffect with a ResizeObserver to measure the container after the layout
+    /* Rework this to handle text + image, text, image, overflow correctly 
+    // problem is that images should shrink to fit, and text should overflow, and this means we neede h-full on images, and h-auto on text (but we can't have both)  
     useLayoutEffect(() => {
-        const container = previewContainerRef.current;
-        if (!container) return;
-
-        // Create an observer that watches for resize changes.
-        const observer = new ResizeObserver((entries) => {
-            for (const entry of entries) {
-                const currentHeight = entry.contentRect.height;
-                const computedStyle = window.getComputedStyle(container);
-                // Get the computed max-height (assumes it's in a valid px value)
-                // If max-height is "none", we'll assume there's no limit.
-                const maxHeightStr = computedStyle.maxHeight;
-                const maxHeight =
-                    maxHeightStr === "none"
-                        ? Infinity
-                        : parseFloat(maxHeightStr);
-
-                if (currentHeight >= maxHeight) {
-                    setIsOverflowing(true);
-                } else {
-                    setIsOverflowing(false);
-                }
-            }
-        });
-
-        // Start observing the container.
-        observer.observe(container);
-
-        // Run an initial measure
-        const rect = container.getBoundingClientRect();
-        const computedStyle = window.getComputedStyle(container);
-        const maxHeightStr = computedStyle.maxHeight;
-        const maxHeight =
-            maxHeightStr === "none" ? Infinity : parseFloat(maxHeightStr);
-        if (rect.height >= maxHeight) {
-            setIsOverflowing(true);
-        } else {
-            setIsOverflowing(false);
-        }
-
-        // Cleanup the observer on unmount
-        return () => observer.disconnect();
-    }, [canvas, showMore]); // Re-run if canvas content or showMore toggles
-
+         const container = contentRef.current;
+ 
+         if (!container) return;
+         let errorMargin = 10; // Adjust this value as needed
+         // Create an observer that watches for resize changes.
+         const observer = new ResizeObserver((entries) => {
+             for (const entry of entries) {
+                 const currentHeight = entry.contentRect.height;
+                 const computedStyle = window.getComputedStyle(previewContainerRef.current);
+                 // Get the computed max-height (assumes it's in a valid px value)
+                 // If max-height is "none", we'll assume there's no limit.
+                 const maxHeightStr = computedStyle.maxHeight;
+                 const maxHeight =
+                     maxHeightStr === "none"
+                         ? Infinity
+                         : parseFloat(maxHeightStr);
+                 console.log("maxHeight", currentHeight, maxHeight);
+                 if (currentHeight >= maxHeight + errorMargin) {
+                     setIsOverflowing(true);
+                 } else {
+                     setIsOverflowing(false);
+                 }
+             }
+         });
+ 
+         // Start observing the container.
+         observer.observe(container);
+ 
+         // Run an initial measure
+         const rect = container.getBoundingClientRect();
+         const computedStyle = window.getComputedStyle(previewContainerRef.current);
+         const maxHeightStr = computedStyle.maxHeight;
+         const maxHeight =
+             maxHeightStr === "none" ? Infinity : parseFloat(maxHeightStr);
+ 
+         if (rect.height >= maxHeight + errorMargin) {
+             setIsOverflowing(true);
+         } else {
+             setIsOverflowing(false);
+         }
+ 
+         // Cleanup the observer on unmount
+         return () => observer.disconnect();
+     }, [canvas, showMore, contentRef.current, previewContainerRef.current]); // Re-run if canvas content or showMore toggles
+  */
     const handleCanvasClick = async (e?: any) => {
         leaveSnapshot(canvas);
         let viewAfterNavigation: ViewType = "chat";
@@ -211,7 +214,7 @@ export const Reply = ({
                         />
                     </div>
                 )}
-                {/* Preview / Canvas Section with a ref and Tailwind classes for transition */}
+                {/* Preview / Canvas Section*/}
                 <div
                     ref={previewContainerRef}
                     className={` relative overflow-hidden flex flex-col min-h-0 max-height-inherit-children ${
@@ -259,7 +262,6 @@ export const Reply = ({
                             />
                         )}
                     </CanvasWrapper>
-
                     {/* Gradient overlay appears when collapsed and content is overflowing */}
                     {!showMore && isOverflowing && (
                         <div className="absolute bottom-0 left-0 right-0 h-[66px] pointer-events-none bg-gradient-to-t from-neutral-50 to-transparent dark:from-black dark:to-transparent" />
