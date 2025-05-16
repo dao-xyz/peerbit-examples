@@ -95,7 +95,7 @@ const PreviewFrame = ({
     className?: string | ((element: Element<ElementContent>) => string);
 }) => (
     <div
-        className={`flex flex-col relative w-full max-in ${
+        className={`flex flex-col relative w-full ${
             maximizeHeight ? "h-full" : ""
         }`}
     >
@@ -392,15 +392,16 @@ const PostPreview = ({
     const [firstApp, ...secondaryApps] = rects.other;
     const text = rects.text;
     return (
-        <>
+        <div
+            ref={forwardRef}
+            className={"flex flex-col h-full w-full " + className}
+        >
             {firstApp && (
                 <div
                     onClick={onClick}
                     className={
-                        "btn col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative " +
-                        className
+                        "btn col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative "
                     }
-                    ref={forwardRef}
                 >
                     <PreviewFrame
                         bgBlur
@@ -414,10 +415,8 @@ const PostPreview = ({
             {secondaryApps.length > 0 && (
                 <div
                     className={
-                        "px-2 col-span-full flex overflow-x-scroll  no-scrollbar gap-2 pt-2 " +
-                        className
+                        "px-2 col-span-full flex overflow-x-scroll  no-scrollbar gap-2 pt-2 "
                     }
-                    ref={forwardRef}
                 >
                     {secondaryApps.map((app, i) => (
                         <button
@@ -439,12 +438,11 @@ const PostPreview = ({
                 <div
                     onClick={onClick}
                     className={"col-start-2 col-span-1 rounded-md py-1 "}
-                    ref={forwardRef}
                 >
                     <PreviewFrame element={text} className={classNameContent} />
                 </div>
             )}
-        </>
+        </div>
     );
 };
 
@@ -464,7 +462,7 @@ const ChatMessagePreview = ({
     const { other: apps, text } = rects;
 
     return (
-        <div className={className} ref={forwardRef}>
+        <div className={"flex flex-col h-full " + className} ref={forwardRef}>
             {apps.map((app) => (
                 <div
                     key={app.idString}
