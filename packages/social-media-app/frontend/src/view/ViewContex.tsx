@@ -100,13 +100,11 @@ function useViewContextHook() {
         [debouncedCanvases]
     );
 
-    // --- Query & Reply Fetching Management ---
-    const getQueryId = (canvas: CanvasDB, sortCriteria: ViewType) =>
-        !canvas ? null : canvas.idString + sortCriteria;
-
     // Set the query based on view and viewRoot.
     const queryObj = useMemo(() => {
-        if (!viewRoot) return null;
+        if (!viewRoot) {
+            return undefined;
+        }
 
         if (debouncedView === "chat") {
             return new SearchRequest({
@@ -158,9 +156,8 @@ function useViewContextHook() {
     } = useQuery(
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
         {
-            query: viewRoot ? queryObj : undefined,
-            id: getQueryId(viewRoot, debouncedView),
-            reverse: debouncedView === "new" || debouncedView === "chat",
+            query: queryObj,
+            reverse: debouncedView === "old" || debouncedView === "chat",
             transform: calculateAddress,
             batchSize,
             debug: false, // { id: "replies" },
@@ -186,7 +183,7 @@ function useViewContextHook() {
                     return undefined;
                 },
                 update:
-                    debouncedView === "chat" || debouncedView === "new"
+                    debouncedView === "chat" || debouncedView === "old"
                         ? undefined
                         : (prev, e) => {
                               prev.unshift(...e.added);
@@ -326,7 +323,7 @@ function useViewContextHook() {
         view: debouncedView,
         setView: changeView, // now changes update the URL
         loadMore,
-        hasMore: !empty,
+        hasMore: () => !empty(),
         isLoading,
         query: queryObj,
         iteratorId,

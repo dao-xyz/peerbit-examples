@@ -52,7 +52,7 @@ export const useAutoScroll = (properties: {
     const [isAtBottom, setIsAtBottom] = useState(true);
 
     const viewIsShouldScrollToBottom =
-        setting?.view === "chat" || setting?.view === "new";
+        setting?.view === "chat" || setting?.view === "old";
     const triggerScroll = () => {
         if (!setting) {
             return;
