@@ -208,6 +208,7 @@ const url_worklet = URL.createObjectURL(
 import { AudioStreamDB, Chunk, Track } from "@peerbit/media-streaming";
 import PDefer, { DeferredPromise } from "p-defer";
 import PQueue from "p-queue";
+import { delay } from "@peerbit/time";
 
 /* —————————————————————————————————————————— */
 /*  TYPE HELPERS                                                               */
@@ -222,6 +223,8 @@ export interface WAVEncoderEvents {
         audioBuffer: Uint8Array;
         timestamp: number;
         last?: boolean;
+        index: number;
+        length: number;
     }): void;
 
     /** media element reached “ended” (real-time only) */
@@ -232,7 +235,7 @@ export interface WAVEncoderEvents {
 /*  ENCODING HELPERS                                          
 /* —————————————————————————————————————————— */
 
-const pcm16Header = (channels: number): Uint8Array => {
+const pcm16Header = (channels: number, sampleRate: number): Uint8Array => {
     const hdr = new Uint8Array(44);
     const v = new DataView(hdr.buffer);
     const BPS = 2; // 16-bit
@@ -243,8 +246,8 @@ const pcm16Header = (channels: number): Uint8Array => {
     v.setUint32(16, 16, true);
     v.setUint16(20, 1, true); // PCM
     v.setUint16(22, channels, true);
-    v.setUint32(24, SAMPLE_RATE, true);
-    v.setUint32(28, SAMPLE_RATE * BPS * channels, true);
+    v.setUint32(24, sampleRate, true);
+    v.setUint32(28, sampleRate * BPS * channels, true);
     v.setUint16(32, BPS * channels, true);
     v.setUint16(34, 16, true);
     v.setUint32(36, 0x64617461, false); // "data"
@@ -295,13 +298,17 @@ export class WAVEncoder {
     /* ---------------------------------- init ------------------------ */
 
     async init(src: WAVEncoderSource, handlers: WAVEncoderEvents = {}) {
-        console.log("DESTORY PREV");
+        console.log("DESTORY PREV?");
+        this.initializing?.reject(new Error("Reset"));
         await this.destroy(); // clean slate
-        this.initializing = PDefer<void>(); // reset gate
+        this.initializing = PDefer<void>();
+        console.log("READY!");
 
-        const forward = (ev: MessageEvent<any>) => {
+        const forward = (ev: MessageEvent) => {
             if (ev.data?.audioBuffer) handlers.onChunk?.(ev.data);
+            if (ev.data?.last) handlers.onEnded?.();
         };
+
         try {
             /* ── real-time branch ───────────────────────────────────────── */
             if ("element" in src) {
@@ -323,8 +330,6 @@ export class WAVEncoder {
                 this.port = this.node.port;
                 this.port.start();
                 this.port.addEventListener("message", forward);
-                if (handlers.onEnded)
-                    this.mediaEl!.addEventListener("ended", handlers.onEnded);
 
                 this.initializing.resolve();
                 return;
@@ -336,34 +341,54 @@ export class WAVEncoder {
             this.port.start();
             this.port.addEventListener("message", forward);
 
-            const buf = await (
-                await new AudioContext()
-            ).decodeAudioData(await src.file.arrayBuffer());
-            const hdr = pcm16Header(buf.numberOfChannels);
-            const CHUNK = Math.floor(0.1 * SAMPLE_RATE); // 100 ms of audio
+            (async () => {
+                const fileCtx = new AudioContext();
+                const buf = await fileCtx.decodeAudioData(
+                    await src.file.arrayBuffer()
+                );
+                const hdr = pcm16Header(buf.numberOfChannels, buf.sampleRate);
+                const CHUNK = Math.floor(0.1 * buf.sampleRate); // 100 ms
+                const STEP_US = 1e6 / buf.sampleRate; // frames → µs
+                let ts = 0;
+                let slicesSinceYield = 0;
 
-            for (let p = 0; p < buf.length; p += CHUNK) {
-                const len = Math.min(CHUNK, buf.length - p);
-                const slice = new AudioBuffer({
-                    length: len,
-                    numberOfChannels: buf.numberOfChannels,
-                    sampleRate: SAMPLE_RATE,
-                });
-                for (let ch = 0; ch < buf.numberOfChannels; ch++)
-                    slice.copyToChannel(
-                        buf.getChannelData(ch).subarray(p, p + len),
-                        ch
+                for (let p = 0; p < buf.length; p += CHUNK) {
+                    const len = Math.min(CHUNK, buf.length - p);
+                    const slice = new AudioBuffer({
+                        length: len,
+                        numberOfChannels: buf.numberOfChannels,
+                        sampleRate: buf.sampleRate,
+                    });
+                    for (let ch = 0; ch < buf.numberOfChannels; ch++)
+                        slice.copyToChannel(
+                            buf.getChannelData(ch).subarray(p, p + len),
+                            ch
+                        );
+
+                    const payload = floatBufToWav(slice, hdr);
+
+                    port2.postMessage(
+                        {
+                            eventType: "data",
+                            audioBuffer: payload,
+                            timestamp: Math.round(ts),
+                            last: p + len >= buf.length,
+                            index: p,
+                            length: buf.length,
+                        },
+                        [payload.buffer]
                     );
+                    ts += len * STEP_US;
 
-                const timestamp = Math.round((p / SAMPLE_RATE) * 1e6); // µs
-
-                port2.postMessage({
-                    eventType: "data",
-                    audioBuffer: floatBufToWav(slice, hdr),
-                    timestamp,
-                    last: p + len >= buf.length,
-                });
-            }
+                    if (++slicesSinceYield === 5) {
+                        slicesSinceYield = 0;
+                        // one macrotask gap is enough for the decoder to keep up
+                        /* eslint-disable no-await-in-loop */
+                        await delay(0);
+                    }
+                }
+                fileCtx.close();
+            })(); // don't wait for this one
 
             this.initializing.resolve(); // nothing else to wait for
         } catch (e) {
