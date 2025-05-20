@@ -111,9 +111,7 @@ export const Play: React.FC<Props> = ({
             console.log("START PROGRESS", progress);
             thisIterator = await source.iterate(progress, {
                 keepTracksOpen: true,
-                replicate: true,
-                preload: 0,
-                preloadingBufferSize: 0,
+                replicate: false,
                 debug: true,
                 onTrackOptionsChange: (track) => {
                     console.log("TRACK OPTIONS CHANGED", track);
@@ -182,7 +180,7 @@ export const Play: React.FC<Props> = ({
         let l = refs.current.get(track.idString);
         if (!l) {
             l = createAudioStreamListener(track, playing, {
-                debug: false,
+                debug: true,
             });
             l.setVolume?.(volume);
             await l.play();
