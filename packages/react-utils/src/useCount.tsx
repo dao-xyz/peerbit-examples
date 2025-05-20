@@ -5,7 +5,7 @@ import { debounceLeadingTrailing } from "./utils";
 
 type QueryOptons = {
     query: indexerTypes.Query[] | indexerTypes.QueryLike;
-    id: string;
+    id?: string;
 };
 export const useCount = <T extends Record<string, any>>(
     db?: Documents<T, any, any>,
@@ -54,7 +54,10 @@ export const useCount = <T extends Record<string, any>>(
             db.events.removeEventListener("change", handleChange);
             debounced.cancel();
         };
-    }, [db?.closed ? undefined : db?.rootAddress, options?.id]);
+    }, [
+        db?.closed ? undefined : db?.rootAddress,
+        options?.id ?? options?.query,
+    ]);
 
     return count;
 };

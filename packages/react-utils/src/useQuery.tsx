@@ -161,6 +161,13 @@ export const useQuery = <
                     : (c: DocumentsChange<T>) => c;
 
             handleChange = async (e: CustomEvent<DocumentsChange<T>>) => {
+                log(
+                    options,
+                    "Merge change",
+                    e.detail,
+                    "iterator",
+                    newIteratorRef.id
+                );
                 const filtered = await mergeFn(e.detail);
                 if (
                     !filtered ||

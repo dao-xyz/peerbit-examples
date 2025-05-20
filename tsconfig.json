@@ -1,9 +1,10 @@
 {
-    "include": ["packages/*/src", "packages/*/*/src"],
+    "include": ["packages/*/src", "packages/*/*/src", "packages/*/*/*/src"],
     "exclude": [
         "node_modules",
         "packages/*/node_modules",
-        "packages/*/*/node_modules"
+        "packages/*/*/node_modules",
+        "packages/*/*/*/node_modules"
     ],
     "compilerOptions": {
         "target": "ES2022",

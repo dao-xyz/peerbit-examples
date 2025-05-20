@@ -29,20 +29,25 @@ jobs:
 
     - name: Deploy stream
       run: |
-        aws s3 sync ./packages/live-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
+        aws s3 sync ./packages/media-streaming/video-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*';
+    
+    - name: Music app
+      run: |
+        aws s3 sync ./packages/media-streaming/music-library/frontend/dist/ s3://music-dao-xyz-dist --delete
+        aws cloudfront create-invalidation --distribution-id E2SEA0JZTCXP6J --paths '/*';
 
     - name: Deploy chat
       run: |
         aws s3 sync ./packages/one-chat-room/frontend/dist/ s3://chat-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E2KS1CGVFT7WAY --paths '/*';
 
-    - name: Deploy social media app
+    - name: Deploy social media app demo-dao
       run: |
         aws s3 sync ./packages/social-media-app/frontend/dist/ s3://demo-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*';
     
-    - name: Deploy social media app
+    - name: Deploy social media app giga-place
       run: |
         aws s3 sync ./packages/social-media-app/frontend/dist/ s3://giga-place-dist --delete
         aws cloudfront create-invalidation --distribution-id E2OYBN34VXT63X --paths '/*';
@@ -66,3 +71,4 @@ jobs:
       run: |
         aws s3 sync ./packages/chess/frontend/dist/ s3://chess-dao-xyz-dist --delete
         aws cloudfront create-invalidation --distribution-id ERBVN30JQDG5W --paths '/*';
+    

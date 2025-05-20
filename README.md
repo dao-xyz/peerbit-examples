@@ -33,8 +33,8 @@
 [<img src="./packages/file-share/demo-cli.gif" width="600" />](./packages/file-share/)
 
 
-### [Live video streaming](./packages/live-streaming/)
-[<img src="./packages/live-streaming/demo.gif" width="600" />](./packages/live-streaming/)
+### [Video streaming](./packages/media-streaming/video-streaming)
+[<img src="./packages/media-streaming/video-streaming/demo.gif" width="600" />](./packages/media-streaming/video-streaming/)
 
 
 ### [Collaborative machine learning](./packages/collaborative-learning/)

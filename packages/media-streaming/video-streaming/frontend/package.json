@@ -1,0 +1,70 @@
+{
+    "name": "videostreaming",
+    "version": "0.1.0",
+    "private": true,
+    "homepage": "https://stream.peerchecker.com",
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "start": "vite",
+        "start-remote": "vite --mode staging --config vite.config.remote.ts",
+        "build": "tsc && vite build",
+        "preview": "vite preview",
+        "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist",
+        "test": "mocha"
+    },
+    "browser": {
+        "./src/hrtime.js": "./src/hrtime.browser.js"
+    },
+    "dependencies": {
+        "peerbit": "^4",
+        "@peerbit/document": "^9",
+        "@peerbit/react": "*",
+        "@peerbit/media-streaming": "*",
+        "@peerbit/media-streaming-web": "*",
+        "@giga-app/sdk": "^0",
+        "react": "^18.2.0",
+        "react-dom": "^18.2.0",
+        "react-use": "^17.4.0",
+        "react-icons": "^5.5.0",
+        "@radix-ui/react-slider": "^1.2.1",
+        "@radix-ui/react-dialog": "^1.1.2",
+        "@radix-ui/react-select": "^2.1.6",
+        "@radix-ui/react-dropdown-menu": "2.1.6",
+        "@radix-ui/react-icons": "^1.3.0",
+        "@radix-ui/react-tooltip": "^1.1.8",
+        "@radix-ui/react-toast": "^1.2.6",
+        "react-router": "^7.5.0",
+        "p-queue": "^8.0.1"
+    },
+    "devDependencies": {
+        "@types/audioworklet": "^0.0.70",
+        "@types/dom-mediacapture-transform": "^0.1.10",
+        "@webgpu/types": "^0.1.44",
+        "@types/dom-webcodecs": "^0.1.11",
+        "@types/react": "^18.2.46",
+        "@types/react-dom": "^18.2.18",
+        "@vitejs/plugin-react": "^4",
+        "typescript": "^5.6.3",
+        "vite": "^6.0.6",
+        "@peerbit/vite": "^1",
+        "tailwindcss": "^4.0.14",
+        "@tailwindcss/postcss": "^4.0.14",
+        "postcss": "^8.4.47",
+        "autoprefixer": "^10.4.20"
+    },
+    "browserslist": {
+        "production": [
+            "chrome >= 67",
+            "edge >= 79",
+            "firefox >= 68",
+            "opera >= 54",
+            "safari >= 14"
+        ],
+        "development": [
+            "last 1 chrome version",
+            "last 1 firefox version",
+            "last 1 safari version"
+        ]
+    }
+}

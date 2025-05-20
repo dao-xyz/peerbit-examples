@@ -1,0 +1,129 @@
+.SliderRoot {
+    position: relative;
+    display: flex;
+    align-items: center;
+    user-select: none;
+    touch-action: none;
+    width: 200px;
+    height: 20px;
+}
+
+.SliderTrack {
+    background-color: red;
+    position: relative;
+    flex-grow: 1;
+    border-radius: 9999px;
+    height: 3px;
+}
+
+.SliderRange {
+    position: absolute;
+    background-color: white;
+    border-radius: 9999px;
+    height: 100%;
+}
+
+.SliderThumb {
+    display: block;
+    width: 20px;
+    height: 20px;
+    background-color: white;
+    box-shadow: 0 2px 10px gray;
+    border-radius: 10px;
+}
+
+.SliderThumb:hover {
+    background-color: violet;
+}
+
+.SliderThumb:focus {
+    outline: none;
+    box-shadow: 0 0 0 5px gainsboro;
+}
+
+.video-wrapper {
+    width: 100%;
+    max-width: 100vw;
+    position: relative;
+    display: flex;
+    overflow-y: auto;
+    flex-direction: column;
+    max-height: 100dvh;
+    align-items: center;
+}
+
+
+/* .video-wrapper:hover .controls {
+    transform: translateY(0%);
+} */
+
+.controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-evenly;
+    /* position: absolute; */
+
+    /*  position: absolute;
+    width: 100vw;
+    bottom: 0px; */
+
+
+    position: -webkit-sticky;
+    position: sticky;
+    /* margin-top: -42px; */
+    bottom: 0px;
+
+
+    width: 100%;
+    flex-wrap: wrap;
+    background: rgba(41, 41, 41, 0.5);
+    box-shadow: 0 8px 32px 0 rgba(255, 255, 255, 0.1);
+
+    backdrop-filter: blur(1px);
+    -webkit-backdrop-filter: blur(1px);
+    /* mask: linear-gradient(transparent, black 90%); */
+    transition: 1s;
+
+
+    border: 1px solid rgba(41, 41, 41, 0.25);
+    /* transform: translateY(150%); */
+    transition: all 0.3s ease-in-out;
+
+
+}
+
+
+
+input[type="range"] {
+    -webkit-appearance: none !important;
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 20px;
+    height: 4px;
+    width: 350px;
+}
+
+input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none !important;
+    cursor: pointer;
+    height: 6px;
+}
+
+input[type="range"]::-moz-range-progress {
+    background: white;
+}
+
+
+
+#volume-button:hover+#volume-slider {
+    display: flex;
+}
+
+#volume-slider:hover {
+    display: flex;
+}
+
+
+
+/* video::-webkit-media-controls-enclosure {
+    display: none !important;
+} */

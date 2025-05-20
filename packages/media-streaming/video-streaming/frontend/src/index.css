@@ -1,0 +1,388 @@
+body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+        'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
+        sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+}
+
+code {
+    font-family: source-code-pro, Menlo, Monaco, Consolas, 'Courier New',
+        monospace;
+}
+
+
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+    /* Define your primary color shades using oklch() */
+    --color-primary-50: oklch(0.97 0.014 254.604);
+    --color-primary-100: oklch(0.932 0.032 255.585);
+    --color-primary-200: oklch(0.882 0.059 254.128);
+    --color-primary-300: oklch(0.809 0.105 251.813);
+    --color-primary-400: oklch(0.707 0.165 254.624);
+    --color-primary-500: oklch(0.623 0.214 259.815);
+    --color-primary-600: oklch(0.546 0.245 262.881);
+    --color-primary-700: oklch(0.488 0.243 264.376);
+    --color-primary-800: oklch(0.424 0.199 265.638);
+    --color-primary-900: oklch(0.379 0.146 265.522);
+    --color-primary-950: oklch(0.282 0.091 267.935);
+
+
+
+    /* Define your secondary color shades using oklch() */
+    --color-secondary-50: oklch(0.987 0.026 102.212);
+    --color-secondary-100: oklch(0.973 0.071 103.193);
+    --color-secondary-200: oklch(0.945 0.129 101.54);
+    --color-secondary-300: oklch(0.905 0.182 98.111);
+    --color-secondary-400: oklch(0.852 0.199 91.936);
+    --color-secondary-500: oklch(0.795 0.184 86.047);
+    --color-secondary-600: oklch(0.681 0.162 75.834);
+    --color-secondary-700: oklch(0.554 0.135 66.442);
+    --color-secondary-800: oklch(0.476 0.114 61.907);
+    --color-secondary-900: oklch(0.421 0.095 57.708);
+
+}
+
+
+@tailwind utilities;
+
+@layer base {
+
+    input {
+        @apply text-black;
+        @apply dark:text-white;
+        @apply bg-white;
+        @apply dark:bg-black;
+    }
+
+    body {
+        @apply text-neutral-950;
+        @apply dark:text-neutral-50;
+        @apply bg-neutral-50;
+        @apply dark:bg-neutral-950;
+    }
+
+    span {
+        @apply text-neutral-950;
+        @apply dark:text-neutral-50;
+    }
+
+    .btn {
+        @apply py-2 px-4 rounded;
+        @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
+    }
+
+    .btn-icon {
+        @apply text-neutral-800;
+        @apply dark:text-neutral-200;
+    }
+
+    .btn:hover {
+        @apply bg-primary-200;
+        @apply dark:bg-primary-400;
+        @apply cursor-pointer;
+
+    }
+
+    .btn:active {
+        @apply bg-primary-400;
+        @apply dark:bg-primary-600;
+    }
+
+    .btn-icon:active {
+        @apply bg-primary-400;
+        @apply dark:bg-primary-600;
+
+    }
+
+
+    /* Only apply hoverings effect on non touch devices */
+    @media (hover: hover) {
+        .btn-icon:hover {
+            @apply bg-primary-200;
+            @apply dark:bg-primary-400;
+            @apply cursor-pointer;
+        }
+    }
+
+
+
+
+    .btn-icon {
+        @apply py-2 px-2 rounded-md;
+    }
+
+    .btn-toggle {
+        box-shadow: 0 4px #999;
+        outline: none;
+        @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
+    }
+
+    .btn-toggle[data-state='on'] {
+        @apply bg-primary-400;
+        @apply dark:bg-primary-500;
+        box-shadow: 0 1px #666 !important;
+        transform: translateY(4px) !important;
+    }
+
+
+    .btn-toggle:focus {
+
+        /*  box-shadow: 0 0 0 2px black; */
+        outline: none;
+    }
+
+    .btn-elevated {
+        outline: none;
+        box-shadow: 0 4px #999;
+        @apply border-[1px] border-neutral-600 dark:border-neutral-400 border-solid;
+    }
+
+    .btn-elevated:active {
+        box-shadow: 0 1px #666 !important;
+        transform: translateY(4px) !important;
+    }
+
+    .btn-icon-sx>* {
+        @apply w-4 h-4
+    }
+
+    .btn-icon-md>* {
+        @apply w-6 h-6
+    }
+
+    .btn-icon-lg>* {
+        @apply w-6 h-6
+    }
+
+    .btn-icon-lg>* {
+        @apply w-8 h-8
+    }
+
+    .tooltip {
+        @apply bg-gray-900 text-white p-3 rounded shadow-lg max-w-xs whitespace-normal
+    }
+
+    button[disabled=disabled], button:disabled {
+        box-shadow: none !important;
+        transform: none !important;
+        cursor: default !important;
+        pointer-events: none;
+    }
+
+    .center-middle {
+        display: flex;
+        align-items: center;
+        justify-content: space-evenly;
+        position: absolute;
+        pointer-events: none;
+        width: 100%;
+        height: 100%;
+        margin: 0;
+        bottom: 0;
+    }
+
+
+    .slider-root {
+        position: relative;
+        display: flex;
+        align-items: center;
+        user-select: none;
+        touch-action: none;
+        width: 200px;
+        height: 20px;
+    }
+
+    .slider-track {
+        @apply bg-white;
+        position: relative;
+        flex-grow: 1;
+        border-radius: 9999px;
+        height: 3px;
+    }
+
+    .slider-range {
+        position: absolute;
+        @apply bg-green-500;
+        @apply shadow-md;
+        @apply shadow-green-500;
+
+        border-radius: 9999px;
+        height: 100%;
+    }
+
+    .slider-thumb {
+        display: block;
+        width: 20px;
+        height: 20px;
+        @apply cursor-pointer;
+        @apply bg-white;
+        @apply shadow-primary-300;
+        border-radius: 10px;
+    }
+
+    .slider-thumb:hover {
+        @apply bg-slate-300;
+
+    }
+
+    .slider-thumb:focus {
+        outline: none;
+        @apply shadow-primary-400;
+
+    }
+
+    .popover-content {
+        @apply bg-neutral-800;
+        border-radius: 4px;
+        padding: 20px;
+        width: 100vw;
+        max-width: 600px;
+
+        box-shadow: hsl(206 22% 7% / 35%) 0px 10px 38px -10px, hsl(206 22% 7% / 20%) 0px 10px 20px -15px;
+        animation-duration: 400ms;
+        animation-timing-function: cubic-bezier(0.16, 1, 0.3, 1);
+        will-change: transform, opacity;
+    }
+
+    .popover-content:focus {
+        box-shadow: hsl(206 22% 7% / 35%) 0px 10px 38px -10px, hsl(206 22% 7% / 20%) 0px 10px 20px -15px,
+            0 0 0 2px var(--violet-7);
+    }
+
+    .popover-content[data-state='open'][data-side='top'] {
+        animation-name: slideDownAndFade;
+    }
+
+    .popover-content[data-state='open'][data-side='right'] {
+        animation-name: slideLeftAndFade;
+    }
+
+    .popover-content[data-state='open'][data-side='bottom'] {
+        animation-name: slideUpAndFade;
+    }
+
+    .popover-content[data-state='open'][data-side='left'] {
+        animation-name: slideRightAndFade;
+    }
+
+    .popover-arrow {
+        fill: white;
+    }
+
+    .popover-close {
+        font-family: inherit;
+        border-radius: 100%;
+        height: 25px;
+        width: 25px;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        color: var(--violet-11);
+        position: absolute;
+        top: 5px;
+        right: 5px;
+    }
+
+    .popover-close:hover {
+        @apply bg-neutral-600;
+    }
+
+
+    .SwitchRoot {
+        width: 42px;
+        height: 25px;
+
+        position: relative;
+        @apply shadow-sm;
+        @apply rounded-full;
+        @apply bg-black;
+        -webkit-tap-highlight-color: rgba(0, 0, 0, 0);
+    }
+
+    .SwitchRoot:focus {
+        box-shadow: 0 0 0 2px black;
+    }
+
+    .SwitchRoot[data-state='checked'] {
+        @apply bg-green-500;
+
+    }
+
+    .SwitchThumb {
+        display: block;
+        width: 21px;
+        height: 21px;
+        background-color: white;
+
+        @apply shadow-sm;
+        @apply rounded-full;
+        transition: transform 100ms;
+        transform: translateX(2px);
+        will-change: transform;
+    }
+
+    .SwitchThumb[data-state='checked'] {
+        transform: translateX(19px);
+    }
+
+
+    .progress-root {
+        position: relative;
+        overflow: hidden;
+        @apply bg-neutral-600;
+        border-radius: 99999px;
+        width: 300px;
+        height: 25px;
+
+        /* Fix overflow clipping in Safari */
+        /* https://gist.github.com/domske/b66047671c780a238b51c51ffde8d3a0 */
+        transform: translateZ(0);
+    }
+
+    .progress-indicator {
+        @apply bg-primary-300;
+        width: 100%;
+        height: 100%;
+        transition: transform 30ms cubic-bezier(0.65, 0, 0.35, 1);
+    }
+
+    .menu-item {
+        @apply flex items-center w-full p-2;
+
+        /*  @apply py-2 px-4; */
+        @apply text-neutral-800;
+        @apply dark:text-neutral-200;
+        @apply hover:bg-primary-200;
+        @apply dark:hover:bg-primary-400;
+        cursor: pointer;
+
+    }
+
+    .menu-item:hover {
+        @apply bg-primary-200;
+        @apply dark:bg-primary-400;
+    }
+
+    .menu-item:active {
+        @apply bg-primary-400;
+        @apply dark:bg-primary-600;
+    }
+
+    .menu-item:focus {
+        @apply bg-primary-200;
+        @apply dark:bg-primary-400;
+    }
+
+    .menu-item[data-disabled] {
+        @apply text-neutral-400;
+        @apply dark:text-neutral-600;
+        @apply cursor-not-allowed;
+    }
+
+
+
+}
