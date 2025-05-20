@@ -48,9 +48,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
 
             /* ② encoder */
             console.log("INIT ENCODER");
-            const wav = new WAVEncoder();
-            encoderRef.current = wav;
-            await wav.init({ file });
+
             console.log("INIT ENCODER DONE");
 
             /* progress */
@@ -58,7 +56,6 @@ export const Upload: React.FC<Props> = ({ source }) => {
             let lastTs = -1;
 
             let clear = async () => {
-                wav.port.removeEventListener("message", onMessage);
                 await wav.pause();
                 await wav.destroy();
                 await source.setEnd(track, lastTs);
@@ -67,36 +64,48 @@ export const Upload: React.FC<Props> = ({ source }) => {
                 setMsg("Upload complete 🎉");
             };
 
-            const onMessage = ({ data }: MessageEvent) => {
-                const { audioBuffer, timestamp, last } = data as {
-                    last?: boolean;
-                    audioBuffer: Uint8Array;
-                    timestamp: number;
-                };
-                if (!audioBuffer) return;
+            const onMessage = (props: {
+                last?: boolean;
+                audioBuffer: Uint8Array;
+                timestamp: number;
+                index: number;
+                length: number;
+            }) => {
+                if (!props.audioBuffer) return;
 
-                let thisTime = timestamp;
+                let thisTime = props.timestamp;
                 if (thisTime == lastTs) {
                     thisTime++;
                 }
                 lastTs = thisTime;
 
+                console.log("onMessage", props.timestamp);
+
                 track.put(
-                    new Chunk({ type: "key", chunk: audioBuffer, time: lastTs })
+                    new Chunk({
+                        type: "key",
+                        chunk: props.audioBuffer,
+                        time: lastTs,
+                    })
                 );
 
-                bytes += audioBuffer.length;
-                setProgress(Math.min(bytes / file.size, 1));
-                console.log("onChunk", lastTs);
-                if (last) {
+                bytes += props.audioBuffer.length;
+                setProgress(Math.min(props.index / props.length, 1));
+
+                if (props.last) {
                     console.log("DONE!");
                     clear();
                 }
             };
 
-            wav.port.addEventListener("message", onMessage);
-
-            /* encode */
+            const wav = new WAVEncoder();
+            encoderRef.current = wav;
+            await wav.init(
+                { file },
+                {
+                    onChunk: onMessage,
+                }
+            );
 
             await wav.play();
 
