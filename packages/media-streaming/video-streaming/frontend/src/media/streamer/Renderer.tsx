@@ -396,8 +396,9 @@ const createAudioEncoder = async (properties: {
                 throw new Error("Unexpected: Missing audio data");
             }
 
-            if (startPlayTime === 1) {
-                startPlayTime = data.timestamp;
+            if (startPlayTime === -1) {
+                startPlayTime =
+                    properties.wavEncoder.current.ctx.currentTime * 1e6;
             }
 
             const { audioBuffer } = data as { audioBuffer: Uint8Array };
