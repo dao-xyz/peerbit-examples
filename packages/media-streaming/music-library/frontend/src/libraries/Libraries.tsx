@@ -12,11 +12,11 @@ export const Libraries = () => {
     const { peer } = usePeer();
 
     /* global stores */
-    const { libraries, create, loading: isLoadingQuery } = useLibraries();
+    const { libraries, create, loading: isLoadingLibraries } = useLibraries();
     const { getName } = useNames();
 
     /* live list of library docs */
-    const { items: libraryItems, isLoading: isLoadingLibraries } = useQuery(
+    const { items: libraryItems, isLoading: isLoadingQUery } = useQuery(
         libraries?.libraries,
         {
             query: useMemo(() => ({}), []),
@@ -27,8 +27,6 @@ export const Libraries = () => {
             },
         }
     );
-
-    const loading = isLoadingQuery || isLoadingLibraries;
 
     const goToLibrary = async (lib: MediaStreamDBs) => {
         return peer
@@ -52,7 +50,7 @@ export const Libraries = () => {
                 </h1>
 
                 {/* create-new button */}
-                {loading ? (
+                {isLoadingLibraries ? (
                     <SpinnerSong />
                 ) : (
                     <button
@@ -70,9 +68,15 @@ export const Libraries = () => {
             </div>
 
             {/* empty-state  */}
-            {!loading && libraryItems.length === 0 && (
+            {!isLoadingQUery && libraryItems.length === 0 && (
                 <div className="flex flex-col items-center justify-center h-[60vh] text-neutral-400">
                     No libraries yet
+                </div>
+            )}
+
+            {isLoadingQUery && (
+                <div className="flex flex-col items-center justify-center h-[60vh] text-neutral-400">
+                    <SpinnerSong />
                 </div>
             )}
 
