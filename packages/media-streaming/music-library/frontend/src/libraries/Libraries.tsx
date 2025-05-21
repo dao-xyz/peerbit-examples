@@ -123,7 +123,6 @@ export const Libraries = () => {
                     <button
                         onClick={async () => {
                             const lib = await create();
-                            console.log("NAVIGATE", lib.address);
                             navigate(`/l/${lib.address}`);
                         }}
                         className="flex items-center gap-2 px-4 py-2 rounded-full bg-emerald-500 hover:bg-emerald-600 text-white shadow-lg transition"

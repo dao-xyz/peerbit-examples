@@ -53,7 +53,6 @@ export const Play: React.FC<Props> = ({
     const { addPlay } = usePlayStats();
     const playedOnce = useRef(false);
     const setPlaying = (value: boolean) => {
-        console.log(value);
         _setPlaying(value);
         if (value) {
             playedOnce.current = true;
@@ -113,12 +112,6 @@ export const Play: React.FC<Props> = ({
                 keepTracksOpen: true,
                 replicate: false,
                 debug: false,
-                onTrackOptionsChange: (track) => {
-                    console.log("TRACK OPTIONS CHANGED", track);
-                },
-                onTracksChange: (tracks) => {
-                    console.log("TRACKS CHANGED", tracks);
-                },
                 onProgress: ({ track, chunk }) => {
                     setIsLoading(false);
                     if (cancelled || id !== iteratorId.current) {
