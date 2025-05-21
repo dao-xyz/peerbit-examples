@@ -119,7 +119,7 @@ class NamedItem {
 }
 
 /* ─────────────── program ─────────────── */
-@variant("named-items") // one program for every “thing”
+@variant("named-items")
 export class NamedItems extends Program {
     @field({ type: Documents })
     documents: Documents<NamedItem>;

@@ -35,10 +35,18 @@ export const Upload: React.FC<Props> = ({ source }) => {
 
         try {
             /* ① open track */
+
+            const peekCtx = new AudioContext(); // throw-away
+            const inBuf = await peekCtx.decodeAudioData(
+                await file.arrayBuffer()
+            );
+            const srcRate = inBuf.sampleRate; // e.g. 44100
+            await peekCtx.close(); // TODO create the track after we learnt about the sample rate from decoding it into chunks
+
             const track = await source.node.open(
                 new Track({
                     sender: source.node.identity.publicKey,
-                    source: new AudioStreamDB({ sampleRate: 48_000 }),
+                    source: new AudioStreamDB({ sampleRate: srcRate }),
                     start: 0,
                 })
             );
@@ -73,13 +81,18 @@ export const Upload: React.FC<Props> = ({ source }) => {
             }) => {
                 if (!props.audioBuffer) return;
 
+                /*  props.timestamp && wav.ctx && console.log("UPLOAD TIMES", {
+                     chunk: props.timestamp,
+                     currentTime: wav.ctx!.currentTime * 1e6,
+                     diff: props.timestamp - wav.ctx!.currentTime * 1e6,
+                 })
+                 props.timestamp = wav.ctx!.currentTime * 1e6; */
+
                 let thisTime = props.timestamp;
                 if (thisTime == lastTs) {
                     thisTime++;
                 }
                 lastTs = thisTime;
-
-                console.log("onMessage", props.timestamp);
 
                 track.put(
                     new Chunk({
@@ -101,7 +114,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
             const wav = new WAVEncoder();
             encoderRef.current = wav;
             await wav.init(
-                { file },
+                { file, useElement: true }, // TODO useElement: false is glitchy/buggy (but should be much faster)
                 {
                     onChunk: onMessage,
                 }

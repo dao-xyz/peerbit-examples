@@ -2,199 +2,150 @@
  * Wave encoder that can run inside in a worklet
  */
 
-const SAMPLE_RATE = 48000;
 // self contained worklet for encoding
 const url_worklet = URL.createObjectURL(
     new Blob(
         [
             "(",
             function () {
-                const SAMPLE_RATE = 48000;
-
                 class ConvertBitsProcessor extends AudioWorkletProcessor {
-                    audioBuffer: Float32Array[][] = [];
-                    bufferLen = 0;
-                    written = 0; // total samples emitted
+                    // ──────────────────────────────────────────────
+                    //                                                state
+                    // ──────────────────────────────────────────────
+                    private readonly SR = sampleRate; // device sample-rate
+                    private readonly MIN_CHUNK = 5_000; // ~100 ms @ 48 kHz
 
-                    // This variable describe how much audio data we need to buffer before
-                    // we sent it back into an array
-                    // making this tooo small can have performanc overheads
-                    // making this too big i will make will increase latency for listeners
-                    MIN_CHUNK_SIZE = 5000; // TODO  make this as option
+                    private buf: Float32Array[][] = []; // gathered frames
+                    private bufLen = 0; // samples in `buf`
+                    private written = 0; // total PCM16 samples sent
 
-                    static get parameterDescriptors() {
-                        return [];
-                    }
+                    // cached WAV header (invalid once channel-count changes)
+                    private hdrCache?: { ch: number; data: Uint8Array };
 
+                    // ──────────────────────────────────────────────
                     constructor() {
                         super();
-                        this.audioBuffer = [];
 
-                        this.port.onmessage = (ev) => {
-                            if (ev.data === "flush") {
-                                this.emitChunk(true); // force
-                            }
+                        // external “flush”
+                        this.port.onmessage = (ev: MessageEvent<any>) => {
+                            if (ev.data === "flush") this.emit(true);
                         };
                     }
 
-                    mergeBuffers(channel: number): Float32Array {
-                        const res = new Float32Array(
-                            this.audioBuffer.length * 128
-                        );
-                        let offset = 0;
-                        for (const frame of this.audioBuffer) {
-                            res.set(frame[channel], offset);
-                            offset += frame[channel].length;
-                        }
-                        return res;
-                    }
-
-                    interleave(l: Float32Array, r: Float32Array) {
-                        const len = l.length + r.length;
-                        const out = new Float32Array(len);
-                        for (let i = 0, j = 0; i < l.length; i++) {
-                            out[j++] = l[i];
-                            out[j++] = r[i];
+                    // ──────────────────────────────────────────────
+                    //                                               helpers
+                    // ──────────────────────────────────────────────
+                    private merge(ch: number): Float32Array {
+                        const out = new Float32Array(this.buf.length * 128);
+                        let off = 0;
+                        for (const frame of this.buf) {
+                            out.set(frame[ch], off);
+                            off += frame[ch].length;
                         }
                         return out;
                     }
 
-                    private _header: Uint8Array;
-                    private _lastChannelCount: number;
-                    private _lastDataLength: number;
+                    private interleave(
+                        l: Float32Array,
+                        r: Float32Array
+                    ): Float32Array {
+                        const res = new Float32Array(l.length + r.length);
+                        for (let i = 0, j = 0; i < l.length; i++) {
+                            res[j++] = l[i];
+                            res[j++] = r[i];
+                        }
+                        return res;
+                    }
 
-                    getHeader(
+                    /** WAV pcm-16 header for *dataLength* bytes */
+                    private header(
                         channels: number,
-                        dataLength = 0xffffffff - 16
+                        dataBytes: number
                     ): Uint8Array {
-                        if (
-                            channels != this._lastChannelCount ||
-                            this._lastDataLength !== dataLength
-                        ) {
-                            this._lastChannelCount = channels;
-                            this._lastDataLength = dataLength;
-                            this._header = undefined as any; // TODO typyes
+                        if (this.hdrCache?.ch !== channels) {
+                            const h = new DataView(new ArrayBuffer(44));
+                            const BPS = 2;
+                            h.setUint32(0, 0x52494646, false); // RIFF
+                            h.setUint32(8, 0x57415645, false); // WAVE
+                            h.setUint32(12, 0x666d7420, false);
+                            h.setUint32(16, 16, true);
+                            h.setUint16(20, 1, true); // PCM
+                            h.setUint16(22, channels, true);
+                            h.setUint32(24, sampleRate, true);
+                            h.setUint32(28, sampleRate * BPS * channels, true);
+                            h.setUint16(32, BPS * channels, true);
+                            h.setUint16(34, 16, true);
+                            h.setUint32(36, 0x64617461, false); // data
+                            this.hdrCache = {
+                                ch: channels,
+                                data: new Uint8Array(h.buffer),
+                            };
                         }
 
-                        if (this._header) {
-                            return this._header;
-                        }
-
-                        const view = new DataView(new ArrayBuffer(44));
-
-                        const BYTES_PER_SAMPLE = Int16Array.BYTES_PER_ELEMENT;
-                        const fileLength = dataLength + 36;
-
-                        view.setUint32(0, 0x52494646, false); // "RIFF"
-                        view.setUint32(4, fileLength, true);
-                        view.setUint32(8, 0x57415645, false); // "WAVE"
-                        view.setUint32(12, 0x666d7420, false); // "fmt "
-                        view.setUint32(16, 16, true); // fmt length
-                        view.setUint16(20, 1, true); // PCM
-                        view.setUint16(22, channels, true);
-                        view.setUint32(24, SAMPLE_RATE, true);
-                        view.setUint32(
-                            28,
-                            SAMPLE_RATE * BYTES_PER_SAMPLE * channels,
-                            true
-                        );
-                        view.setUint16(32, BYTES_PER_SAMPLE * channels, true);
-                        view.setUint16(34, 16, true); // bits
-                        view.setUint32(36, 0x64617461, false); // "data"
-                        view.setUint32(40, dataLength, true);
-
-                        return (this._header = new Uint8Array(view.buffer));
+                        // clone & patch sizes
+                        const hdr = new Uint8Array(this.hdrCache.data); // copy!
+                        const v = new DataView(hdr.buffer);
+                        v.setUint32(4, dataBytes + 36, true); // file size
+                        v.setUint32(40, dataBytes, true); // data size
+                        return hdr;
                     }
 
-                    _floatTo16BitPCM(
-                        output: Uint8Array,
-                        offset: number,
-                        input: Float32Array
-                    ) {
-                        for (let i = 0; i < input.length; i++, offset += 2) {
-                            let s = input[i];
+                    /** PCM32 → PCM16 and post Message */
+                    private emit(forceLast = false): void {
+                        if (!forceLast && this.bufLen < this.MIN_CHUNK) return;
 
-                            // Check for clipping
-                            if (s > 1) {
-                                s = 1;
-                            } else if (s < -1) {
-                                s = -1;
-                            }
+                        const ch = this.buf[0].length;
+                        const merged =
+                            ch === 2
+                                ? this.interleave(this.merge(0), this.merge(1))
+                                : this.merge(0);
 
-                            //output.setInt16(offset, s < 0 ? s * 0x8000 : s *    , true)
-                            s = s * 32768;
-                            output[offset] = s;
-                            output[offset + 1] = s >> 8;
+                        const pcm16 = new Int16Array(merged.length);
+                        for (let i = 0; i < merged.length; i++) {
+                            const s = Math.max(-1, Math.min(1, merged[i]));
+                            pcm16[i] = s * 0x7fff;
                         }
-                    }
 
-                    /**
-                     * Emit a chunk if:
-                     *   • `force` = true  OR
-                     *   • bufferLen > MIN_CHUNK_SIZE
-                     * After emitting, the local buffer resets.
-                     */
-                    private emitChunk(last = false) {
-                        if (!last && this.bufferLen <= this.MIN_CHUNK_SIZE)
-                            return;
-
-                        const channels = this.audioBuffer[0].length;
-                        const merged: Float32Array[] = [];
-                        for (let ch = 0; ch < channels; ch++)
-                            merged.push(this.mergeBuffers(ch));
-
-                        const interleaved =
-                            channels === 2
-                                ? this.interleave(merged[0], merged[1])
-                                : merged[0];
-
-                        const dataLen = interleaved.length * 2;
-                        const buf = new Uint8Array(44 + dataLen);
-                        buf.set(this.getHeader(channels, dataLen), 0);
-                        const timestamp = Math.round(
-                            (this.written / SAMPLE_RATE) * 1e6
-                        ); // µs
-                        this.written +=
-                            (buf.length - 44) / 2 /* bytes → samples */;
-
-                        this._floatTo16BitPCM(buf, 44, interleaved);
-
-                        this.port.postMessage({
+                        const pcmBytes = new Uint8Array(pcm16.buffer);
+                        const msg = {
                             eventType: "data",
-                            audioBuffer: buf,
-                            timestamp,
-                            last,
-                        });
+                            audioBuffer: new Uint8Array(44 + pcmBytes.length),
+                            timestamp: Math.round(
+                                (this.written / this.SR) * 1e6
+                            ),
+                            last: forceLast,
+                        };
 
-                        this.audioBuffer = [];
-                        this.bufferLen = 0;
+                        // copy header + payload
+                        msg.audioBuffer.set(
+                            this.header(ch, pcmBytes.length),
+                            0
+                        );
+                        msg.audioBuffer.set(pcmBytes, 44);
+
+                        this.written += merged.length / ch;
+                        this.port.postMessage(msg, [msg.audioBuffer.buffer]);
+
+                        // reset buffer
+                        this.buf = [];
+                        this.bufLen = 0;
                     }
 
-                    process(
-                        inputs: Float32Array[][],
-                        outputs: Float32Array[][],
-                        parameters: Record<string, Float32Array>
-                    ): boolean {
-                        const inp = inputs[0]; // first node
-                        /* silent quantum  → flush once, then ignore the rest */
-                        if (inp.length === 0) {
-                            return true;
-                        }
+                    // ──────────────────────────────────────────────
+                    //                                                main callback
+                    // ──────────────────────────────────────────────
+                    process(inputs: Float32Array[][]): boolean {
+                        const inp = inputs[0];
+                        if (inp.length === 0) return true; // silent quantum
 
-                        /* accumulate */
-                        this.audioBuffer.push(
-                            inp.map((c) => new Float32Array(c))
-                        );
-                        this.bufferLen += 128 * inp.length;
-                        this.emitChunk(false);
+                        this.buf.push(inp.map((c) => new Float32Array(c)));
+                        this.bufLen += 128 * inp.length;
+                        this.emit(false);
 
-                        /* pass-through to outputs (mirrors input) */
-                        const output = arguments[1][0] as Float32Array[]; // outputs[0]
-                        for (let ch = 0; ch < output.length; ch++)
-                            output[ch].set(inp[ch]);
-                        return true;
+                        return true; // keep processor alive
                     }
                 }
+
                 registerProcessor(
                     "convert-bits-processor",
                     ConvertBitsProcessor
@@ -205,6 +156,7 @@ const url_worklet = URL.createObjectURL(
         { type: "application/javascript" }
     )
 );
+
 import { AudioStreamDB, Chunk, Track } from "@peerbit/media-streaming";
 import PDefer, { DeferredPromise } from "p-defer";
 import PQueue from "p-queue";
@@ -214,8 +166,8 @@ import { delay } from "@peerbit/time";
 /*  TYPE HELPERS                                                               */
 /* —————————————————————————————————————————— */
 type WAVEncoderSource =
-    | { element: HTMLMediaElement; file?: never }
-    | { file: File; element?: never };
+    | { element: HTMLMediaElement; file?: never; useElement?: true }
+    | { file: File; useElement?: boolean };
 
 export interface WAVEncoderEvents {
     /** every ≈100 ms */
@@ -311,11 +263,16 @@ export class WAVEncoder {
 
         try {
             /* ── real-time branch ───────────────────────────────────────── */
-            if ("element" in src) {
-                this.mediaEl = src.element;
-                this.ownsMedia = false;
+            if ("element" in src || src.useElement) {
+                if ("element" in src) {
+                    this.mediaEl = src.element;
+                    this.ownsMedia = false;
+                } else {
+                    this.mediaEl = await this._prepareElementFromFile(src.file);
+                    this.ownsMedia = true;
+                }
 
-                this.ctx = new AudioContext({ sampleRate: SAMPLE_RATE });
+                this.ctx = new AudioContext();
                 await this.ctx.audioWorklet.addModule(url_worklet);
 
                 this.srcNode = this.ctx.createMediaElementSource(this.mediaEl!);
@@ -323,6 +280,12 @@ export class WAVEncoder {
                     this.ctx,
                     "convert-bits-processor"
                 );
+                const flushOnEnded = () => {
+                    /* the worklet listens for "flush" and calls emitChunk(true) */
+                    this.port.postMessage("flush");
+                    this.mediaEl!.removeEventListener("ended", flushOnEnded);
+                };
+                this.mediaEl.addEventListener("ended", flushOnEnded);
 
                 this.srcNode.connect(this.node);
                 this.node.connect(this.ctx.destination);
@@ -335,60 +298,97 @@ export class WAVEncoder {
                 return;
             }
 
-            /* ── offline / file branch ──────────────────────────────────── */
+            /* ── offline / file branch  without using element (fastest) ──────────────────────────────────── */
+            // this path seems to be glitchy broken when we deploy our site and might lead to issues when decoding wierd file formats
             const { port1, port2 } = new MessageChannel();
             this.port = port1;
             this.port.start();
             this.port.addEventListener("message", forward);
 
             (async () => {
-                const fileCtx = new AudioContext();
-                const buf = await fileCtx.decodeAudioData(
+                /* 1️⃣  Decode with a short-lived context */
+                const tmpCtx = new AudioContext();
+                const DEVICE_SR = tmpCtx.sampleRate; // device sample-rate
+                const srcBuf = await tmpCtx.decodeAudioData(
                     await src.file.arrayBuffer()
                 );
-                const hdr = pcm16Header(buf.numberOfChannels, buf.sampleRate);
-                const CHUNK = Math.floor(0.1 * buf.sampleRate); // 100 ms
-                const STEP_US = 1e6 / buf.sampleRate; // frames → µs
-                let ts = 0;
-                let slicesSinceYield = 0;
+                const inSR = srcBuf.sampleRate;
+                const channels = srcBuf.numberOfChannels;
+                await tmpCtx.close();
 
-                for (let p = 0; p < buf.length; p += CHUNK) {
-                    const len = Math.min(CHUNK, buf.length - p);
+                const TARGET_SR = inSR === DEVICE_SR ? inSR : 48_000;
+                let pcmBuf: AudioBuffer;
+                if (inSR === TARGET_SR) {
+                    /* already at our target - no resampling needed */
+                    pcmBuf = srcBuf;
+                } else {
+                    /* 2️⃣b  Resample in one shot */
+
+                    const frames = Math.ceil(srcBuf.duration * TARGET_SR);
+                    console.log("RESAMPLE", { inSR, TARGET_SR, frames });
+
+                    const offCtx = new OfflineAudioContext(
+                        channels,
+                        frames,
+                        TARGET_SR
+                    );
+
+                    const srcNode = offCtx.createBufferSource();
+                    srcNode.buffer = srcBuf;
+                    srcNode.connect(offCtx.destination);
+                    srcNode.start();
+
+                    pcmBuf = await offCtx.startRendering(); // resampled buffer
+                    /* OfflineAudioContext needs no close(); GC will collect it */
+                }
+
+                /* 3️⃣  Chunk & stream */
+                const CHUNK_FRAMES = Math.floor(0.1 * TARGET_SR); // 100 ms
+                const STEP_US = 1e6 / TARGET_SR; // frames → µs
+                const header = pcm16Header(channels, TARGET_SR);
+
+                let tsUS = 0; // µ-seconds since start
+                let yieldC = 0; // macro-task back-pressure
+
+                for (let p = 0; p < pcmBuf.length; p += CHUNK_FRAMES) {
+                    const len = Math.min(CHUNK_FRAMES, pcmBuf.length - p);
+
+                    /* zero-copy view into original channel data -------------------- */
                     const slice = new AudioBuffer({
                         length: len,
-                        numberOfChannels: buf.numberOfChannels,
-                        sampleRate: buf.sampleRate,
+                        numberOfChannels: channels,
+                        sampleRate: TARGET_SR,
                     });
-                    for (let ch = 0; ch < buf.numberOfChannels; ch++)
+                    for (let ch = 0; ch < channels; ch++) {
                         slice.copyToChannel(
-                            buf.getChannelData(ch).subarray(p, p + len),
+                            pcmBuf.getChannelData(ch).subarray(p, p + len),
                             ch
                         );
+                    }
 
-                    const payload = floatBufToWav(slice, hdr);
+                    const payload = floatBufToWav(slice, header);
 
                     port2.postMessage(
                         {
                             eventType: "data",
-                            audioBuffer: payload,
-                            timestamp: Math.round(ts),
-                            last: p + len >= buf.length,
+                            audioBuffer: payload, // Uint8Array
+                            timestamp: Math.round(tsUS), // μs
+                            last: p + len >= pcmBuf.length,
                             index: p,
-                            length: buf.length,
+                            length: pcmBuf.length,
                         },
-                        [payload.buffer]
+                        [payload.buffer] // transfer ownership
                     );
-                    ts += len * STEP_US;
 
-                    if (++slicesSinceYield === 5) {
-                        slicesSinceYield = 0;
-                        // one macrotask gap is enough for the decoder to keep up
+                    tsUS += len * STEP_US;
+                    if (++yieldC === 5) {
+                        // ~1.5 s of audio / task
+                        yieldC = 0;
                         /* eslint-disable no-await-in-loop */
-                        await delay(0);
+                        await delay(0); // let UI breathe
                     }
                 }
-                fileCtx.close();
-            })(); // don't wait for this one
+            })(); // fire-and-forget – encoder keeps running
 
             this.initializing.resolve(); // nothing else to wait for
         } catch (e) {
@@ -402,18 +402,30 @@ export class WAVEncoder {
 
     async play() {
         await this.initializing.promise;
-        if (this.mediaEl) {
-            await this.ctx!.resume();
-            await this.mediaEl.play();
-        }
+        await this.ctx?.resume();
+        await this.mediaEl?.play();
     }
 
     async pause() {
         await this.initializing.promise;
-        if (this.mediaEl) {
-            await this.ctx!.suspend();
-            this.mediaEl.pause();
-        }
+        await this.ctx?.suspend();
+        this.mediaEl?.pause();
+    }
+
+    private _prepareElementFromFile(file: File): Promise<HTMLAudioElement> {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const audio = new Audio(url);
+            audio.crossOrigin = "anonymous";
+            audio.preload = "auto";
+            audio.addEventListener("loadedmetadata", () => {
+                this.objURL = url;
+                resolve(audio);
+            });
+            audio.addEventListener("error", () =>
+                reject(new Error("Unable to load audio file"))
+            );
+        });
     }
 
     /* ------------------------------ destroy ------------------------- */
@@ -494,7 +506,7 @@ export const createAudioStreamListener = (
     const MIN_EXPECTED_LATENCY = 0.01; // seconds
     let currentExpectedLatency = 3;
     let succesfullFrameCount = 0;
-    const isUnderflow = () => 0; /* pendingFrames.length < 30 */
+    const isUnderflow = () => pendingFrames.length < 0;
 
     const updateExpectedLatency = (latency: number) => {
         options?.debug && console.log("UPDATE EXPECTED LATENCY", latency);
@@ -506,19 +518,6 @@ export const createAudioStreamListener = (
     };
 
     const renderFrame = async () => {
-        options?.debug &&
-            console.log(
-                "RENDER AUDIO CHUNK",
-                bufferedAudioTime,
-                pendingFrames.length,
-                audioContext?.currentTime,
-                audioContext?.state,
-                play,
-                audioContext?.state === "running" && play,
-                pendingFrames.length > 0,
-                isUnderflow()
-            );
-
         if (!bufferedAudioTime) {
             // we've not yet started the queue - just queue this up,
             // leaving a "latency gap" so we're not desperately trying
@@ -571,18 +570,43 @@ export const createAudioStreamListener = (
             }
         }
 
-        !skipframe && audioSource.start(bufferedAudioTime, isBehindSeconds);
+        options?.debug &&
+            console.log("RENDER AUDIO CHUNK", {
+                bufferedAudioTime,
+                currentTIme: audioContext?.currentTime,
+                state: audioContext?.state,
+                play,
+                running: audioContext?.state === "running" && play,
+                pending: pendingFrames.length,
+                underflow: isUnderflow(),
+                duration: audioSource.buffer.duration,
+                start: frame!.timestamp / 1e6,
+            });
+
+        !skipframe &&
+            audioSource.start(frame!.timestamp / 1e6, isBehindSeconds);
         bufferedAudioTime! += audioSource.buffer.duration;
 
-        setTimeout(() => renderFrame(), bufferedAudioTime); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
-        //requestAnimationFrame(renderFrame);
+        scheduleNextTick();
     };
+    function scheduleNextTick() {
+        if (document.visibilityState === "visible") {
+            requestAnimationFrame(() => renderFrame()); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
+        } else {
+            setTimeout(() => renderFrame(), 0);
+        }
+    }
 
     const decodeAudioDataQueue = new PQueue({ concurrency: 1 });
     let resuming = false;
 
     let push = (chunk: Chunk) => {
         if (decodeAudioDataQueue.size > 10) {
+            options?.debug &&
+                console.log(
+                    "CLEARING AUDIO QUEUE CAN NOT KEEP UP",
+                    decodeAudioDataQueue.size
+                );
             decodeAudioDataQueue.clear(); // We can't keep up, clear the queue
         }
 
