@@ -584,6 +584,7 @@ export class Track<
     private _globalTime?: bigint | number;
 
     constructor(properties: {
+        id?: Uint8Array;
         sender: PublicSignKey;
         now?: () => bigint | number;
         globalTime?: bigint | number;
@@ -592,7 +593,7 @@ export class Track<
         source: T;
     }) {
         super();
-        this.id = randomBytes(32);
+        this.id = properties.id ?? randomBytes(32);
         this._now = properties.now;
         this._globalTime = properties.globalTime;
         this._startTime =

@@ -6,6 +6,70 @@ import { useLibraries } from "./LibrariesContext";
 import { useNames } from "../NamesProvider";
 import { MediaStreamDBs } from "@peerbit/media-streaming";
 import { SpinnerSong } from "../Spinner";
+import { useCover } from "../images/useCover";
+
+const LibraryItem: React.FC<{
+    lib: MediaStreamDBs;
+    isOwner: boolean;
+    onClick: () => void;
+    getName: (id: Uint8Array) => string;
+}> = ({ lib, isOwner, onClick, getName }) => {
+    const [cover] = useCover(lib.id);
+    return (
+        <li
+            key={lib.idString}
+            onClick={onClick}
+            className="flex items-center gap-4 p-4 rounded-lg hover:cursor-pointer bg-neutral-800/50 hover:bg-neutral-700/50 transition"
+        >
+            {/* open */}
+            <button className="shrink-0 p-3 bg-white text-neutral-900 rounded-full hover:scale-105 transition">
+                <PlayIcon className="w-4 h-4" />
+            </button>
+
+            <div className="w-20 h-20 flex-shrink-0 rounded-lg overflow-hidden bg-neutral-700">
+                <img
+                    src={
+                        cover
+                            ? cover
+                            : `https://picsum.photos/seed/${lib.idString.slice(
+                                  0,
+                                  6
+                              )}/400`
+                    }
+                    alt="Library cover"
+                    className="w-full h-full object-cover"
+                />
+            </div>
+
+            {/* title */}
+            <div className="min-w-0 flex-1">
+                <span className="text-lg font-semibold text-white truncate block">
+                    {getName(lib.id)}
+                </span>
+                <p className="text-xs text-neutral-400">
+                    {lib.idString?.slice(0, 12)}…
+                </p>
+            </div>
+
+            {isOwner && (
+                <>
+                    <span className="px-2 py-1 text-xs bg-emerald-600 text-white rounded-full">
+                        owner
+                    </span>
+
+                    {/* placeholder pencil (disabled) */}
+                    <button
+                        disabled
+                        title="edit coming soon"
+                        className="shrink-0 p-2 rounded-full bg-neutral-700 text-neutral-400 cursor-not-allowed"
+                    >
+                        <Pencil1Icon className="w-4 h-4" />
+                    </button>
+                </>
+            )}
+        </li>
+    );
+};
 
 export const Libraries = () => {
     const navigate = useNavigate();
@@ -24,6 +88,9 @@ export const Libraries = () => {
             batchSize: 200,
             onChange: {
                 merge: true,
+            },
+            waitForReplicators: {
+                type: "once",
             },
         }
     );
@@ -86,43 +153,17 @@ export const Libraries = () => {
                     const isOwner = peer?.identity.publicKey.equals(lib.owner);
 
                     return (
-                        <li
+                        <LibraryItem
                             key={lib.idString}
-                            onClick={() => goToLibrary(lib)}
-                            className="flex items-center gap-4 p-4 rounded-lg hover:cursor-pointer bg-neutral-800/50 hover:bg-neutral-700/50 transition"
-                        >
-                            {/* open */}
-                            <button className="shrink-0 p-3 bg-white text-neutral-900 rounded-full hover:scale-105 transition">
-                                <PlayIcon className="w-4 h-4" />
-                            </button>
-
-                            {/* title */}
-                            <div className="min-w-0 flex-1">
-                                <span className="text-lg font-semibold text-white truncate block">
-                                    {getName(lib.id)}
-                                </span>
-                                <p className="text-xs text-neutral-400">
-                                    {lib.idString?.slice(0, 12)}…
-                                </p>
-                            </div>
-
-                            {isOwner && (
-                                <>
-                                    <span className="px-2 py-1 text-xs bg-emerald-600 text-white rounded-full">
-                                        owner
-                                    </span>
-
-                                    {/* placeholder pencil (disabled) */}
-                                    <button
-                                        disabled
-                                        title="edit coming soon"
-                                        className="shrink-0 p-2 rounded-full bg-neutral-700 text-neutral-400 cursor-not-allowed"
-                                    >
-                                        <Pencil1Icon className="w-4 h-4" />
-                                    </button>
-                                </>
-                            )}
-                        </li>
+                            lib={lib}
+                            isOwner={isOwner}
+                            onClick={() => {
+                                goToLibrary(lib).catch((e) => {
+                                    console.error("Error opening library", e);
+                                });
+                            }}
+                            getName={getName}
+                        />
                     );
                 })}
             </ul>

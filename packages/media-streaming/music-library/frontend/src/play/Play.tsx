@@ -112,7 +112,7 @@ export const Play: React.FC<Props> = ({
             thisIterator = await source.iterate(progress, {
                 keepTracksOpen: true,
                 replicate: false,
-                debug: true,
+                debug: false,
                 onTrackOptionsChange: (track) => {
                     console.log("TRACK OPTIONS CHANGED", track);
                 },

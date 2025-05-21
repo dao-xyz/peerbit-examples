@@ -133,14 +133,9 @@ export class NamedItems extends Program {
         });
     }
 
-    /** Write / overwrite name for any address-like object or string */
+    /** Write / overwrite name for any address-like object  */
     async setName(id: Uint8Array, name: string) {
         await this.documents.put(new NamedItem({ id, name }));
-    }
-
-    /** Convenience for objects that expose `.address` */
-    async setFor(obj: { id: Uint8Array }, name: string) {
-        await this.setName(obj.id, name);
     }
 
     async open(): Promise<void> {
@@ -149,6 +144,77 @@ export class NamedItems extends Program {
             replicate: { factor: 1 },
             index: {
                 type: NamedItem,
+            },
+        });
+    }
+}
+
+class ImageItem {
+    @id({ type: Uint8Array })
+    id: Uint8Array;
+
+    @field({ type: Uint8Array })
+    img: Uint8Array;
+
+    @field({ type: "u32" })
+    width: number;
+
+    @field({ type: "u32" })
+    height: number;
+
+    constructor(props: {
+        id: Uint8Array;
+        img: Uint8Array;
+        width: number;
+        height: number;
+    }) {
+        this.id = props.id;
+        this.width = props.width;
+        this.height = props.height;
+        this.img = props.img;
+    }
+}
+
+class IndexedImageItem {
+    @id({ type: Uint8Array })
+    id: Uint8Array;
+
+    constructor(props: ImageItem) {
+        this.id = props.id;
+    }
+}
+
+/* ─────────────── program ─────────────── */
+@variant("image-items")
+export class ImageItems extends Program {
+    @field({ type: Documents })
+    documents: Documents<ImageItem, IndexedImageItem>;
+
+    constructor(props?: { id?: Uint8Array }) {
+        super();
+        this.documents = new Documents<ImageItem, IndexedImageItem>({
+            id:
+                props?.id ??
+                sha256Sync(new TextEncoder().encode("image-items")),
+        });
+    }
+
+    /** Write / overwrite image for any address-like  */
+    async setImage(
+        id: Uint8Array,
+        img: Uint8Array,
+        width: number,
+        height: number
+    ) {
+        await this.documents.put(new ImageItem({ id, img, width, height }));
+    }
+
+    async open(): Promise<void> {
+        await this.documents.open({
+            type: ImageItem,
+            replicate: { factor: 1 },
+            index: {
+                type: IndexedImageItem,
             },
         });
     }

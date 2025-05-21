@@ -1,48 +1,80 @@
 import React, { useState, useRef, ChangeEvent } from "react";
 import {
-    MediaStreamDB,
+    MediaStreamDB as AudioContainer,
     AudioStreamDB,
     Track,
     Chunk,
+    MediaStreamDBs,
 } from "@peerbit/media-streaming";
 import { WAVEncoder } from "@peerbit/media-streaming-web";
 import { Play } from "../play/Play";
 import { useNavigate, useSearchParams } from "react-router";
 import { useNames } from "../NamesProvider";
+import { usePeer, useProgram } from "@peerbit/react";
+import { ImageItems } from "@peerbit/music-library-utils";
+import { SpinnerSong } from "../Spinner";
+import { useCover } from "../images/useCover";
+import { randomBytes, toBase64 } from "@peerbit/crypto";
+import { Pencil1Icon } from "@radix-ui/react-icons";
 
-type Props = { source: MediaStreamDB };
+type Props = { source: AudioContainer };
 
 export const Upload: React.FC<Props> = ({ source }) => {
+    const peer = usePeer();
     const navigate = useNavigate();
     const [search] = useSearchParams();
     const libAddr = search.get("lib");
 
+    // the two file inputs
+    const [audioFile, setAudioFile] = useState<File | null>(null);
+    const [coverFile, setCoverFile] = useState<File | null>(null);
+
+    // upload state
     const [status, setStatus] = useState<
         "idle" | "encoding" | "done" | "error"
     >("idle");
     const [msg, setMsg] = useState("");
     const [progress, setProgress] = useState(0);
 
+    // for the encoder & track
     const encoderRef = useRef<WAVEncoder>();
-    const trackRef = useRef<Track<AudioStreamDB>>();
     const { setName } = useNames();
 
-    /* ---------------- core flow ---------------- */
-    const handleFile = async (file: File) => {
+    // open your ImageItems store once, reuse
+    const imgs = useProgram(new ImageItems(), { existing: "reuse" });
+
+    // subscribe to any already-stored cover for that track:
+    const [storedCover, setCover] = useCover(source?.id);
+    console.log(source?.id);
+
+    // handlers for file inputs
+    const onAudioPicked = (e: ChangeEvent<HTMLInputElement>) => {
+        setAudioFile(e.target.files?.[0] ?? null);
+        e.target.value = "";
+    };
+    const onCoverPicked = (e: ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        setCoverFile(file ?? null);
+        e.target.value = "";
+    };
+
+    // core upload flow
+    const upload = async () => {
+        if (!audioFile) return;
         setStatus("encoding");
-        setMsg(`Encoding “${file.name}”…`);
+        setMsg(`Encoding “${audioFile.name}”…`);
         setProgress(0);
 
         try {
-            /* ① open track */
-
-            const peekCtx = new AudioContext(); // throw-away
+            // 0️⃣ peek at sample-rate
+            const peekCtx = new AudioContext();
             const inBuf = await peekCtx.decodeAudioData(
-                await file.arrayBuffer()
+                await audioFile.arrayBuffer()
             );
-            const srcRate = inBuf.sampleRate; // e.g. 44100
-            await peekCtx.close(); // TODO create the track after we learnt about the sample rate from decoding it into chunks
+            const srcRate = inBuf.sampleRate;
+            await peekCtx.close();
 
+            // 1️⃣ create a new Track in your MediaStreamDB
             const track = await source.node.open(
                 new Track({
                     sender: source.node.identity.publicKey,
@@ -52,147 +84,202 @@ export const Upload: React.FC<Props> = ({ source }) => {
             );
             await track.source.replicate("streamer");
             await source.tracks.put(track, { target: "all" });
-            trackRef.current = track;
 
-            /* ② encoder */
-            console.log("INIT ENCODER");
+            // 2️⃣ wire up the WAVEncoder
+            const wav = new WAVEncoder();
+            encoderRef.current = wav;
 
-            console.log("INIT ENCODER DONE");
-
-            /* progress */
-            let bytes = 0;
             let lastTs = -1;
-
-            let clear = async () => {
+            const finish = async (ts: number) => {
                 await wav.pause();
                 await wav.destroy();
-                await source.setEnd(track, lastTs);
+                await source.setEnd(track, ts);
                 setProgress(1);
                 setStatus("done");
                 setMsg("Upload complete 🎉");
             };
 
-            const onMessage = (props: {
-                last?: boolean;
-                audioBuffer: Uint8Array;
-                timestamp: number;
-                index: number;
-                length: number;
-            }) => {
-                if (!props.audioBuffer) return;
-
-                /*  props.timestamp && wav.ctx && console.log("UPLOAD TIMES", {
-                     chunk: props.timestamp,
-                     currentTime: wav.ctx!.currentTime * 1e6,
-                     diff: props.timestamp - wav.ctx!.currentTime * 1e6,
-                 })
-                 props.timestamp = wav.ctx!.currentTime * 1e6; */
-
-                let thisTime = props.timestamp;
-                if (thisTime == lastTs) {
-                    thisTime++;
-                }
-                lastTs = thisTime;
-
-                track.put(
-                    new Chunk({
-                        type: "key",
-                        chunk: props.audioBuffer,
-                        time: lastTs,
-                    })
-                );
-
-                bytes += props.audioBuffer.length;
-                setProgress(Math.min(props.index / props.length, 1));
-
-                if (props.last) {
-                    console.log("DONE!");
-                    clear();
-                }
-            };
-
-            const wav = new WAVEncoder();
-            encoderRef.current = wav;
             await wav.init(
-                { file, useElement: true }, // TODO useElement: false is glitchy/buggy (but should be much faster)
+                { file: audioFile, useElement: srcRate === 48_000 },
                 {
-                    onChunk: onMessage,
+                    onChunk: ({
+                        audioBuffer,
+                        timestamp,
+                        last,
+                        index,
+                        length,
+                    }) => {
+                        if (!audioBuffer) return;
+                        // ensure strictly‐increasing timestamps
+                        const ts =
+                            timestamp === lastTs ? timestamp + 1 : timestamp;
+                        lastTs = ts;
+                        track.put(
+                            new Chunk({
+                                type: "key",
+                                chunk: audioBuffer,
+                                time: ts,
+                            })
+                        );
+                        setProgress(index / length);
+                        if (last) void finish(ts);
+                    },
                 }
             );
-
             await wav.play();
 
-            await setName(source.id, file.name);
-        } catch (err: any) {
-            console.error(err);
+            // store meta info
+            console.log("coverFile", { coverFile });
+
+            if (coverFile) {
+                setCover(coverFile);
+            }
+            await setName(source.id, audioFile.name);
+
+            peer.peer
+                .open<MediaStreamDBs>(libAddr, {
+                    existing: "reuse",
+                    args: {
+                        replicate: "owned",
+                    },
+                })
+                .then((lib) => {
+                    // save lib
+                    return lib.mediaStreams.put(source);
+                })
+                .catch((e) => {
+                    console.error(e);
+                    setStatus("error");
+                    setMsg("Failed to save track to library");
+                });
+        } catch (e: any) {
+            console.error(e);
             setStatus("error");
-            setMsg(err.message ?? "Something went wrong");
+            setMsg(e.message ?? "Something went wrong");
         }
     };
 
-    const onChange = (e: ChangeEvent<HTMLInputElement>) => {
-        const file = e.target.files?.[0];
-        if (file) handleFile(file);
-        e.target.value = "";
-    };
-
-    /* ---------------- UI ---------------- */
     return (
         <div className="max-w-md mx-auto mt-16 p-8 rounded-3xl bg-neutral-800/60 backdrop-blur-md shadow-2xl">
-            {/* Back button (only if we know the parent library) */}
-            {libAddr && (
-                <button
-                    onClick={() => navigate(`/l/${libAddr}`)}
-                    className="mb-4 flex items-center gap-1 text-sm text-emerald-400 hover:text-emerald-300 transition"
-                >
-                    ← Back to library
-                </button>
-            )}
+            {/* while your cover-store is loading */}
+            {imgs.loading && <SpinnerSong />}
 
-            <h2 className="text-3xl font-bold text-white mb-6">
-                Upload a track
-            </h2>
+            {!imgs.loading && (
+                <>
+                    {libAddr && (
+                        <button
+                            onClick={() => navigate(`/l/${libAddr}`)}
+                            className="mb-4 flex items-center gap-1 text-sm text-emerald-400 hover:text-emerald-300 transition"
+                        >
+                            ← Back to library
+                        </button>
+                    )}
 
-            <label className="block cursor-pointer">
-                <span className="sr-only">Choose file</span>
-                <input
-                    type="file"
-                    accept="audio/*,video/*"
-                    onChange={onChange}
-                    className="hidden"
-                />
-                <div className="w-full py-4 rounded-xl border-2 border-dashed border-neutral-500 text-neutral-300 flex items-center justify-center hover:border-emerald-500 hover:text-white transition">
-                    Click or drop to select file
-                </div>
-            </label>
+                    <h2 className="text-3xl font-bold text-white mb-6">
+                        Upload a track
+                    </h2>
 
-            {status === "encoding" && (
-                <div className="mt-8 w-full h-3 bg-neutral-700 rounded-full overflow-hidden">
-                    <div
-                        className="h-full bg-emerald-500 transition-all"
-                        style={{ width: `${progress * 100}%` }}
-                    />
-                </div>
-            )}
+                    {/* preview + pickers */}
+                    <div className="space-y-6">
+                        {/* cover preview & picker */}
+                        <div
+                            className="relative group w-full h-40 mx-auto rounded-lg overflow-hidden bg-neutral-700 cursor-pointer"
+                            onClick={() =>
+                                document.getElementById("cover-input")!.click()
+                            }
+                        >
+                            <img
+                                src={
+                                    coverFile
+                                        ? URL.createObjectURL(coverFile)
+                                        : storedCover ||
+                                          (source.id
+                                              ? `https://picsum.photos/seed/${toBase64(
+                                                    source.id
+                                                ).slice(0, 6)}/400`
+                                              : "")
+                                }
+                                className="w-full h-full object-cover"
+                                alt="Track cover"
+                            />
 
-            {msg && (
-                <p
-                    className={`mt-4 text-sm ${
-                        status === "error"
-                            ? "text-red-400"
-                            : status === "done"
-                            ? "text-emerald-400"
-                            : "text-neutral-300"
-                    }`}
-                >
-                    {msg}
-                </p>
-            )}
+                            {/* overlay on hover */}
+                            <div className="absolute inset-0 flex flex-col items-center justify-center bg-black/40 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition">
+                                <Pencil1Icon className="w-6 h-6 text-white mb-1" />
+                                <span className="text-white text-sm font-semibold">
+                                    Change cover
+                                </span>
+                            </div>
+                        </div>
+                        <input
+                            id="cover-input"
+                            type="file"
+                            accept="image/*"
+                            onChange={onCoverPicked}
+                            className="hidden"
+                        />
 
-            {status === "done" && (
-                <div className="mt-8">
-                    <Play source={source} />
-                </div>
+                        {/* audio picker */}
+                        <label className="block cursor-pointer">
+                            <input
+                                type="file"
+                                accept="audio/*,video/*"
+                                onChange={onAudioPicked}
+                                className="hidden"
+                            />
+                            <div className="w-full p-3 rounded-xl border-2 border-dashed border-neutral-500 text-neutral-300 flex items-center justify-center hover:border-emerald-500 hover:text-white transition">
+                                {audioFile
+                                    ? audioFile.name
+                                    : "Click to select audio"}
+                            </div>
+                        </label>
+
+                        {/* start button */}
+                        <button
+                            disabled={!audioFile || status === "encoding"}
+                            onClick={upload}
+                            className="w-full py-3 rounded-xl bg-emerald-500 hover:bg-emerald-600 text-white font-semibold disabled:opacity-50"
+                        >
+                            {status === "encoding"
+                                ? "Uploading…"
+                                : "Start upload"}
+                        </button>
+                    </div>
+
+                    {/* progress bar */}
+                    {status === "encoding" && (
+                        <div className="mt-6 w-full h-3 bg-neutral-700 rounded-full overflow-hidden">
+                            <div
+                                className="h-full bg-emerald-500 transition-all"
+                                style={{
+                                    width: `${Math.round(progress * 100)}%`,
+                                }}
+                            />
+                        </div>
+                    )}
+
+                    {/* message */}
+                    {msg && (
+                        <p
+                            className={`mt-4 text-sm ${
+                                status === "error"
+                                    ? "text-red-400"
+                                    : status === "done"
+                                    ? "text-emerald-400"
+                                    : "text-neutral-300"
+                            }`}
+                        >
+                            {msg}
+                        </p>
+                    )}
+
+                    {/* instant player */}
+                    {status === "done" && (
+                        <div className="mt-8">
+                            <Play source={source} />
+                        </div>
+                    )}
+                </>
             )}
         </div>
     );
