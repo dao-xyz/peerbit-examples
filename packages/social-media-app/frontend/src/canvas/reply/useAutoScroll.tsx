@@ -24,6 +24,7 @@ function getScrollBottomOffset(scrollPosition) {
 }
 
 const DELAY_AFTER_RESIZER_CHANGE_SCROLL_UP_EVENTS_WILL_BE_CONSIDERED = 300;
+const IS_AT_BOTTOM_THRESHOLD = 30;
 
 export type ScrollSettings = {
     scrollUsingWindow?: boolean;
@@ -144,7 +145,10 @@ export const useAutoScroll = (properties: {
             const scrollTop = getScrollTop();
 
             // When we hit the very bottom, flip back to automatic mode
-            if (Math.abs(scrollHeight - clientHeight - scrollTop) < 1) {
+            if (
+                Math.abs(scrollHeight - clientHeight - scrollTop) <
+                IS_AT_BOTTOM_THRESHOLD
+            ) {
                 properties.debug &&
                     console.log("⇣  at bottom → automatic mode");
                 scrollMode.current = "automatic";
