@@ -122,7 +122,7 @@ export const useQuery = <
     useEffect(() => {
         resetResultsOnReset.current = true;
         waitedOnceRef.current = false;
-    }, [db]);
+    }, [db, options?.id ?? options?.query, options?.resolve, options?.reverse]);
 
     /* ────────────── effect: (re)create iterator ────────────── */
     useEffect(() => {
