@@ -9,12 +9,10 @@ import {
 } from "react";
 import type { WithContext } from "@peerbit/document";
 import type { Canvas as CanvasDB } from "@giga-app/interface";
-import { ViewType } from "../../view/ViewContex";
-import { getScrollTop } from "../../HeaderVisibilitiyProvider";
 
 /* 1 ────────────────────────────────────────────────────────────────────────── */
 export interface FeedSnapshot {
-    view: ViewType;
+    view: string; // view key
     rootId: string; // idString of the canvas you were inside
     anchorId: string; // first reply visible when you left
     offsetY: number; // pixels between viewport‑top and anchor‑top
@@ -30,7 +28,7 @@ export const consumeSnapshot = (key: string) => cache.delete(key);
 interface LeaveArgs {
     replies: { reply: WithContext<CanvasDB> }[]; // processedReplies
     replyRefs: (HTMLDivElement | null)[]; // ↕ same length
-    view: ViewType;
+    view: string;
     viewRoot?: CanvasDB;
 }
 export function useLeaveSnapshot(args: LeaveArgs) {
@@ -61,7 +59,7 @@ interface RestoreArgs {
     loadMore: () => Promise<boolean>;
     hasMore: () => boolean;
     replyRefs: (HTMLDivElement | null)[];
-    setView: (v: ViewType) => void;
+    setView: (v: string) => void;
     setViewRootById: (id: string) => void;
     onSnapshot: (snap: FeedSnapshot) => void;
     onRestore: (snap: FeedSnapshot) => void;
@@ -85,7 +83,6 @@ export function useRestoreFeed(a: RestoreArgs) {
     /* 1. restore view & root (once)                                     */
     /* ────────────────────────────────────────────────────────────────── */
     useLayoutEffect(() => {
-        console.log("NAV KEY CHANGE", key);
         const next = getSnapshot(key);
         const current = snapRef.current;
         if (current !== next && next) {

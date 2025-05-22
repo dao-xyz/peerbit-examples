@@ -4,7 +4,7 @@ import { Spinner } from "../../utils/Spinner.js";
 import { Replies } from "./Replies.js";
 import { ReplyingInProgress } from "./ReplyingInProgress.js";
 import { Toolbar } from "../toolbar/Toolbar.js";
-import { useView, ViewType } from "../../view/ViewContex.js";
+import { useView } from "../../view/ViewContex.js";
 import { PendingCanvasProvider } from "../PendingCanvasContext.js";
 import { useToolbarVisibility } from "./useToolbarVisibility.js";
 import { DetailedView } from "../detailed/DetailedView.js";
@@ -12,11 +12,9 @@ import { SubHeader } from "./SubHeader.js";
 import { AnimatedStickyToolbar } from "./AnimatedStickyToolbar.js";
 import { ToolbarProvider, useToolbar } from "../toolbar/ToolbarContext.js";
 import { ScrollSettings } from "./useAutoScroll.js";
-import { TbBuildingCommunity } from "react-icons/tb";
-import { FaUserFriends } from "react-icons/fa";
-import { IoIosNotifications } from "react-icons/io";
 import { getSnapshot } from "./feedRestoration.js";
 import { useLocation } from "react-router";
+import { ViewModel } from "../../view/defaultViews.js";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",
@@ -66,9 +64,12 @@ const textToLoad =
 
 const SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT = 15;
 
-const shouldFocusRepliesByDefault = (view?: ViewType) => {
+const shouldFocusRepliesByDefault = (view?: ViewModel) => {
     // For view types other than "best" or "old", we want the new scroll-based effect.
-    return view === "best" || view === "old" || view == null;
+    if (!view) {
+        return false;
+    }
+    return view.settings.focus === "first"; // because then we scroll down to see more and hence we can make the replies to be focused by default (because for "chat" style reply sections we scroll up to see more)
 };
 /**
  * CanvasAndReplies component.
@@ -105,7 +106,6 @@ export const CanvasAndRepliesInner = () => {
 
     const lastScrollTopRef = useRef(-1);
     const lastHeightTopRef = useRef(-1);
-
     const repliesScrollRef = useRef<HTMLDivElement>(null);
 
     const postRef = useRef<HTMLDivElement>(null);
@@ -166,17 +166,14 @@ export const CanvasAndRepliesInner = () => {
 
     useEffect(() => {
         if (view) {
-            if (!repliesFocused) {
-                setRepliesFocused(shouldFocusRepliesByDefault(view));
-            } else {
-                setScrollSettings((prev) => {
-                    return {
-                        ...prev,
-                        scrollUsingWindow: shouldFocusRepliesByDefault(view),
-                        view,
-                    };
-                });
-            }
+            setRepliesFocused(shouldFocusRepliesByDefault(view));
+            setScrollSettings((prev) => {
+                return {
+                    ...prev,
+                    scrollUsingWindow: shouldFocusRepliesByDefault(view),
+                    view,
+                };
+            });
         }
         return () => {
             // setRepliesFocused(false); // we can't have this unmount it seems. Feed restoration does not work (i.e. focus can not be set autmatically, because this will cancel it)
@@ -356,7 +353,7 @@ export const CanvasAndRepliesInner = () => {
                 >
                     <div className="z-5 flex-shrink-0 bg-neutral-50 dark:bg-neutral-900">
                         <div className="max-w-[876px] mx-auto w-full">
-                            {!viewRoot || canvases.length === 1 ? (
+                            {/*  special code to run in the root {!viewRoot || canvases.length === 1 ? (
                                 <div>
                                     <div className="flex flex-row">
                                         <button className="btn btn-icon btn-icon-md gap-2">
@@ -373,11 +370,11 @@ export const CanvasAndRepliesInner = () => {
                                         </button>
                                     </div>
                                 </div>
-                            ) : (
-                                <div className="py-6">
-                                    <DetailedView />
-                                </div>
-                            )}
+                            ) */}
+
+                            <div className="py-6">
+                                <DetailedView />
+                            </div>
                         </div>
                     </div>
                 </div>

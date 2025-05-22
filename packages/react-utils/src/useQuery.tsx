@@ -10,7 +10,6 @@ import * as indexerTypes from "@peerbit/indexer-interface";
 import { AbortError } from "@peerbit/time";
 import { NoPeersError } from "@peerbit/shared-log";
 import { v4 as uuid } from "uuid";
-
 /* ────────────── helper types ────────────── */
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;

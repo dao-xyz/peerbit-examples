@@ -113,12 +113,12 @@ export const Canvas = (
                                 : "max-h-[60vh] h-full"
                         }`}
                     >
-                        {isLoading && (
-                            <div className="flex justify-center align-middle">
+                        {filteredRects.length === 0 && isLoading && (
+                            <div className="absolute right-2 flex justify-center align-middle">
                                 <Spinner />
                             </div>
                         )}
-                        {!isLoading && (
+                        {filteredRects.length > 0 && (
                             <>
                                 <Frame
                                     thumbnail={asThumbnail}

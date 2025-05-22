@@ -15,7 +15,7 @@ export const BodyStyler: React.FC = () => {
         document.body.classList.remove("bg-neutral-50", "bg-neutral-200");
 
         // Add the appropriate class based on the view.
-        if (view === "chat") {
+        if (view?.id === "chat") {
             document.body.classList.add("dark:bg-neutral-800");
             document.body.classList.add("bg-neutral-50");
         } else {

@@ -1,9 +1,9 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useView, ViewType } from "../../view/ViewContex";
 import { Canvas } from "@giga-app/interface";
 import { debounce, throttle } from "lodash";
 import { usePeer } from "@peerbit/react";
 import { getScrollTop } from "../../HeaderVisibilitiyProvider";
+import { ViewModel } from "../../view/defaultViews";
 
 function getMaxScrollTop() {
     const documentHeight = Math.max(
@@ -28,7 +28,7 @@ const IS_AT_BOTTOM_THRESHOLD = 30;
 
 export type ScrollSettings = {
     scrollUsingWindow?: boolean;
-    view: ViewType /*  we pass view here because scrollUsingWindow should be updated at the same time as view! */;
+    view: ViewModel /*  we pass view here because scrollUsingWindow should be updated at the same time as view! */;
 };
 
 export const useAutoScroll = (properties: {
@@ -48,17 +48,16 @@ export const useAutoScroll = (properties: {
     } = properties;
     const { peer } = usePeer();
     const disableScrollUpEvents = useRef(false);
-    const forceScrollToBottom = useRef(false);
     const scrollMode = useRef<"automatic" | "manual">("automatic");
     const [isAtBottom, setIsAtBottom] = useState(true);
 
-    const viewIsShouldScrollToBottom =
-        setting?.view === "chat" || setting?.view === "old";
+    const viewIsShouldScrollToBottom = setting?.view.settings.focus === "last";
+
     const triggerScroll = () => {
         if (!setting) {
             return;
         }
-        if (setting.view === "best" || setting.view === "old") {
+        if (!viewIsShouldScrollToBottom) {
             scrollToTop();
         } else {
             scrollToBottom();
@@ -71,25 +70,24 @@ export const useAutoScroll = (properties: {
         if (!properties.scrollOnViewChange) {
             return;
         }
-
+        /* 
         // TODO is this needed?
         if (viewIsShouldScrollToBottom) {
             properties.debug &&
                 console.log(
-                    "view is chat or new, setting scroll mode to automatic"
+                    "view is chat or old, setting scroll mode to automatic"
                 );
             scrollMode.current = "automatic";
-            forceScrollToBottom.current = true;
         }
         // TODO is this needed?
         else {
             properties.debug &&
                 console.log(
-                    "view is best or old, setting scroll mode to manual"
+                    "view not sorted by asc, setting scroll mode to manual"
                 );
             scrollMode.current = "manual";
-            forceScrollToBottom.current = false;
-        }
+        } 
+        */
 
         // trigger scroll to bottom when the view changes
         properties.debug &&
@@ -132,7 +130,6 @@ export const useAutoScroll = (properties: {
                 properties.debug &&
                     console.log("⇡  user scrolled up → manual mode");
                 scrollMode.current = "manual";
-                forceScrollToBottom.current = false;
                 setIsAtBottom(false);
             }
         };
@@ -182,27 +179,18 @@ export const useAutoScroll = (properties: {
                 latestReplyRef.current =
                     processedReplies[processedReplies.length - 1];
 
-                properties.debug &&
-                    console.log(
-                        "Reply change, should scroll to bottom?",
-                        last.reply.idString !== lastScrollToSee?.current &&
-                            latestReplyRef.current.reply.publicKey.equals(
-                                peer.identity.publicKey
-                            ) &&
-                            scrollMode.current === "automatic",
-                        last.reply.idString !== lastScrollToSee?.current,
-                        latestReplyRef.current.reply.publicKey.equals(
-                            peer.identity.publicKey
-                        ),
-                        scrollMode.current === "automatic"
-                    );
-                if (
+                const shouldScrollToBottom =
                     last.reply.idString !== lastScrollToSee?.current &&
                     latestReplyRef.current.reply.publicKey.equals(
                         peer.identity.publicKey
                     ) &&
-                    scrollMode.current === "automatic"
-                ) {
+                    scrollMode.current === "automatic";
+                properties.debug &&
+                    console.log(
+                        "Reply change, should scroll to bottom?",
+                        shouldScrollToBottom
+                    );
+                if (shouldScrollToBottom) {
                     scrollToBottom();
                     lastScrollToSee.current =
                         latestReplyRef.current.reply.idString;
@@ -224,6 +212,7 @@ export const useAutoScroll = (properties: {
 
     // UPDATED scrollToBottom: scroll the container if available.
     const scrollToBottom = () => {
+        properties.debug && console.log("scroll to bottom!");
         if (!setting.scrollUsingWindow) {
             if (!repliesContainerRef.current) {
                 properties.debug && console.log("No replies container ref");
@@ -254,7 +243,6 @@ export const useAutoScroll = (properties: {
         properties.debug &&
             console.log("setting automatic scroll mode on scroll to bottom");
         scrollMode.current = "automatic";
-        forceScrollToBottom.current = false;
     };
 
     const scrollToTop = () => {
@@ -367,7 +355,6 @@ export const useAutoScroll = (properties: {
                     }
                     properties.debug && console.log("scroll up detected");
                     scrollMode.current = "manual";
-                    forceScrollToBottom.current = false;
                     setIsAtBottom(false);
                 }
                 lastScrollTop.current = st <= 0 ? 0 : st;

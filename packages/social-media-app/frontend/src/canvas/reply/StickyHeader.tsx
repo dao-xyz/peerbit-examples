@@ -44,9 +44,8 @@ export const StickyHeader = ({
     // Instead of changing the top value, we always fix the sticky header at top-14
     // then use transform to slide it up by 14 units when the main header is hidden.
     // This ensures both animations use the transform property.
-    const defaultBG = `bg-neutral-50 ${
-        view === "chat" ? "dark:bg-neutral-700" : "dark:bg-neutral-900"
-    }`;
+    const defaultBG = `bg-neutral-50 ${view.id === "chat" ? "dark:bg-neutral-700" : "dark:bg-neutral-900"
+        }`;
     return (
         <div
             ref={ref}
@@ -63,16 +62,14 @@ export const StickyHeader = ({
             {/* Base layer: gradient background */}
             {
                 <div
-                    className={`absolute inset-0 ${defaultBG} bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[linear-gradient(73deg,rgba(23,23,23,1),rgba(64,64,64,1))] drop-shadow-lg ${
-                        isScrolled ? "drop-shadow-md" : ""
-                    }`}
+                    className={`absolute inset-0 ${defaultBG} bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[linear-gradient(73deg,rgba(23,23,23,1),rgba(64,64,64,1))] drop-shadow-lg ${isScrolled ? "drop-shadow-md" : ""
+                        }`}
                 ></div>
             }
             {/* Overlay: fades in/out based on scroll */}
             <div
-                className={`absolute inset-0 transition-opacity duration-700 ${
-                    isScrolled ? "opacity-100" : "opacity-0"
-                } ${defaultBG}`}
+                className={`absolute inset-0 transition-opacity duration-700 ${isScrolled ? "opacity-100" : "opacity-0"
+                    } ${defaultBG}`}
             ></div>
             {/* Content */}
             <div className="relative flex w-full justify-center">

@@ -170,7 +170,6 @@ export const Replies = (props: {
         pendingScrollAdjust.current = null;
         firstBatchHandled.current = false;
         restoredScrollPositionOnce.current = false;
-        console.log("RESET LAZY STATE");
     };
 
     const prevView = useRef(view);
@@ -187,7 +186,7 @@ export const Replies = (props: {
 
     const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
 
-    const scrollUpForMore = view === "chat" || view === "old";
+    const scrollUpForMore = view?.settings.focus === "last";
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
@@ -354,7 +353,7 @@ export const Replies = (props: {
     const leaveSnapshot = useLeaveSnapshot({
         replies: processedReplies,
         replyRefs: replyContentRefs.current,
-        view,
+        view: view?.id,
         viewRoot,
     });
 
@@ -407,7 +406,7 @@ export const Replies = (props: {
                             "max-w-[876px] w-full mx-auto grid relative"
                         )}
                     >
-                        {view === "chat" && (
+                        {view.id === "chat" && (
                             <StraightReplyLine
                                 replyRefs={replyContentRefs.current}
                                 containerRef={repliesContainerRef}
@@ -419,12 +418,17 @@ export const Replies = (props: {
 
                         <div
                             className={`${
-                                view === "chat" ? "pl-[15px]" : ""
-                            } flex flex-col gap-4 w-full`}
+                                view.id === "chat" ? "pl-[15px]" : ""
+                            } flex flex-col gap-4 w-full ${
+                                view.settings.classNameContainer
+                            }`}
                         >
                             {processedReplies.map((item, i) => (
                                 <Fragment key={item.id}>
                                     <Reply
+                                        hideHeader={
+                                            !view.settings.showAuthorInfo
+                                        }
                                         forwardRef={(ref) => {
                                             replyContentRefs.current[i] = ref;
                                             if (i === sentinelIndex) {
@@ -434,7 +438,9 @@ export const Replies = (props: {
                                         }}
                                         canvas={item.reply}
                                         variant={
-                                            view === "chat" ? "chat" : "thread"
+                                            view.id === "chat"
+                                                ? "chat"
+                                                : "thread"
                                         }
                                         isQuote={item.type === "quote"}
                                         highlightType={
@@ -445,11 +451,11 @@ export const Replies = (props: {
                                                     : "pre-selected"
                                                 : undefined
                                         }
-                                        className={
+                                        className={`${
                                             indexIsReadyToRender(i)
                                                 ? "visible"
                                                 : "hidden"
-                                        }
+                                        } ${view.settings.classNameReply}`}
                                     />
                                 </Fragment>
                             ))}

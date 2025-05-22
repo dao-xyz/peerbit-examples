@@ -7,7 +7,6 @@ import { Canvas as CanvasDB } from "@giga-app/interface";
 import { CreateRoot } from "./canvas/CreateRoot";
 import { MissingProfile } from "./profile/MissingProfile";
 import { ConnectDevices } from "./identity/ConnectDevices";
-import { ViewType } from "./view/ViewContex";
 import { NavigationEffects } from "./NavigationEffects";
 import { useRecordLocation } from "./useNavHistory";
 
@@ -23,7 +22,7 @@ export const getAdressFromKey = (key: string) =>
 
 export const getNameFromPath = (name: string) => decodeURIComponent(name);
 
-export const getCanvasPath = (canvas: CanvasDB, view?: ViewType) => {
+export const getCanvasPath = (canvas: CanvasDB, view?: string) => {
     const base = "/c/" + canvas.address;
     let searchParams = "";
     if (view) {

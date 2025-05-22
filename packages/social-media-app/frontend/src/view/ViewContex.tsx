@@ -8,22 +8,12 @@ import React, {
     useRef,
 } from "react";
 import { usePeer, useQuery } from "@peerbit/react";
-import {
-    Canvas as CanvasDB,
-    Canvas,
-    getImmediateRepliesQuery,
-    getRepliesQuery,
-} from "@giga-app/interface";
+import { Canvas as CanvasDB, Canvas } from "@giga-app/interface";
 import { useCanvases } from "../canvas/useCanvas";
-import {
-    SearchRequest,
-    SearchRequestIndexed,
-} from "@peerbit/document-interface";
-import { Sort, SortDirection } from "@peerbit/indexer-interface";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
 import { BodyStyler } from "./BodyStyler";
-
+import { ALL_DEFAULT_VIEWS, DefaultViewType } from "./defaultViews";
 /**
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
  * pieces of state run **once** instead of once‑per‑piece. The update is flushed after `delay` ms.
@@ -51,7 +41,6 @@ function useCombinedDebounced<A, B>(a: A, b: B, delay: number): { a: A; b: B } {
     return debounced;
 }
 
-export type ViewType = "new" | "old" | "best" | "chat";
 export type LineType = "start" | "end" | "end-and-start" | "none" | "middle";
 
 // Helper: retrieves parent's address from a canvas message.
@@ -72,10 +61,11 @@ function useViewContextHook() {
 
     // Instead of separate view state, derive view from URL:
     const [searchParams, setSearchParams] = useSearchParams();
-    const view: ViewType = (searchParams.get("view") as ViewType) || "best";
+    const view: DefaultViewType =
+        (searchParams.get("view") as DefaultViewType) || "best";
 
     // Whenever you need to change view, update the URL.
-    const changeView = (newView: ViewType) => {
+    const changeView = (newView: string) => {
         if (newView !== view) {
             const newParams = new URLSearchParams(searchParams.toString());
             newParams.set("view", newView);
@@ -101,52 +91,23 @@ function useViewContextHook() {
     );
 
     // Set the query based on view and viewRoot.
-    const queryObj = useMemo(() => {
+    const viewModel = useMemo(() => {
+        return ALL_DEFAULT_VIEWS.find((x) => x.id == debouncedView);
+    }, [debouncedView]);
+
+    const query = useMemo(() => {
         if (!viewRoot) {
             return undefined;
         }
-
-        if (debouncedView === "chat") {
-            return new SearchRequest({
-                query: getRepliesQuery(viewRoot),
-                sort: [
-                    new Sort({
-                        key: ["__context", "created"],
-                        direction: SortDirection.DESC,
-                    }),
-                ],
-            });
+        if (!viewModel) {
+            return undefined;
         }
-        if (debouncedView === "best") {
-            return new SearchRequest({
-                query: getImmediateRepliesQuery(viewRoot),
-                sort: [
-                    new Sort({
-                        key: ["replies"],
-                        direction: SortDirection.DESC,
-                    }),
-                    new Sort({
-                        key: ["__context", "created"],
-                        direction: SortDirection.DESC,
-                    }),
-                ],
-            });
-        }
-        // "new" | "old"
-        return new SearchRequest({
-            query: getImmediateRepliesQuery(viewRoot),
-            sort: new Sort({
-                key: ["__context", "created"],
-                direction:
-                    debouncedView === "new"
-                        ? SortDirection.DESC
-                        : SortDirection.ASC,
-            }),
-        });
-    }, [viewRoot, debouncedView]);
+        return viewModel?.query(viewRoot);
+    }, [viewRoot, viewModel]);
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(10); // Default batch size
+
     const {
         items: sortedReplies,
         loadMore,
@@ -156,8 +117,8 @@ function useViewContextHook() {
     } = useQuery(
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
         {
-            query: queryObj,
-            reverse: debouncedView === "old" || debouncedView === "chat",
+            query,
+            reverse: viewModel?.settings.focus === "last" ? true : false,
             transform: calculateAddress,
             batchSize,
             debug: false, // { id: "replies" },
@@ -182,7 +143,7 @@ function useViewContextHook() {
                     return undefined;
                 },
                 update:
-                    debouncedView === "chat" || debouncedView === "old"
+                    viewModel?.settings.focus === "last"
                         ? undefined
                         : (prev, e) => {
                               prev.unshift(...e.added);
@@ -319,12 +280,12 @@ function useViewContextHook() {
     return {
         canvases: debouncedCanvases,
         viewRoot,
-        view: debouncedView,
+        views: ALL_DEFAULT_VIEWS,
+        view: viewModel,
         setView: changeView, // now changes update the URL
         loadMore,
         hasMore: () => !empty(),
         isLoading,
-        query: queryObj,
         iteratorId,
         lastReply,
         sortedReplies,

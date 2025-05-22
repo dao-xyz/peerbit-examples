@@ -28,12 +28,10 @@ export function useRecordLocation() {
         if (navType === "REPLACE") {
             // Overwrite the last entry
             stack[stack.length - 1] = { key: loc.key, path };
-            console.log("REPLACE!", stack);
         } else if (navType === "PUSH") {
             // Avoid duplicates caused by React remounting the same entry
             if (stack[stack.length - 1].key !== loc.key) {
                 stack.push({ key: loc.key, path });
-                console.log("PUSH", stack);
             }
         }
         // "POP" doesn’t modify the stack because the browser
