@@ -154,8 +154,11 @@ export const Library: React.FC = () => {
             query: useMemo(() => ({ query: {} }), []),
             prefetch: true,
             batchSize: 100,
-            waitForReplicators: {
-                type: "once",
+            onChange: {
+                merge: true,
+            },
+            remote: {
+                eager: true,
             },
         }
     );
@@ -188,8 +191,6 @@ export const Library: React.FC = () => {
     /* helpers --------------------------------------------------------------- */
     const toUpload = () => nav(`/upload?lib=${address}`);
 
-    const loading = lib.loading || tracksLoading;
-
     /* ------------------------------- render ------------------------------- */
     return (
         <div className="px-6 pt-6 pb-32 flex flex-col gap-6">
@@ -197,7 +198,7 @@ export const Library: React.FC = () => {
             <LibraryHeader onDelete={dropLibrary} onUpload={toUpload} />
 
             {/* tracks ----------------------------------------------------------- */}
-            {loading ? (
+            {lib.loading ? (
                 <div className="flex justify-center mt-24">
                     <SpinnerSong />
                 </div>
@@ -234,6 +235,8 @@ export const Library: React.FC = () => {
                             />
                         );
                     })}
+
+                    {tracksLoading && <SpinnerSong />}
                 </ul>
             )}
 

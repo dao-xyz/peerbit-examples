@@ -110,7 +110,7 @@ export const Play: React.FC<Props> = ({
             console.log("START PROGRESS", progress);
             thisIterator = await source.iterate(progress, {
                 keepTracksOpen: true,
-                replicate: false,
+                replicate: true,
                 debug: false,
                 onProgress: ({ track, chunk }) => {
                     setIsLoading(false);

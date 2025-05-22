@@ -30,6 +30,10 @@ export const NamesProvider = ({ children }: PropsWithChildren) => {
             merge: true,
         },
         debug: false,
+        remote: {
+            eager: true,
+            warmup: 5e3,
+        },
     });
 
     const value = useMemo<NamesCtx>(() => {

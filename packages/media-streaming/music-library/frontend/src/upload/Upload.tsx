@@ -45,7 +45,6 @@ export const Upload: React.FC<Props> = ({ source }) => {
 
     // subscribe to any already-stored cover for that track:
     const [storedCover, setCover] = useCover(source?.id);
-    console.log(source?.id);
 
     // handlers for file inputs
     const onAudioPicked = (e: ChangeEvent<HTMLInputElement>) => {

@@ -162,10 +162,9 @@ function useViewContextHook() {
             batchSize,
             debug: false, // { id: "replies" },
             local: true,
-            remote: true,
-            waitForReplicators: {
-                timeout: 5e3,
-                type: "once",
+            remote: {
+                eager: true,
+                warmup: 5e3,
             },
             onChange: {
                 merge: async (e) => {

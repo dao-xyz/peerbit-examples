@@ -26,7 +26,7 @@ export const LibrariesProvider = ({ children }: PropsWithChildren) => {
     /* singleton store program */
     const storeProg = useProgram(peer ? new StoraOfLibraries() : null, {
         existing: "reuse",
-        args: { replicate: true },
+        args: { replicate: false },
     });
 
     const value = useMemo<LibrariesCtx>(() => {

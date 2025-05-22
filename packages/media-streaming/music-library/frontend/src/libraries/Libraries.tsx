@@ -89,8 +89,8 @@ export const Libraries = () => {
             onChange: {
                 merge: true,
             },
-            waitForReplicators: {
-                type: "once",
+            remote: {
+                eager: true,
             },
         }
     );
@@ -140,12 +140,6 @@ export const Libraries = () => {
                 </div>
             )}
 
-            {isLoadingQUery && (
-                <div className="flex flex-col items-center justify-center h-[60vh] text-neutral-400">
-                    <SpinnerSong />
-                </div>
-            )}
-
             {/* libraries list */}
             <ul className="space-y-3 max-w-3xl mx-auto">
                 {libraryItems.map((lib) => {
@@ -166,6 +160,12 @@ export const Libraries = () => {
                     );
                 })}
             </ul>
+
+            {isLoadingQUery && (
+                <div className="flex flex-col items-center justify-center text-neutral-400">
+                    <SpinnerSong />
+                </div>
+            )}
         </div>
     );
 };

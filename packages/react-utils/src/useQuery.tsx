@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useReducer } from "react";
 import {
     ClosedError,
     Documents,
@@ -18,10 +18,7 @@ type QueryLike = {
 };
 type QueryOptions = { query: QueryLike; id?: string };
 
-type WaitForReplicatorsOption =
-    | boolean
-    | "once"
-    | { type?: "once"; timeout?: number };
+type WaitForReplicatorsOption = { warmup?: number; eager?: boolean };
 
 /* ────────────── main hook ────────────── */
 export const useQuery = <
@@ -33,7 +30,6 @@ export const useQuery = <
     db?: Documents<T, I>,
     options?: {
         resolve?: R;
-        waitForReplicators?: WaitForReplicatorsOption;
         transform?: (r: RT) => Promise<RT>;
         debounce?: number;
         debug?: boolean | { id: string };
@@ -52,11 +48,7 @@ export const useQuery = <
             update?: (prev: RT[], change: DocumentsChange<T>) => RT[];
         };
         local?: boolean;
-        remote?:
-            | boolean
-            | {
-                  eager?: boolean;
-              };
+        remote?: boolean | WaitForReplicatorsOption;
     } & QueryOptions
 ) => {
     /* ── «Item» is the concrete element type flowing through the hook ── */
@@ -75,7 +67,10 @@ export const useQuery = <
     const emptyResultsRef = useRef(false);
     const closeControllerRef = useRef<AbortController | null>(null);
     const waitedOnceRef = useRef(false);
+    const resetResultsOnReset = useRef(true);
+
     const [id, setId] = useState<string | undefined>(undefined);
+    const [resetCounter, invokeReset] = useReducer((n) => n + 1, 0);
 
     const reverseRef = useRef(options?.reverse);
     useEffect(() => {
@@ -101,22 +96,33 @@ export const useQuery = <
         } | null
     ) => {
         const toClose = iteratorRef.current;
-        if (toClose && fromRef && toClose !== fromRef) return;
+        if (toClose && fromRef && toClose !== fromRef) {
+            return;
+        }
+
         iteratorRef.current = null;
 
         closeControllerRef.current?.abort();
         closeControllerRef.current = new AbortController();
-        waitedOnceRef.current = false;
         emptyResultsRef.current = false;
 
         toClose?.iterator.close();
-        allRef.current = [];
-        setAll([]);
+
+        if (resetResultsOnReset.current) {
+            allRef.current = [];
+            setAll([]);
+        }
+
         setIsLoading(false);
         loadingMoreRef.current = false;
         log(options, "Iterator reset", toClose?.id, fromRef?.id);
         setId(undefined);
     };
+
+    useEffect(() => {
+        resetResultsOnReset.current = true;
+        waitedOnceRef.current = false;
+    }, [db]);
 
     /* ────────────── effect: (re)create iterator ────────────── */
     useEffect(() => {
@@ -131,7 +137,12 @@ export const useQuery = <
                 id,
                 iterator: db.index.iterate(options.query ?? {}, {
                     local: options?.local ?? true,
-                    remote: options?.remote ?? true,
+                    remote:
+                        options.remote == null || options.remote === false
+                            ? false
+                            : typeof options.remote === "object"
+                            ? options.remote
+                            : true,
                     resolve: options?.resolve,
                 }) as ResultsIterator<Item>,
                 itemsConsumed: 0,
@@ -220,37 +231,34 @@ export const useQuery = <
         options?.id ?? options?.query,
         options?.resolve,
         options?.reverse,
+        resetCounter,
     ]);
 
     /* ────────────── loadMore (once-wait aware) ────────────── */
     const batchSize = options?.batchSize ?? 10;
 
     const shouldWait = (): boolean => {
-        if (options?.waitForReplicators === false) return false;
-        if (options?.waitForReplicators === true) return true;
-        if (options?.waitForReplicators === "once")
-            return !waitedOnceRef.current;
-        if (
-            typeof options?.waitForReplicators === "object" &&
-            options.waitForReplicators.type === "once"
-        )
-            return !waitedOnceRef.current;
+        if (waitedOnceRef.current) {
+            return false;
+        }
+        if (options?.remote === false) return false;
+        if (options?.remote === true) return true;
+        if (options?.remote == null) return true;
+        if (typeof options?.remote === "object") {
+            return true;
+        }
         return true;
     };
 
-    const waitTimeout =
-        typeof options?.waitForReplicators === "object" &&
-        typeof options.waitForReplicators.timeout === "number"
-            ? options.waitForReplicators.timeout
-            : 5_000;
+    const reloadAfterTime = (): number | undefined => {
+        if (typeof options?.remote === "object" && options.remote.eager) {
+            return options.remote.warmup ?? db?.log.timeUntilRoleMaturity;
+        }
+        return undefined;
+    };
 
     const markWaited = () => {
-        if (
-            options?.waitForReplicators === "once" ||
-            (typeof options?.waitForReplicators === "object" &&
-                options.waitForReplicators.type === "once")
-        )
-            waitedOnceRef.current = true;
+        waitedOnceRef.current = true;
     };
 
     const loadMore = async () => {
@@ -271,7 +279,18 @@ export const useQuery = <
             /* ── optional replicate-wait ── */
             if (shouldWait()) {
                 log(options, "Wait for replicators", iterator.id);
-                await db?.log
+
+                let isEager =
+                    typeof options?.remote === "object" && options.remote.eager;
+                const waitTimeout =
+                    typeof options?.remote === "object" &&
+                    typeof options?.remote.warmup === "number"
+                        ? options?.remote.warmup
+                        : 5_000;
+
+                let shouldResetAfterMaturity =
+                    isEager && !waitedOnceRef.current;
+                let promise = db?.log
                     .waitForReplicators({
                         timeout: waitTimeout,
                         signal: closeControllerRef.current?.signal,
@@ -283,8 +302,17 @@ export const useQuery = <
                         )
                             return;
                         console.warn("Remote replicators not ready", e);
+                    })
+                    .finally(() => {
+                        markWaited();
+                        if (shouldResetAfterMaturity) {
+                            resetResultsOnReset.current = false; // don't reset results， because we expect to get same or more results
+                            invokeReset();
+                        }
                     });
-                markWaited();
+                if (!shouldResetAfterMaturity) {
+                    await promise;
+                }
             } else {
                 log(options, "Skip wait for replicators", iterator.id);
             }

@@ -163,6 +163,7 @@ export const Replies = (props: {
             loadTimeoutRef.current = null;
         }
         setHidden({ head: 0, tail: 0 });
+        hiddenRef.current = { head: 0, tail: 0 };
         committedIds.current = { firstId: null, lastId: null };
         committedLengthRef.current = 0;
         alreadySeen.current.clear();
@@ -374,7 +375,7 @@ export const Replies = (props: {
             restoredScrollPositionOnce.current = true;
         },
         isReplyVisible,
-        debug: true,
+        debug: false,
     });
 
     useEffect(() => {

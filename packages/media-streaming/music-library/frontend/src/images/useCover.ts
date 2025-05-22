@@ -18,6 +18,7 @@ export const useCover = (id?: Uint8Array) => {
         onChange: {
             merge: true,
         },
+        remote: { eager: true },
     });
 
     /* blob-url for <img> / background-image */

@@ -24,7 +24,7 @@ export const Content = () => {
                             <FiAlertCircle className="mr-2" size={24} />
                             <div>
                                 <strong className="font-bold">Error</strong>
-                                <span className="block sm:inline ml-2">
+                                <span className="block sm:inline ml-2 text-black">
                                     Failed to connect to the network
                                 </span>
                             </div>

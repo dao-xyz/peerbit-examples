@@ -7,6 +7,7 @@ import { MediaStreamDBs } from "@peerbit/media-streaming";
 import { usePeer, useProgram } from "@peerbit/react";
 import { useState, useEffect } from "react";
 import { useCover } from "../images/useCover";
+import { SpinnerSong } from "../Spinner";
 
 type Props = { onDelete(): Promise<void>; onUpload(): void };
 
@@ -38,22 +39,26 @@ export const LibraryHeader: React.FC<Props> = ({ onDelete, onUpload }) => {
 
     /* cover helpers */
     const [coverURL, setCover] = useCover(lib.program?.id!);
-
+    console.log(lib?.program?.idString);
     /* ─────────────────── UI ─────────────────── */
     return (
-        <header className="max-w-5xl mx-auto flex flex-col gap-6">
+        <header className="max-w-5xl mx-auto flex flex-col gap-6 w-full">
             {/* cover */}
-            <div className="relative group rounded-2xl overflow-hidden aspect-[16/9]">
-                <img
-                    src={
-                        coverURL ??
-                        `https://picsum.photos/seed/${lib.program?.idString.slice(
-                            0,
-                            6
-                        )}/960`
-                    }
-                    className="w-full h-full object-cover"
-                />
+            <div className="relative group rounded-2xl overflow-hidden max-h-[300px] aspect-[16/9]">
+                {coverURL || lib.program ? (
+                    <img
+                        src={
+                            coverURL ??
+                            `https://picsum.photos/seed/${lib.program?.idString.slice(
+                                0,
+                                6
+                            )}/960`
+                        }
+                        className="w-full h-full object-cover"
+                    />
+                ) : (
+                    <div className="h-full"></div>
+                )}
 
                 {isOwner && (
                     <>

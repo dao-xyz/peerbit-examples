@@ -118,6 +118,7 @@ export class Profiles extends Program<ProfileArgs> {
                 }
             },
             index: {
+                idProperty: "id", // we need this because we use @id inside of Canvas (TODO is this expected?)
                 prefetch: {
                     strict: false,
                 },

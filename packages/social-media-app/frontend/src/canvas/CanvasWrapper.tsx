@@ -161,11 +161,10 @@ export const CanvasWrapper = ({
         {
             debounce: 123,
             local: true,
-            remote: true,
             prefetch: true,
-            waitForReplicators: {
-                timeout: 5e3,
-                type: "once",
+            remote: {
+                eager: true,
+                warmup: 5e3,
             },
             onChange: {
                 merge: (change) => {

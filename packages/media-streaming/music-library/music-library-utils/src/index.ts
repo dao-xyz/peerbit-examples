@@ -69,6 +69,7 @@ export class StoraOfLibraries extends Program {
             index: {
                 type: MediaStreamDBsIndexable,
             },
+            keep: "self",
             replicate: this._replicateAll
                 ? {
                       factor: 1,
@@ -118,9 +119,11 @@ class NamedItem {
     }
 }
 
+type ReplicationArgs = { replicate?: boolean };
+
 /* ─────────────── program ─────────────── */
 @variant("named-items")
-export class NamedItems extends Program {
+export class NamedItems extends Program<ReplicationArgs> {
     @field({ type: Documents })
     documents: Documents<NamedItem>;
 
@@ -138,10 +141,11 @@ export class NamedItems extends Program {
         await this.documents.put(new NamedItem({ id, name }));
     }
 
-    async open(): Promise<void> {
+    async open(args?: ReplicationArgs): Promise<void> {
         await this.documents.open({
             type: NamedItem,
-            replicate: { factor: 1 },
+            keep: "self",
+            replicate: args?.replicate ? { factor: 1 } : false,
             index: {
                 type: NamedItem,
             },
@@ -209,10 +213,11 @@ export class ImageItems extends Program {
         await this.documents.put(new ImageItem({ id, img, width, height }));
     }
 
-    async open(): Promise<void> {
+    async open(args?: ReplicationArgs): Promise<void> {
         await this.documents.open({
             type: ImageItem,
-            replicate: { factor: 1 },
+            keep: "self",
+            replicate: args?.replicate ? { factor: 1 } : false,
             index: {
                 type: IndexedImageItem,
             },
@@ -250,10 +255,11 @@ export class PlayStats extends Program {
         });
     }
 
-    async open(): Promise<void> {
+    async open(args?: ReplicationArgs): Promise<void> {
         await this.documents.open({
             type: PlayEvent,
-            replicate: { factor: 1 },
+            keep: "self",
+            replicate: args?.replicate ? { factor: 1 } : false,
         });
     }
 }
