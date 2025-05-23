@@ -14,7 +14,7 @@ import { ToolbarProvider, useToolbar } from "../toolbar/ToolbarContext.js";
 import { ScrollSettings } from "./useAutoScroll.js";
 import { getSnapshot } from "./feedRestoration.js";
 import { useLocation } from "react-router";
-import { ViewModel } from "../../view/defaultViews.js";
+import { ViewModel } from "@giga-app/interface";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",

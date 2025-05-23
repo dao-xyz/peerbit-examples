@@ -1,9 +1,10 @@
 import { StickyHeader } from "./StickyHeader";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useView } from "../../view/ViewContex";
-import { ViewModel } from "../../view/defaultViews";
 import { FaChevronDown } from "react-icons/fa6";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { FaPlus } from "react-icons/fa";
+import { ViewModel } from "@giga-app/interface";
 
 interface SubHeaderProps {
     onBackToTop?: () => void;
@@ -13,152 +14,262 @@ interface SubHeaderProps {
 
 interface ViewSelectorSubheaderProps {
     onViewChange?: (view: ViewModel) => void;
-    gapPx?: number; // Tailwind `gap-2` is 8px
+    gapPx?: number; // Tailwind gap-2 = 8 px
 }
 
 const ViewSelectorSubheader = ({
     onViewChange,
     gapPx = 8,
 }: ViewSelectorSubheaderProps) => {
-    const { views: viewOrg, view: currentView, setView } = useView();
+    /* ------------------------------------------------------------------ */
+    /*  🌳  STATE & CONTEXT                                               */
+    /* ------------------------------------------------------------------ */
+    const {
+        defaultViews,
+        dynamicViews,
+        view: currentView,
+        setView,
+        createView, // async name => View
+    } = useView();
 
-    const [views, setViews] = useState<ViewModel[]>(viewOrg);
-    useEffect(() => {
-        setViews(viewOrg);
-    }, [viewOrg]);
+    // ⚠️ Dynamic views should appear first
+    const allViews = useMemo(() => {
+        return [...dynamicViews, ...defaultViews];
+    }, [defaultViews, dynamicViews]);
 
-    // State: measured widths and container width
-    const [buttonWidths, setButtonWidths] = useState<Record<string, number>>(
-        {}
-    );
-    const [containerWidth, setContainerWidth] = useState(0);
+    /* ------------------------------------------------------------------ */
+    /*  📏  MEASUREMENT (hidden measurer + container ResizeObserver)       */
+    /* ------------------------------------------------------------------ */
+    const [buttonW, setButtonW] = useState<Record<string, number>>({});
+    const [containerW, setContainerW] = useState(0);
 
-    // Refs
-    const containerRef = useRef<HTMLDivElement>(null);
     const measurerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+    const containerRef = useRef<HTMLDivElement>(null);
 
-    // 1️⃣ Measure all button widths via hidden measurer
+    // measure buttons
     const measureAll = useCallback(() => {
-        const newWidths: Record<string, number> = {};
-        for (const vm of views) {
-            const btn = measurerRefs.current[vm.id];
-            if (btn) {
-                newWidths[vm.id] = btn.offsetWidth;
-            }
+        const w: Record<string, number> = {};
+        for (const v of allViews) {
+            const el = measurerRefs.current[v.id];
+            if (el) w[v.id] = el.offsetWidth;
         }
-        setButtonWidths(newWidths);
-    }, [views]);
+        setButtonW(w);
+    }, [allViews]);
 
-    useEffect(() => {
-        measureAll();
-        // If your view names can change dynamically, you can add a ResizeObserver here:
-        // but for simplicity we re-measure on views change only.
-    }, [measureAll]);
+    useEffect(measureAll, [measureAll]);
 
-    // 2️⃣ Watch container width
+    // measure container
     useEffect(() => {
         if (!containerRef.current) return;
-        const obs = new ResizeObserver(([entry]) => {
-            setContainerWidth(entry.contentRect.width);
-        });
-        obs.observe(containerRef.current);
-        return () => obs.disconnect();
+        const ro = new ResizeObserver(([e]) =>
+            setContainerW(e.contentRect.width)
+        );
+        ro.observe(containerRef.current);
+        return () => ro.disconnect();
     }, []);
 
-    // 3️⃣ Decide which views fit
+    /* ------------------------------------------------------------------ */
+    /*  🧮  LAYOUT – split into visible / overflow                         */
+    /* ------------------------------------------------------------------ */
     let used = 0;
     const visible: ViewModel[] = [];
-    const overflow: ViewModel[] = [];
 
-    // subtract a bit of padding if needed
-    const avail = containerWidth - gapPx;
+    const avail = containerW - 32; // slight padding
 
-    for (const vm of views) {
-        const w = buttonWidths[vm.id] ?? 120; // fallback
-        const need = visible.length > 0 ? w + gapPx : w;
+    for (const v of currentView ? [currentView, ...allViews] : allViews) {
+        const w = buttonW[v.id] ?? 120;
+        const need = visible.length ? w + gapPx : w;
         if (used + need <= avail) {
-            visible.push(vm);
+            if (v !== currentView) {
+                visible.push(v);
+            }
             used += need;
-        } else {
-            overflow.push(vm);
         }
     }
 
-    const handleSelect = (vm: ViewModel) => {
-        setView(vm.id);
-        onViewChange?.(vm);
+    /* ------------------------------------------------------------------ */
+    /*  ➕  “Create view” local state                                      */
+    /* ------------------------------------------------------------------ */
+    const [newName, setNewName] = useState("");
+    const [saving, setSaving] = useState(false);
+
+    const handleCreate = async () => {
+        if (!newName.trim()) return;
+        setSaving(true);
+        await createView(newName.trim());
+        setNewName("");
+        setSaving(false);
     };
 
+    /* ------------------------------------------------------------------ */
+    /*  🔗  Handlers                                                      */
+    /* ------------------------------------------------------------------ */
+    const select = (v: ViewModel) => {
+        setView(v.id);
+        onViewChange?.(v);
+    };
+
+    /* ------------------------------------------------------------------ */
+    /*  🖼  RENDER                                                         */
+    /* ------------------------------------------------------------------ */
     return (
         <>
-            {/* Hidden measurer */}
+            {/* invisible measurer */}
             <div
                 aria-hidden
-                style={{
-                    position: "absolute",
-                    visibility: "hidden",
-                    height: 0,
-                    overflow: "hidden",
-                    whiteSpace: "nowrap",
-                }}
+                className="absolute h-0 overflow-hidden whitespace-nowrap"
+                style={{ visibility: "hidden" }}
             >
-                {views.map((vm) => (
+                {allViews.map((v) => (
                     <button
-                        key={vm.id}
-                        ref={(el) => (measurerRefs.current[vm.id] = el)}
+                        key={v.id}
+                        ref={(el) => (measurerRefs.current[v.id] = el)}
                         className="px-4 py-2 text-sm whitespace-nowrap"
-                        onClick={() => handleSelect(vm)}
                     >
-                        {vm.name}
+                        {v.id}
                     </button>
                 ))}
             </div>
 
-            {/* Actual toolbar */}
-            <div className="flex flex-row items-center w-full gap-2">
-                <div className="flex flex-wrap gap-2 w-full" ref={containerRef}>
-                    {visible.map((vm) => (
+            {/* toolbar */}
+            <div className="flex items-center gap-2 w-full">
+                <div ref={containerRef} className="flex flex-wrap gap-2 w-full">
+                    {/* selected view – fixed far-left */}
+                    {currentView && (
                         <button
-                            key={vm.id}
-                            onClick={() => handleSelect(vm)}
-                            className={`whitespace-nowrap px-4 py-2 text-sm transition duration-200 ${
-                                currentView?.id === vm.id
+                            onClick={() => select(currentView)}
+                            className="px-4 py-2 text-sm font-semibold underline underline-offset-4 text-blue-600 whitespace-nowrap"
+                        >
+                            {currentView.name}
+                        </button>
+                    )}
+
+                    {/* vertical rule */}
+                    {allViews.length > 0 && (
+                        <div className="flex items-center">
+                            <div className="h-6 border-l border-gray-300 " />
+                        </div>
+                    )}
+
+                    {visible.map((v) => (
+                        <button
+                            key={v.id}
+                            onClick={() => select(v)}
+                            className={`px-4 py-2 text-sm whitespace-nowrap transition ${
+                                currentView?.id === v.id
                                     ? "underline underline-offset-4 font-semibold"
                                     : "text-neutral-500 dark:text-neutral-400 hover:text-gray-700"
+                            } ${
+                                dynamicViews.find((d) => d.id === v.id)
+                                    ? "" // Style dynamic views differently?
+                                    : ""
                             }`}
                         >
-                            {vm.name}
+                            {v.name}
                         </button>
                     ))}
                 </div>
 
-                {overflow.length > 0 && (
-                    <DropdownMenu.Root>
-                        <DropdownMenu.Trigger className="ml-auto px-4 py-2 text-sm rounded-md hover:bg-gray-100 dark:hover:bg-neutral-800">
-                            <FaChevronDown />
-                        </DropdownMenu.Trigger>
-                        <DropdownMenu.Content
-                            align="start"
-                            sideOffset={5}
-                            className="bg-white dark:bg-neutral-900 rounded-md shadow-lg py-2"
-                            style={{ minWidth: 150 }}
-                        >
-                            {overflow.map((vm) => (
-                                <DropdownMenu.Item
-                                    key={vm.id}
-                                    onClick={() => handleSelect(vm)}
-                                    className={`cursor-pointer w-full text-left whitespace-nowrap px-4 py-2 text-sm transition duration-200 ${
-                                        currentView?.id === vm.id
-                                            ? "underline underline-offset-4 font-semibold "
-                                            : "dark:text-neutral-400 text-neutral-600  hover:text-gray-700"
-                                    }`}
-                                >
-                                    {vm.name}
-                                </DropdownMenu.Item>
-                            ))}
-                        </DropdownMenu.Content>
-                    </DropdownMenu.Root>
-                )}
+                {/* dropdown with overflow & creator */}
+                <DropdownMenu.Root>
+                    <DropdownMenu.Trigger className="ml-auto px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-neutral-800">
+                        <FaChevronDown />
+                    </DropdownMenu.Trigger>
+
+                    <DropdownMenu.Content
+                        align="end"
+                        sideOffset={6}
+                        className=" bg-white dark:bg-neutral-800 rounded-md shadow-lg py-2 max-w-[220px]"
+                    >
+                        {/* Dynamic overflow first */}
+                        <div className="max-h-[300px] overflow-y-auto">
+                            {allViews.filter((v) =>
+                                dynamicViews.some((d) => d.id === v.id)
+                            ).length > 0 && (
+                                <>
+                                    <DropdownMenu.Label className=" px-4 py-1 text-xs text-blue-600">
+                                        Your views
+                                    </DropdownMenu.Label>
+                                    {allViews
+                                        .filter((v) =>
+                                            dynamicViews.some(
+                                                (d) => d.id === v.id
+                                            )
+                                        )
+                                        .map((v) => (
+                                            <DropdownMenu.Item
+                                                key={v.id}
+                                                onClick={() => select(v)}
+                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
+                                                    currentView?.id === v.id
+                                                        ? "underline font-semibold"
+                                                        : "text-neutral-600 hover:text-gray-700"
+                                                }`}
+                                            >
+                                                {v.name}
+                                            </DropdownMenu.Item>
+                                        ))}
+                                    <DropdownMenu.Separator className="my-2 h-px bg-neutral-200 dark:bg-neutral-700" />
+                                </>
+                            )}
+
+                            {/* Default */}
+                            {allViews.filter(
+                                (v) => !dynamicViews.some((d) => d.id === v.id)
+                            ).length > 0 && (
+                                <>
+                                    <DropdownMenu.Label className="px-4 py-1 text-xs text-neutral-400 dark:text-neutral-300">
+                                        Default views
+                                    </DropdownMenu.Label>
+                                    {allViews
+                                        .filter(
+                                            (v) =>
+                                                !dynamicViews.some(
+                                                    (d) => d.id === v.id
+                                                )
+                                        )
+                                        .map((v) => (
+                                            <DropdownMenu.Item
+                                                key={v.id}
+                                                onClick={() => select(v)}
+                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
+                                                    currentView?.id === v.id
+                                                        ? "underline font-semibold"
+                                                        : "text-neutral-600 hover:text-gray-700"
+                                                }`}
+                                            >
+                                                {v.name}
+                                            </DropdownMenu.Item>
+                                        ))}
+                                    <DropdownMenu.Separator className="my-2 h-px bg-neutral-200 dark:bg-neutral-700" />
+                                </>
+                            )}
+                        </div>
+
+                        {/* Create-new section */}
+                        <div className="px-4 pt-1 pb-2 space-y-2">
+                            <input
+                                type="text"
+                                value={newName}
+                                onChange={(e) => setNewName(e.target.value)}
+                                placeholder="New view name"
+                                className="w-full rounded border border-neutral-300 dark:border-neutral-700 bg-transparent px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            />
+                            <button
+                                disabled={newName.trim().length === 0 || saving}
+                                onClick={handleCreate}
+                                className={`w-full flex items-center justify-center gap-2 rounded px-3 py-1.5 text-sm transition ${
+                                    newName.trim().length === 0 || saving
+                                        ? "bg-neutral-300 dark:bg-neutral-700 cursor-not-allowed text-neutral-500"
+                                        : "bg-blue-600 hover:bg-blue-700 text-white"
+                                }`}
+                            >
+                                <FaPlus className="text-xs" />
+                                Save view
+                            </button>
+                        </div>
+                    </DropdownMenu.Content>
+                </DropdownMenu.Root>
             </div>
         </>
     );

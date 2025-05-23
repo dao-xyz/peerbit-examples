@@ -406,7 +406,7 @@ export const Replies = (props: {
                             "max-w-[876px] w-full mx-auto grid relative"
                         )}
                     >
-                        {view.id === "chat" && (
+                        {view?.id === "chat" && (
                             <StraightReplyLine
                                 replyRefs={replyContentRefs.current}
                                 containerRef={repliesContainerRef}
@@ -418,7 +418,7 @@ export const Replies = (props: {
 
                         <div
                             className={`${
-                                view.id === "chat" ? "pl-[15px]" : ""
+                                view?.id === "chat" ? "pl-[15px]" : ""
                             } flex flex-col gap-4 w-full ${
                                 view.settings.classNameContainer
                             }`}
@@ -438,7 +438,7 @@ export const Replies = (props: {
                                         }}
                                         canvas={item.reply}
                                         variant={
-                                            view.id === "chat"
+                                            view?.id === "chat"
                                                 ? "chat"
                                                 : "thread"
                                         }

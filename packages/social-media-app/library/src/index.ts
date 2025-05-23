@@ -5,3 +5,4 @@ export * from "./profile.js";
 export * from "./identity.js";
 export * from "./types.js";
 export * from "./root.js";
+export * from "./view.js";

@@ -62,8 +62,9 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
             className="btn btn-icon p-0 m-0"
         >
             <FaPlus
-                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300  ${appSelectOpen ? "rotate-45" : "rotate-0"
-                    }`}
+                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300  ${
+                    appSelectOpen ? "rotate-45" : "rotate-0"
+                }`}
             />
         </button>
     );
@@ -101,7 +102,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
     }
     const colorStyle =
         "dark:bg-neutral-700 " +
-        (view.id === "chat" ? "bg-neutral-200" : "bg-neutral-100");
+        (view?.id === "chat" ? "bg-neutral-200" : "bg-neutral-100");
     return (
         <>
             <div
@@ -142,8 +143,9 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
                     <form>
                         <div className="flex items-center px-1">
                             <label
-                                className={`ganja-font ${!isReady ? "text-neutral-500" : ""
-                                    }`}
+                                className={`ganja-font ${
+                                    !isReady ? "text-neutral-500" : ""
+                                }`}
                                 htmlFor="use-ai"
                                 style={{ paddingRight: 15 }}
                             >
@@ -212,7 +214,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
                         <BsArrowsAngleExpand />
                     </button>
 
-                    {view.id === "chat" &&
+                    {view?.id === "chat" &&
                         replyTo &&
                         replyTo.idString !== viewRoot.idString && (
                             <button

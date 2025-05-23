@@ -7,13 +7,19 @@ import React, {
     ReactNode,
     useRef,
 } from "react";
-import { usePeer, useQuery } from "@peerbit/react";
-import { Canvas as CanvasDB, Canvas } from "@giga-app/interface";
+import { usePeer, useProgram, useQuery } from "@peerbit/react";
+import {
+    Canvas as CanvasDB,
+    Canvas,
+    Views,
+    View,
+    CanvasAddressReference,
+} from "@giga-app/interface";
 import { useCanvases } from "../canvas/useCanvas";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
 import { BodyStyler } from "./BodyStyler";
-import { ALL_DEFAULT_VIEWS, DefaultViewType } from "./defaultViews";
+import { ALL_DEFAULT_VIEWS } from "./defaultViews";
 /**
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
  * pieces of state run **once** instead of once‑per‑piece. The update is flushed after `delay` ms.
@@ -61,8 +67,7 @@ function useViewContextHook() {
 
     // Instead of separate view state, derive view from URL:
     const [searchParams, setSearchParams] = useSearchParams();
-    const view: DefaultViewType =
-        (searchParams.get("view") as DefaultViewType) || "best";
+    const view: string = (searchParams.get("view") as string) || "best";
 
     // Whenever you need to change view, update the URL.
     const changeView = (newView: string) => {
@@ -90,16 +95,62 @@ function useViewContextHook() {
         [debouncedCanvases]
     );
 
+    const views = useProgram(
+        viewRoot ? new Views({ canvasId: viewRoot.id }) : undefined,
+        { existing: "reuse" }
+    );
+
+    const { items: dynamicViewItems } = useQuery(views.program?.views, {
+        query: useMemo(() => {
+            return {};
+        }, []),
+        onChange: {
+            merge: true,
+        },
+        prefetch: true,
+        local: true,
+
+        remote: {
+            eager: true,
+        },
+    });
+
+    const dynamicViews = useMemo(() => {
+        if (!dynamicViewItems) {
+            return [];
+        }
+        return dynamicViewItems.map((item) => item.toViewModel());
+    }, [dynamicViewItems]);
+
+    const createView = async (
+        name: string,
+        description?: CanvasAddressReference /* filter */
+    ) => {
+        const view = new View({
+            id: name,
+            canvas: new CanvasAddressReference({ canvas: viewRoot }),
+            description: description,
+        });
+        await views.program.views.put(view);
+        return view;
+    };
+
     // Set the query based on view and viewRoot.
     const viewModel = useMemo(() => {
-        return ALL_DEFAULT_VIEWS.find((x) => x.id == debouncedView);
-    }, [debouncedView]);
+        return (
+            dynamicViews.find((x) => x.id === debouncedView) ||
+            ALL_DEFAULT_VIEWS.find((x) => x.id == debouncedView)
+        );
+    }, [debouncedView, dynamicViews]);
 
     const query = useMemo(() => {
         if (!viewRoot) {
             return undefined;
         }
         if (!viewModel) {
+            return undefined;
+        }
+        if (!viewModel?.query) {
             return undefined;
         }
         return viewModel?.query(viewRoot);
@@ -280,7 +331,9 @@ function useViewContextHook() {
     return {
         canvases: debouncedCanvases,
         viewRoot,
-        views: ALL_DEFAULT_VIEWS,
+        defaultViews: ALL_DEFAULT_VIEWS,
+        dynamicViews,
+        createView,
         view: viewModel,
         setView: changeView, // now changes update the URL
         loadMore,

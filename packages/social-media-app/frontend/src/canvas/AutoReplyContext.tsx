@@ -81,7 +81,7 @@ export const AutoReplyProvider: React.FC<{
     const autoReplyFunctionality = () => {
         let last = processedReplies[processedReplies.length - 1]?.reply;
         if (
-            view.id === "chat" &&
+            view?.id === "chat" &&
             last &&
             (replyTo == null ||
                 (replyTo.idString === viewRoot.idString &&
@@ -123,7 +123,7 @@ export const AutoReplyProvider: React.FC<{
            }
     */
         // auto reply to the last processed reply
-        if (view.id === "chat") {
+        if (view?.id === "chat") {
             if (processedReplies.length > 0) {
                 let last = processedReplies[processedReplies.length - 1]?.reply;
                 if (
@@ -137,7 +137,7 @@ export const AutoReplyProvider: React.FC<{
         } else {
             setReplyTo(viewRoot); // clear replyTo when not in chat view
         }
-    }, [processedReplies]);
+    }, [view, processedReplies]);
 
     return (
         <AutoReplyContext.Provider

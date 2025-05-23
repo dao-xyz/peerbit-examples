@@ -1,9 +1,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Canvas } from "@giga-app/interface";
+import { Canvas, ViewModel } from "@giga-app/interface";
 import { debounce, throttle } from "lodash";
 import { usePeer } from "@peerbit/react";
 import { getScrollTop } from "../../HeaderVisibilitiyProvider";
-import { ViewModel } from "../../view/defaultViews";
 
 function getMaxScrollTop() {
     const documentHeight = Math.max(
