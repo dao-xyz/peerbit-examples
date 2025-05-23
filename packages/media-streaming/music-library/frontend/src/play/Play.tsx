@@ -110,7 +110,7 @@ export const Play: React.FC<Props> = ({
             console.log("START PROGRESS", progress);
             thisIterator = await source.iterate(progress, {
                 keepTracksOpen: true,
-                replicate: true,
+                /*  replicate: true, */
                 debug: false,
                 onProgress: ({ track, chunk }) => {
                     setIsLoading(false);
@@ -134,7 +134,6 @@ export const Play: React.FC<Props> = ({
                 },
                 onMaxTimeChange: ({ maxTime }) =>
                     setMax(Math.max(maxTime / 1e3, maxS)),
-                closeOnEnd: true,
             });
 
             if (id !== iteratorId.current) {
