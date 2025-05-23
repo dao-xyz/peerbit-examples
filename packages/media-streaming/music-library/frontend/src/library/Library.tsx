@@ -78,7 +78,7 @@ export const TrackPreview: React.FC<Props> = ({
           ${selected ? "ring-2 ring-emerald-500" : ""}`}
         >
             {/* cover */}
-            <div className="aspect-square rounded-lg bg-neutral-700 mb-4 relative overflow-hidden">
+            <div className="rounded-lg bg-neutral-700 mb-4 relative overflow-hidden">
                 <img
                     src={coverURL ?? getPicSumLink(db, 400)}
                     className="max-w-full h-auto object-cover opacity-80 group-hover:opacity-100 transition"
