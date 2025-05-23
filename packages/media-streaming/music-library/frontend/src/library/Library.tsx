@@ -10,6 +10,7 @@ import { useLibraries } from "../libraries/LibrariesContext";
 import { useCover } from "../images/useCover";
 import { LibraryHeader } from "./LibraryHeader";
 import { useNames } from "../NamesProvider";
+import { getPicSumLink } from "../images/utils";
 
 type Props = {
     db: MediaStreamDB;
@@ -79,13 +80,7 @@ export const TrackPreview: React.FC<Props> = ({
             {/* cover */}
             <div className="aspect-square rounded-lg bg-neutral-700 mb-4 relative overflow-hidden">
                 <img
-                    src={
-                        coverURL ??
-                        `https://picsum.photos/seed/${db.idString.slice(
-                            0,
-                            6
-                        )}/400`
-                    }
+                    src={coverURL ?? getPicSumLink(db, 400)}
                     className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition"
                     alt="Track cover"
                 />

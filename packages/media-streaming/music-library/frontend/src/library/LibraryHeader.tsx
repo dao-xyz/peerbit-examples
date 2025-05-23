@@ -7,7 +7,7 @@ import { MediaStreamDBs } from "@peerbit/media-streaming";
 import { usePeer, useProgram } from "@peerbit/react";
 import { useState, useEffect } from "react";
 import { useCover } from "../images/useCover";
-import { SpinnerSong } from "../Spinner";
+import { getPicSumLink } from "../images/utils";
 
 type Props = { onDelete(): Promise<void>; onUpload(): void };
 
@@ -47,13 +47,7 @@ export const LibraryHeader: React.FC<Props> = ({ onDelete, onUpload }) => {
             <div className="relative group rounded-2xl overflow-hidden max-h-[300px] aspect-[16/9]">
                 {coverURL || lib.program ? (
                     <img
-                        src={
-                            coverURL ??
-                            `https://picsum.photos/seed/${lib.program?.idString.slice(
-                                0,
-                                6
-                            )}/960`
-                        }
+                        src={coverURL ?? getPicSumLink(lib?.program, 960)}
                         className="w-full h-full object-cover"
                     />
                 ) : (

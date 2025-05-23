@@ -7,6 +7,7 @@ import { useNames } from "../NamesProvider";
 import { MediaStreamDBs } from "@peerbit/media-streaming";
 import { SpinnerSong } from "../Spinner";
 import { useCover } from "../images/useCover";
+import { getPicSumLink } from "../images/utils";
 
 const LibraryItem: React.FC<{
     lib: MediaStreamDBs;
@@ -28,14 +29,7 @@ const LibraryItem: React.FC<{
 
             <div className="w-20 h-20 flex-shrink-0 rounded-lg overflow-hidden bg-neutral-700">
                 <img
-                    src={
-                        cover
-                            ? cover
-                            : `https://picsum.photos/seed/${lib.idString.slice(
-                                  0,
-                                  6
-                              )}/400`
-                    }
+                    src={cover ? cover : getPicSumLink(lib, 400)}
                     alt="Library cover"
                     className="w-full h-full object-cover"
                 />
