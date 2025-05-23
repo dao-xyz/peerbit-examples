@@ -96,7 +96,10 @@ function useViewContextHook() {
     );
 
     const views = useProgram(
-        viewRoot ? new Views({ canvasId: viewRoot.id }) : undefined,
+        useMemo(
+            () => (viewRoot ? new Views({ canvasId: viewRoot.id }) : undefined),
+            [viewRoot]
+        ),
         { existing: "reuse" }
     );
 
