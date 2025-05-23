@@ -39,7 +39,7 @@ export const LibraryHeader: React.FC<Props> = ({ onDelete, onUpload }) => {
 
     /* cover helpers */
     const [coverURL, setCover] = useCover(lib.program?.id!);
-    console.log(lib?.program?.idString);
+
     /* ─────────────────── UI ─────────────────── */
     return (
         <header className="max-w-5xl mx-auto flex flex-col gap-6 w-full">
