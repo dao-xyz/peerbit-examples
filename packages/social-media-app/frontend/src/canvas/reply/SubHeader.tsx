@@ -155,7 +155,7 @@ export const ViewSelectorSubheader = ({
                     {currentView && (
                         <button
                             onClick={() => select(currentView)}
-                            className="px-4 py-2 text-sm font-semibold underline underline-offset-4 text-blue-600 whitespace-nowrap"
+                            className="px-4 py-2 text-sm font-semibold underline underline-offset-4  whitespace-nowrap"
                         >
                             {currentView.name}
                         </button>
