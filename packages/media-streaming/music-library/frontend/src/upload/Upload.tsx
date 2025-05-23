@@ -193,9 +193,10 @@ export const Upload: React.FC<Props> = ({ source }) => {
                                         ? URL.createObjectURL(coverFile)
                                         : storedCover ||
                                           (source.id
-                                              ? `https://picsum.photos/seed/${toBase64(
-                                                    source.id
-                                                ).slice(0, 6)}/400`
+                                              ? `https://picsum.photos/seed/${source.idString.slice(
+                                                    0,
+                                                    6
+                                                )}/400`
                                               : "")
                                 }
                                 className="w-full h-full object-cover"
