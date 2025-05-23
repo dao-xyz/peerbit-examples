@@ -14,51 +14,76 @@ interface SubHeaderProps {
 
 interface ViewSelectorSubheaderProps {
     onViewChange?: (view: ViewModel) => void;
-    gapPx?: number; // Tailwind gap-2 = 8 px
+    gapPx?: number; // Tailwind gap-2 ≈ 8 px
 }
 
-const ViewSelectorSubheader = ({
+export const ViewSelectorSubheader = ({
     onViewChange,
     gapPx = 8,
 }: ViewSelectorSubheaderProps) => {
-    /* ------------------------------------------------------------------ */
-    /*  🌳  STATE & CONTEXT                                               */
-    /* ------------------------------------------------------------------ */
+    /* ─────────────────────────── context ─────────────────────────── */
     const {
         defaultViews,
         dynamicViews,
         view: currentView,
         setView,
-        createView, // async name => View
+        createView,
+        viewRoot,
     } = useView();
 
-    // ⚠️ Dynamic views should appear first
-    const allViews = useMemo(() => {
-        return [...dynamicViews, ...defaultViews];
-    }, [defaultViews, dynamicViews]);
+    /* ─────────────────── MRU list (ids, newest → oldest) ──────────── */
+    const [recent, setRecent] = useState<string[]>([]);
 
-    /* ------------------------------------------------------------------ */
-    /*  📏  MEASUREMENT (hidden measurer + container ResizeObserver)       */
-    /* ------------------------------------------------------------------ */
+    useEffect(() => {
+        setRecent([]);
+    }, [viewRoot]);
+
+    const select = (v: ViewModel) => {
+        if (currentView && v.id !== currentView.id) {
+            setRecent((prev) => {
+                const withoutDup = prev.filter(
+                    (id) => id !== currentView.id && id !== v.id
+                );
+                return [currentView.id, ...withoutDup].slice(0, 20);
+            });
+        }
+        setView(v.id);
+        onViewChange?.(v);
+    };
+
+    /* ── order “others”: MRU first, then remaining (dynamic ∪ default) ── */
+    const orderedOthers: ViewModel[] = useMemo(() => {
+        const all = [...dynamicViews, ...defaultViews];
+        const byId = new Map(all.map((v) => [v.id, v]));
+
+        const mru = recent
+            .map((id) => byId.get(id))
+            .filter(Boolean) as ViewModel[];
+
+        const rest = all.filter((v) => !recent.includes(v.id));
+
+        return [...mru, ...rest].filter((v) => v.id !== currentView?.id);
+    }, [recent, dynamicViews, defaultViews, currentView]);
+
+    /* ───────────── measurement (buttons + container) ───────────── */
     const [buttonW, setButtonW] = useState<Record<string, number>>({});
     const [containerW, setContainerW] = useState(0);
 
     const measurerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
     const containerRef = useRef<HTMLDivElement>(null);
 
-    // measure buttons
     const measureAll = useCallback(() => {
         const w: Record<string, number> = {};
-        for (const v of allViews) {
+        for (const v of [currentView, ...orderedOthers]) {
+            if (!v) continue;
             const el = measurerRefs.current[v.id];
             if (el) w[v.id] = el.offsetWidth;
         }
         setButtonW(w);
-    }, [allViews]);
+    }, [orderedOthers, currentView]);
 
     useEffect(measureAll, [measureAll]);
 
-    // measure container
     useEffect(() => {
         if (!containerRef.current) return;
         const ro = new ResizeObserver(([e]) =>
@@ -68,28 +93,27 @@ const ViewSelectorSubheader = ({
         return () => ro.disconnect();
     }, []);
 
-    /* ------------------------------------------------------------------ */
-    /*  🧮  LAYOUT – split into visible / overflow                         */
-    /* ------------------------------------------------------------------ */
+    /* ───────────── decide which “others” fit on the line ─────────── */
     let used = 0;
     const visible: ViewModel[] = [];
+    const avail = containerW - 32; // tiny pad
 
-    const avail = containerW - 32; // slight padding
-
-    for (const v of currentView ? [currentView, ...allViews] : allViews) {
+    for (const v of [currentView, ...orderedOthers]) {
+        if (!v) continue;
         const w = buttonW[v.id] ?? 120;
         const need = visible.length ? w + gapPx : w;
         if (used + need <= avail) {
-            if (v !== currentView) {
-                visible.push(v);
-            }
+            if (v !== currentView) visible.push(v);
             used += need;
         }
     }
 
-    /* ------------------------------------------------------------------ */
-    /*  ➕  “Create view” local state                                      */
-    /* ------------------------------------------------------------------ */
+    /* ────────── dropdown lists (always sectioned) ────────── */
+    const inDynamic = (v: ViewModel) => dynamicViews.some((d) => d.id === v.id);
+    const dynamicList = [...dynamicViews];
+    const defaultList = [...defaultViews];
+
+    /* ───────────── create-new view local state ───────────── */
     const [newName, setNewName] = useState("");
     const [saving, setSaving] = useState(false);
 
@@ -101,40 +125,33 @@ const ViewSelectorSubheader = ({
         setSaving(false);
     };
 
-    /* ------------------------------------------------------------------ */
-    /*  🔗  Handlers                                                      */
-    /* ------------------------------------------------------------------ */
-    const select = (v: ViewModel) => {
-        setView(v.id);
-        onViewChange?.(v);
-    };
-
-    /* ------------------------------------------------------------------ */
-    /*  🖼  RENDER                                                         */
-    /* ------------------------------------------------------------------ */
+    /* ─────────────────────────── render ─────────────────────────── */
     return (
         <>
-            {/* invisible measurer */}
+            {/* hidden measurer */}
             <div
                 aria-hidden
                 className="absolute h-0 overflow-hidden whitespace-nowrap"
                 style={{ visibility: "hidden" }}
             >
-                {allViews.map((v) => (
-                    <button
-                        key={v.id}
-                        ref={(el) => (measurerRefs.current[v.id] = el)}
-                        className="px-4 py-2 text-sm whitespace-nowrap"
-                    >
-                        {v.id}
-                    </button>
-                ))}
+                {[currentView, ...orderedOthers].map(
+                    (v) =>
+                        v && (
+                            <button
+                                key={v.id}
+                                ref={(el) => (measurerRefs.current[v.id] = el)}
+                                className="px-4 py-2 text-sm"
+                            >
+                                {v.name}
+                            </button>
+                        )
+                )}
             </div>
 
             {/* toolbar */}
             <div className="flex items-center gap-2 w-full">
                 <div ref={containerRef} className="flex flex-wrap gap-2 w-full">
-                    {/* selected view – fixed far-left */}
+                    {/* selected view – counted in width */}
                     {currentView && (
                         <button
                             onClick={() => select(currentView)}
@@ -144,33 +161,26 @@ const ViewSelectorSubheader = ({
                         </button>
                     )}
 
-                    {/* vertical rule */}
-                    {allViews.length > 0 && (
+                    {/* vertical separator (centred same as before) */}
+                    {orderedOthers.length > 0 && (
                         <div className="flex items-center">
-                            <div className="h-6 border-l border-gray-300 " />
+                            <div className="h-6 border-l border-gray-300" />
                         </div>
                     )}
 
+                    {/* visible buttons */}
                     {visible.map((v) => (
                         <button
                             key={v.id}
                             onClick={() => select(v)}
-                            className={`px-4 py-2 text-sm whitespace-nowrap transition ${
-                                currentView?.id === v.id
-                                    ? "underline underline-offset-4 font-semibold"
-                                    : "text-neutral-500 dark:text-neutral-400 hover:text-gray-700"
-                            } ${
-                                dynamicViews.find((d) => d.id === v.id)
-                                    ? "" // Style dynamic views differently?
-                                    : ""
-                            }`}
+                            className="px-4 py-2 text-sm text-neutral-500 dark:text-neutral-400 hover:text-gray-700 whitespace-nowrap transition"
                         >
                             {v.name}
                         </button>
                     ))}
                 </div>
 
-                {/* dropdown with overflow & creator */}
+                {/* dropdown */}
                 <DropdownMenu.Root>
                     <DropdownMenu.Trigger className="ml-auto px-3 py-2 rounded hover:bg-gray-100 dark:hover:bg-neutral-800">
                         <FaChevronDown />
@@ -179,74 +189,58 @@ const ViewSelectorSubheader = ({
                     <DropdownMenu.Content
                         align="end"
                         sideOffset={6}
-                        className=" bg-white dark:bg-neutral-800 rounded-md shadow-lg py-2 max-w-[220px]"
+                        className="bg-white dark:bg-neutral-800 rounded-md shadow-lg py-2 max-w-[220px]"
                     >
-                        {/* Dynamic overflow first */}
                         <div className="max-h-[300px] overflow-y-auto">
-                            {allViews.filter((v) =>
-                                dynamicViews.some((d) => d.id === v.id)
-                            ).length > 0 && (
+                            {/* ── Dynamic section ───────────────────────────── */}
+                            {dynamicList.length > 0 && (
                                 <>
-                                    <DropdownMenu.Label className=" px-4 py-1 text-xs text-blue-600">
+                                    <DropdownMenu.Label className="px-4 py-1 text-xs text-blue-600">
                                         Your views
                                     </DropdownMenu.Label>
-                                    {allViews
-                                        .filter((v) =>
-                                            dynamicViews.some(
-                                                (d) => d.id === v.id
-                                            )
-                                        )
-                                        .map((v) => (
-                                            <DropdownMenu.Item
-                                                key={v.id}
-                                                onClick={() => select(v)}
-                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
-                                                    currentView?.id === v.id
-                                                        ? "underline font-semibold"
-                                                        : "text-neutral-600 hover:text-gray-700"
-                                                }`}
-                                            >
-                                                {v.name}
-                                            </DropdownMenu.Item>
-                                        ))}
-                                    <DropdownMenu.Separator className="my-2 h-px bg-neutral-200 dark:bg-neutral-700" />
+                                    {dynamicList.map((v) => (
+                                        <DropdownMenu.Item
+                                            key={v.id}
+                                            onClick={() => select(v)}
+                                            className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
+                                                currentView?.id === v.id
+                                                    ? "underline font-semibold"
+                                                    : "text-neutral-600 hover:text-gray-700"
+                                            }`}
+                                        >
+                                            {v.name}
+                                        </DropdownMenu.Item>
+                                    ))}
+                                    {defaultList.length > 0 && (
+                                        <DropdownMenu.Separator className="my-2 h-px bg-neutral-200 dark:bg-neutral-700" />
+                                    )}
                                 </>
                             )}
 
-                            {/* Default */}
-                            {allViews.filter(
-                                (v) => !dynamicViews.some((d) => d.id === v.id)
-                            ).length > 0 && (
+                            {/* ── Default section ───────────────────────────── */}
+                            {defaultList.length > 0 && (
                                 <>
                                     <DropdownMenu.Label className="px-4 py-1 text-xs text-neutral-400 dark:text-neutral-300">
                                         Default views
                                     </DropdownMenu.Label>
-                                    {allViews
-                                        .filter(
-                                            (v) =>
-                                                !dynamicViews.some(
-                                                    (d) => d.id === v.id
-                                                )
-                                        )
-                                        .map((v) => (
-                                            <DropdownMenu.Item
-                                                key={v.id}
-                                                onClick={() => select(v)}
-                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
-                                                    currentView?.id === v.id
-                                                        ? "underline font-semibold"
-                                                        : "text-neutral-600 hover:text-gray-700"
-                                                }`}
-                                            >
-                                                {v.name}
-                                            </DropdownMenu.Item>
-                                        ))}
-                                    <DropdownMenu.Separator className="my-2 h-px bg-neutral-200 dark:bg-neutral-700" />
+                                    {defaultList.map((v) => (
+                                        <DropdownMenu.Item
+                                            key={v.id}
+                                            onClick={() => select(v)}
+                                            className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
+                                                currentView?.id === v.id
+                                                    ? "underline font-semibold"
+                                                    : "text-neutral-600 hover:text-gray-700"
+                                            }`}
+                                        >
+                                            {v.name}
+                                        </DropdownMenu.Item>
+                                    ))}
                                 </>
                             )}
                         </div>
 
-                        {/* Create-new section */}
+                        {/* create-new */}
                         <div className="px-4 pt-1 pb-2 space-y-2">
                             <input
                                 type="text"
