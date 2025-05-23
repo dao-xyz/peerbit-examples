@@ -570,7 +570,7 @@ export const createAudioStreamListener = (
             }
         }
 
-        options?.debug &&
+        /* options?.debug &&
             console.log("RENDER AUDIO CHUNK", {
                 bufferedAudioTime,
                 currentTIme: audioContext?.currentTime,
@@ -581,7 +581,7 @@ export const createAudioStreamListener = (
                 underflow: isUnderflow(),
                 duration: audioSource.buffer.duration,
                 start: frame!.timestamp / 1e6,
-            });
+            }); */
 
         !skipframe &&
             audioSource.start(frame!.timestamp / 1e6, isBehindSeconds);
@@ -613,13 +613,13 @@ export const createAudioStreamListener = (
         decodeAudioDataQueue.add(async () => {
             let zeroOffsetBuffer = new Uint8Array(chunk.chunk.length);
             zeroOffsetBuffer.set(chunk.chunk, 0);
-            options?.debug &&
-                console.log(
-                    "DECODE AUDIO CHUNK",
-                    chunk.time,
-                    zeroOffsetBuffer.length,
-                    audioContext?.state
-                );
+            /*    options?.debug &&
+                   console.log(
+                       "DECODE AUDIO CHUNK",
+                       chunk.time,
+                       zeroOffsetBuffer.length,
+                       audioContext?.state
+                   ); */
             audioContext?.decodeAudioData(
                 zeroOffsetBuffer.buffer,
                 (data) => {

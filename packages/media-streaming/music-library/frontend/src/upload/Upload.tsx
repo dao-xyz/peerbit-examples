@@ -97,9 +97,9 @@ export const Upload: React.FC<Props> = ({ source }) => {
                 setStatus("done");
                 setMsg("Upload complete 🎉");
             };
-
+            let bytes = 0;
             await wav.init(
-                { file: audioFile, useElement: srcRate === 48_000 },
+                { file: audioFile, useElement: true },
                 {
                     onChunk: ({
                         audioBuffer,
@@ -120,7 +120,11 @@ export const Upload: React.FC<Props> = ({ source }) => {
                                 time: ts,
                             })
                         );
-                        setProgress(index / length);
+                        bytes += audioBuffer.length;
+                        // this progress bar is not perfect..
+                        // maybe use wav.ctx.currentTime instead?
+
+                        setProgress(Math.min(bytes / audioFile.size, 1));
                         if (last) void finish(ts);
                     },
                 }
