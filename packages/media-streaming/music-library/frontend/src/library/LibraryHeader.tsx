@@ -29,7 +29,7 @@ export const LibraryHeader: React.FC<Props> = ({ onDelete, onUpload }) => {
 
     useEffect(() => {
         if (lib.program) setTitle(getName(lib.program.id));
-    }, [lib.program?.id]);
+    }, [getName, lib.program?.id]);
 
     const saveTitle = async () => {
         setEdit(false);
