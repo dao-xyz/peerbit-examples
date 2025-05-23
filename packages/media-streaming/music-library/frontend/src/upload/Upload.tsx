@@ -163,7 +163,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
     };
 
     return (
-        <div className="max-w-md mx-auto mt-16 p-8 rounded-3xl bg-neutral-800/60 backdrop-blur-md shadow-2xl">
+        <div className="max-w-md w-full mx-auto mt-16 p-8 rounded-3xl bg-neutral-800/60 backdrop-blur-md shadow-2xl">
             {/* while your cover-store is loading */}
             {imgs.loading && <SpinnerSong />}
 

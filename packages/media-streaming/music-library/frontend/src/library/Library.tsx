@@ -74,11 +74,11 @@ export const TrackPreview: React.FC<Props> = ({
         <li
             className={`group relative min-w-0 p-4 rounded-xl shadow-lg transform transition
           bg-neutral-800/60 backdrop-blur-sm
-          hover:-translate-y-1 hover:bg-neutral-700/60
+          hover:-translate-y-1 hover:bg-neutral-700/60 hover:cursor-pointer
           ${selected ? "ring-2 ring-emerald-500" : ""}`}
         >
             {/* cover */}
-            <div className="rounded-lg bg-neutral-700 mb-4 relative overflow-hidden">
+            <div className="rounded-lg bg-neutral-700 mb-4 relative overflow-hidden flex justify-center">
                 <img
                     src={coverURL ?? getPicSumLink(db, 400)}
                     className="max-w-full h-auto object-cover opacity-80 group-hover:opacity-100 transition"

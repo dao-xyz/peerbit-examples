@@ -7,7 +7,12 @@ process.addListener("unhandledRejection", (reason, promise) => {
 });
 
 import { Peerbit } from "peerbit";
-import { ImageItems, NamedItems, StoraOfLibraries } from "../index.js";
+import {
+    ImageItems,
+    NamedItems,
+    PlayStats,
+    StoraOfLibraries,
+} from "../index.js";
 console.log(!!StoraOfLibraries, !!NamedItems); // effect import
 
 const client = await Peerbit.create();
@@ -32,6 +37,13 @@ const images = await client.open(new ImageItems(), {
     },
 });
 
+const stats = await client.open(new PlayStats(), {
+    args: {
+        replicate: true,
+    },
+});
+
 console.log("Libraries root: " + streams.address);
 console.log("Names root: " + names.address);
 console.log("Images root: " + images.address);
+console.log("Stats root: " + stats.address);
