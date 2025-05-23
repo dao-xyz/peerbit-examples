@@ -72,7 +72,7 @@ export const TrackPreview: React.FC<Props> = ({
 
     return (
         <li
-            className={`group relative p-4 rounded-xl shadow-lg transform transition
+            className={`group relative min-w-0 p-4 rounded-xl shadow-lg transform transition
           bg-neutral-800/60 backdrop-blur-sm
           hover:-translate-y-1 hover:bg-neutral-700/60
           ${selected ? "ring-2 ring-emerald-500" : ""}`}
@@ -81,7 +81,7 @@ export const TrackPreview: React.FC<Props> = ({
             <div className="aspect-square rounded-lg bg-neutral-700 mb-4 relative overflow-hidden">
                 <img
                     src={coverURL ?? getPicSumLink(db, 400)}
-                    className="w-full h-full object-cover opacity-80 group-hover:opacity-100 transition"
+                    className="max-w-full h-auto object-cover opacity-80 group-hover:opacity-100 transition"
                     alt="Track cover"
                 />
 
@@ -157,7 +157,7 @@ export const TrackPreview: React.FC<Props> = ({
                     />
                 ) : (
                     <h3
-                        className={`text-lg font-semibold text-white truncate flex-1 ${
+                        className={`text-lg whitespace-break-spaces font-semibold text-white truncate flex-1 ${
                             isOwner ? "cursor-text hover:underline" : ""
                         }`}
                         onDoubleClick={() => isOwner && setEditing(true)}

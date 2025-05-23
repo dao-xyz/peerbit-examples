@@ -8,6 +8,7 @@ import { MediaStreamDBs } from "@peerbit/media-streaming";
 import { SpinnerSong } from "../Spinner";
 import { useCover } from "../images/useCover";
 import { getPicSumLink } from "../images/utils";
+import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 
 const LibraryItem: React.FC<{
     lib: MediaStreamDBs;
@@ -77,7 +78,14 @@ export const Libraries = () => {
     const { items: libraryItems, isLoading: isLoadingQUery } = useQuery(
         libraries?.libraries,
         {
-            query: useMemo(() => ({}), []),
+            query: useMemo(() => {
+                return {
+                    sort: new Sort({
+                        key: ["__context", "created"],
+                        direction: SortDirection.DESC,
+                    }),
+                };
+            }, []),
             prefetch: true,
             batchSize: 200,
             onChange: {

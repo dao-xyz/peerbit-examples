@@ -14,8 +14,8 @@ import { usePeer, useProgram } from "@peerbit/react";
 import { ImageItems } from "@peerbit/music-library-utils";
 import { SpinnerSong } from "../Spinner";
 import { useCover } from "../images/useCover";
-import { randomBytes, toBase64 } from "@peerbit/crypto";
 import { Pencil1Icon } from "@radix-ui/react-icons";
+import { getPicSumLink } from "../images/utils";
 
 type Props = { source: AudioContainer };
 
@@ -197,10 +197,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
                                         ? URL.createObjectURL(coverFile)
                                         : storedCover ||
                                           (source.id
-                                              ? `https://picsum.photos/seed/${source.idString.slice(
-                                                    0,
-                                                    6
-                                                )}/400`
+                                              ? getPicSumLink(source, 400)
                                               : "")
                                 }
                                 className="w-full h-full object-cover"
