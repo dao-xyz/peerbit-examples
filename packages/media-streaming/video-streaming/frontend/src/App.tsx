@@ -17,7 +17,7 @@ export const App = () => {
                     : {
                           type: "remote",
                           bootstrap: [
-                              "/dns4/b9981764b064f1af2e9b0e3ef63e612c33418081.peerchecker.com/tcp/4003/wss/p2p/12D3KooWM7N2DZxfpFaWrhtZ3BY54gqeTFBTN3no55yNNHSjuu4y",
+                              "/dns4/bc97c21cb63f3360c9328ed9b3a0753cce7165f4.peerchecker.com/tcp/4003/wss/p2p/12D3KooWMWKqQejvpuKRFzYhDjYYkCgEMqnfAjbB5zHt9kMqzuro",
                           ],
                       }
             }
