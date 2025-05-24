@@ -317,7 +317,12 @@ export const View = (properties: DBArgs) => {
                 isPlaying: boolean
             ) => StreamControlFunction =
                 properties.track.source instanceof AudioStreamDB
-                    ? createAudioStreamListener
+                    ? (x, isPlaying) =>
+                          createAudioStreamListener(
+                              x as Track<AudioStreamDB>,
+                              isPlaying,
+                              { recoverLag: true }
+                          ) // make audio catch up with video (assume video is always realtime and audio is not)
                     : addVideoStreamListener;
 
             const newController: StreamControlFunction & { track: Track<any> } =

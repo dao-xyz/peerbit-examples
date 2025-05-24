@@ -452,6 +452,8 @@ export const createAudioStreamListener = (
     play: boolean,
     options?: {
         debug?: boolean;
+        minExpectedLatency?: number;
+        recoverLag?: boolean;
     }
 ) => {
     console.log("ADD AUDIO STREAM LISTENER");
@@ -465,11 +467,15 @@ export const createAudioStreamListener = (
             audioContext!.state === "suspended" ||
             audioContext!.state === "closed"
         ) {
+            console.log(
+                "AUDIO CONTEXT SUSPENDED OR CLOSED",
+                audioContext!.state
+            );
             play = false;
         }
     };
     const stop = async () => {
-        options?.debug && console.log("STOP AUDIO LISTENER");
+        options?.debug && console.trace("STOP AUDIO LISTENER");
         if (audioContext) {
             audioContext.removeEventListener(
                 "statechange",
@@ -504,18 +510,28 @@ export const createAudioStreamListener = (
 
     let bufferedAudioTime: number | undefined = undefined;
     const MIN_EXPECTED_LATENCY = 0.01; // seconds
-    let currentExpectedLatency = 3;
+    let defaultMinExpectedLatency =
+        options?.minExpectedLatency != null
+            ? options?.minExpectedLatency / 1e3
+            : MIN_EXPECTED_LATENCY;
+    let targetLatency = defaultMinExpectedLatency;
     let succesfullFrameCount = 0;
+
     const isUnderflow = () => pendingFrames.length < 0;
 
-    const updateExpectedLatency = (latency: number) => {
+    const updateTargetLatency = (latency: number) => {
         options?.debug && console.log("UPDATE EXPECTED LATENCY", latency);
-        currentExpectedLatency = latency;
-        bufferedAudioTime = Math.max(
-            currentExpectedLatency + audioContext!.currentTime,
-            0
-        );
+        targetLatency = latency;
+        /*  bufferedAudioTime = Math.max(
+             currentExpectedLatency + audioContext!.currentTime,
+             0
+         ); */
     };
+
+    const getBufferLag = () =>
+        bufferedAudioTime && audioContext
+            ? audioContext.currentTime - bufferedAudioTime
+            : 0;
 
     const renderFrame = async () => {
         if (!bufferedAudioTime) {
@@ -523,12 +539,16 @@ export const createAudioStreamListener = (
             // leaving a "latency gap" so we're not desperately trying
             // to keep up.  Note if the network is slow, this is going
             // to fail.  Latency gap here is 100 ms.
-            updateExpectedLatency(MIN_EXPECTED_LATENCY);
+            updateTargetLatency(defaultMinExpectedLatency);
         }
 
-        if (!play) return;
-        if (pendingFrames.length === 0) return;
-        if (audioContext!.state !== "running") {
+        /* if (!play) {
+            return;
+        } */
+        if (pendingFrames.length === 0) {
+            return;
+        }
+        if (!audioContext || audioContext!.state === "closed") {
             return;
         }
 
@@ -541,10 +561,7 @@ export const createAudioStreamListener = (
         audioSource.buffer = frame!.buffer;
         audioSource.connect(gainNode!);
 
-        const isBehindSeconds = Math.max(
-            audioContext!.currentTime - bufferedAudioTime!,
-            0
-        );
+        const isBehindSeconds = Math.max(getBufferLag(), 0);
 
         let skipframe = false;
         if (isBehindSeconds > 0) {
@@ -555,16 +572,16 @@ export const createAudioStreamListener = (
             succesfullFrameCount = 0;
             // here we want to do something about the expectedLatency, because if we also end up here
             // it means we are trying to watch in "too" much realtime
-            updateExpectedLatency(currentExpectedLatency * 2);
-        } else if (currentExpectedLatency > MIN_EXPECTED_LATENCY) {
+            updateTargetLatency(targetLatency * 2);
+        } else if (targetLatency > defaultMinExpectedLatency) {
             succesfullFrameCount++;
 
             // we have been succesfully able to play audio for some time
             // lets try to reduce the latency
-            if (succesfullFrameCount > 1000) {
-                const newLatency = currentExpectedLatency / 2;
+            if (succesfullFrameCount > 1000 && options?.recoverLag) {
+                const newLatency = targetLatency / 2;
                 if (newLatency >= MIN_EXPECTED_LATENCY) {
-                    updateExpectedLatency(newLatency);
+                    updateTargetLatency(newLatency);
                 }
                 succesfullFrameCount = 0;
             }
@@ -583,12 +600,28 @@ export const createAudioStreamListener = (
                 start: frame!.timestamp / 1e6,
             }); */
 
-        !skipframe &&
-            audioSource.start(frame!.timestamp / 1e6, isBehindSeconds);
-        bufferedAudioTime! += audioSource.buffer.duration;
+        const catchUpStep = options?.recoverLag
+            ? Math.max(isBehindSeconds, 0)
+            : 0;
 
+        !skipframe &&
+            audioSource.start(
+                /* options?.recoverLag
+                    ? (frame!.timestamp / 1e6 + targetLatency)
+                    : TODO this strategy can also be better? */
+                bufferedAudioTime!,
+                catchUpStep
+            );
+
+        /* console.log({
+            skipframe,
+            targetLatency,
+            scheduleAt: options?.recoverLag ? frame!.timestamp / 1e6 : bufferedAudioTime,
+        }) */
+        bufferedAudioTime! += audioSource.buffer.duration; // this feels wrong
         scheduleNextTick();
     };
+
     function scheduleNextTick() {
         if (document.visibilityState === "visible") {
             requestAnimationFrame(() => renderFrame()); // requestAnimationFrame will not run in background. delay here is 1 ms, its fine as if weunderflow we will stop this loop
@@ -678,6 +711,53 @@ export const createAudioStreamListener = (
         decodeAudioDataQueue.clear();
         /*    streamDB.source.chunks.events.removeEventListener("change", listener); */
     };
+
+    let suspended = false;
+
+    const playPauseToKeepBufferHappy = async () => {
+        if (options?.recoverLag) {
+            return; // this method works against recoverLag, so we don't use it. TODO find a good balance
+        }
+
+        // if buffer ahead goes to a low value, we suspend the audio context
+        // until we have enough buffer again (high threshold)
+        while (audioContext?.state !== "closed") {
+            let lowThreshold = 100; // 100 ms
+            let highThreshold = targetLatency * 1e3;
+            let bufferAhead = -1 * getBufferLag() * 1000; // convert to ms
+            //  console.log("BUFFER LAG", { state: audioContext?.state, bufferAhead, currentExpectedLatency, mediaTime: audioContext?.currentTime, bufferedAudioTime, lowThreshold, highThreshold });
+            if (bufferAhead < lowThreshold && !suspended) {
+                console.log("SUSPENDING AUDIO CONTEXT", {
+                    bufferAhead,
+                    lowThreshold,
+                    highThreshold,
+                    suspended,
+                });
+                audioContext?.suspend();
+                suspended = true;
+            } else if (bufferAhead > highThreshold && suspended) {
+                console.log("RESUMING AUDIO CONTEXT", {
+                    bufferAhead,
+                    lowThreshold,
+                    highThreshold,
+                    suspended,
+                });
+                audioContext?.resume();
+                suspended = false;
+            }
+            await delay(5);
+        }
+
+        console.log("stopped keeping buffer happy");
+    };
+
+    async function maybePlay() {
+        play = true;
+        await setupAudioContext();
+        renderFrame();
+        playPauseToKeepBufferHappy();
+    }
+
     return {
         close: async () => {
             cleanup?.();
@@ -692,12 +772,7 @@ export const createAudioStreamListener = (
         setVolume,
         mute,
         unmute,
-        play: async () => {
-            play = true;
-            setupAudioContext().then(() => {
-                audioContext!.resume().then(() => renderFrame());
-            });
-        },
+        play: maybePlay,
         pause: () => {
             cleanup();
             play = false;

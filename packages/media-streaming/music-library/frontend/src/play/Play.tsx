@@ -173,6 +173,7 @@ export const Play: React.FC<Props> = ({
         if (!l) {
             l = createAudioStreamListener(track, playing, {
                 debug: true,
+                minExpectedLatency: 3e2, // keep 3 second of buffer before playing
             });
             l.setVolume?.(volume);
             await l.play();
