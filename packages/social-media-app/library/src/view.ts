@@ -1,5 +1,5 @@
 import { variant, field, vec, option } from "@dao-xyz/borsh";
-import { Canvas, CanvasAddressReference } from "./content";
+import { Canvas, CanvasAddressReference } from "./content.js";
 import { Program } from "@peerbit/program";
 import { Documents, SearchRequest } from "@peerbit/document";
 import { sha256Sync } from "@peerbit/crypto";
