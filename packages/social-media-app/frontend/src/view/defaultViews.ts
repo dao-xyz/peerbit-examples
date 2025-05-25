@@ -37,7 +37,7 @@ export const ALL_DEFAULT_VIEWS: ViewModel[] = [
     {
         query: (canvas) =>
             new SearchRequest({
-                query: getRepliesQuery(canvas),
+                query: getImmediateRepliesQuery(canvas),
                 sort: [
                     new Sort({
                         key: ["__context", "created"],
