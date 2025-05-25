@@ -659,6 +659,7 @@ export class Canvas extends Program<CanvasArgs> {
                     */
                 },
                 index: {
+                    includeIndexed: true, // because the transformation from value to indexed value is expensive, so we want to emit and also expect results with indexed values emitted
                     type: IndexableElement,
                     prefetch: {
                         strict: false,
@@ -713,6 +714,7 @@ export class Canvas extends Program<CanvasArgs> {
                 },
                 keep: "self",
                 index: {
+                    includeIndexed: true, // because the transformation from value to indexed value is expensive, so we want to emit and also expect results with indexed values emitted
                     prefetch: {
                         strict: false,
                     },
