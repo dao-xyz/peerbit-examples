@@ -284,7 +284,7 @@ export const Replies = (props: {
             : (props.viewRef as HTMLElement);
 
         const prevHeight = pendingScrollAdjust.current.prevScrollHeight;
-        if (prevHeight != null) {
+        if (prevHeight == null) {
             // prevent scroll adjust on the first batch (where set the prevScrollHeight to undefined)
             return;
         }
