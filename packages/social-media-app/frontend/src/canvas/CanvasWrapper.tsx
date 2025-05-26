@@ -7,7 +7,7 @@ import React, {
     createContext,
     useMemo,
 } from "react";
-import { usePeer, useProgram, useLocal, useQuery } from "@peerbit/react";
+import { usePeer, useProgram, useQuery } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Element,
@@ -22,6 +22,7 @@ import {
     getQualityLessThanOrEqualQuery,
     LOWEST_QUALITY,
     Quality,
+    IndexableElement,
 } from "@giga-app/interface";
 import { randomBytes, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
@@ -169,7 +170,8 @@ export const CanvasWrapper = ({
             onChange: {
                 merge: (change) => {
                     const filteredForScope: DocumentsChange<
-                        Element<ElementContent>
+                        Element<ElementContent>,
+                        IndexableElement
                     > = {
                         added: change.added.filter((x) => canvas.isInScope(x)),
                         removed: change.removed.filter((x) =>

@@ -35,7 +35,7 @@ export abstract class AbstractFile {
     abstract delete(files: Files): Promise<void>;
 }
 
-class IndexableFile {
+export class IndexableFile {
     @field({ type: "string" })
     id: string;
 

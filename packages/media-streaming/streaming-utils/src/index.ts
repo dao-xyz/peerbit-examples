@@ -61,6 +61,7 @@ import {
     CustomDocumentDomain,
     createDocumentDomain,
     WithContext,
+    WithIndexedContext,
 } from "@peerbit/document";
 import {
     id,
@@ -159,7 +160,7 @@ export class Chunk {
     }
 }
 
-class ChunkIndexable {
+export class ChunkIndexable {
     @field({ type: "string" })
     id: string;
 
@@ -925,7 +926,10 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
 
     private _trackChangeListener: (
         change: CustomEvent<
-            DocumentsChange<Track<AudioStreamDB | WebcodecsStreamDB>>
+            DocumentsChange<
+                Track<AudioStreamDB | WebcodecsStreamDB>,
+                TrackIndexable
+            >
         >
     ) => void;
 
@@ -1028,7 +1032,12 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
             any,
             any
         >
-    ): Promise<WithContext<Track<AudioStreamDB | WebcodecsStreamDB>>[]> {
+    ): Promise<
+        WithIndexedContext<
+            Track<AudioStreamDB | WebcodecsStreamDB>,
+            TrackIndexable
+        >[]
+    > {
         const tracks = await this.tracks.index.search(
             new SearchRequest({
                 query: [
@@ -2022,7 +2031,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
 
             if (startProgressBarMediaTime() === "live") {
                 let listener = async (
-                    change: CustomEvent<DocumentsChange<Chunk>>
+                    change: CustomEvent<DocumentsChange<Chunk, ChunkIndexable>>
                 ) => {
                     for (const chunk of change.detail.added) {
                         await onPending({ chunk, track });
@@ -2361,7 +2370,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
         let startProgressBarMediaTimeValue = startProgressBarMediaTime();
         if (startProgressBarMediaTimeValue === "live") {
             const listener = async (
-                change: CustomEvent<DocumentsChange<Track>>
+                change: CustomEvent<DocumentsChange<Track, TrackIndexable>>
             ) => {
                 try {
                     if (change.detail.added) {
@@ -2719,13 +2728,17 @@ export class MediaStreamDBs extends Program {
     private _replicateOptions: "all" | "owned" | false = false;
 
     private _streamListener: (
-        args: CustomEvent<DocumentsChange<MediaStreamDB>>
+        args: CustomEvent<
+            DocumentsChange<MediaStreamDB, MediaStreamDBIndexable>
+        >
     ) => void;
     async open(args?: { replicate: "all" | "owned" | false }) {
         this._replicateOptions = args?.replicate || false;
         if (this._replicateOptions) {
             this._streamListener = async (
-                ev: CustomEvent<DocumentsChange<MediaStreamDB>>
+                ev: CustomEvent<
+                    DocumentsChange<MediaStreamDB, MediaStreamDBIndexable>
+                >
             ) => {
                 for (const added of ev.detail.added) {
                     let open = false;

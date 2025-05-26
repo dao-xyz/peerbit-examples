@@ -10,6 +10,7 @@ import * as indexerTypes from "@peerbit/indexer-interface";
 import { AbortError } from "@peerbit/time";
 import { NoPeersError } from "@peerbit/shared-log";
 import { v4 as uuid } from "uuid";
+import { WithIndexedContext } from "@peerbit/document/dist/src/search";
 /* ────────────── helper types ────────────── */
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -24,7 +25,7 @@ export const useQuery = <
     T extends Record<string, any>,
     I extends Record<string, any>,
     R extends boolean | undefined = true,
-    RT = R extends false ? WithContext<I> : WithContext<T>
+    RT = R extends false ? WithContext<I> : WithIndexedContext<T, I>
 >(
     db?: Documents<T, I>,
     options?: {
@@ -39,12 +40,12 @@ export const useQuery = <
             merge?:
                 | boolean
                 | ((
-                      c: DocumentsChange<T>
+                      c: DocumentsChange<T, I>
                   ) =>
-                      | DocumentsChange<T>
-                      | Promise<DocumentsChange<T>>
+                      | DocumentsChange<T, I>
+                      | Promise<DocumentsChange<T, I>>
                       | undefined);
-            update?: (prev: RT[], change: DocumentsChange<T>) => RT[];
+            update?: (prev: RT[], change: DocumentsChange<T, I>) => RT[];
         };
         local?: boolean;
         remote?: boolean | WaitForReplicatorsOption;
@@ -161,16 +162,16 @@ export const useQuery = <
 
         /* live-merge listener (optional) */
         let handleChange:
-            | ((e: CustomEvent<DocumentsChange<T>>) => void | Promise<void>)
+            | ((e: CustomEvent<DocumentsChange<T, I>>) => void | Promise<void>)
             | undefined;
 
         if (options?.onChange && options.onChange.merge !== false) {
             const mergeFn =
                 typeof options.onChange.merge === "function"
                     ? options.onChange.merge
-                    : (c: DocumentsChange<T>) => c;
+                    : (c: DocumentsChange<T, I>) => c;
 
-            handleChange = async (e: CustomEvent<DocumentsChange<T>>) => {
+            handleChange = async (e: CustomEvent<DocumentsChange<T, I>>) => {
                 log(
                     options,
                     "Merge change",

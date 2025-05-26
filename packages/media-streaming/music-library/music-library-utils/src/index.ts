@@ -36,13 +36,17 @@ export class StoraOfLibraries extends Program {
     private _replicateAll: boolean = false;
 
     private _streamListener: (
-        args: CustomEvent<DocumentsChange<MediaStreamDBs>>
+        args: CustomEvent<
+            DocumentsChange<MediaStreamDBs, MediaStreamDBsIndexable>
+        >
     ) => void;
     async open(args?: { replicate: boolean }) {
         this._replicateAll = args?.replicate ?? true;
         if (this._replicateAll) {
             this._streamListener = async (
-                ev: CustomEvent<DocumentsChange<MediaStreamDBs>>
+                ev: CustomEvent<
+                    DocumentsChange<MediaStreamDBs, MediaStreamDBsIndexable>
+                >
             ) => {
                 for (const added of ev.detail.added) {
                     await this.node.open<MediaStreamDBs>(added, {

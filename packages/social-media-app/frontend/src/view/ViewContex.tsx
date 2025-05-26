@@ -14,12 +14,14 @@ import {
     Views,
     View,
     CanvasAddressReference,
+    IndexableCanvas,
 } from "@giga-app/interface";
 import { useCanvases } from "../canvas/useCanvas";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
 import { BodyStyler } from "./BodyStyler";
 import { ALL_DEFAULT_VIEWS } from "./defaultViews";
+import { type WithIndexedContext } from "@peerbit/document";
 /**
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
  * pieces of state run **once** instead of once‑per‑piece. The update is flushed after `delay` ms.
@@ -55,7 +57,9 @@ function getParentAddress(msg: WithContext<Canvas>): string | undefined {
 }
 
 // Helper: ensure canvas address calculation before transform.
-const calculateAddress = async (p: WithContext<Canvas>) => {
+const calculateAddress = async (
+    p: WithIndexedContext<Canvas, IndexableCanvas>
+) => {
     await p.calculateAddress();
     return p;
 };
@@ -260,17 +264,17 @@ function useViewContextHook() {
     }
 
     function insertQuotes(
-        replies: WithContext<Canvas>[],
+        replies: WithIndexedContext<Canvas, IndexableCanvas>[],
         context: CanvasDB
     ): {
         id: string;
-        reply: WithContext<Canvas>;
+        reply: WithIndexedContext<Canvas, IndexableCanvas>;
         type: "reply" | "quote";
         lineType: LineType;
     }[] {
         const repliesAndQuotes: {
             id: string;
-            reply: WithContext<Canvas>;
+            reply: WithIndexedContext<Canvas, IndexableCanvas>;
             type: "reply" | "quote";
         }[] = replies.map((reply) => ({
             id: reply.idString,

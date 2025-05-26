@@ -14,6 +14,7 @@ import {
     Element,
     getOwnedAndSubownedElementsQuery,
     getTextElementsQuery,
+    IndexableElement,
     Layout,
     LOWEST_QUALITY,
     ReplyingInProgresss,
@@ -21,7 +22,12 @@ import {
     StaticContent,
     StaticMarkdownText,
 } from "@giga-app/interface";
-import { Query, Sort, WithContext } from "@peerbit/document";
+import {
+    Query,
+    Sort,
+    WithContext,
+    WithIndexedContext,
+} from "@peerbit/document";
 import { createProfile } from "./profile.js";
 import { DEEP_SEEK_R1_1_5b, DEEP_SEEK_R1_7b } from "./model.js";
 import { defaultGigaReplicator, LifeCycle } from "./replication.js";
@@ -124,8 +130,9 @@ async function getOrderedContextTexts(options: {
         const batch = await iterator.next(10);
         if (!batch || batch.length === 0) break;
         for (const element of batch) {
-            const el = element as WithContext<
-                Element<StaticContent<StaticMarkdownText>>
+            const el = element as WithIndexedContext<
+                Element<StaticContent<StaticMarkdownText>>,
+                IndexableElement
             >;
             if (!options.visited.has(el.idString)) {
                 options.visited.add(el.idString);

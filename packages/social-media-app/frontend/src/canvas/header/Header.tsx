@@ -8,9 +8,10 @@ import {
     Canvas,
     getOwnedElementsQuery,
     IFrameContent,
+    IndexableCanvas,
 } from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
-import { WithContext } from "@peerbit/document";
+import { WithContext, WithIndexedContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FaRegComment } from "react-icons/fa";
 import { MdOpenInFull } from "react-icons/md";
@@ -25,7 +26,7 @@ export const Header = ({
     forwardRef,
     detailed,
 }: {
-    canvas?: Canvas | WithContext<Canvas>;
+    canvas?: /* Canvas | */ WithIndexedContext<Canvas, IndexableCanvas>;
     direction?: "row" | "col";
     className?: string;
     variant: "tiny" | "large" | "medium";
@@ -49,19 +50,19 @@ export const Header = ({
         canvas.loadContext();
     }, [canvas]);
  */
-    const countQuery = useMemo(() => {
-        return !canvas || canvas.closed
-            ? undefined
-            : {
-                  id: canvas.address.toString(),
-                  query: canvas.getCountQuery(),
-              };
-    }, [canvas?.closed, canvas?.idString]);
-
-    const replyCount = useCount(
-        canvas?.loadedReplies ? canvas.replies : undefined,
-        countQuery
-    );
+    /*  const countQuery = useMemo(() => {
+         return !canvas || canvas.closed
+             ? undefined
+             : {
+                 id: canvas.address.toString(),
+                 query: canvas.getCountQuery(),
+             };
+     }, [canvas?.closed, canvas?.idString]);
+ 
+     const replyCount = useCount(
+         canvas?.loadedReplies ? canvas.replies : undefined,
+         countQuery
+     ); */
 
     // State for controlling the More Info dialog and its content.
     const [moreInfoOpen, setMoreInfoOpen] = useState(false);
@@ -156,7 +157,9 @@ export const Header = ({
                                 onClick={open}
                             >
                                 <FaRegComment size={16} />
-                                <span className="text-xs">{replyCount}</span>
+                                <span className="text-xs">
+                                    {Number(canvas.__indexed.replies)}
+                                </span>
                             </button>
 
                             {/* Show a "go to post" buttom */}

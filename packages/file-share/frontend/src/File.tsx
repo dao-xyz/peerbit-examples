@@ -1,4 +1,4 @@
-import { LargeFile, TinyFile } from "@peerbit/please-lib";
+import { IndexableFile, LargeFile, TinyFile } from "@peerbit/please-lib";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import { useEffect, useReducer, useState } from "react";
 import { FaSeedling } from "react-icons/fa";
@@ -36,7 +36,11 @@ export const File = (properties: {
                 });
         let changeListener =
             properties.file instanceof LargeFile
-                ? (e: CustomEvent<DocumentsChange<AbstractFile>>) => {
+                ? (
+                      e: CustomEvent<
+                          DocumentsChange<AbstractFile, IndexableFile>
+                      >
+                  ) => {
                       for (const added of e.detail.added) {
                           if (
                               added instanceof TinyFile &&

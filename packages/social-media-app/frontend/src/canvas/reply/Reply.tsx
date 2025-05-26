@@ -3,12 +3,13 @@ import {
     Canvas as CanvasDB,
     getOwnedAndSubownedElementsQuery,
     getOwnedElementsQuery,
+    IndexableCanvas,
     MEDIUM_QUALITY,
 } from "@giga-app/interface";
 import { Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "../Preview.js";
-import { WithContext } from "@peerbit/document";
+import { WithContext, WithIndexedContext } from "@peerbit/document";
 import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
@@ -35,7 +36,7 @@ const ReplyButton = ({
 };
 
 type BaseReplyPropsType = {
-    canvas: WithContext<CanvasDB>;
+    canvas: WithIndexedContext<CanvasDB, IndexableCanvas>;
     index?: number;
     onClick?: () => void;
     hideHeader?: boolean;

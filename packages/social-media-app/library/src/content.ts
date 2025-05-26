@@ -596,7 +596,7 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     private _repliesChangeListener: (
-        evt: CustomEvent<DocumentsChange<Canvas>>
+        evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
     ) => void;
 
     private getValueWithContext(value: string) {
@@ -846,7 +846,7 @@ export class Canvas extends Program<CanvasArgs> {
          } */
 
         this._repliesChangeListener = async (
-            evt: CustomEvent<DocumentsChange<Canvas>>
+            evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
         ) => {
             // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
 
