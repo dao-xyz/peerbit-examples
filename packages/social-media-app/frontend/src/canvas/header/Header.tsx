@@ -26,7 +26,7 @@ export const Header = ({
     forwardRef,
     detailed,
 }: {
-    canvas?: /* Canvas | */ WithIndexedContext<Canvas, IndexableCanvas>;
+    canvas?: Canvas | WithIndexedContext<Canvas, IndexableCanvas>;
     direction?: "row" | "col";
     className?: string;
     variant: "tiny" | "large" | "medium";
@@ -157,9 +157,25 @@ export const Header = ({
                                 onClick={open}
                             >
                                 <FaRegComment size={16} />
-                                <span className="text-xs">
-                                    {Number(canvas.__indexed.replies)}
-                                </span>
+                                {(
+                                    canvas as WithIndexedContext<
+                                        Canvas,
+                                        IndexableCanvas
+                                    >
+                                ).__indexed.replies ? (
+                                    <span className="text-xs">
+                                        {Number(
+                                            (
+                                                canvas as WithIndexedContext<
+                                                    Canvas,
+                                                    IndexableCanvas
+                                                >
+                                            ).__indexed.replies
+                                        )}
+                                    </span>
+                                ) : (
+                                    <></>
+                                )}
                             </button>
 
                             {/* Show a "go to post" buttom */}
