@@ -16,7 +16,9 @@ export default defineConfig({
         target: "esnext",
     },
     define: {
-        COMMIT_HASH: JSON.stringify(process.env.SHORT_SHA || "unknown"),
+        "globalThis.COMMIT_HASH": JSON.stringify(
+            process.env.SHORT_SHA || "unknown"
+        ),
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
     /*  server: fs.existsSync("./.cert/key.pem")
