@@ -21,6 +21,7 @@ export type EditableStaticContentProps = {
     canOpenFullscreen?: boolean;
     noPadding?: boolean;
     inFullscreen?: boolean;
+    onLoad?: () => void;
 };
 
 /**
@@ -49,6 +50,7 @@ export const EditableStaticContent = ({
     previewLines,
     noPadding,
     inFullscreen,
+    onLoad,
 }: EditableStaticContentProps) => {
     if (staticContent instanceof StaticMarkdownText) {
         return (
@@ -61,6 +63,7 @@ export const EditableStaticContent = ({
                 previewLines={previewLines}
                 noPadding={noPadding}
                 inFullscreen={inFullscreen}
+                onLoad={onLoad}
             />
         );
     }
@@ -74,6 +77,7 @@ export const EditableStaticContent = ({
                 thumbnail={thumbnail}
                 canOpenFullscreen={canOpenFullscreen}
                 fit={fit}
+                onLoad={onLoad}
             />
         );
     }

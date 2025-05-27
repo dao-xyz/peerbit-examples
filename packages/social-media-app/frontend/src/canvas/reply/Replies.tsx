@@ -11,7 +11,6 @@ import { Reply } from "./Reply";
 import { tw } from "../../utils/tailwind";
 import { useView } from "../../view/ViewContex";
 import { usePeer } from "@peerbit/react";
-import { StraightReplyLine } from "./StraightReplyLine";
 import { useAutoReply } from "../AutoReplyContext";
 import { useAutoScroll, ScrollSettings } from "./useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
@@ -22,8 +21,9 @@ import {
     LeaveSnapshotContext,
     FeedSnapshot,
 } from "./feedRestoration";
+import { Canvas } from "@giga-app/interface";
 
-const LOAD_TIMEOUT = 2e2;
+const LOAD_TIMEOUT = 3e3;
 const SPINNER_HEIGHT = 40;
 
 interface HiddenState {
@@ -65,12 +65,15 @@ export const Replies = (props: {
         lastId: string | null;
     }>({ firstId: null, lastId: null });
     const committedLengthRef = useRef(0);
+    const hiddenToLoadRef = useRef<Set<string>>(new Set());
+    const revealRef = useRef<(() => void) | null>();
 
     const restoredScrollPositionOnce = useRef(false);
     const alreadySeen = useRef(new Set<string>());
     const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const firstBatchHandled = useRef(false);
     const pendingScrollAdjust = useRef<{
+        isWindow: boolean;
         sentinel: HTMLElement | null;
         prevScrollHeight: number | undefined;
     } | null>(null);
@@ -78,6 +81,7 @@ export const Replies = (props: {
     const loadMore = () => {
         if (!firstBatchHandled.current) {
             pendingScrollAdjust.current = {
+                isWindow: props.viewRef === document.body,
                 sentinel: null,
                 prevScrollHeight: undefined, // how can viewRef be null?
             };
@@ -122,6 +126,17 @@ export const Replies = (props: {
         hiddenRef.current = nextHidden; // ← sync update
         setHidden(nextHidden); // ← async render update
 
+        // build set of all IDs that we need to wait for
+        const hiddenIds = list
+            .filter(
+                (_, i) =>
+                    i < nextHidden.head || i >= list.length - nextHidden.tail
+            )
+            .map((r) => r.reply.idString);
+
+        hiddenToLoadRef.current = new Set(hiddenIds);
+
+        // reveal function, (show pending messages)
         const reveal = () => {
             committedIds.current.firstId = list[0]?.reply.idString ?? null;
             committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
@@ -131,7 +146,12 @@ export const Replies = (props: {
             setHidden({ head: 0, tail: 0 });
 
             loadTimeoutRef.current = null;
+            hiddenToLoadRef.current.clear();
         };
+
+        // stash it so handleLoad can call it
+        revealRef.current = reveal;
+
         if (loadTimeoutRef.current) {
             clearTimeout(loadTimeoutRef.current);
         }
@@ -187,6 +207,13 @@ export const Replies = (props: {
     const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
 
     const scrollUpForMore = view?.settings.focus === "last";
+
+    useEffect(() => {
+        document.documentElement.style.setProperty(
+            "--overflow-anchor",
+            scrollUpForMore ? "none" : "auto"
+        );
+    }, [scrollUpForMore]);
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: processedReplies,
@@ -252,11 +279,20 @@ export const Replies = (props: {
                     !isLoadingAnything
                 ) {
                     lastSentinelForLoadingMore.current = sentinel;
+
                     pendingScrollAdjust.current = {
+                        isWindow: props.viewRef === document.body,
                         sentinel,
                         prevScrollHeight: props.viewRef.scrollHeight,
                     };
+
                     loadMore();
+
+                    /* console.log("set cache scroll height", {
+                        scrollHeight: props.viewRef.scrollHeight,
+                        prevScrollHeight: props.viewRef.scrollHeight,
+                        isWindow: props.viewRef === document.body,
+                    }); */
                 }
             },
             {
@@ -269,6 +305,10 @@ export const Replies = (props: {
         return () => {
             observer.disconnect();
             lastSentinelForLoadingMore.current = null;
+            let isWindowNow = props.viewRef === document.body;
+            if (pendingScrollAdjust.current?.isWindow !== isWindowNow) {
+                pendingScrollAdjust.current = null; // reset pending scroll adjust. TODO should we set this to null? on focus change we might want to locate the sentinel and then set the height manually?
+            }
         };
     }, [props.viewRef, isLoadingAnything, processedReplies]);
 
@@ -292,7 +332,6 @@ export const Replies = (props: {
         const diff = newHeight - prevHeight;
 
         if (diff > 0) {
-            console.log("scroll diff", { isWindow, scrollUpForMore, diff });
             if (isWindow) {
                 window.scrollBy({ top: diff, behavior: "instant" as any });
             } else {
@@ -357,6 +396,23 @@ export const Replies = (props: {
         viewRoot,
     });
 
+    const handleLoad = useCallback((canvas: Canvas, index: number) => {
+        const id = canvas.idString;
+        const hiddenSet = hiddenToLoadRef.current;
+        if (hiddenSet.has(id)) {
+            hiddenSet.delete(id);
+
+            // if that was the last one, reveal early
+            if (hiddenSet.size === 0 && revealRef.current) {
+                if (loadTimeoutRef.current) {
+                    clearTimeout(loadTimeoutRef.current);
+                    loadTimeoutRef.current = null;
+                }
+                revealRef.current();
+            }
+        }
+    }, []);
+
     useRestoreFeed({
         hasMore,
         replies: processedReplies,
@@ -375,6 +431,7 @@ export const Replies = (props: {
         },
         isReplyVisible,
         debug: false,
+        enabled: false,
     });
 
     useEffect(() => {
@@ -406,7 +463,7 @@ export const Replies = (props: {
                             "max-w-[876px] w-full mx-auto grid relative"
                         )}
                     >
-                        {view?.id === "chat" && (
+                        {/* TMP DISABLE  {view?.id === "chat" && (
                             <StraightReplyLine
                                 replyRefs={replyContentRefs.current}
                                 containerRef={repliesContainerRef}
@@ -415,7 +472,7 @@ export const Replies = (props: {
                                 )}
                             />
                         )}
-
+ */}
                         <div
                             className={`${
                                 view?.id === "chat" ? "pl-[15px]" : ""
@@ -426,6 +483,7 @@ export const Replies = (props: {
                             {processedReplies.map((item, i) => (
                                 <Fragment key={item.id}>
                                     <Reply
+                                        onLoad={() => handleLoad(item.reply, i)}
                                         hideHeader={
                                             !view.settings.showAuthorInfo
                                         }

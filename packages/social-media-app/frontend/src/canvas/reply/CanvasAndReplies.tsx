@@ -446,7 +446,6 @@ height: `${spacerHeight}px`,
                                     if (repliesFocused) {
                                         return;
                                     }
-                                    console.log("CLICKED TO");
                                     e.preventDefault();
                                     e.stopPropagation();
                                     setRepliesFocused(true);

@@ -1,4 +1,10 @@
-import React, { useRef, useEffect, useState, useCallback } from "react";
+import React, {
+    useRef,
+    useEffect,
+    useState,
+    useCallback,
+    useLayoutEffect,
+} from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
@@ -23,6 +29,7 @@ export type MarkdownContentProps = {
     previewLines?: number;
     noPadding?: boolean;
     inFullscreen?: boolean;
+    onLoad?: () => void;
 };
 
 export const MarkdownContent = ({
@@ -33,6 +40,7 @@ export const MarkdownContent = ({
     previewLines,
     noPadding,
     inFullscreen,
+    onLoad,
 }: MarkdownContentProps) => {
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
@@ -115,6 +123,17 @@ export const MarkdownContent = ({
     // Update text when content changes.
     useEffect(() => {
         setText(content.text);
+    }, [content.text]);
+
+    const loadedOnce = useRef(false);
+    useLayoutEffect(() => {
+        if (onLoad) {
+            onLoad();
+            loadedOnce.current = true;
+        }
+        return () => {
+            loadedOnce.current = false;
+        };
     }, [content.text]);
 
     // Observe container's size changes.

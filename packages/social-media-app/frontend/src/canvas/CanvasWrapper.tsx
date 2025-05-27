@@ -109,6 +109,7 @@ interface CanvasWrapperProps {
     multiCanvas?: boolean;
     onContentChange?: (elements: Element[]) => void;
     quality?: Quality;
+    onLoad?: () => void;
 }
 
 export const CanvasWrapper = ({
@@ -119,6 +120,7 @@ export const CanvasWrapper = ({
     multiCanvas,
     onContentChange,
     quality,
+    onLoad,
 }: CanvasWrapperProps) => {
     // Standard hooks & context from your existing code.
     const { peer, persisted } = usePeer();

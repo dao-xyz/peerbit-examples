@@ -65,6 +65,7 @@ interface RestoreArgs {
     onRestore: (snap: FeedSnapshot) => void;
     isReplyVisible: (id: string) => boolean;
     debug?: boolean;
+    enabled?: boolean; // if false, no restoration happens
 }
 
 const nextFrame = () =>
@@ -165,6 +166,11 @@ export function useRestoreFeed(a: RestoreArgs) {
     };
 
     useEffect(() => {
+        if (!a.enabled) {
+            log(tag, "Restoration disabled");
+            return;
+        }
+
         const snap = snapRef.current;
 
         if (!snap || doneRef.current || fetching.current) return;
@@ -187,7 +193,7 @@ export function useRestoreFeed(a: RestoreArgs) {
             fetching.current = false;
             log(tag, "fetching loop done");
         })();
-    }, [key]);
+    }, [key, a.enabled]);
 
     /* ────────────────────────────────────────────────────────────────── */
     /* 3. scroll correction                                              */

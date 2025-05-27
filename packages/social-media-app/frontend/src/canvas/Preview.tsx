@@ -32,6 +32,7 @@ type BaseCanvasPreviewProps = {
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((element: Element<ElementContent>) => string);
+    onLoad?: () => void;
 };
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
@@ -84,6 +85,7 @@ const PreviewFrame = ({
     noPadding,
     onClick,
     className,
+    onLoad,
 }: {
     element: Element<ElementContent>;
     previewLines?: number;
@@ -93,6 +95,7 @@ const PreviewFrame = ({
     noPadding?: boolean;
     onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     className?: string | ((element: Element<ElementContent>) => string);
+    onLoad?: () => void;
 }) => (
     <div
         className={`flex flex-col relative w-full ${
@@ -107,7 +110,7 @@ const PreviewFrame = ({
             editMode={false}
             showEditControls={false}
             element={element}
-            onLoad={() => {}}
+            onLoad={onLoad}
             fit={fit}
             previewLines={previewLines}
             noPadding={noPadding}
@@ -202,19 +205,29 @@ const BlurredBackground = ({
 const TinyPreview = ({
     rect,
     onClick,
+    onLoad,
 }: {
     rect: Element<ElementContent>;
     onClick?: (e: React.MouseEvent<HTMLElement>) => void;
+    onLoad?: () => void;
 }) => (
-    <PreviewFrame element={rect} fit="cover" maximizeHeight onClick={onClick} />
+    <PreviewFrame
+        element={rect}
+        fit="cover"
+        maximizeHeight
+        onClick={onClick}
+        onLoad={onLoad}
+    />
 );
 
 const BreadcrumbPreview = ({
     rect,
     onClick,
+    onLoad,
 }: {
     rect: Element<ElementContent>;
     onClick?: (e: React.MouseEvent<HTMLElement>) => void;
+    onLoad?: () => void;
 }) => {
     let isText = false;
     let textLength: number | undefined = undefined;
@@ -241,6 +254,7 @@ const BreadcrumbPreview = ({
                 noPadding={isText}
                 maximizeHeight
                 onClick={onClick}
+                onLoad={onLoad}
                 className={"w-full h-full flex items-center justify-center"}
             />
         </div>
@@ -251,12 +265,24 @@ const ExpandedBreadcrumbPreview = ({
     rects,
     onClick,
     forwardedRef,
+    onLoad,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     forwardedRef?: React.Ref<HTMLDivElement>;
+    onLoad?: () => void;
 }) => {
     const { other: apps, text } = rects;
+
+    const loadedSet: Set<string> = useMemo(() => new Set(), []);
+
+    const handleLoad = (element: Element<ElementContent>) => {
+        loadedSet.add(element.idString);
+        if (onLoad && loadedSet.size === rects.other.length + (text ? 1 : 0)) {
+            onLoad();
+        }
+    };
+
     return (
         <div
             className="col-span-full flex gap-1.5 items-start w-full rounded-lg"
@@ -272,6 +298,7 @@ const ExpandedBreadcrumbPreview = ({
                         fit="cover"
                         maximizeHeight
                         onClick={onClick}
+                        onLoad={() => handleLoad(app)}
                     />
                     {i === 1 && apps.slice(2).length > 0 && (
                         <div className="absolute inset-0 bg-neutral-50/80 dark:bg-neutral-950/80 flex items-center justify-center">
@@ -287,6 +314,7 @@ const ExpandedBreadcrumbPreview = ({
                         previewLines={2}
                         noPadding
                         onClick={onClick}
+                        onLoad={() => handleLoad(text)}
                     />
                 </div>
             )}
@@ -299,6 +327,7 @@ const PostQuotePreview = ({
     onClick,
     author,
     forwardedRef,
+    onLoad,
 }: {
     rects: {
         text?: Element<StaticContent<StaticMarkdownText>>;
@@ -307,8 +336,16 @@ const PostQuotePreview = ({
     onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     author?: string;
     forwardedRef?: React.Ref<HTMLDivElement>;
+    onLoad?: () => void;
 }) => {
     const { other: apps, text } = rects;
+    const loadedSet: Set<string> = useMemo(() => new Set(), []);
+    const handleLoad = (element: Element<ElementContent>) => {
+        loadedSet.add(element.idString);
+        if (onLoad && loadedSet.size === apps.length + (text ? 1 : 0)) {
+            onLoad();
+        }
+    };
     return (
         <div
             ref={forwardedRef}
@@ -344,6 +381,7 @@ const PostQuotePreview = ({
                             fit="cover"
                             maximizeHeight
                             onClick={onClick}
+                            onLoad={() => handleLoad(app)}
                         />
                     </div>
                     {i === 1 && apps.slice(2).length > 0 && (
@@ -361,6 +399,7 @@ const PostQuotePreview = ({
                             element={text}
                             noPadding
                             onClick={onClick}
+                            onLoad={() => handleLoad(text)}
                         />
                     </span>
                 ) : (
@@ -379,6 +418,7 @@ const PostPreview = ({
     forwardRef,
     className,
     classNameContent,
+    onLoad,
 }: {
     rects: {
         text?: Element<StaticContent<StaticMarkdownText>>;
@@ -388,9 +428,19 @@ const PostPreview = ({
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((element: Element<ElementContent>) => string);
+    onLoad?: () => void;
 }) => {
     const [firstApp, ...secondaryApps] = rects.other;
     const text = rects.text;
+
+    const loadedSet: Set<string> = useMemo(() => new Set(), []);
+    const handleLoad = (element: Element<ElementContent>) => {
+        loadedSet.add(element.idString);
+        if (onLoad && loadedSet.size === rects.other.length + (text ? 1 : 0)) {
+            onLoad();
+        }
+    };
+
     return (
         <div
             ref={forwardRef}
@@ -408,6 +458,7 @@ const PostPreview = ({
                         element={firstApp}
                         fit="contain"
                         maximizeHeight
+                        onLoad={() => handleLoad(firstApp)}
                         className={classNameContent}
                     />
                 </div>
@@ -428,6 +479,7 @@ const PostPreview = ({
                                 element={app}
                                 fit="cover"
                                 maximizeHeight
+                                onLoad={() => handleLoad(app)}
                                 className={classNameContent}
                             />
                         </button>
@@ -439,7 +491,11 @@ const PostPreview = ({
                     onClick={onClick}
                     className={"col-start-2 col-span-1 rounded-md py-1 "}
                 >
-                    <PreviewFrame element={text} className={classNameContent} />
+                    <PreviewFrame
+                        element={text}
+                        className={classNameContent}
+                        onLoad={() => handleLoad(text)}
+                    />
                 </div>
             )}
         </div>
@@ -452,14 +508,24 @@ const ChatMessagePreview = ({
     forwardRef,
     className,
     classNameContent,
+    onLoad,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: (e: React.MouseEvent<HTMLElement>) => void;
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((element: Element<ElementContent>) => string);
+    onLoad?: () => void;
 }) => {
     const { other: apps, text } = rects;
+
+    const loadedSet: Set<string> = useMemo(() => new Set(), []);
+    const handleLoad = (element: Element<ElementContent>) => {
+        loadedSet.add(element.idString);
+        if (onLoad && loadedSet.size === apps.length + (text ? 1 : 0)) {
+            onLoad();
+        }
+    };
 
     return (
         <div className={"flex flex-col h-full " + className} ref={forwardRef}>
@@ -474,6 +540,7 @@ const ChatMessagePreview = ({
                         element={app}
                         fit="contain"
                         maximizeHeight
+                        onLoad={() => handleLoad(app)}
                         className={classNameContent}
                     />
                 </div>
@@ -487,6 +554,7 @@ const ChatMessagePreview = ({
                         element={text}
                         previewLines={3}
                         noPadding
+                        onLoad={() => handleLoad(text)}
                         className={classNameContent}
                     />
                 </div>
@@ -501,6 +569,7 @@ export const CanvasPreview = ({
     forwardRef,
     className,
     classNameContent,
+    onLoad,
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
@@ -522,6 +591,7 @@ export const CanvasPreview = ({
                 <TinyPreview
                     rect={variantRects as Element<ElementContent>}
                     onClick={onClick}
+                    onLoad={onLoad}
                 />
             );
         case "breadcrumb":
@@ -529,6 +599,7 @@ export const CanvasPreview = ({
                 <BreadcrumbPreview
                     rect={variantRects as Element<ElementContent>}
                     onClick={onClick}
+                    onLoad={onLoad}
                 />
             );
         case "expanded-breadcrumb":
@@ -541,6 +612,7 @@ export const CanvasPreview = ({
                         }
                     }
                     onClick={onClick}
+                    onLoad={onLoad}
                 />
             );
         case "quote":
@@ -554,6 +626,7 @@ export const CanvasPreview = ({
                     }
                     onClick={onClick}
                     author={canvas?.publicKey.hashcode()}
+                    onLoad={onLoad}
                 />
             );
         case "post":
@@ -569,6 +642,7 @@ export const CanvasPreview = ({
                     className={className}
                     classNameContent={classNameContent}
                     forwardRef={forwardRef}
+                    onLoad={onLoad}
                 />
             );
         case "chat-message":
@@ -584,6 +658,7 @@ export const CanvasPreview = ({
                     className={className}
                     forwardRef={forwardRef}
                     classNameContent={classNameContent}
+                    onLoad={onLoad}
                 />
             );
         default:

@@ -38,6 +38,7 @@ export type ImageContentProps = {
     canOpenFullscreen?: boolean;
     /** If width/height are missing, fall back to this ratio (w / h). */
     fallbackRatio?: number;
+    onLoad?: () => void;
 };
 
 export const ImageContent = memo(function ImageContent({
@@ -48,6 +49,7 @@ export const ImageContent = memo(function ImageContent({
     fit,
     canOpenFullscreen = true,
     fallbackRatio = 4 / 3,
+    onLoad,
 }: ImageContentProps) {
     /* ------------------------------------------------------------------- */
     /* Internal state                                                      */
@@ -217,6 +219,7 @@ export const ImageContent = memo(function ImageContent({
                             src={imgUrl}
                             alt={content.alt ?? ""}
                             className="h-full object-contain"
+                            onLoad={onLoad}
                         />
                     )}
                 </div>
@@ -287,6 +290,7 @@ export const ImageContent = memo(function ImageContent({
                                     src={imgUrl}
                                     alt={content.alt ?? ""}
                                     className={`w-full  ${fitClass}`}
+                                    onLoad={onLoad}
                                 />
                             </Dialog.Trigger>
                             {fullScreen}
@@ -298,6 +302,7 @@ export const ImageContent = memo(function ImageContent({
                                 alt={content.alt ?? ""}
                                 style={{ aspectRatio: ratio }}
                                 className={`w-full h-full ${fitClass}`}
+                                onLoad={onLoad}
                             />
                             <button
                                 onClick={() => setDialogOpen(true)}
@@ -318,6 +323,7 @@ export const ImageContent = memo(function ImageContent({
                         src={imgUrl}
                         alt={content.alt ?? ""}
                         className={`w-full h-full ${fitClass}`}
+                        onLoad={onLoad}
                     />
                 ))}
 

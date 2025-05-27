@@ -12,10 +12,10 @@ body {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
 
-    overflow-anchor: auto;
-    /*  scroll-snap-stop: always; */
-    /* Prevents scroll anchoring (scrolling through a feed with dynamic content looks better this way) */
+    /* override the default anchoring */
+    overflow-anchor: var(--overflow-anchor, auto);
 }
+
 
 code {
     font-family: source-code-pro, Menlo, Monaco, Consolas, "Courier New",

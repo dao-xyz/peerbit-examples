@@ -69,7 +69,7 @@ export const Frame = (properties: {
     active: boolean;
     setActive: (value: boolean) => void;
     thumbnail?: boolean;
-    onLoad: (event: React.SyntheticEvent<HTMLElement, Event>) => void;
+    onLoad?: (event?: React.SyntheticEvent<HTMLElement, Event>) => void;
 
     key?: number;
     delete(): void;
@@ -284,6 +284,7 @@ export const Frame = (properties: {
                     previewLines={properties.previewLines}
                     noPadding={properties.noPadding}
                     inFullscreen={properties.inFullscreen}
+                    onLoad={properties.onLoad}
                 />
             );
         }

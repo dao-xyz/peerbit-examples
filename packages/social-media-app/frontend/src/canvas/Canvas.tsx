@@ -52,6 +52,8 @@ export const Canvas = (
         bgBlur?: boolean;
     } & ({ draft: true; inFullScreen?: boolean } | { draft?: false }) & {
             className?: string;
+        } & {
+            onLoad?: () => void;
         }
 ) => {
     const asThumbnail = !!properties.scaled;
@@ -83,6 +85,14 @@ export const Canvas = (
         }
         return reduceElementsForViewing(allRects);
     }, [rects, pendingRects, properties.appearance, reduceElementsForViewing]);
+
+    const loadedSet: Set<string> = useMemo(() => new Set(), []);
+    const handleLoad = (element: Element<ElementContent>) => {
+        loadedSet.add(element.idString);
+        if (properties.onLoad && loadedSet.size === filteredRects.length) {
+            properties.onLoad();
+        }
+    };
 
     const renderRects = (rectsToRender: Element<ElementContent>[]) => {
         return rectsToRender.map((rect, ix) => {
@@ -153,7 +163,7 @@ export const Canvas = (
                                         filteredRects.length > 1
                                     }
                                     element={rect}
-                                    onLoad={() => {}}
+                                    onLoad={() => handleLoad(rect)}
                                     fit={
                                         properties.appearance ===
                                         "chat-view-images"

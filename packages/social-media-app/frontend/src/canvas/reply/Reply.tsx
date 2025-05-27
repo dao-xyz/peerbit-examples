@@ -9,7 +9,7 @@ import {
 import { Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "../Preview.js";
-import { WithContext, WithIndexedContext } from "@peerbit/document";
+import { WithIndexedContext } from "@peerbit/document";
 import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
@@ -46,6 +46,7 @@ type BaseReplyPropsType = {
     highlightType?: "pre-selected" | "selected";
     classNameHighlight?: string;
     className?: string;
+    onLoad?: () => void;
 };
 
 type ReplyPropsType = BaseReplyPropsType & {
@@ -65,6 +66,7 @@ export const Reply = ({
     highlightType,
     className,
     classNameHighlight,
+    onLoad,
 }: ReplyPropsType) => {
     const [showMore, setShowMore] = useState(false);
     const [isOverflowing, setIsOverflowing] = useState(false);
@@ -228,6 +230,7 @@ export const Reply = ({
                                 forwardRef={contentRef}
                                 variant="expanded-breadcrumb"
                                 onClick={handleCanvasClick}
+                                onLoad={onLoad}
                             />
                         ) : isChat ? (
                             <CanvasPreview
@@ -249,10 +252,16 @@ export const Reply = ({
                                                   : "")
                                         : ""
                                 }
+                                onLoad={onLoad}
                             />
                         ) : showMore ? (
                             <div ref={contentRef}>
-                                <Canvas bgBlur fitWidth draft={false} />
+                                <Canvas
+                                    bgBlur
+                                    fitWidth
+                                    draft={false}
+                                    onLoad={onLoad}
+                                />
                             </div>
                         ) : (
                             <CanvasPreview
@@ -260,6 +269,7 @@ export const Reply = ({
                                 onClick={handleCanvasClick}
                                 variant="post"
                                 className="w-full "
+                                onLoad={onLoad}
                             />
                         )}
                     </CanvasWrapper>
