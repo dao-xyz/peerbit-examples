@@ -431,7 +431,7 @@ export const Replies = (props: {
         },
         isReplyVisible,
         debug: false,
-        enabled: false,
+        enabled: true,
     });
 
     useEffect(() => {

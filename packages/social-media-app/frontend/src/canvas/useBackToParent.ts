@@ -21,12 +21,7 @@ export function useBackToParent(parent?: CanvasDB) {
             const prevPath = peekPrevPaths(i); // one cheap array lookup
             // look at both paths without query params
             const prevPathNoQuery = prevPath?.split("?")[0];
-            console.log(
-                "DIFF?",
-                prevPathNoQuery,
-                parentPathNoQuery,
-                prevPathNoQuery === parentPathNoQuery
-            );
+
             if (prevPathNoQuery === parentPathNoQuery) {
                 // real back -> snapshot already exists
                 consumePaths(i); // remove the history entries we just skipped
