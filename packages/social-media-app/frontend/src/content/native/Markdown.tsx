@@ -354,7 +354,9 @@ export const MarkdownContent = ({
                     style={{ ["--preview-lines" as any]: previewLines }}
                     className={`${commonClasses} ${
                         previewLines ? "line-clamp-[var(--preview-lines)]" : ""
-                    } ${previewLines === 1 ? "break-all" : ""}`}
+                    } ${previewLines === 1 ? "break-all" : ""} ${
+                        editable ? "bg-neutral-800" : ""
+                    }`}
                 >
                     <Markdown
                         disallowedElements={
