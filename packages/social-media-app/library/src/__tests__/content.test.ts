@@ -161,7 +161,7 @@ describe("content", () => {
                         )
                         .all();
                     expect(replies).to.have.length(1);
-                    expect(replies[0].content).to.eq("a");
+                    expect(replies[0].context).to.eq("a");
                     expect(replies[0].replies).to.eq(1n); // one reply (b)
                 });
             });

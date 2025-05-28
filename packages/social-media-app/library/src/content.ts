@@ -8,6 +8,7 @@ import {
     id,
     IntegerCompare,
     Or,
+    Query,
     SearchRequest,
     StringMatch,
     StringMatchMethod,
@@ -218,6 +219,9 @@ export class IndexableElement {
     @field({ type: "u32" })
     quality: number; // the higher the number, the better the quality
 
+    @field({ type: vec("f32") })
+    vector: number[]; // vector representation of the element, e.g. for search
+
     constructor(properties: {
         id: Uint8Array;
         publicKey: PublicSignKey;
@@ -238,6 +242,7 @@ export class IndexableElement {
             throw new Error("Quality is required");
         }
         this.quality = properties.quality;
+        this.vector = [];
     }
 
     private _idString: string;
@@ -250,11 +255,17 @@ export class IndexableCanvas {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
+    @field({ type: "string" })
+    address: string;
+
     @field({ type: Uint8Array })
     publicKey: Uint8Array;
 
     @field({ type: "string" })
-    content: string;
+    context: string; // string context for searching, e.g. title or description, or a summary of the canvas
+
+    @field({ type: vec("f32") })
+    vector: number[]; // vector representation of the canvas, e.g. for search
 
     @field({ type: "u64" })
     replies: bigint;
@@ -268,21 +279,29 @@ export class IndexableCanvas {
     @field({ type: vec("string") })
     replyTo: string[]; // addresses
 
+    @field({ type: vec("string") })
+    types: string[]; // types of elements in the canvas, e.g. text, image, etc.
+
     constructor(properties: {
         id: Uint8Array;
+        address: string; // used for indexing
         publicKey: PublicSignKey;
-        content: string;
+        context: string;
         replies: bigint;
         path: string[]; // address path
         replyTo: string[]; // addresses
+        types: string[];
     }) {
         this.id = properties.id;
+        this.address = properties.address;
         this.publicKey = properties.publicKey.bytes;
-        this.content = properties.content;
+        this.context = properties.context;
         this.replies = properties.replies;
         this.path = properties.path;
         this.replyTo = properties.replyTo;
         this.pathDepth = properties.path.length;
+        this.types = properties.types;
+        this.vector = [];
     }
 
     static async from(
@@ -294,15 +313,24 @@ export class IndexableCanvas {
             canvas = await node.open(canvas, { existing: "reuse", args });
         }
         const indexable = await canvas.createTitle();
+        console.log("Indexable canvas context", indexable);
         const replies = await canvas.countReplies();
+        const elements = await canvas.elements.index
+            .iterate(
+                { query: getOwnedElementsQuery(canvas) },
+                { resolve: false }
+            )
+            .all();
 
         return new IndexableCanvas({
             id: canvas.id,
             publicKey: canvas.publicKey,
-            content: indexable,
+            address: canvas.address,
+            context: indexable,
             replies,
             path: canvas.path.map((x) => x.address),
             replyTo: canvas.replyTo.map((x) => x.address),
+            types: elements.map((x) => x.type),
         });
     }
 
@@ -457,6 +485,42 @@ export const getImagesQuery = () =>
             method: StringMatchMethod.exact,
         }),
     ]);
+export const getTimeQuery = (ageMilliseconds: number) =>
+    new IntegerCompare({
+        key: ["__context", "created"],
+        value: BigInt(+new Date() - ageMilliseconds),
+        compare: Compare.GreaterOrEqual,
+    });
+
+export const getCanvasWithContentTypesQuery = (source: string[]) => {
+    if (source.length === 0) {
+        throw new Error("No types provided for canvas content query");
+    }
+    let query: Query[] = [];
+    for (const type of source) {
+        query.push(
+            new StringMatch({
+                key: "types",
+                value: type,
+                caseInsensitive: true,
+                method: StringMatchMethod.exact,
+            })
+        );
+    }
+    return new Or(query);
+};
+
+export const getCanvasWithContentQuery = (source: string) => {
+    if (source.length === 0) {
+        throw new Error("No types provided for canvas content query");
+    }
+    return new StringMatch({
+        key: "context",
+        value: source,
+        caseInsensitive: true,
+        method: StringMatchMethod.contains,
+    });
+};
 
 export abstract class CanvasMessage {}
 
@@ -1081,7 +1145,7 @@ export class Canvas extends Program<CanvasArgs> {
             await this.load();
         }
         try {
-            const elements: any[] = []; /* await this.elements.index
+            const elements: any[] = await this.elements.index
                 .iterate(
                     { query: getOwnedElementsQuery(this) },
                     {
@@ -1090,7 +1154,7 @@ export class Canvas extends Program<CanvasArgs> {
                         remote: { strategy: "fallback", timeout: 2e4 },
                     }
                 )
-                .all();  TODO make this work efficiently when non replicators is requesting content, we somehow get a double fetch for this -> requesting all in true value, then we can actually calculate the indexed version, but we yet need to request the owned elements anyways ? */
+                .all();
             let concat = "";
             for (const element of elements) {
                 if (element.type !== "canvas") {

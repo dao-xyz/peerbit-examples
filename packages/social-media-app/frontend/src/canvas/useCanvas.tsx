@@ -1,11 +1,5 @@
 import { usePeer } from "@peerbit/react";
-import React, {
-    useContext,
-    useEffect,
-    useRef,
-    useState,
-    useReducer,
-} from "react";
+import React, { useContext, useEffect, useState } from "react";
 import {
     Canvas,
     Element,
@@ -16,9 +10,8 @@ import {
     StaticMarkdownText,
 } from "@giga-app/interface";
 import { useLocation } from "react-router";
-import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
+import { sha256Sync } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
-import { deserialize } from "@dao-xyz/borsh";
 import { toId } from "@peerbit/indexer-interface";
 interface ICanvasContext {
     // root canvas
@@ -80,7 +73,6 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const [leaf, setLeaf] = useState<Canvas>(undefined);
 
     const [canvases, setCanvases] = useState<Canvas[]>([]);
-    const loadingPromise = useRef<Promise<void>>();
     const [isLoading, setIsLoading] = useState(true);
     const rlocation = useLocation();
 
@@ -111,10 +103,10 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                             canvases.map((canvas) =>
                                 root.openWithSameSettings(canvas)
                             )
-                        ).then((openRooms) => {
-                            console.log("OPEN ROOMS", openRooms);
-                            setCanvases(openRooms);
-                            return openRooms;
+                        ).then((openCanvases) => {
+                            console.log("OPEN CANVASES", openCanvases);
+                            setCanvases(openCanvases);
+                            return openCanvases;
                         });
                     })
                     .finally(() => {
@@ -173,7 +165,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     }, [root?.address, rlocation]);
 
     useEffect(() => {
-        if (root || !peer || loadingPromise.current) {
+        if (root || !peer) {
             return;
         }
 
@@ -211,7 +203,6 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                             parent: result,
                         })
                     );
-                    loadingPromise.current = undefined;
                 }
             })
             .catch((e) => {

@@ -38,6 +38,7 @@ import { useReplyProgress } from "./reply/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
 import { waitFor } from "@peerbit/time";
 import { DocumentsChange } from "@peerbit/document";
+import { useView } from "./reply/view/ViewContex.js";
 
 // Extend the context type to include a subscription function.
 export interface CanvasContextType {
@@ -140,6 +141,8 @@ export const CanvasWrapper = ({
     const [editMode, setEditMode] = useState(!!draft);
     const [isEmpty, setIsEmpty] = useState(true);
     const { announceReply } = useReplyProgress();
+    const { typeFilter } = useView();
+
     const query = useMemo(() => {
         return !canvas || canvas.closed
             ? null
@@ -149,6 +152,9 @@ export const CanvasWrapper = ({
                       ...getQualityLessThanOrEqualQuery(
                           quality ?? LOWEST_QUALITY
                       ),
+                      /*  ...(typeFilter && typeFilter.type !== "all"
+                         ? [getTypeQuery(typeFilter.type)]
+                         : []), TODO? */
                   ],
                   sort: [
                       new Sort({
@@ -158,7 +164,8 @@ export const CanvasWrapper = ({
                       new Sort({ key: ["location", "y"] }),
                   ],
               };
-    }, [canvas?.closed, canvas?.idString, quality]);
+    }, [canvas?.closed, canvas?.idString, quality, typeFilter.key]);
+
     const { items: rects, isLoading } = useQuery(
         canvas?.loadedElements ? canvas.origin?.elements : null,
         {
@@ -169,6 +176,7 @@ export const CanvasWrapper = ({
                 eager: true,
                 warmup: 5e3,
             },
+
             onChange: {
                 merge: (change) => {
                     const filteredForScope: DocumentsChange<

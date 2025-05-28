@@ -10,7 +10,7 @@ import React, {
 import { Canvas, CanvasAddressReference } from "@giga-app/interface";
 import { usePendingCanvas } from "./PendingCanvasContext";
 import { useCanvas } from "./CanvasWrapper";
-import { useView } from "../view/ViewContex";
+import { useView } from "./reply/view/ViewContex";
 
 interface AutoReplyContextType {
     typedOnce: boolean;

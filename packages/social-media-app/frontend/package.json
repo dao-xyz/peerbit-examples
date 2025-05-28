@@ -21,6 +21,7 @@
         "@peerbit/peer-names": "^0.0.1",
         "@peerbit/react": "*",
         "@radix-ui/react-toggle": "^1.0.3",
+        "@radix-ui/react-toggle-group": "^1.0.3",
         "axios": "^1.4.0",
         "lodash.debounce": "^4.0.8",
         "lodash.throttle": "^4.1.1",

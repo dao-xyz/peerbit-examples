@@ -10,7 +10,7 @@ import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
 import { SimpleWebManifest } from "@giga-app/interface";
 import * as Switch from "@radix-ui/react-switch";
-import { useView } from "../../view/ViewContex";
+import { useView } from "../reply/view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
 import { useAutoReply } from "../AutoReplyContext";
 import { BsArrowsAngleExpand } from "react-icons/bs";

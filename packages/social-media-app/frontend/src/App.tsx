@@ -15,14 +15,14 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ThemeProvider } from "./theme/useTheme";
 import { ReplyProgressProvider } from "./canvas/reply/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
-import { ViewProvider } from "./view/ViewContex";
+import { ViewProvider } from "./canvas/reply/view/ViewContex";
 import {
     HeaderVisibilityProvider,
     useHeaderVisibilityContext,
 } from "./HeaderVisibilitiyProvider";
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
 import type { NetworkOption } from "@peerbit/react";
-import { BlurOnOutsidePointerProvider } from "./view/BlurOnScrollProvider";
+import { BlurOnOutsidePointerProvider } from "./canvas/reply/view/BlurOnScrollProvider";
 
 export const Content = () => {
     const { error: peerError } = usePeer();

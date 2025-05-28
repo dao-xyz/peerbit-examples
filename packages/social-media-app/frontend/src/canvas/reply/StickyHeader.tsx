@@ -1,7 +1,7 @@
 // StickyHeader.tsx
 import React, { useEffect, useRef, useState } from "react";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
-import { useView } from "../../view/ViewContex";
+import { useView } from "./view/ViewContex";
 
 export const StickyHeader = ({
     children,
@@ -62,8 +62,9 @@ export const StickyHeader = ({
         >
             {/* Base layer: gradient background */}
             {
+                /*  background-image: linear-gradient(15deg, rgba(23, 23, 23, 1), rgb(46 34 34)) */
                 <div
-                    className={`absolute inset-0 ${defaultBG} bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[linear-gradient(73deg,rgba(23,23,23,1),rgba(64,64,64,1))] drop-shadow-lg ${
+                    className={`absolute inset-0 ${defaultBG} bg-white border-[#ccc] dark:border-none border-t-[1px] border-b-[1px] dark:bg-[linear-gradient(15deg,rgba(23,23,23,1),rgba(45,45,45,1))] drop-shadow-lg ${
                         isScrolled ? "drop-shadow-md" : ""
                     }`}
                 ></div>

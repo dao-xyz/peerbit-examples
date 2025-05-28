@@ -1,5 +1,5 @@
 import { HIGH_QUALITY } from "@giga-app/interface";
-import { useView } from "../../view/ViewContex";
+import { useView } from "../reply/view/ViewContex";
 import { Canvas } from "../Canvas";
 import { CanvasWrapper } from "../CanvasWrapper";
 import { Header } from "../header/Header";

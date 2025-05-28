@@ -9,7 +9,7 @@ import React, {
 import * as Toast from "@radix-ui/react-toast";
 import { Reply } from "./Reply";
 import { tw } from "../../utils/tailwind";
-import { useView } from "../../view/ViewContex";
+import { useView } from "./view/ViewContex";
 import { usePeer } from "@peerbit/react";
 import { useAutoReply } from "../AutoReplyContext";
 import { useAutoScroll, ScrollSettings } from "./useAutoScroll";

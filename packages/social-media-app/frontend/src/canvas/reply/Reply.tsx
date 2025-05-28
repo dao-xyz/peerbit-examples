@@ -14,7 +14,7 @@ import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
-import { useView } from "../../view/ViewContex.js";
+import { useView } from "./view/ViewContex.js";
 import { rectIsStaticMarkdownText } from "../utils/rect.js";
 import { useLeaveSnapshotFn } from "./feedRestoration.js";
 
@@ -191,7 +191,7 @@ export const Reply = ({
                 </div>
             )} */}
             <div
-                className={`inline-flex flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${
+                className={`inline-flex h-full flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${
                     isThread ? "w-full" : ""
                 }`}
             >

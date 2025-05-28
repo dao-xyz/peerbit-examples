@@ -6,6 +6,7 @@ import React, {
     useMemo,
     ReactNode,
     useRef,
+    useCallback,
 } from "react";
 import { usePeer, useProgram, useQuery } from "@peerbit/react";
 import {
@@ -15,13 +16,27 @@ import {
     View,
     CanvasAddressReference,
     IndexableCanvas,
+    PinnedPosts,
+    getTimeQuery,
+    getCanvasWithContentQuery,
+    getCanvasWithContentTypesQuery,
 } from "@giga-app/interface";
-import { useCanvases } from "../canvas/useCanvas";
+import { useCanvases } from "../../useCanvas";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
 import { BodyStyler } from "./BodyStyler";
 import { ALL_DEFAULT_VIEWS } from "./defaultViews";
 import { type WithIndexedContext } from "@peerbit/document";
+import {
+    DEFAULT_TIME_FILTER,
+    DEFAULT_TYPE_FILTER,
+    TIME_FILTERS,
+    TimeFilter,
+    TimeFilterType,
+    TYPE_FILTERS,
+    TypeFilter,
+    TypeFilterType,
+} from "./filters";
 /**
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
  * pieces of state run **once** instead of once‑per‑piece. The update is flushed after `delay` ms.
@@ -71,17 +86,59 @@ function useViewContextHook() {
 
     // Instead of separate view state, derive view from URL:
     const [searchParams, setSearchParams] = useSearchParams();
-    const view: string = (searchParams.get("view") as string) || "best";
+    const view: string = (searchParams.get("v") as string) || "best";
 
-    // Whenever you need to change view, update the URL.
-    const changeView = (newView: string) => {
-        if (newView !== view) {
-            const newParams = new URLSearchParams(searchParams.toString());
-            newParams.set("view", newView);
-            setSearchParams(newParams, { replace: true });
-        }
-    };
+    const timeFilter: TimeFilter = TIME_FILTERS.get(
+        (searchParams.get("t") as TimeFilterType) || DEFAULT_TIME_FILTER
+    );
 
+    const typeFilter: TypeFilter = TYPE_FILTERS.get(
+        (searchParams.get("c") as TypeFilterType) || DEFAULT_TYPE_FILTER
+    );
+
+    const query: string = (searchParams.get("q") as string) || undefined;
+
+    // ------------ helper that always starts from latest URL -------------
+    const mutateParams = React.useCallback(
+        (mutator: (p: URLSearchParams) => void) =>
+            setSearchParams(
+                (prev) => {
+                    const p = new URLSearchParams(prev);
+                    mutator(p);
+                    return p;
+                },
+                { replace: true }
+            ),
+        [setSearchParams]
+    );
+
+    // ------------ *public* api ------------------------------------------
+    const setQueryParams = React.useCallback(
+        (opts: {
+            view?: string; // undefined = ignore
+            time?: TimeFilterType; // 'all'  ⇢ delete 't'
+            type?: TypeFilterType; // 'all'  ⇢ delete 'c'
+            query?: string; // ''     ⇢ delete 'q'
+        }) =>
+            mutateParams((p) => {
+                if (opts.view !== undefined) p.set("v", opts.view);
+                if (opts.time !== undefined)
+                    opts.time === "all" ? p.delete("t") : p.set("t", opts.time);
+                if (opts.type !== undefined)
+                    opts.type === "all" ? p.delete("c") : p.set("c", opts.type);
+                if (opts.query !== undefined)
+                    opts.query ? p.set("q", opts.query) : p.delete("q");
+            }),
+        [mutateParams]
+    );
+
+    // ------------ keep old wrappers for convenience ---------------------
+    const changeView = (v: string) => v !== view && setQueryParams({ view: v });
+    const setTimeFilter = (t: TimeFilterType) =>
+        t !== timeFilter.key && setQueryParams({ time: t });
+    const setTypeFilter = (t: TypeFilterType) =>
+        t !== typeFilter.key && setQueryParams({ type: t });
+    const setQuery = (q: string) => q !== query && setQueryParams({ query: q });
     /* =====================================================================================
      *  🚀 Debounce *both* values together so the next effect fires only once per change‑set.
      * ===================================================================================== */
@@ -122,13 +179,6 @@ function useViewContextHook() {
         },
     });
 
-    const dynamicViews = useMemo(() => {
-        if (!dynamicViewItems) {
-            return [];
-        }
-        return dynamicViewItems.map((item) => item.toViewModel());
-    }, [dynamicViewItems]);
-
     const createView = async (
         name: string,
         description?: CanvasAddressReference /* filter */
@@ -142,15 +192,36 @@ function useViewContextHook() {
         return view;
     };
 
+    const pinToView = async (view: View, canvas: Canvas) => {
+        if (!view.filter) {
+            view.filter = new PinnedPosts({ pinned: [] });
+        } else if (view.filter instanceof PinnedPosts === false) {
+            throw new Error(
+                "View filter is not a PinnedPosts filter, cannot pin to view"
+            );
+        }
+        const pinnedPosts = view.filter as PinnedPosts;
+        // Check if the canvas is already pinned
+        if (pinnedPosts.pinned.some((p) => p.address === canvas.address)) {
+            return; // Already pinned, no action needed
+        }
+
+        // Pin the canvas to the view
+        pinnedPosts.pinned.push(new CanvasAddressReference({ canvas }));
+        await views.program.views.put(view);
+    };
+
     // Set the query based on view and viewRoot.
     const viewModel = useMemo(() => {
         return (
-            dynamicViews.find((x) => x.id === debouncedView) ||
+            dynamicViewItems
+                .find((x) => x.id === debouncedView)
+                ?.toViewModel() ||
             ALL_DEFAULT_VIEWS.find((x) => x.id == debouncedView)
         );
-    }, [debouncedView, dynamicViews]);
+    }, [debouncedView, dynamicViewItems]);
 
-    const query = useMemo(() => {
+    const canvasQuery = useMemo(() => {
         if (!viewRoot) {
             return undefined;
         }
@@ -160,8 +231,36 @@ function useViewContextHook() {
         if (!viewModel?.query) {
             return undefined;
         }
-        return viewModel?.query(viewRoot);
-    }, [viewRoot, viewModel]);
+        const queryObject = viewModel?.query(viewRoot);
+        if (timeFilter) {
+            if (timeFilter.key !== "all") {
+                let delta = 0;
+                if (timeFilter.key === "24h") {
+                    delta = 24 * 60 * 60 * 1000; // 24 hours in milliseconds
+                } else if (timeFilter.key === "7d") {
+                    delta = 7 * 24 * 60 * 60 * 1000; // 7 days in milliseconds
+                } else if (timeFilter.key === "30d") {
+                    delta = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
+                } else {
+                    throw new Error(
+                        `Unknown time filter type: ${timeFilter.key}`
+                    );
+                }
+                queryObject.query.push(getTimeQuery(delta));
+            }
+        }
+        if (typeFilter) {
+            if (typeFilter.types?.length > 0) {
+                queryObject.query.push(
+                    getCanvasWithContentTypesQuery(typeFilter.types)
+                );
+            }
+        }
+        if (query?.length > 0) {
+            queryObject.query.push(getCanvasWithContentQuery(query));
+        }
+        return queryObject;
+    }, [viewRoot, viewModel, timeFilter, typeFilter?.key, query]);
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(10); // Default batch size
@@ -175,7 +274,7 @@ function useViewContextHook() {
     } = useQuery(
         viewRoot && viewRoot.loadedReplies ? viewRoot.replies : undefined,
         {
-            query,
+            query: canvasQuery,
             reverse: viewModel?.settings.focus === "last" ? true : false,
             transform: calculateAddress,
             batchSize,
@@ -339,7 +438,7 @@ function useViewContextHook() {
         canvases: debouncedCanvases,
         viewRoot,
         defaultViews: ALL_DEFAULT_VIEWS,
-        dynamicViews,
+        dynamicViews: dynamicViewItems,
         createView,
         view: viewModel,
         setView: changeView, // now changes update the URL
@@ -353,6 +452,14 @@ function useViewContextHook() {
         loading,
         batchSize,
         setBatchSize,
+        pinToView,
+        timeFilter,
+        typeFilter,
+        setTimeFilter,
+        setTypeFilter,
+        setQueryParams,
+        query,
+        setQuery,
     };
 }
 

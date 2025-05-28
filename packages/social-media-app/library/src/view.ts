@@ -1,14 +1,20 @@
 import { variant, field, vec, option } from "@dao-xyz/borsh";
 import { Canvas, CanvasAddressReference } from "./content.js";
 import { Program } from "@peerbit/program";
-import { Documents, SearchRequest } from "@peerbit/document";
+import {
+    And,
+    Documents,
+    Or,
+    SearchRequest,
+    StringMatch,
+} from "@peerbit/document";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
 abstract class Filter {}
 
 @variant(0)
-class PinnedPosts extends Filter {
+export class PinnedPosts extends Filter {
     @field({ type: vec(CanvasAddressReference) })
     pinned: CanvasAddressReference[];
 
@@ -17,20 +23,6 @@ class PinnedPosts extends Filter {
         this.pinned = properties.pinned;
     }
 }
-
-/* abstract class Settings { }
-
-@variant(0)
-class PinnedPosts extends Settings {
-    @field({ type: vec(CanvasAddressReference) })
-    pinned: CanvasAddressReference[];
-
-    constructor(properties: { pinned: CanvasAddressReference[] }) {
-        super();
-        this.pinned = properties.pinned;
-    }
-}
- */
 
 export interface ViewModel {
     id: string; // Key to identify the view.
@@ -85,7 +77,23 @@ export class View {
         return {
             id: this.id,
             name: this.id,
-            query: undefined, // TODO
+            query:
+                this.filter && this.filter instanceof PinnedPosts
+                    ? (from: Canvas) => {
+                          let pinned = this.filter as PinnedPosts;
+                          return new SearchRequest({
+                              query: new Or(
+                                  pinned.pinned.map(
+                                      (p) =>
+                                          new StringMatch({
+                                              key: "address",
+                                              value: p.address,
+                                          })
+                                  )
+                              ),
+                          });
+                      }
+                    : undefined,
             settings: {
                 // TODO
                 layout: "list",

@@ -9,12 +9,15 @@ import {
     getOwnedElementsQuery,
     IFrameContent,
     IndexableCanvas,
+    PinnedPosts,
 } from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
-import { WithContext, WithIndexedContext } from "@peerbit/document";
+import { WithIndexedContext } from "@peerbit/document";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FaRegComment } from "react-icons/fa";
 import { MdOpenInFull } from "react-icons/md";
+import { useView } from "../reply/view/ViewContex";
+import { CreateNewViewMenuItem } from "../reply/view/CreateNewViewMenuItem";
 
 export const Header = ({
     canvas,
@@ -38,6 +41,7 @@ export const Header = ({
     const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
     const { create } = useProfiles();
+    const { dynamicViews, pinToView } = useView();
 
     /* useEffect(() => {
         if (!canvas) return;
@@ -90,6 +94,8 @@ export const Header = ({
             console.error("Failed to fetch elements info", error);
         }
     };
+
+    const handlePin = async () => {};
 
     return (
         <>
@@ -242,6 +248,47 @@ export const Header = ({
                             >
                                 More info
                             </DropdownMenu.Item>
+                            {/* ───────────────── Add-to-view (submenu) ───────────────── */}
+                            <DropdownMenu.Sub>
+                                <DropdownMenu.SubTrigger className="menu-item flex justify-between">
+                                    Add to view
+                                </DropdownMenu.SubTrigger>
+
+                                <DropdownMenu.SubContent
+                                    alignOffset={-4}
+                                    className="dropdown-menu-responsive bg-white dark:bg-black p-2 rounded shadow-md max-h-[280px] overflow-y-auto"
+                                >
+                                    {/* dynamic (user) views first */}
+                                    {dynamicViews.length > 0 && (
+                                        <>
+                                            <DropdownMenu.Label className="px-4 py-1 text-xs text-blue-600">
+                                                Your views
+                                            </DropdownMenu.Label>
+                                            {dynamicViews.map((v) => (
+                                                <DropdownMenu.Item
+                                                    key={v.id}
+                                                    onSelect={() => {
+                                                        pinToView(v, canvas);
+                                                    }}
+                                                    className="cursor-pointer px-4 py-2 text-sm whitespace-nowrap hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded"
+                                                >
+                                                    {v.id}{" "}
+                                                    {/* TODO Display view ID or name */}
+                                                </DropdownMenu.Item>
+                                            ))}
+                                        </>
+                                    )}
+                                    {dynamicViews.length === 0 && (
+                                        <>
+                                            <DropdownMenu.Item className="cursor-pointer px-4 py-2 text-sm whitespace-nowrap text-gray-500">
+                                                No views available
+                                            </DropdownMenu.Item>
+                                        </>
+                                    )}
+                                    <DropdownMenu.Separator className="my-2 h-px bg-neutral-200 dark:bg-neutral-700" />
+                                    <CreateNewViewMenuItem />
+                                </DropdownMenu.SubContent>
+                            </DropdownMenu.Sub>
                         </DropdownMenu.Content>
                     </DropdownMenu.Root>
                 </div>

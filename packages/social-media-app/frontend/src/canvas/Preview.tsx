@@ -450,7 +450,7 @@ const PostPreview = ({
                 <div
                     onClick={onClick}
                     className={
-                        "btn col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative "
+                        "min-h-20 btn  col-span-full max-h-[60vh] flex flex-col overflow-hidden h-full relative "
                     }
                 >
                     <PreviewFrame
@@ -489,7 +489,9 @@ const PostPreview = ({
             {text && (
                 <div
                     onClick={onClick}
-                    className={"col-start-2 col-span-1 rounded-md py-1 "}
+                    className={
+                        "col-start-2 col-span-1 overflow-y-auto rounded-md py-1 "
+                    }
                 >
                     <PreviewFrame
                         element={text}
