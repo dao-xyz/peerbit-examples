@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/video-replicator-cli",
-    "version": "0.0.19",
+    "version": "0.0.20",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -42,6 +42,6 @@
         "@inquirer/editor": "^2",
         "@inquirer/input": "^2",
         "@inquirer/select": "^2",
-        "@peerbit/media-streaming": "^0.0.2"
+        "@peerbit/media-streaming": "^0.0.3"
     }
 }

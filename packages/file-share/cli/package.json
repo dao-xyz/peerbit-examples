@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/please",
-    "version": "0.0.17",
+    "version": "0.0.18",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -38,7 +38,7 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/please-lib": "^0.0.12",
+        "@peerbit/please-lib": "^0.0.13",
         "chalk": "^5.3.0",
         "peerbit": "^4",
         "yargs": "^17.7.2"
