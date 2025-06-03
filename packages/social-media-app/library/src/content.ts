@@ -309,7 +309,6 @@ export class IndexableCanvas {
         canvas: Canvas,
         node: ProgramClient,
         args: {
-            existing?: { context?: string };
             replicate?: boolean;
             replicas?: { min?: number };
         }
@@ -317,9 +316,7 @@ export class IndexableCanvas {
         if (canvas.closed) {
             canvas = await node.open(canvas, { existing: "reuse", args });
         }
-        const context =
-            args?.existing?.context ?? (await canvas.createContext());
-        console.trace("Indexable canvas context", context);
+        const context = await canvas.createContext();
         const replies = await canvas.countReplies();
         const elements = await canvas.elements.index
             .iterate(
@@ -1188,30 +1185,27 @@ export class Canvas extends Program<CanvasArgs> {
         if (!this.loadedElements) {
             await this.load();
         }
-        try {
-            const elements: any[] = await this.elements.index
-                .iterate(
-                    { query: getOwnedElementsQuery(this) },
-                    {
-                        resolve: false,
-                        local: true,
-                        remote: { strategy: "fallback", timeout: 2e4 },
-                    }
-                )
-                .all();
-            let concat = "";
-            for (const element of elements) {
-                if (element.type !== "canvas") {
-                    if (concat.length > 0) {
-                        concat += "\n";
-                    }
-                    concat += element.content;
+
+        const elements = await this.elements.index
+            .iterate(
+                { query: getOwnedElementsQuery(this) },
+                {
+                    resolve: false,
+                    local: true,
+                    remote: { strategy: "fallback", timeout: 2e4 },
                 }
+            )
+            .all();
+        let concat = "";
+        for (const element of elements) {
+            if (element.type !== "canvas") {
+                if (concat.length > 0) {
+                    concat += "\n";
+                }
+                concat += element.content;
             }
-            return concat;
-        } catch (error) {
-            throw error;
         }
+        return concat;
     }
     private _topMostCanvasWithSameACL: Canvas | null | undefined = null;
     async load() {
