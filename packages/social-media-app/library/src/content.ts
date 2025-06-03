@@ -14,6 +14,7 @@ import {
     StringMatchMethod,
     toId,
     WithContext,
+    WithIndexedContext,
 } from "@peerbit/document";
 import {
     PublicSignKey,
@@ -307,13 +308,18 @@ export class IndexableCanvas {
     static async from(
         canvas: Canvas,
         node: ProgramClient,
-        args: { replicate?: boolean; replicas?: { min?: number } }
+        args: {
+            existing?: { context?: string };
+            replicate?: boolean;
+            replicas?: { min?: number };
+        }
     ) {
         if (canvas.closed) {
             canvas = await node.open(canvas, { existing: "reuse", args });
         }
-        const indexable = await canvas.createTitle();
-        console.log("Indexable canvas context", indexable);
+        const context =
+            args?.existing?.context ?? (await canvas.createContext());
+        console.trace("Indexable canvas context", context);
         const replies = await canvas.countReplies();
         const elements = await canvas.elements.index
             .iterate(
@@ -326,7 +332,7 @@ export class IndexableCanvas {
             id: canvas.id,
             publicKey: canvas.publicKey,
             address: canvas.address,
-            context: indexable,
+            context,
             replies,
             path: canvas.path.map((x) => x.address),
             replyTo: canvas.replyTo.map((x) => x.address),
@@ -669,15 +675,31 @@ export class Canvas extends Program<CanvasArgs> {
     public debug: boolean = false;
     private closeController: AbortController | null = null;
     private reIndexDebouncer: ReturnType<
-        typeof debouncedAccumulatorMap<Canvas | WithContext<Canvas>>
+        typeof debouncedAccumulatorMap<{
+            canvas: Canvas;
+            options?: { onlyReplies?: boolean };
+        }>
     >;
 
     async open(args?: CanvasArgs): Promise<void> {
-        this.reIndexDebouncer = debouncedAccumulatorMap<Canvas>(async (map) => {
-            for (const canvas of map.values()) {
-                await this.reIndex(canvas);
+        this.reIndexDebouncer = debouncedAccumulatorMap<{
+            canvas: Canvas;
+            options?: { onlyReplies?: boolean };
+        }>(
+            async (map) => {
+                for (const indexArgs of map.values()) {
+                    await this.reIndex(indexArgs.canvas, indexArgs.options);
+                }
+            },
+            123,
+            (into, from) => {
+                if (into.options?.onlyReplies && !from.options?.onlyReplies) {
+                    into.options = from.options;
+                }
+                into.canvas = from.canvas;
+                return into;
             }
-        }, 123);
+        );
 
         this.closeController = new AbortController();
         this.debug = !!args?.debug;
@@ -814,7 +836,15 @@ export class Canvas extends Program<CanvasArgs> {
         }
     }
 
-    private async reIndex(from: Canvas | WithContext<Canvas>) {
+    private async reIndex(
+        from: Canvas | WithIndexedContext<Canvas, IndexableCanvas>,
+        options?: { onlyReplies?: boolean }
+    ) {
+        if (options?.onlyReplies) {
+            await this.updateIndexedReplyCounter(from);
+            return;
+        }
+
         const canvas = await this.openWithSameSettings(from);
         if (canvas.closed) {
             console.warn("indexable canvas not open, skipping re-index");
@@ -851,18 +881,6 @@ export class Canvas extends Program<CanvasArgs> {
                 console.trace("MISSING INDEXED CANVAS", canvas.idString);
                 // because we might index children before parents, this might be undefined
                 // but it is fine, since when the parent is to be re-indexed, its children will be considered
-                /*  try {
-                     let context = await canvas.loadContext();
-                     indexedCanvas = coerceWithContext(
-                         await IndexableCanvas.from(canvas, this.node),
-                         context
-                     );
-                 } catch (error) {
-                     const fff222 = [toId(canvas.id).primitive, parent.replies.index.closed, parent.replies.index["putSet"]?.size, parent.replies.index["putSet"]?.has(toId(canvas.id).primitive), parent.replies.index.index["_index"].has(toId(canvas.id).primitive)]
-    
-                     console.error("Failed to load context", fff, fff222, error);
-                     throw error;
-                 } */
                 return;
             }
             context = indexedCanvas.__context;
@@ -909,6 +927,11 @@ export class Canvas extends Program<CanvasArgs> {
              await Promise.all(promises);
          } */
 
+        this._repliesChangeListener &&
+            this._replies.events.removeEventListener(
+                "change",
+                this._repliesChangeListener
+            );
         this._repliesChangeListener = async (
             evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
         ) => {
@@ -916,10 +939,11 @@ export class Canvas extends Program<CanvasArgs> {
 
             for (let added of evt.detail.added) {
                 if (added.closed) {
-                    const context = added.__context;
                     added = await this.openWithSameSettings(added);
                 }
                 const loadedPath = await added.loadPath(true);
+                // i = 1 start to skip the root, -1 to skip the current canvas
+                // (we only want to-re-index parents)
                 for (let i = 1; i < loadedPath.length; i++) {
                     loadedPath[i] = await this.node.open(loadedPath[i], {
                         existing: "reuse",
@@ -927,7 +951,12 @@ export class Canvas extends Program<CanvasArgs> {
                     await loadedPath[i].load();
                     this.reIndexDebouncer.add({
                         key: loadedPath[i].idString,
-                        value: loadedPath[i],
+                        value: {
+                            canvas: loadedPath[i],
+                            options: {
+                                onlyReplies: true,
+                            },
+                        },
                     });
                 }
             }
@@ -940,10 +969,17 @@ export class Canvas extends Program<CanvasArgs> {
                 }
 
                 const loadedPath = await removed.loadPath(true);
+                // i = 1 start to skip the root, -1 to skip the current canvas
+                // (we only want to-re-index parents)
                 for (let i = 1; i < loadedPath.length; i++) {
                     this.reIndexDebouncer.add({
                         key: loadedPath[i].idString,
-                        value: loadedPath[i],
+                        value: {
+                            canvas: loadedPath[i],
+                            options: {
+                                onlyReplies: true,
+                            },
+                        },
                     });
                 }
                 await removed.close();
@@ -1034,10 +1070,15 @@ export class Canvas extends Program<CanvasArgs> {
         return concat;
     }
 
-    async getCreateRoomByPath(path: string[]): Promise<Canvas[]> {
+    async getCreateRoomByPath(
+        path: string[]
+    ): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
         const results = await this.findCanvasesByPath(path);
-        let rooms = results.canvases;
-        const existingPath = await results.canvases[0]?.loadPath(true);
+        let end = results.canvases[0];
+        if (end.closed) {
+            end = await this.openWithSameSettings(end);
+        }
+        const existingPath = await end.loadPath(true);
         let createdPath: Canvas[] =
             existingPath?.length > 0 ? existingPath : [this];
 
@@ -1071,7 +1112,7 @@ export class Canvas extends Program<CanvasArgs> {
                 });
                 await nextCanvas.load();
 
-                createdPath.push(canvas);
+                createdPath.push(nextCanvas);
 
                 const name = path[i];
                 // TODO Dont put if already exists
@@ -1092,9 +1133,11 @@ export class Canvas extends Program<CanvasArgs> {
                 await currentCanvas.createReply(nextCanvas);
                 currentCanvas = nextCanvas;
             }
-            rooms = [currentCanvas];
         }
-        return rooms;
+        return createdPath.slice(1) as WithIndexedContext<
+            Canvas,
+            IndexableCanvas
+        >[];
     }
 
     async findCanvasesByPath(
@@ -1110,6 +1153,7 @@ export class Canvas extends Program<CanvasArgs> {
                         existing: "reuse",
                     });
                 }
+                await parent.load();
 
                 newRooms.push(...(await parent.findCanvasesByName(name)));
             }
@@ -1128,7 +1172,7 @@ export class Canvas extends Program<CanvasArgs> {
             new SearchRequest({
                 query: [
                     new StringMatch({
-                        key: ["content"],
+                        key: ["context"],
                         value: name,
                         caseInsensitive: true,
                         method: StringMatchMethod.exact,
@@ -1140,7 +1184,7 @@ export class Canvas extends Program<CanvasArgs> {
         return results as Canvas[];
     }
 
-    async createTitle(): Promise<string> {
+    async createContext(): Promise<string> {
         if (!this.loadedElements) {
             await this.load();
         }
@@ -1231,6 +1275,50 @@ export class Canvas extends Program<CanvasArgs> {
         return root._replies;
     }
 
+    private async updateIndexedReplyCounter(
+        canvas: Canvas | WithIndexedContext<Canvas, IndexableCanvas>,
+        amount?: bigint
+    ) {
+        let indexed: IndexableCanvas;
+        let context: Context;
+        if ((canvas as WithIndexedContext<Canvas, IndexableCanvas>).__indexed) {
+            indexed = (canvas as WithIndexedContext<Canvas, IndexableCanvas>)
+                .__indexed;
+            context = (canvas as WithIndexedContext<Canvas, IndexableCanvas>)
+                .__context;
+        } else {
+            let parent = canvas.origin;
+
+            if (!parent) {
+                throw new Error("Missing parent for re-indexing");
+            }
+
+            let indexedCanvas = await parent.replies.index.get(canvas.id, {
+                resolve: false,
+                local: true,
+                remote: {
+                    strategy: "fallback",
+                    timeout: 1e4,
+                },
+            });
+
+            indexed = indexedCanvas;
+            context = indexedCanvas.__context;
+        }
+
+        if (amount) {
+            indexed.replies += amount;
+        } else {
+            indexed.replies = await canvas.countReplies();
+        }
+
+        const wrappedValueToIndex = new this.replies.index.wrappedIndexedType(
+            indexed,
+            context
+        );
+        await this.replies.index.index.put(wrappedValueToIndex);
+    }
+
     async createReply(canvas: Canvas) {
         if (!this.origin!.replies.log.isReplicating()) {
             await this.origin!.replies.log.waitForReplicators();
@@ -1239,12 +1327,13 @@ export class Canvas extends Program<CanvasArgs> {
         await this.origin!.replies.put(canvas);
         const path = await canvas.loadPath(true);
         for (let i = 1; i < path.length; i++) {
-            path[i] = await this.node.open(path[i], { existing: "reuse" });
-            await path[i].load();
-            await this.reIndexDebouncer.add({
-                key: path[i].idString,
-                value: path[i],
+            const loadedPathElement = await this.node.open(path[i], {
+                existing: "reuse",
             });
+            await loadedPathElement.load();
+
+            // we only need to bump the reply counters of the parent
+            await this.updateIndexedReplyCounter(loadedPathElement);
         }
     }
 

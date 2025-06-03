@@ -153,8 +153,8 @@ export const CanvasWrapper = ({
                           quality ?? LOWEST_QUALITY
                       ),
                       /*  ...(typeFilter && typeFilter.type !== "all"
-                         ? [getTypeQuery(typeFilter.type)]
-                         : []), TODO? */
+                       ? [getTypeQuery(typeFilter.type)]
+                       : []), TODO? */
                   ],
                   sort: [
                       new Sort({
@@ -512,6 +512,7 @@ export const CanvasWrapper = ({
                 element.parent = canvas;
             }
 
+            console.log("SAVE PENDING!");
             await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
             if (draft && onSave) {
                 await onSave();

@@ -12,8 +12,14 @@ import {
     getImagesQuery,
     getSubownedElementsQuery,
     LOWEST_QUALITY,
+    IndexableCanvas,
 } from "../content.js";
-import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
+import {
+    SearchRequest,
+    Sort,
+    SortDirection,
+    WithIndexedContext,
+} from "@peerbit/document";
 import { expect } from "chai";
 import { delay, waitForResolved } from "@peerbit/time";
 import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
@@ -38,19 +44,21 @@ describe("content", () => {
                     seed: new Uint8Array(),
                 })
             );
-            const abc = await root.getCreateRoomByPath(["a", "b", "c"]);
-            expect(abc).to.have.length(1);
-            expect(await abc[0].createTitle()).to.eq("c");
-            expect((await abc[0].loadPath(true)).length).to.eq(4);
+            const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
+            expect(await c.createContext()).to.eq("c");
+            expect((await c.loadPath(true)).length).to.eq(4);
 
-            expect((await abc[0].loadPath(true))[3]).to.eq(abc[0]);
+            expect((await c.loadPath(true))[3]).to.eq(c);
 
-            const abd = await root.getCreateRoomByPath(["a", "b", "d"]);
-            expect(abd).to.have.length(1);
-            expect(await abd[0].createTitle()).to.eq("d");
-            expect((await abd[0].loadPath(true)).length).to.eq(4);
+            const [__a, __b, d] = await root.getCreateRoomByPath([
+                "a",
+                "b",
+                "d",
+            ]);
+            expect(await d.createContext()).to.eq("d");
+            expect((await d.loadPath(true)).length).to.eq(4);
 
-            expect((await abd[0].loadPath(true))[3]).to.eq(abd[0]);
+            expect((await d.loadPath(true))[3]).to.eq(d);
 
             const childrenFromRoot = await root.replies.index.index
                 .iterate({ query: getImmediateRepliesQuery(root) })
@@ -59,7 +67,7 @@ describe("content", () => {
 
             const ab = await root.findCanvasesByPath(["a", "b"]);
             expect(
-                await Promise.all(ab.canvases.map((x) => x.createTitle()))
+                await Promise.all(ab.canvases.map((x) => x.createContext()))
             ).to.deep.eq(["b"]);
 
             const elementsInB = await ab.canvases[0].replies.index.search(
@@ -69,7 +77,7 @@ describe("content", () => {
             );
 
             const titlesFromB = await Promise.all(
-                elementsInB.map((x) => x.createTitle())
+                elementsInB.map((x) => x.createContext())
             );
             expect(titlesFromB.sort()).to.deep.eq(["c", "d"]);
 
@@ -89,10 +97,124 @@ describe("content", () => {
                     .all();
                 expect(allReplies).to.have.length(4);
                 for (const x of allReplies) {
-                    const title = await x.createTitle();
+                    const title = await x.createContext();
                     expect(title.length > 0).to.be.true;
                 }
             });
+        });
+
+        it("index once", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            let putIndexCalls = root.replies.index.putWithContext.bind(
+                root.replies.index
+            );
+
+            let putCount = 0;
+            root.replies.index.putWithContext = async (a, b, c) => {
+                putCount++;
+                return putIndexCalls(a, b, c);
+            };
+
+            await root.getCreateRoomByPath(["a"]);
+            expect(putCount).to.eq(1);
+        });
+
+        it("indexes replies", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root1 = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+            const [a, b] = await root1.getCreateRoomByPath(["a", "b"]);
+
+            expect(Number(a.__indexed.replies)).to.eq(1); // a has one reply (b)
+            expect(Number(b.__indexed.replies)).to.eq(0); // b has no replies
+        });
+
+        /*
+        //  TODO for keep: 'self' property is used and a remote not is modifying the same document, updates will not be propagate
+        // this will lead to issues when working with indexed data and fetching stuff "local first"
+        
+        it("will not re-index parents if not replicating", async () => {
+             const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+             const root1 = await session.peers[0].open(
+                 new Canvas({
+                     publicKey: randomRootKey,
+                     seed: new Uint8Array(),
+                 })
+             );
+             const [a1] = await root1.getCreateRoomByPath(["a"]);
+ 
+             const root2 = await session.peers[1].open(root1.clone(), {
+                 args: {
+                     replicate: false,
+                 },
+             });
+ 
+             await root2.replies.log.waitForReplicators({ waitForNewPeers: true });
+ 
+             let putIndexCalls = root2.replies.index.putWithContext.bind(
+                 root2.replies.index
+             );
+ 
+             let putCount = 0;
+             await root2.load();
+             root2.replies.index.putWithContext = async (a, b, c) => {
+                 putCount++;
+                 return putIndexCalls(a, b, c);
+             };
+ 
+             const [a2, b2] = await root2.getCreateRoomByPath(["a", "b"]);
+             await waitForResolved(async () => expect(Number(await a1.countReplies({ onlyImmediate: true }))).to.eq(1))
+ 
+             expect(putCount).to.eq(1);
+ 
+             const checkReplies = async (root: Canvas) => {
+                 const a = await root.getCreateRoomByPath(["a"])
+                 expect(a).to.have.length(1);
+                 const asIndexed = a[0] as WithIndexedContext<Canvas, IndexableCanvas>;
+ 
+                 expect(asIndexed.__indexed).to.exist; // root + a
+                 expect(Number(await a1.countReplies({ onlyImmediate: true }))).to.eq(1);
+                 expect(Number(asIndexed.__indexed.replies)).to.eq(1); // a has one reply (b)
+             }
+ 
+             await checkReplies(root1);
+             await checkReplies(root2);
+ 
+ 
+ 
+         }); */
+        it("same path", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root1 = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            const indexSize = await root1.replies.index.getSize();
+            expect(indexSize).to.eq(0);
+
+            const [a1] = await root1.getCreateRoomByPath(["a"]);
+
+            const indexSize1 = await root1.replies.index.getSize();
+            expect(indexSize1).to.eq(1);
+
+            const [a2, b2] = await root1.getCreateRoomByPath(["a", "b"]);
+
+            const indexSize2 = await root1.replies.index.getSize();
+            expect(indexSize2).to.eq(2);
         });
 
         it("can reload", async () => {
@@ -142,8 +264,10 @@ describe("content", () => {
                         seed: new Uint8Array(),
                     })
                 );
-                const [ab] = await root.getCreateRoomByPath(["a", "b"]);
-                expect(ab.path).to.have.length(2);
+
+                const [a, b] = await root.getCreateRoomByPath(["a", "b"]);
+                expect(a).to.exist;
+                expect(b).to.exist;
 
                 // index updates are not immediate, so we do checks until it's updated
                 await waitForResolved(async () => {
@@ -176,7 +300,7 @@ describe("content", () => {
                 await root.getCreateRoomByPath(["a", "b", "c"]);
                 await root.getCreateRoomByPath(["a", "b", "d"]);
                 const a = (await root.getCreateRoomByPath(["a"]))[0];
-                expect(await a.createTitle()).to.eq("a");
+                expect(await a.createContext()).to.eq("a");
 
                 const all = await a.replies.index
                     .iterate({
@@ -187,7 +311,7 @@ describe("content", () => {
                 // b, c, d
                 expect(all).to.have.length(3);
                 const allTitles = await Promise.all(
-                    all.map((x) => x.createTitle())
+                    all.map((x) => x.createContext())
                 );
                 expect(allTitles.sort()).to.deep.eq(["b", "c", "d"]);
             });
@@ -201,8 +325,8 @@ describe("content", () => {
                 );
                 await root.getCreateRoomByPath(["a", "b", "c"]);
                 await root.getCreateRoomByPath(["a", "b", "d"]);
-                const b = (await root.getCreateRoomByPath(["a", "b"]))[0];
-                expect(await b.createTitle()).to.eq("b");
+                const [_a, b] = await root.getCreateRoomByPath(["a", "b"]);
+                expect(await b.createContext()).to.eq("b");
 
                 const all = await b.replies.index
                     .iterate({
@@ -211,7 +335,7 @@ describe("content", () => {
                     .all();
 
                 const allTitles = await Promise.all(
-                    all.map((x) => x.createTitle())
+                    all.map((x) => x.createContext())
                 );
                 expect(allTitles.sort()).to.deep.eq(["c", "d"]);
             });
@@ -237,7 +361,7 @@ describe("content", () => {
                 });
                 expect(
                     await Promise.all(
-                        sortedByReplies.map((x) => x.createTitle())
+                        sortedByReplies.map((x) => x.createContext())
                     )
                 ).to.deep.eq(["a", "b", "c"]);
             });
@@ -287,7 +411,7 @@ describe("content", () => {
                         }
                     }
                     const titles = await Promise.all(
-                        sorted.map((x) => x.createTitle())
+                        sorted.map((x) => x.createContext())
                     );
                     expect(titles).to.deep.eq(["c", "b", "a"]);
                 };
@@ -352,7 +476,7 @@ describe("content", () => {
 
                     await delay(3e3);
                     const titles = await Promise.all(
-                        sorted.map((x) => x.createTitle())
+                        sorted.map((x) => x.createContext())
                     );
                     expect(titles).to.deep.eq(["c", "b", "a"]);
                 };
@@ -403,7 +527,7 @@ describe("content", () => {
                     }
                     expect(
                         await Promise.all(
-                            sortedByReplies.map((x) => x.createTitle())
+                            sortedByReplies.map((x) => x.createContext())
                         )
                     ).to.deep.eq(["a", "b", "c"]);
                 };
@@ -457,7 +581,7 @@ describe("content", () => {
                     }
                     expect(
                         await Promise.all(
-                            sortedByReplies.map((x) => x.createTitle())
+                            sortedByReplies.map((x) => x.createContext())
                         )
                     ).to.deep.eq(["a", "b", "c"]);
                 };
@@ -503,7 +627,7 @@ describe("content", () => {
                         direction: SortDirection.DESC,
                     }),
                 });
-                expect(await all[0].createTitle()).to.eq("a");
+                expect(await all[0].createContext()).to.eq("a");
 
                 console.log(
                     "VIEWER REPLICATE",
@@ -572,7 +696,7 @@ describe("content", () => {
                 await root.getCreateRoomByPath(["a", "b1"]);
                 await root.getCreateRoomByPath(["a", "b2"]);
 
-                expect(await a.createTitle()).to.eq("a");
+                expect(await a.createContext()).to.eq("a");
 
                 const allSubElements = await a.elements.index
                     .iterate({
@@ -676,9 +800,13 @@ describe("content", () => {
                         seed: new Uint8Array(),
                     })
                 );
-                const [c] = await root.getCreateRoomByPath(["a", "b", "c"]);
+                const [_a, _b, c] = await root.getCreateRoomByPath([
+                    "a",
+                    "b",
+                    "c",
+                ]);
                 const [a] = await root.getCreateRoomByPath(["a"]);
-                const [b] = await root.getCreateRoomByPath(["a", "b"]);
+                const [__a, b] = await root.getCreateRoomByPath(["a", "b"]);
                 expect(a.path).to.have.length(1);
                 expect(b.path).to.have.length(2);
                 expect(c.path).to.have.length(3);

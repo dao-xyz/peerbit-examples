@@ -36,10 +36,10 @@ describe("profile", () => {
                 seed: new Uint8Array(),
             })
         );
-        const abc = await root.getCreateRoomByPath(["a", "b", "c"]);
+        const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
 
         const profiles = await session.peers[0].open(new Profiles());
-        await profiles.create({ profile: abc[abc.length - 1] });
+        await profiles.create({ profile: c });
 
         const profile = await profiles.get(
             profiles.node.identity.publicKey,
@@ -58,28 +58,24 @@ describe("profile", () => {
                 seed: new Uint8Array(),
             })
         );
-        const abc = await root.getCreateRoomByPath(["a", "b", "c"]);
-        const abd = await root.getCreateRoomByPath(["a", "b", "d"]);
+        const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
+        const [__a, __b, d] = await root.getCreateRoomByPath(["a", "b", "d"]);
 
         const profiles = await session.peers[0].open(new Profiles());
-        await profiles.create({ profile: abc[abc.length - 1] });
+        await profiles.create({ profile: c });
 
         const profile = await profiles.get(
             profiles.node.identity.publicKey,
             identities
         );
-        expect(profile?.profile.address).to.eq(
-            abc[abc.length - 1].address.toString()
-        );
+        expect(profile?.profile.address).to.eq(c.address.toString());
 
-        await profiles.create({ profile: abd[abd.length - 1] });
+        await profiles.create({ profile: d });
         const updatedProfile = await profiles.get(
             profiles.node.identity.publicKey,
             identities
         );
-        expect(updatedProfile?.profile.address).to.eq(
-            abd[abd.length - 1].address.toString()
-        );
+        expect(updatedProfile?.profile.address).to.eq(d.address.toString());
 
         // expect profiles db to only have 1 profile entry
         expect(await profiles.profiles.index.getSize()).to.eq(1);
@@ -115,10 +111,10 @@ describe("profile", () => {
                 seed: new Uint8Array(),
             })
         );
-        const abc = await root.getCreateRoomByPath(["a", "b", "c"]);
+        const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
 
         const profiles = await session.peers[0].open(new Profiles());
-        await profiles.create({ profile: abc[abc.length - 1] });
+        await profiles.create({ profile: c });
 
         const profiles2 = await session.peers[1].open(new Profiles());
 
