@@ -155,7 +155,10 @@ export const Replies = (props: {
         if (loadTimeoutRef.current) {
             clearTimeout(loadTimeoutRef.current);
         }
-        loadTimeoutRef.current = setTimeout(reveal, LOAD_TIMEOUT);
+        loadTimeoutRef.current = setTimeout(() => {
+            console.log("REVEAL AFTER TIMEOUT");
+            reveal();
+        }, LOAD_TIMEOUT);
 
         return () => {
             if (loadTimeoutRef.current) {
@@ -399,6 +402,7 @@ export const Replies = (props: {
     const handleLoad = useCallback((canvas: Canvas, index: number) => {
         const id = canvas.idString;
         const hiddenSet = hiddenToLoadRef.current;
+
         if (hiddenSet.has(id)) {
             hiddenSet.delete(id);
 

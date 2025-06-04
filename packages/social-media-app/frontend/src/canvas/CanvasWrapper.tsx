@@ -153,8 +153,8 @@ export const CanvasWrapper = ({
                           quality ?? LOWEST_QUALITY
                       ),
                       /*  ...(typeFilter && typeFilter.type !== "all"
-                       ? [getTypeQuery(typeFilter.type)]
-                       : []), TODO? */
+               ? [getTypeQuery(typeFilter.type)]
+               : []), TODO? */
                   ],
                   sort: [
                       new Sort({
@@ -172,9 +172,12 @@ export const CanvasWrapper = ({
             debounce: 123,
             local: true,
             prefetch: true,
+            debug: false /* { id: canvas?.idString }, */,
             remote: {
                 eager: true,
-                warmup: 5e3,
+                joining: {
+                    waitFor: 5e3,
+                },
             },
 
             onChange: {

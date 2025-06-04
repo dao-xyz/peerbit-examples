@@ -11,6 +11,7 @@ import { AbortError } from "@peerbit/time";
 import { NoPeersError } from "@peerbit/shared-log";
 import { v4 as uuid } from "uuid";
 import { WithIndexedContext } from "@peerbit/document/dist/src/search";
+import { on } from "events";
 /* ────────────── helper types ────────────── */
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -18,7 +19,11 @@ type QueryLike = {
 };
 type QueryOptions = { query: QueryLike; id?: string };
 
-type WaitForReplicatorsOption = { warmup?: number; eager?: boolean };
+type RemoteQueryOptions = {
+    warmup?: number;
+    joining?: { waitFor?: number };
+    eager?: boolean;
+};
 
 /* ────────────── main hook ────────────── */
 export const useQuery = <
@@ -48,7 +53,7 @@ export const useQuery = <
             update?: (prev: RT[], change: DocumentsChange<T, I>) => RT[];
         };
         local?: boolean;
-        remote?: boolean | WaitForReplicatorsOption;
+        remote?: boolean | RemoteQueryOptions;
     } & QueryOptions
 ) => {
     /* ── «Item» is the concrete element type flowing through the hook ── */
@@ -67,10 +72,8 @@ export const useQuery = <
     const emptyResultsRef = useRef(false);
     const closeControllerRef = useRef<AbortController | null>(null);
     const waitedOnceRef = useRef(false);
-    const resetResultsOnReset = useRef(true);
 
     const [id, setId] = useState<string | undefined>(undefined);
-    const [resetCounter, invokeReset] = useReducer((n) => n + 1, 0);
 
     const reverseRef = useRef(options?.reverse);
     useEffect(() => {
@@ -108,19 +111,16 @@ export const useQuery = <
 
         toClose?.iterator.close();
 
-        if (resetResultsOnReset.current) {
-            allRef.current = [];
-            setAll([]);
-        }
+        allRef.current = [];
+        setAll([]);
 
         setIsLoading(false);
         loadingMoreRef.current = false;
-        log(options, "Iterator reset", toClose?.id, fromRef?.id);
+        log("Iterator reset", toClose?.id, fromRef?.id);
         setId(undefined);
     };
 
     useEffect(() => {
-        resetResultsOnReset.current = true;
         waitedOnceRef.current = false;
     }, [db, options?.id ?? options?.query, options?.resolve, options?.reverse]);
 
@@ -133,17 +133,33 @@ export const useQuery = <
 
         const initIterator = () => {
             let id = options?.id ?? uuid();
+            let remoteQueryOptions =
+                options.remote == null || options.remote === false
+                    ? false
+                    : {
+                          ...(typeof options.remote === "object"
+                              ? options.remote
+                              : {}),
+                          joining:
+                              typeof options.remote === "object" &&
+                              options.remote.joining?.waitFor !== undefined
+                                  ? {
+                                        waitFor:
+                                            options.remote.joining?.waitFor ??
+                                            5e3,
+                                        onMissedResults: ({ amount }) => {
+                                            loadMore(amount, true);
+                                        },
+                                    }
+                                  : undefined,
+                      };
             const ref = {
                 id,
                 iterator: db.index.iterate(options.query ?? {}, {
                     local: options?.local ?? true,
-                    remote:
-                        options.remote == null || options.remote === false
-                            ? false
-                            : typeof options.remote === "object"
-                            ? options.remote
-                            : true,
+                    remote: remoteQueryOptions,
                     resolve: options?.resolve,
+                    signal: closeControllerRef.current?.signal,
                 }) as ResultsIterator<Item>,
                 itemsConsumed: 0,
             };
@@ -172,13 +188,7 @@ export const useQuery = <
                     : (c: DocumentsChange<T, I>) => c;
 
             handleChange = async (e: CustomEvent<DocumentsChange<T, I>>) => {
-                log(
-                    options,
-                    "Merge change",
-                    e.detail,
-                    "iterator",
-                    newIteratorRef.id
-                );
+                log("Merge change", e.detail, "iterator", newIteratorRef.id);
                 const filtered = await mergeFn(e.detail);
                 if (
                     !filtered ||
@@ -200,7 +210,7 @@ export const useQuery = <
                         options.resolve ?? true
                     );
 
-                    log(options, "After update", allRef.current, merged);
+                    log("After update", allRef.current, merged);
                     const expectedDiff =
                         filtered.added.length - filtered.removed.length;
 
@@ -210,7 +220,7 @@ export const useQuery = <
                             merged.length === allRef.current.length)
                     ) {
                         // no change
-                        log(options, "no change after merge");
+                        log("no change after merge");
                         return;
                     }
                 }
@@ -231,7 +241,6 @@ export const useQuery = <
         options?.id ?? options?.query,
         options?.resolve,
         options?.reverse,
-        resetCounter,
     ]);
 
     /* ────────────── loadMore (once-wait aware) ────────────── */
@@ -250,22 +259,18 @@ export const useQuery = <
         return true;
     };
 
-    const reloadAfterTime = (): number | undefined => {
-        if (typeof options?.remote === "object" && options.remote.eager) {
-            return options.remote.warmup ?? db?.log.timeUntilRoleMaturity;
-        }
-        return undefined;
-    };
-
     const markWaited = () => {
         waitedOnceRef.current = true;
     };
 
-    const loadMore = async () => {
+    const loadMore = async (
+        n: number = batchSize,
+        pollEvenIfWasEmpty = false
+    ) => {
         const iterator = iteratorRef.current;
         if (
             !iterator ||
-            emptyResultsRef.current ||
+            (emptyResultsRef.current && !pollEvenIfWasEmpty) ||
             iterator.iterator.done() ||
             loadingMoreRef.current
         ) {
@@ -278,59 +283,59 @@ export const useQuery = <
         try {
             /* ── optional replicate-wait ── */
             if (shouldWait()) {
-                log(options, "Wait for replicators", iterator.id);
+                log("Wait for replicators", iterator.id);
+                let t0 = Date.now();
 
-                let isEager =
-                    typeof options?.remote === "object" && options.remote.eager;
-                const waitTimeout =
+                const warmup =
                     typeof options?.remote === "object" &&
                     typeof options?.remote.warmup === "number"
                         ? options?.remote.warmup
-                        : 5_000;
+                        : undefined;
 
-                let shouldResetAfterMaturity =
-                    isEager && !waitedOnceRef.current;
-                let promise = db?.log
-                    .waitForReplicators({
-                        timeout: waitTimeout,
-                        signal: closeControllerRef.current?.signal,
-                    })
-                    .catch((e) => {
-                        if (
-                            e instanceof AbortError ||
-                            e instanceof NoPeersError
-                        )
-                            return;
-                        console.warn("Remote replicators not ready", e);
-                    })
-                    .finally(() => {
-                        markWaited();
-                        if (shouldResetAfterMaturity) {
-                            resetResultsOnReset.current = false; // don't reset results， because we expect to get same or more results
-                            invokeReset();
-                        }
-                    });
-                if (!shouldResetAfterMaturity) {
-                    await promise;
+                if (warmup) {
+                    await db?.log
+                        .waitForReplicators({
+                            timeout: warmup,
+                            signal: closeControllerRef.current?.signal,
+                        })
+                        .catch((e) => {
+                            if (
+                                e instanceof AbortError ||
+                                e instanceof NoPeersError
+                            )
+                                return;
+                            console.warn("Remote replicators not ready", e);
+                        })
+                        .finally(() => {
+                            log(
+                                "Wait for replicators done",
+                                iterator.id,
+                                "time",
+                                Date.now() - t0
+                            );
+                            markWaited();
+                        });
                 }
             } else {
-                log(options, "Skip wait for replicators", iterator.id);
+                log("Skip wait for replicators", iterator.id);
             }
 
             /* ── fetch next batch ── */
-            log(options, "Retrieve next batch", iterator.id);
-            let newItems = await iterator.iterator.next(batchSize);
+            log("Retrieve next batch", iterator.id);
+
+            let newItems = await iterator.iterator.next(n);
+
             if (options?.transform) {
-                log(options, "Transform start", iterator.id);
+                log("Transform start", iterator.id);
 
                 newItems = await Promise.all(newItems.map(options.transform));
-                log(options, "Transform end", iterator.id);
+                log("Transform end", iterator.id);
             }
 
             /* iterator might have been reset while we were async… */
 
             if (iteratorRef.current !== iterator) {
-                log(options, "Iterator reset while loading more");
+                log("Iterator reset while loading more");
                 return false;
             }
 
@@ -367,7 +372,7 @@ export const useQuery = <
                     : [...prev, ...unique];
                 updateAll(combined);
             } else {
-                log(options, "No new items", iterator.id);
+                log("No new items", iterator.id);
             }
             return !iterator.iterator.done();
         } catch (e) {

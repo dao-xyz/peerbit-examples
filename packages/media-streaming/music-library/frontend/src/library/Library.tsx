@@ -206,6 +206,9 @@ export const Library: React.FC = () => {
             },
             remote: {
                 eager: true,
+                joining: {
+                    waitFor: 5e3,
+                },
             },
         }
     );

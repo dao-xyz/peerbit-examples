@@ -25,7 +25,7 @@ import { useCanvases } from "../../useCanvas";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
 import { BodyStyler } from "./BodyStyler";
-import { ALL_DEFAULT_VIEWS } from "./defaultViews";
+import { ALL_DEFAULT_VIEWS } from "./defaultViews.js";
 import { type WithIndexedContext } from "@peerbit/document";
 import {
     DEFAULT_TIME_FILTER,
@@ -36,7 +36,7 @@ import {
     TYPE_FILTERS,
     TypeFilter,
     TypeFilterType,
-} from "./filters";
+} from "./filters.js";
 /**
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
  * pieces of state run **once** instead of once‑per‑piece. The update is flushed after `delay` ms.
@@ -173,9 +173,11 @@ function useViewContextHook() {
         },
         prefetch: true,
         local: true,
-
         remote: {
             eager: true,
+            joining: {
+                waitFor: 5e3,
+            },
         },
     });
 
@@ -263,7 +265,7 @@ function useViewContextHook() {
     }, [viewRoot, viewModel, timeFilter, typeFilter?.key, query]);
 
     // For lazy loading, we use a paginated hook.
-    const [batchSize, setBatchSize] = useState(10); // Default batch size
+    const [batchSize, setBatchSize] = useState(3); // Default batch size
 
     const {
         items: sortedReplies,
@@ -281,8 +283,9 @@ function useViewContextHook() {
             debug: false, // { id: "replies" },
             local: true,
             remote: {
-                eager: true,
-                warmup: 5e3,
+                joining: {
+                    waitFor: 5e3,
+                },
             },
             onChange: {
                 merge: async (e) => {

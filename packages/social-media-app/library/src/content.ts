@@ -316,6 +316,7 @@ export class IndexableCanvas {
         if (canvas.closed) {
             canvas = await node.open(canvas, { existing: "reuse", args });
         }
+        console.log("from", canvas.idString, canvas.address);
         const context = await canvas.createContext();
         const replies = await canvas.countReplies();
         const elements = await canvas.elements.index

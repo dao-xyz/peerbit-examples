@@ -93,6 +93,9 @@ export const Libraries = () => {
             },
             remote: {
                 eager: true,
+                joining: {
+                    waitFor: 5e3,
+                },
             },
         }
     );

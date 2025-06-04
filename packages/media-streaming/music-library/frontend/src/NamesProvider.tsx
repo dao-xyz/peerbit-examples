@@ -32,7 +32,9 @@ export const NamesProvider = ({ children }: PropsWithChildren) => {
         debug: false,
         remote: {
             eager: true,
-            warmup: 5e3,
+            joining: {
+                waitFor: 5e3,
+            },
         },
     });
 
