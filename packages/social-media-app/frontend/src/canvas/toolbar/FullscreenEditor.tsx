@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Canvas } from "../Canvas";
-import { useToolbar } from "./ToolbarContext";
 
-type FullscreenEditorProps = {
-    children: React.ReactNode;
+type InlineEditorProps = {
+    generateTitle?: boolean; // Optional prop to control title generation
+    className?: string; // Optional class name for the container
 };
 
 // Array of 30 casual, everyday titles.
@@ -41,33 +41,36 @@ const titles = [
     "Share a thought",
 ];
 
-export const FullscreenEditor = ({ children }: FullscreenEditorProps) => {
-    const { fullscreenEditorActive } = useToolbar();
-    const startRef = useRef<HTMLHeadingElement>(null);
+export const InlineEditor = ({
+    generateTitle,
+    className,
+}: InlineEditorProps) => {
     // Pick a random title once when the component mounts.
     const randomTitle = useMemo(() => {
         return titles[Math.floor(Math.random() * titles.length)];
     }, []);
 
+    const ref = useRef<HTMLSpanElement>(null);
+    // Use the ref to focus the title input if needed
     useEffect(() => {
-        if (fullscreenEditorActive && startRef.current) {
-            startRef.current.scrollIntoView({
-                // scroll to the top of the page
-                behavior: "instant",
-                block: "start",
-                inline: "nearest",
-            });
-        }
-    }, [fullscreenEditorActive]);
-    if (fullscreenEditorActive) {
-        return (
-            <div className="overflow-auto  px-2 ">
-                <span className="" ref={startRef}>
+        ref.current?.scrollIntoView({
+            // scroll to the top of the page
+            behavior: "instant",
+            block: "start",
+            inline: "nearest",
+        });
+    }, [ref]);
+
+    return (
+        <div className={` flex flex-col pb-12 h-full ${className}`}>
+            {" "}
+            {/* mb-12 does not work here */}
+            {generateTitle && (
+                <span className="px-2" ref={ref}>
                     <h2>{randomTitle}</h2>
                 </span>
-                <Canvas fitWidth draft={true} inFullScreen />
-            </div>
-        );
-    }
-    return <>{children}</>;
+            )}
+            <Canvas fitWidth draft={true} inFullScreen />
+        </div>
+    );
 };

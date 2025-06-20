@@ -1,7 +1,8 @@
 import React, { useRef, useState, useLayoutEffect } from "react";
+import { useEditTools } from "./ToolbarContext";
+import { useToolbarVisibilityContext } from "./ToolbarVisibilityProvider";
 
 interface AnimatedStickyToolbarProps {
-    toolbarVisible: boolean;
     children: React.ReactNode;
     onHeightChange?: (height: number) => void;
 }
@@ -10,28 +11,29 @@ interface AnimatedStickyToolbarProps {
  * This crap is made because we can not use `position: sticky` on the toolbar together with transform transitions, because on Safari the sticky container will not reserve the space for the toolbar when it is translated.
  */
 export const AnimatedStickyToolbar = ({
-    toolbarVisible,
     children,
     onHeightChange,
 }: AnimatedStickyToolbarProps) => {
+    const { visible: toolbarVisible } = useToolbarVisibilityContext();
+
     const innerRef = useRef<HTMLDivElement>(null);
     const [toolbarHeight, _setToolbarHeight] = useState(0);
 
-    const setToolbarHeight = (height: number) => {
-        _setToolbarHeight(height);
-        if (onHeightChange) {
-            onHeightChange(height);
-        }
+    const updateToolbarHeight = (h: number) => {
+        // 1. expose to CSS immediately – no React render needed
+        document.documentElement.style.setProperty("--toolbar-h", `${h}px`);
+        _setToolbarHeight(h); // (optional) still keep your local state
+        onHeightChange?.(h); // keep existing API
     };
 
     useLayoutEffect(() => {
         if (innerRef.current) {
-            setToolbarHeight(innerRef.current.offsetHeight);
+            updateToolbarHeight(innerRef.current.offsetHeight);
         }
         const resizeObserver = new ResizeObserver((entries) => {
             for (let entry of entries) {
                 if (entry.target === innerRef.current) {
-                    setToolbarHeight(entry.contentRect.height);
+                    updateToolbarHeight(entry.contentRect.height);
                 }
             }
         });
@@ -49,7 +51,9 @@ export const AnimatedStickyToolbar = ({
     return (
         // This outer container is sticky and always reserves the toolbar height.
         <div
-            className="fixed z-20 bottom-0 inset-x-0 "
+            className={`fixed z-20 bottom-0 inset-x-0 ${
+                toolbarVisible ? "" : "pointer-events-none"
+            }`}
             style={{ height: toolbarHeight || "auto" }}
         >
             {/* The inner toolbar is animated with transform */}

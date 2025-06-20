@@ -3,7 +3,7 @@ import { forwardRef, useEffect, useState } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
 import { LOWEST_QUALITY, Profile as ProfileData } from "@giga-app/interface";
 import { useProfiles } from "./useProfiles";
-import { CanvasPreview } from "../canvas/Preview";
+import { CanvasPreview } from "../canvas/preview/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";
@@ -22,11 +22,10 @@ export const ProfileButton = forwardRef<
     {
         publicKey: PublicSignKey;
         direction?: "row" | "col";
-        setBgColor?: (color: string) => void;
         onClick?: () => void;
         size?: number;
     } & React.ButtonHTMLAttributes<HTMLButtonElement>
->(({ size, publicKey, direction, setBgColor, onClick, ...rest }, ref) => {
+>(({ size, publicKey, direction, onClick, ...rest }, ref) => {
     const { profiles, navigateTo, getProfile } = useProfiles();
     const [profile, setProfile] = useState<ProfileData | undefined>();
     const { identities } = useIdentities();
@@ -83,11 +82,7 @@ export const ProfileButton = forwardRef<
             );
         }
         return (
-            <ProfilePhotoGenerated
-                size={sizeDefined}
-                publicKey={publicKey}
-                onColorGenerated={setBgColor}
-            />
+            <ProfilePhotoGenerated size={sizeDefined} publicKey={publicKey} />
         );
     };
 

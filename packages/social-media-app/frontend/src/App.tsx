@@ -23,6 +23,8 @@ import {
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
 import type { NetworkOption } from "@peerbit/react";
 import { BlurOnOutsidePointerProvider } from "./canvas/reply/view/BlurOnScrollProvider";
+import { CustomizedBackground } from "./canvas/custom/applyVisualization";
+import { CustomizationProvider } from "./canvas/custom/CustomizationProvider";
 
 export const Content = () => {
     const { error: peerError } = usePeer();
@@ -53,7 +55,7 @@ export const Content = () => {
     }, [peerError, showError]);
 
     // Use our new hook to control header visibility.
-    const headerVisible = useHeaderVisibilityContext();
+    const { visible: headerVisible } = useHeaderVisibilityContext();
 
     const [headerHeight, setHeaderHeight] = useState(0);
     const headerRef = useRef<HTMLDivElement>(null);
@@ -67,27 +69,29 @@ export const Content = () => {
     }, []);
 
     return (
-        <>
-            <ViewProvider>
-                {/* Main header with transform animation */}
-                <div
-                    ref={headerRef}
-                    className={`sticky top-0   inset-x-0 z-3 transition-transform duration-800 ease-in-out`}
-                    style={{
-                        transform: headerVisible
-                            ? "translateY(0)"
-                            : `translateY(-${headerHeight}px)`,
-                        willChange: "transform",
-                        backfaceVisibility: "hidden",
-                    }}
-                >
-                    <Header fullscreen={inIframe()} />
-                </div>
+        <ViewProvider>
+            <CustomizationProvider>
+                <CustomizedBackground className=" h-full">
+                    {/* Main header with transform animation */}
+                    <div
+                        ref={headerRef}
+                        className={`sticky top-0   inset-x-0 transition-transform duration-800 ease-in-out z-30`}
+                        style={{
+                            transform: headerVisible
+                                ? "translateY(0)"
+                                : `translateY(-${headerHeight}px)`,
+                            willChange: "transform",
+                            backfaceVisibility: "hidden",
+                        }}
+                    >
+                        <Header fullscreen={inIframe()} />
+                    </div>
 
-                {/* Add padding so content isn’t hidden by the fixed header */}
-                <BaseRoutes />
-            </ViewProvider>
-        </>
+                    {/* Add padding so content isn’t hidden by the fixed header */}
+                    <BaseRoutes />
+                </CustomizedBackground>
+            </CustomizationProvider>
+        </ViewProvider>
     );
 };
 

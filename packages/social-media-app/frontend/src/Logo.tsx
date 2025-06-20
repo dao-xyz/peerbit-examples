@@ -34,7 +34,7 @@ export const HeaderLogo = ({ onClick }: { onClick?: () => void }) => {
     );
     return (
         <button
-            className=" p-0 mb-[-10px] rounded-none hover:cursor-pointer h-full flex flex-col content-center items-center outline-0  border-none bg-transparent transform transition duration-200 hover:scale-110 active:scale-125"
+            className=" p-0 mb-[-10px] rounded-none hover:cursor-pointer h-full flex flex-col content-center items-center outline-0  border-none bg-transparent btn-bouncy"
             onClick={() => {
                 navigate("/", {});
                 onClick && onClick();

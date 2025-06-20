@@ -121,7 +121,7 @@ export const DebugGeneratePostButton = () => {
                             breakpoint: "md",
                         }),
                         publicKey: peer.identity.publicKey,
-                        parent: openCanvas,
+                        canvasId: openCanvas.id,
                     })
                 );
             }

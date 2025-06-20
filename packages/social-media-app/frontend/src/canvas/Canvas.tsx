@@ -9,7 +9,7 @@ import {
 import "./Canvas.css";
 import { Frame } from "../content/Frame.js";
 import { useCanvas } from "./CanvasWrapper";
-import { ReactNode, useMemo, useReducer } from "react";
+import { ReactNode, useEffect, useMemo, useReducer } from "react";
 import {
     rectIsStaticImage,
     rectIsStaticMarkdownText,
@@ -18,6 +18,7 @@ import {
 import { IoIosArrowDown, IoIosArrowUp } from "react-icons/io";
 import { MdClear } from "react-icons/md";
 import { Spinner } from "../utils/Spinner";
+import { useEditModeContext } from "./toolbar/EditModeProvider";
 
 type SizeProps = {
     width?: number;
@@ -58,7 +59,6 @@ export const Canvas = (
 ) => {
     const asThumbnail = !!properties.scaled;
     const {
-        editMode,
         active,
         setActive,
         pendingRects,
@@ -67,8 +67,15 @@ export const Canvas = (
         canvas,
         mutate,
         isLoading,
+
         reduceElementsForViewing, // from context!
     } = useCanvas();
+
+    const { editMode, setEditMode } = useEditModeContext();
+    useEffect(() => {
+        setEditMode(properties.draft);
+    }, [properties.draft]);
+
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
     // First filter based on appearance, then group partial images.
@@ -178,9 +185,9 @@ export const Canvas = (
                                         properties.inFullScreen
                                     }
                                     editControls={
-                                        <>
+                                        <div className="mx-1 flex flex-col items-center">
                                             <button
-                                                className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                                className="mb-2 btn border btn-icon btn-icon-sm"
                                                 disabled={ix === 0}
                                                 onClick={() => {
                                                     return mutate(
@@ -216,13 +223,13 @@ export const Canvas = (
                                                 <IoIosArrowUp />
                                             </button>
                                             <button
-                                                className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                                className="mb-2 btn border btn-icon btn-icon-sm"
                                                 onClick={deleteFn}
                                             >
                                                 <MdClear />
                                             </button>
                                             <button
-                                                className="btn btn-elevated m-1 btn-icon btn-icon-sm"
+                                                className="mb-2 btn  border  btn-icon btn-icon-sm"
                                                 disabled={
                                                     rectsToRender.length - 1 ===
                                                     ix
@@ -259,7 +266,7 @@ export const Canvas = (
                                             >
                                                 <IoIosArrowDown />
                                             </button>
-                                        </>
+                                        </div>
                                     }
                                 />
                                 <svg
@@ -305,7 +312,7 @@ export const Canvas = (
     } ${
         properties.draft
             ? properties.inFullScreen
-                ? "h-[calc(100vh-10rem)]"
+                ? "" /*  "min-h-[calc(100vh-10rem)]" */
                 : ""
             : ""
     }`;

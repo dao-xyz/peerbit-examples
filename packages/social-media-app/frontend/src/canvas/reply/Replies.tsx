@@ -36,6 +36,7 @@ export const Replies = (props: {
     parentRef: React.RefObject<HTMLDivElement>;
     viewRef: HTMLElement;
     onSnapshot: (snap: FeedSnapshot) => void;
+    disableLoadMore?: boolean; // if true, will not load more items
 }) => {
     const {
         view,
@@ -79,6 +80,10 @@ export const Replies = (props: {
     } | null>(null);
 
     const loadMore = () => {
+        if (props.disableLoadMore) {
+            return;
+        }
+
         if (!firstBatchHandled.current) {
             pendingScrollAdjust.current = {
                 isWindow: props.viewRef === document.body,
@@ -86,6 +91,7 @@ export const Replies = (props: {
                 prevScrollHeight: undefined, // how can viewRef be null?
             };
         }
+
         return _loadMore();
     };
 
@@ -271,11 +277,12 @@ export const Replies = (props: {
 
     useEffect(() => {
         const sentinel = sentinelRef.current;
-        if (!sentinel || props.viewRef !== document.body) return;
+        if (!sentinel /*  || props.viewRef !== document.body */) return; // TODO second arg needed?
 
         const observer = new IntersectionObserver(
             (entries) => {
                 const entry = entries[0];
+
                 if (
                     entry.isIntersecting &&
                     lastSentinelForLoadingMore.current !== sentinel &&
@@ -288,7 +295,6 @@ export const Replies = (props: {
                         sentinel,
                         prevScrollHeight: props.viewRef.scrollHeight,
                     };
-
                     loadMore();
 
                     /* console.log("set cache scroll height", {

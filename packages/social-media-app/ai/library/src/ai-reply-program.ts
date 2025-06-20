@@ -12,7 +12,7 @@ import {
     CanvasReference,
     CanvasValueReference,
     Element,
-    getOwnedAndSubownedElementsQuery,
+    getOwnedElementsQuery,
     getTextElementsQuery,
     IndexableElement,
     Layout,
@@ -111,7 +111,7 @@ async function getOrderedContextTexts(options: {
     const iterator = options.canvas.elements.index.iterate(
         {
             query: [
-                ...getOwnedAndSubownedElementsQuery(options.canvas),
+                ...getOwnedElementsQuery(options.canvas),
                 getTextElementsQuery(),
                 ...(options.elementsQuery ? [options.elementsQuery] : []),
             ],
@@ -864,7 +864,7 @@ export const insertTextIntoCanvas = async (text: string, parent: Canvas) => {
             }),
             location: Layout.zero(),
             publicKey: parent.node.identity.publicKey,
-            parent,
+            canvasId: parent.id,
         })
     );
 };

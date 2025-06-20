@@ -22,11 +22,18 @@ export const getAdressFromKey = (key: string) =>
 
 export const getNameFromPath = (name: string) => decodeURIComponent(name);
 
-export const getCanvasPath = (canvas: CanvasDB, view?: string) => {
+export const getCanvasPath = (
+    canvas: CanvasDB,
+    view?: string,
+    mode?: "fullscreen" | "regular"
+) => {
     const base = "/c/" + canvas.address;
     let searchParams = "";
     if (view) {
         searchParams = `?view=${view}`;
+    }
+    if (mode) {
+        searchParams += searchParams ? `&mode=${mode}` : `?mode=${mode}`;
     }
     return base + searchParams;
 };

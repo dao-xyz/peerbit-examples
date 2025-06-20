@@ -43,6 +43,7 @@ const useHeaderVisibility = (
 ) => {
     // inside HeaderVisibilityProvider or a top‑level layout component
     const baseViewportHeightRef = useRef(getViewportHeight());
+    const [disabled, setDisabled] = useState(false);
 
     useEffect(() => {
         const handleVpResize = () => {
@@ -65,7 +66,19 @@ const useHeaderVisibility = (
     const baseViewportHeight = baseViewportHeightRef.current; // inject via context
 
     useEffect(() => {
+        if (disabled) {
+            setVisible(false);
+        } else {
+            setVisible(true);
+        }
+    }, [disabled]);
+
+    useEffect(() => {
         const handleScroll = () => {
+            if (disabled) {
+                return;
+            }
+
             if (keyboardIsOpen(baseViewportHeight)) {
                 return;
             }
@@ -114,21 +127,31 @@ const useHeaderVisibility = (
         return () => {
             window.removeEventListener("scroll", handleScroll);
         };
-    }, [threshold, downDeltaThreshold, bottomBounceTolerance]);
+    }, [threshold, downDeltaThreshold, bottomBounceTolerance, disabled]);
 
-    return visible;
+    return { visible, setDisabled, disabled };
 };
 
-const HeaderVisibilityContext = createContext<boolean>(true);
+const HeaderVisibilityContext = createContext<{
+    visible: boolean;
+    disabled: boolean;
+    setDisabled: (disabled: boolean) => void;
+}>(undefined);
 
 export const HeaderVisibilityProvider = ({
     children,
 }: {
     children: React.ReactNode;
 }) => {
-    const headerVisible = useHeaderVisibility();
+    const { visible, disabled, setDisabled } = useHeaderVisibility();
     return (
-        <HeaderVisibilityContext.Provider value={headerVisible}>
+        <HeaderVisibilityContext.Provider
+            value={{
+                visible,
+                disabled,
+                setDisabled,
+            }}
+        >
             {children}
         </HeaderVisibilityContext.Provider>
     );

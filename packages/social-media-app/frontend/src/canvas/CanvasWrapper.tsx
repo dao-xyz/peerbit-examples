@@ -1,4 +1,3 @@
-// CanvasWrapper.tsx
 import React, {
     useState,
     useEffect,
@@ -39,18 +38,19 @@ import { useAIReply } from "../ai/AIReployContext.js";
 import { waitFor } from "@peerbit/time";
 import { DocumentsChange } from "@peerbit/document";
 import { useView } from "./reply/view/ViewContex.js";
+import { set } from "lodash";
 
-// Extend the context type to include a subscription function.
+// ---------------------------------------------------------------------
+//  Context definitions
+// ---------------------------------------------------------------------
 export interface CanvasContextType {
-    editMode: boolean;
-    setEditMode: (value: boolean) => void;
     active: Set<Uint8Array>;
     setActive: (value: Set<Uint8Array>) => void;
     pendingRects: Element[];
     setPendingRects: React.Dispatch<
         React.SetStateAction<Element<ElementContent>[]>
     >;
-    rects: Element[];
+    rects: Element[]; // ► now the deduplicated, user-visible list
     insertDefault: (options?: {
         app?: SimpleWebManifest;
         increment?: boolean;
@@ -59,6 +59,7 @@ export interface CanvasContextType {
     }) => Promise<Element | Element[]>;
     removePending: (id: Uint8Array) => void;
     savePending: () => Promise<Element[] | undefined>;
+    savedOnce: boolean;
     canvas: CanvasDB;
     onContentChange: (element: Element) => void;
     isEmpty: boolean;
@@ -75,19 +76,19 @@ export interface CanvasContextType {
             filter: (rect: Element) => boolean;
         }
     ) => boolean;
-    reduceElementsForViewing: (rects: Element[]) => Element[];
-    separateAndSortRects: (rects: Element[]) => {
+    reduceElementsForViewing: (rects?: Element[]) => Element[];
+    separateAndSortRects: (rects?: Element[]) => {
         text: Element<StaticContent<StaticMarkdownText>>[];
         other: Element[];
     };
     text: string;
     setRequestAIReply: (boolean: boolean) => void;
     requestAIReply: boolean;
-    // <-- New subscription function!
     subscribeContentChange: (
         callback: (element: Element) => void
     ) => () => void;
     isLoading: boolean;
+    isSaving: boolean;
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -95,13 +96,14 @@ export const CanvasContext = createContext<CanvasContextType | undefined>(
 );
 
 export const useCanvas = () => {
-    const context = useContext(CanvasContext);
-    if (!context) {
-        throw new Error("useCanvas must be used within a CanvasWrapper");
-    }
-    return context;
+    const ctx = useContext(CanvasContext);
+    if (!ctx) throw new Error("useCanvas must be used within a CanvasWrapper");
+    return ctx;
 };
 
+// ---------------------------------------------------------------------
+//  Component
+// ---------------------------------------------------------------------
 interface CanvasWrapperProps {
     children: React.ReactNode;
     canvas: CanvasDB;
@@ -123,47 +125,50 @@ export const CanvasWrapper = ({
     quality,
     onLoad,
 }: CanvasWrapperProps) => {
-    // Standard hooks & context from your existing code.
+    // -------------------------------------------------- basic hooks ----
     const { peer, persisted } = usePeer();
     const { program: canvas } = useProgram(canvasDB, {
         existing: "reuse",
         id: canvasDB?.idString,
         keepOpenOnUnmount: true,
-        args: {
-            replicate: persisted,
-        },
+        args: { replicate: persisted },
     });
-    const setupForCanvasIdDone = useRef<string | undefined>(undefined);
-    const { request } = useAIReply();
-    const [requestAIReply, setRequestAIReply] = useState(false);
+
     const { getCuratedNativeApp: getNativeApp } = useApps();
     const { showError } = useErrorDialog();
-    const [editMode, setEditMode] = useState(!!draft);
-    const [isEmpty, setIsEmpty] = useState(true);
     const { announceReply } = useReplyProgress();
+    const { request } = useAIReply();
     const { typeFilter } = useView();
 
+    // -------------------------------------------------- local state ----
+    const [pendingRects, setPendingRects] = useState<Element[]>([]);
+    const [active, setActive] = useState<Set<Uint8Array>>(new Set());
+    const [isEmpty, setIsEmpty] = useState(true);
+    const [isSaving, setIsSaving] = useState(false);
+    const [savedOnce, setSavedOnce] = useState(false);
+    const [requestAIReply, setRequestAIReply] = useState(false);
+    const [text, setText] = useState<string>("");
+
+    const pendingCounter = useRef(0);
+    const latestBreakpoint = useRef<"xxs" | "md">("md");
+    const setupForCanvasIdDone = useRef<string>();
+
+    // -------------------------------------------------- query ---------
     const query = useMemo(() => {
-        return !canvas || canvas.closed
-            ? null
-            : {
-                  query: [
-                      ...getOwnedElementsQuery(canvas),
-                      ...getQualityLessThanOrEqualQuery(
-                          quality ?? LOWEST_QUALITY
-                      ),
-                      /*  ...(typeFilter && typeFilter.type !== "all"
-               ? [getTypeQuery(typeFilter.type)]
-               : []), TODO? */
-                  ],
-                  sort: [
-                      new Sort({
-                          key: ["quality"],
-                          direction: SortDirection.ASC,
-                      }),
-                      new Sort({ key: ["location", "y"] }),
-                  ],
-              };
+        if (!canvas || canvas.closed) return null;
+        return {
+            query: [
+                ...getOwnedElementsQuery(canvas),
+                ...getQualityLessThanOrEqualQuery(quality ?? LOWEST_QUALITY),
+            ],
+            sort: [
+                new Sort({
+                    key: ["quality"],
+                    direction: SortDirection.ASC,
+                }),
+                new Sort({ key: ["location", "y"] }),
+            ],
+        };
     }, [canvas?.closed, canvas?.idString, quality, typeFilter.key]);
 
     const { items: rects, isLoading } = useQuery(
@@ -172,17 +177,14 @@ export const CanvasWrapper = ({
             debounce: 123,
             local: true,
             prefetch: true,
-            debug: false /* { id: canvas?.idString }, */,
+            debug: false,
             remote: {
                 eager: true,
-                joining: {
-                    waitFor: 5e3,
-                },
+                joining: { waitFor: 5e3 },
             },
-
             onChange: {
                 merge: (change) => {
-                    const filteredForScope: DocumentsChange<
+                    const filtered: DocumentsChange<
                         Element<ElementContent>,
                         IndexableElement
                     > = {
@@ -191,68 +193,161 @@ export const CanvasWrapper = ({
                             canvas.isInScope(x)
                         ),
                     };
-                    return filteredForScope;
+                    return filtered;
                 },
             },
-            /*   debug: {
-                  id: canvas?.idString,
-              }, */
             query,
         }
     );
 
-    const [pendingRects, setPendingRects] = useState<Element[]>([]);
-    const pendingCounter = useRef(0);
-    const [active, setActive] = useState<Set<Uint8Array>>(new Set());
-    const latestBreakpoint = useRef<"xxs" | "md">("md");
-    const [text, setText] = useState<string>("");
+    // ------------------------------------------------------------------
+    // 1.  Deduplicated union for rendering (prevents flash)
+    // ------------------------------------------------------------------
+    const visibleRects = useMemo<Element[]>(() => {
+        const idsInQuery = new Set(rects.map((r) => r.idString));
+        const stillPending = pendingRects.filter(
+            (p) => !idsInQuery.has(p.idString)
+        );
+        return [...rects, ...stillPending];
+    }, [rects, pendingRects]);
 
-    // --- New: Set up a subscription mechanism for content changes ---
+    // ------------------------------------------------------------------
+    // 2.  Incremental pruning of pendingRects
+    // ------------------------------------------------------------------
+    useEffect(() => {
+        if (pendingRects.length === 0) return;
+        const idsInQuery = new Set(rects.map((r) => r.idString));
+        if (idsInQuery.size === 0) return; // nothing new yet
+        setPendingRects((prev) =>
+            prev.filter((p) => !idsInQuery.has(p.idString))
+        );
+    }, [rects]); // NOTE: intentionally *not* depending on pendingRects
+
+    // ------------------------------------------------------------------
+    //  Subscription machinery
+    // ------------------------------------------------------------------
     const contentChangeSubscribers = useRef(
         new Set<(element: Element) => void>()
     );
-
-    const subscribeContentChange = (callback: (element: Element) => void) => {
-        contentChangeSubscribers.current.add(callback);
-        // Return an unsubscribe function.
-        return () => {
-            contentChangeSubscribers.current.delete(callback);
-        };
+    const subscribeContentChange = (cb: (e: Element) => void) => {
+        contentChangeSubscribers.current.add(cb);
+        return () => contentChangeSubscribers.current.delete(cb);
     };
 
-    // --- The rest of your functions remain unchanged ---
+    // ------------------------------------------------------------------
+    //  Utilities (reduce / separate) – default to visibleRects
+    // ------------------------------------------------------------------
+    const reduceElementsForViewing = (
+        elems: Element[] = visibleRects
+    ): Element[] => {
+        const groups = new Map<string, Map<number, Element[]>>();
+        elems.forEach((rect) => {
+            const cid = rect.content.contentIdString;
+            if (!groups.has(cid)) groups.set(cid, new Map());
+            const q = rect.content.quality;
+            const qm = groups.get(cid)!;
+            if (!qm.has(q)) qm.set(q, []);
+            qm.get(q)!.push(rect);
+        });
+
+        const finalRects: Element[] = [];
+
+        groups.forEach((qm) => {
+            const qualities = Array.from(qm.keys()).sort((a, b) => b - a);
+            if (qualities.length === 0) return;
+            const bestQ = qualities[0];
+            const candidates = qm.get(bestQ)!;
+
+            const full = candidates.filter((r) => !rectIsStaticPartialImage(r));
+            const partial = candidates.filter((r) =>
+                rectIsStaticPartialImage(r)
+            );
+
+            let best: Element | undefined = undefined;
+            if (partial.length > 0) {
+                const first = partial[0].content.content as StaticPartialImage;
+                if (first.totalParts === partial.length) {
+                    const merged = StaticPartialImage.combine(
+                        partial.map(
+                            (r) => r.content.content as StaticPartialImage
+                        )
+                    );
+                    const rep = partial[0] as Element<StaticContent>;
+                    best = new Element({
+                        publicKey: rep.publicKey,
+                        id: rep.id,
+                        location: rep.location,
+                        content: new StaticContent({
+                            quality: rep.content.quality,
+                            content: merged,
+                            contentId: rep.content.contentId,
+                        }),
+                        canvasId: rep.parent.id,
+                    });
+                } else {
+                    best = partial[0];
+                }
+            } else if (full.length > 0) {
+                best = full[0];
+            }
+            if (best) finalRects.push(best);
+        });
+
+        finalRects.sort((a, b) => a.location.y - b.location.y);
+        return finalRects;
+    };
+
+    const separateAndSortRects = (
+        elems: Element[] = visibleRects
+    ): {
+        text: Element<StaticContent<StaticMarkdownText>>[];
+        other: Element[];
+    } => {
+        const grouped = reduceElementsForViewing(elems);
+        const out = {
+            text: [] as Element<StaticContent<StaticMarkdownText>>[],
+            other: [] as Element[],
+        };
+        grouped.forEach((r) => {
+            if (rectIsStaticMarkdownText(r)) out.text.push(r);
+            else out.other.push(r);
+        });
+        out.text.sort((a, b) => a.location.y - b.location.y);
+        out.other.sort((a, b) => a.location.y - b.location.y);
+        return out;
+    };
+
+    // ------------------------------------------------------------------
+    //  addRect, mutate, insertImage, insertDefault, removePending
+    //  –– original implementations below (unchanged except where noted)
+    // ------------------------------------------------------------------
     const getOptimalInsertLocation = (content: ElementContent) => {
         if (rectIsStaticMarkdownText({ content })) {
             return 0;
         }
-        const locationOfTopMostText = (): number | undefined => {
-            return pendingRects
+        const topMostTextY = () =>
+            pendingRects
                 .filter((x) => rectIsStaticMarkdownText(x))
                 .sort((x, y) => x.location.y - y.location.y)[0]?.location.y;
-        };
-        let insertionLocation = locationOfTopMostText();
-        if (insertionLocation == null || insertionLocation < 0) {
-            insertionLocation = 0;
-        }
-        return insertionLocation;
+
+        let y: number | undefined = topMostTextY();
+        if (y == null || y < 0) y = 0;
+        return y;
     };
 
     const getMaxYPlus1 = (from: Element[]) => {
         const maxY = from
             .map((x) => x.location)
             .filter((x) => x.breakpoint === latestBreakpoint.current)
-            .reduce((prev, current) => Math.max(current.y, prev), -1);
+            .reduce((prev, curr) => Math.max(curr.y, prev), -1);
         return maxY != null ? maxY + 1 : 0;
     };
 
     const reduceYInPending = (fromY: number) => {
-        const allPending = pendingRects;
-        for (const element of allPending.sort(
-            (x, y) => x.location.y - y.location.y
+        for (const el of [...pendingRects].sort(
+            (a, b) => a.location.y - b.location.y
         )) {
-            if (element.location.y >= fromY) {
-                element.location.y--;
-            }
+            if (el.location.y >= fromY) el.location.y--;
         }
     };
 
@@ -260,53 +355,35 @@ export const CanvasWrapper = ({
         fn: (element: Element<ElementContent>, ix: number) => boolean,
         options?: { filter: (rect: Element) => boolean }
     ): boolean => {
-        if (!canvas?.publicKey.equals(peer?.identity.publicKey)) {
-            return false;
-        }
-        let mutatedOnce = false;
+        if (!canvas?.publicKey.equals(peer?.identity.publicKey)) return false;
+        let mutated = false;
+        let updated = [...pendingRects];
 
-        // Create a new array for pending mutations.
-        let updatedPending = [...pendingRects];
-
-        // Process already pending elements.
-        for (let i = 0; i < updatedPending.length; i++) {
-            const element = updatedPending[i];
-            if (options?.filter && !options.filter(element)) {
-                continue;
-            }
-            const mutated = fn(element, i);
-            if (mutated) {
-                // The element has been mutated; update it in the pending array.
-                updatedPending[i] = element;
-                mutatedOnce = true;
+        // mutate pending
+        for (let i = 0; i < updated.length; i++) {
+            const el = updated[i];
+            if (options?.filter && !options.filter(el)) continue;
+            if (fn(el, i)) {
+                updated[i] = el;
+                mutated = true;
             }
         }
 
-        // Process elements from rects that are not yet in pending.
+        // mutate committed rects (copy into pending if needed)
         for (let i = 0; i < rects.length; i++) {
-            const element = rects[i];
-            // Skip if already in pending.
-            if (updatedPending.some((e) => e.idString === element.idString)) {
-                continue;
-            }
-            if (options?.filter && !options.filter(element)) {
-                continue;
-            }
-            const mutated = fn(element, i);
-            if (mutated) {
-                // Add the mutated element to pending.
-                updatedPending.push(element);
-                mutatedOnce = true;
+            const el = rects[i];
+            if (updated.some((e) => e.idString === el.idString)) continue;
+            if (options?.filter && !options.filter(el)) continue;
+            if (fn(el, i)) {
+                updated.push(el);
+                mutated = true;
             }
         }
-        // Update the state so that any useEffect dependent on pendingRects is notified.
-        if (mutatedOnce) {
-            setPendingRects(updatedPending);
-        }
-        return mutatedOnce;
+
+        if (mutated) setPendingRects(updated);
+        return mutated;
     };
 
-    // Overloaded addRect function.
     async function addRect(
         content: ElementContent,
         options?: {
@@ -319,56 +396,45 @@ export const CanvasWrapper = ({
         contents: ElementContent[],
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
     ): Promise<Element[]>;
+
     async function addRect(
-        contentOrContents: ElementContent | ElementContent[],
+        contents: ElementContent | ElementContent[],
         options: {
             id?: Uint8Array;
             pending?: boolean;
             y?: number | "optimize" | "max";
         } = { pending: false }
     ): Promise<Element | Element[]> {
-        const oneContent = Array.isArray(contentOrContents)
-            ? contentOrContents[0]
-            : contentOrContents;
-        if (!oneContent) {
-            throw new Error("Missing content");
-        }
-        if (options?.id && Array.isArray(contentOrContents)) {
-            throw new Error("Cannot set id when adding multiple elements");
-        }
-        const yStrategy = options.y ?? "optimize";
-        await waitFor(() => canvas).catch(() => {
-            new Error("Canvas not ready");
-        });
+        const firstContent = Array.isArray(contents) ? contents[0] : contents;
+        if (!firstContent) throw new Error("Missing content");
+        if (options?.id && Array.isArray(contents))
+            throw new Error("Cannot set id when adding multiple");
 
+        const yStrategy = options.y ?? "optimize";
+        await waitFor(() => canvas).catch(() => new Error("Canvas not ready"));
         await canvas.load();
-        const allCurrentRects = await canvas.elements.index.search({
+
+        const current = await canvas.elements.index.search({
             query: getOwnedElementsQuery(canvas),
         });
-        const allPending = pendingRects;
-        const all = [...allCurrentRects, ...allPending];
-        let y: number | undefined = undefined;
-        if (typeof yStrategy === "number") {
-            y = yStrategy;
-        } else if (yStrategy === "optimize") {
-            y = getOptimalInsertLocation(oneContent);
-        } else if (yStrategy === "max") {
-            y = getMaxYPlus1(all);
-        } else {
-            throw new Error("Invalid y option");
-        }
-        for (const element of allPending.sort(
+        const all = [...current, ...pendingRects];
+
+        let y: number;
+        if (typeof yStrategy === "number") y = yStrategy;
+        else if (yStrategy === "optimize")
+            y = getOptimalInsertLocation(firstContent);
+        else if (yStrategy === "max") y = getMaxYPlus1(all);
+        else throw new Error("Invalid y option");
+
+        for (const el of [...pendingRects].sort(
             (a, b) => a.location.y - b.location.y
         )) {
-            if (element.location.y >= y) {
-                element.location.y++;
-            }
+            if (el.location.y >= y) el.location.y++;
         }
-        const results: Element[] = [];
-        const contents = Array.isArray(contentOrContents)
-            ? contentOrContents
-            : [contentOrContents];
-        for (const content of contents) {
+
+        const result: Element[] = [];
+        const list = Array.isArray(contents) ? contents : [contents];
+        for (const content of list) {
             const element = new Element({
                 publicKey: peer.identity.publicKey,
                 id: options.id,
@@ -381,19 +447,19 @@ export const CanvasWrapper = ({
                     h: 1,
                 }),
                 content,
-                parent: canvas,
+                canvasId: canvas.id,
             });
             if (options.pending) {
                 setPendingRects((prev) => {
-                    const prevElement = prev.find(
+                    const already = prev.find(
                         (x) => x.idString === element.idString
                     );
-                    if (prevElement) {
+                    if (already) {
                         if (
-                            prevElement.content instanceof StaticContent &&
-                            prevElement.content.content.isEmpty
+                            already.content instanceof StaticContent &&
+                            already.content.content.isEmpty
                         ) {
-                            prevElement.content = element.content;
+                            already.content = element.content;
                             return [...prev];
                         }
                         return prev;
@@ -401,12 +467,11 @@ export const CanvasWrapper = ({
                     return [...prev, element];
                 });
             } else {
-                console.log("Save pending into", canvas.elements);
                 canvas.createElement(element);
             }
-            results.push(element);
+            result.push(element);
         }
-        return Array.isArray(contentOrContents) ? results : results[0];
+        return Array.isArray(contents) ? result : result[0];
     }
 
     const insertImage = async (
@@ -416,11 +481,10 @@ export const CanvasWrapper = ({
         try {
             const images = await readFileAsImage(file);
             const newElements: Element[] = await addRect(images, options);
-
             setIsEmpty(false);
             onContentChange?.(newElements);
-        } catch (error) {
-            showError({ message: "Failed to insert image", error });
+        } catch (e) {
+            showError({ message: "Failed to insert image", error: e });
         }
     };
 
@@ -438,7 +502,7 @@ export const CanvasWrapper = ({
                 last.content instanceof StaticContent &&
                 last.content.content.isEmpty
             ) {
-                // Do not increment; instead, replace it.
+                /* replace last */
             } else {
                 pendingCounter.current++;
             }
@@ -451,7 +515,7 @@ export const CanvasWrapper = ({
                 new Uint8Array([pendingCounter.current]),
             ])
         );
-        let appToAdd: ElementContent;
+        let appContent: ElementContent;
         if (options?.app) {
             if (options.app.isNative) {
                 const native = getNativeApp(options.app.url);
@@ -460,26 +524,26 @@ export const CanvasWrapper = ({
                         "Missing native app for url: " + options.app.url
                     );
                 }
-                const defaultValue = native.default();
-                appToAdd = new StaticContent({
-                    content: defaultValue,
+                const v = native.default();
+                appContent = new StaticContent({
+                    content: v,
                     quality: LOWEST_QUALITY,
                     contentId: randomBytes(32),
                 });
             } else {
-                appToAdd = new IFrameContent({
+                appContent = new IFrameContent({
                     resizer: false,
                     src: options.app.url,
                 });
             }
         } else {
-            appToAdd = new StaticContent({
+            appContent = new StaticContent({
                 content: new StaticMarkdownText({ text: "" }),
                 quality: LOWEST_QUALITY,
                 contentId: sha256Sync(new TextEncoder().encode("")),
             });
         }
-        return addRect(appToAdd, {
+        return addRect(appContent, {
             id: defaultId,
             pending: true,
             y: options?.y,
@@ -489,234 +553,111 @@ export const CanvasWrapper = ({
     const removePending = (id: Uint8Array) => {
         const pending = pendingRects.find((x) => equals(x.id, id));
         setPendingRects((prev) => prev.filter((el) => !equals(id, el.id)));
-        if (pending) {
-            reduceYInPending(pending.location.y);
-        }
+        if (pending) reduceYInPending(pending.location.y);
     };
 
     const savePending = async () => {
-        if (!pendingRects) return;
+        if (!pendingRects.length) return;
+        setIsSaving(true);
+        setSavedOnce(true);
         try {
-            const pendingToSave = pendingRects.filter(
+            const toSave = pendingRects.filter(
                 (x) =>
-                    x.content instanceof StaticContent === false ||
+                    !(x.content instanceof StaticContent) ||
                     x.content.content.isEmpty === false
             );
-            if (pendingToSave.length === 0) {
-                console.log("No pending to save", pendingRects);
-                return;
-            }
-            setPendingRects([]);
-            pendingCounter.current += pendingToSave.length;
+            if (toSave.length === 0) return;
 
-            // re-assign parent to canvas (TODO - remove this, when we have eliminated flaky parent updatnig behaviour that happens during save)
-            // (when update the path of a canvas while concurrently saving we might run into problems)
-            for (const element of pendingToSave) {
-                element.parent = canvas;
-            }
+            pendingCounter.current += toSave.length;
+            for (const el of toSave) el.parent = canvas; // see original comment
 
-            console.log("SAVE PENDING!");
-            await Promise.all(pendingToSave.map((x) => canvas.elements.put(x)));
-            if (draft && onSave) {
-                await onSave();
-            }
-            if (requestAIReply) {
-                request(canvas).catch((e) => {
-                    console.error("Error requesting AI reply", e);
-                });
-            }
+            await Promise.all(toSave.map((x) => canvas.elements.put(x)));
+
+            if (draft && onSave) await onSave();
+            if (requestAIReply) request(canvas).catch(console.error);
             setIsEmpty(true);
-            return pendingToSave;
+            return toSave;
         } catch (error) {
             showError({ message: "Failed to save", error, severity: "error" });
+        } finally {
+            setIsSaving(false);
         }
     };
 
+    // ------------------------------------------------------------------
+    //  reset & effects
+    // ------------------------------------------------------------------
     const reset = () => {
         setPendingRects([]);
+        setSavedOnce(false);
     };
 
     useEffect(() => {
-        const handleClickOutside = (event: MouseEvent) => {
-            setActive(new Set());
-        };
+        const handleClickOutside = () => setActive(new Set());
         document.addEventListener("mousedown", handleClickOutside);
-        return () => {
+        return () =>
             document.removeEventListener("mousedown", handleClickOutside);
-        };
     }, []);
 
     useEffect(() => {
         if (!peer || !canvas || canvas.closed) return;
-
-        if (canvas.idString === setupForCanvasIdDone.current) {
-            return;
-        }
+        if (canvas.idString === setupForCanvasIdDone.current) return;
         setupForCanvasIdDone.current = canvas.idString;
         reset();
-
-        if (canvas?.closed) {
-            throw new Error("Expecting canvas to be open");
-        }
-        if (draft) {
-            insertDefault();
-        }
+        if (canvas.closed) throw new Error("Expecting canvas to be open");
     }, [peer?.identity.publicKey.hashcode(), canvas?.idString]);
 
-    // Modified content change handler that notifies subscribers.
-    const _onContentChange = async (element: Element) => {
+    // ------------------------------------------------------------------
+    //  Content-change hook (unchanged except still uses pendingRects)
+    // ------------------------------------------------------------------
+    const _onContentChange = async (el: Element) => {
         if (
             rects.length === 0 &&
             pendingRects.length === 1 &&
-            rectIsStaticMarkdownText(element)
+            rectIsStaticMarkdownText(el)
         ) {
-            setText(element.content.content.text);
+            setText(el.content.content.text);
         }
-        if (rectIsStaticMarkdownText(element)) {
+        if (rectIsStaticMarkdownText(el)) {
             const parent = await canvas.loadParent();
             announceReply(parent);
         }
-        if (!element.content.isEmpty) {
+        if (!el.content.isEmpty) {
             setIsEmpty(false);
         } else {
-            const allElements = [...pendingRects, ...rects];
-            if (allElements.every((el) => el.content.isEmpty)) {
-                setIsEmpty(true);
-            }
+            const all = [...pendingRects, ...rects];
+            if (all.every((r) => r.content.isEmpty)) setIsEmpty(true);
         }
-        if (onContentChange) {
-            onContentChange([element]);
-        }
-        // Notify all subscribers about the change.
-        contentChangeSubscribers.current.forEach((callback) =>
-            callback(element)
-        );
+        onContentChange?.([el]);
+        contentChangeSubscribers.current.forEach((cb) => cb(el));
     };
 
-    const reduceElementsForViewing = (rects: Element[]): Element[] => {
-        // Group rects by their content source, identified by contentId (as Base64).
-        const groups = new Map<string, Map<number, Element[]>>();
-        rects.forEach((rect) => {
-            const contentId = rect.content.contentIdString;
-            if (!groups.has(contentId)) {
-                groups.set(contentId, new Map());
-            }
-            const quality = rect.content.quality; // quality is already a number
-            const qualityMap = groups.get(contentId)!;
-            if (!qualityMap.has(quality)) {
-                qualityMap.set(quality, []);
-            }
-            qualityMap.get(quality)!.push(rect);
-        });
-
-        const finalRects: Element[] = [];
-
-        // For each content source, choose the candidate with the best available quality.
-        groups.forEach((qualityMap) => {
-            // Get the sorted quality keys in descending order.
-            const qualityKeys = Array.from(qualityMap.keys()).sort(
-                (a, b) => b - a
-            );
-            if (qualityKeys.length === 0) return;
-            const bestQuality = qualityKeys[0];
-            const candidates = qualityMap.get(bestQuality)!;
-
-            // Separate candidates into full images and partial images.
-            const fullImages = candidates.filter(
-                (rect) => !rectIsStaticPartialImage(rect)
-            );
-            const partialImages = candidates.filter((rect) =>
-                rectIsStaticPartialImage(rect)
-            );
-
-            let bestCandidate: Element | undefined = undefined;
-            if (partialImages.length > 0) {
-                // Check whether partial images are complete.
-                const firstPartial = partialImages[0].content
-                    .content as StaticPartialImage;
-                if (firstPartial.totalParts === partialImages.length) {
-                    // If complete, merge partial images into a single image.
-                    const mergedImage = StaticPartialImage.combine(
-                        partialImages.map(
-                            (r) => r.content.content as StaticPartialImage
-                        )
-                    );
-                    const rep = partialImages[0] as Element<StaticContent>;
-                    bestCandidate = new Element({
-                        publicKey: rep.publicKey,
-                        id: rep.id,
-                        location: rep.location,
-                        content: new StaticContent({
-                            quality: rep.content.quality,
-                            content: mergedImage,
-                            contentId: rep.content.contentId,
-                        }),
-                        parent: rep.parent,
-                    });
-                } else {
-                    // Otherwise, use the first partial image (even though it may be incomplete).
-                    bestCandidate = partialImages[0];
-                }
-            } else if (fullImages.length > 0) {
-                // If no partial images, use the first full image.
-                bestCandidate = fullImages[0];
-            }
-            if (bestCandidate) {
-                finalRects.push(bestCandidate);
-            }
-        });
-
-        // Sort the final elements by the y coordinate.
-        finalRects.sort((a, b) => a.location.y - b.location.y);
-        return finalRects;
-    };
-
-    const separateAndSortRects = (
-        rects: Element[]
-    ): {
-        text: Element<StaticContent<StaticMarkdownText>>[];
-        other: Element[];
-    } => {
-        const groupedRects = reduceElementsForViewing(rects);
-        const separated = {
-            text: [] as Element<StaticContent<StaticMarkdownText>>[],
-            other: [] as Element[],
-        };
-        groupedRects.forEach((rect) => {
-            if (rectIsStaticMarkdownText(rect)) {
-                separated.text.push(rect);
-            } else {
-                separated.other.push(rect);
-            }
-        });
-        separated.text.sort((a, b) => a.location.y - b.location.y);
-        separated.other.sort((a, b) => a.location.y - b.location.y);
-        return separated;
-    };
-
+    // ------------------------------------------------------------------
+    //  Provide context
+    // ------------------------------------------------------------------
     const contextValue: CanvasContextType = {
-        editMode,
-        setEditMode,
         active,
-        isEmpty,
-        isLoading,
         setActive,
         pendingRects,
         setPendingRects,
-        rects,
+        rects: visibleRects, // ◄ expose deduplicated list
         insertDefault,
         removePending,
         savePending,
+        savedOnce,
         canvas,
         onContentChange: _onContentChange,
+        isEmpty,
         insertImage,
         mutate,
         reduceElementsForViewing,
         separateAndSortRects,
         text,
-        requestAIReply,
         setRequestAIReply,
+        requestAIReply,
         subscribeContentChange,
+        isLoading,
+        isSaving,
     };
 
     return (

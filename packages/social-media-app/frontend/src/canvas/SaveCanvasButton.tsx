@@ -21,7 +21,7 @@ export const SaveButton = ({
                     savePending();
                     onClick?.();
                 }}
-                className={"btn-icon btn-icon-md " + className}
+                className={"btn btn-icon btn-icon-md " + className}
                 aria-label="Send"
             >
                 <Icon size={30} />

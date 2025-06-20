@@ -2,10 +2,9 @@ import { forwardRef, useEffect, useState } from "react";
 import { useCanvas } from "../CanvasWrapper";
 import { Canvas } from "../Canvas";
 import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
-import { MdAdd as FaPlus, MdClear } from "react-icons/md";
+import { MdAdd as FaPlus, MdClear, MdSave } from "react-icons/md";
 import { SaveButton } from "../SaveCanvasButton";
-import { FiSend } from "react-icons/fi";
-import { BsCamera, BsArrowsCollapse } from "react-icons/bs";
+import { BsCamera, BsSend } from "react-icons/bs";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
 import { SimpleWebManifest } from "@giga-app/interface";
@@ -14,27 +13,49 @@ import { useView } from "../reply/view/ViewContex";
 import { useAIReply } from "../../ai/AIReployContext";
 import { useAutoReply } from "../AutoReplyContext";
 import { BsArrowsAngleExpand } from "react-icons/bs";
-import { useToolbar } from "./ToolbarContext";
+import { useEditTools } from "./ToolbarContext";
+import { TbArrowsDiagonalMinimize2 } from "react-icons/tb";
+import { usePendingCanvas } from "../PendingCanvasContext";
 
-const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
+export const ToolbarCreateNew = (props: {
+    setInlineEditorActive: (value: boolean) => void;
+    inlineEditorActive: boolean;
+}) => {
     const {
         isEmpty,
         text,
-        savePending,
         insertDefault,
         setRequestAIReply,
         requestAIReply,
+        canvas,
+        pendingRects,
+        isSaving: isSavingElements,
+        savedOnce,
     } = useCanvas();
-
+    const { isSaving: isSavingCanvas } = usePendingCanvas();
     const { replyTo, disable: disableAutoReply } = useAutoReply();
-    const { fullscreenEditorActive, setFullscreenEditorActive } = useToolbar();
-
     const { view, viewRoot } = useView();
     const { isReady } = useAIReply();
     const { search } = useApps();
     const [resolvedApp, setResolvedApp] = useState<null | SimpleWebManifest>(
         null
     );
+
+    useEffect(() => {
+        if (
+            !savedOnce &&
+            /*  !isSavingCanvas && !isSavingElements &&  */ pendingRects.length ===
+                0 &&
+            canvas
+        ) {
+            insertDefault();
+        }
+    }, [
+        isEmpty,
+        savedOnce,
+        /* isSavingCanvas, isSavingElements, */ canvas?.idString,
+        pendingRects,
+    ]);
 
     // Try to resolve a matching app when the text changes.
     useEffect(() => {
@@ -47,7 +68,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
             setResolvedApp(null);
         }
     }, [text, search]);
-    const { appSelectOpen, setAppSelectOpen } = useToolbar();
+    const { appSelectOpen, setAppSelectOpen } = useEditTools();
     const onToggleAppSelect = (open) => {
         if (open != null) {
             setAppSelectOpen(open);
@@ -70,18 +91,18 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
     );
 
     // Fullscreen mode: retain your existing layout.
-    if (fullscreenEditorActive) {
+    if (props.inlineEditorActive) {
         return (
-            <div ref={ref} className="flex flex-col z-20 w-full left-0">
+            <div className="flex flex-col z-20 w-full left-0">
                 <div className="flex flex-col h-full">
-                    <div className="flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-700">
+                    <div className="px-1 flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-700">
                         {AddButton()}
 
                         <button
                             className="btn btn-icon btn-icon-md ml-auto"
-                            onClick={() => setFullscreenEditorActive(false)}
+                            onClick={() => props.setInlineEditorActive(false)}
                         >
-                            <BsArrowsCollapse />
+                            <TbArrowsDiagonalMinimize2 />
                         </button>
                         {isEmpty ? (
                             <ImageUploadTrigger
@@ -92,7 +113,10 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
                             </ImageUploadTrigger>
                         ) : (
                             <SaveButton
-                                onClick={() => setFullscreenEditorActive(false)}
+                                onClick={() =>
+                                    props.setInlineEditorActive(false)
+                                }
+                                icon={BsSend}
                             />
                         )}
                     </div>
@@ -106,8 +130,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
     return (
         <>
             <div
-                ref={ref}
-                className={`flex flex-col z-20 w-full left-0  ${colorStyle}`}
+                className={`flex flex-col z-20 w-full left-0  ${colorStyle} rounded-t-lg`}
             >
                 {/* Top area: pending images canvas positioned above the toolbar */}
                 <div
@@ -125,18 +148,15 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
                 </div>
 
                 {/* First row: Input field */}
-                <div className="pt-1 min-h-10">
-                    {/* We set the min height here because without it switching views might lead to flickering behaviour where the input field gets removed and re-added */}
-                    <Canvas
-                        fitWidth
-                        draft={true}
-                        appearance="chat-view-text"
-                        className="rounded"
-                    />
-                </div>
-
+                {/* We set the min height here because without it switching views might lead to flickering behaviour where the input field gets removed and re-added */}
+                <Canvas
+                    fitWidth
+                    draft={true}
+                    appearance="chat-view-text"
+                    className="rounded min-h-10 pt-1"
+                />
                 {/* Second row: Toolbar buttons */}
-                <div className="flex items-center p-1 pt-0 h-full">
+                <div className="flex items-center p-1 pt-0 ">
                     {/* Left: Plus button */}
                     {AddButton()}
                     {/* AI reply slider */}
@@ -209,7 +229,7 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
                     {/* Right: Fullscreen button */}
                     <button
                         className="btn btn-icon btn-icon-md ml-auto"
-                        onClick={() => setFullscreenEditorActive(true)}
+                        onClick={() => props.setInlineEditorActive(true)}
                     >
                         <BsArrowsAngleExpand />
                     </button>
@@ -228,16 +248,18 @@ const ToolbarContent = forwardRef<HTMLDivElement, {}>((props, ref) => {
                         )}
 
                     {/* Right: Send button */}
-                    <button
+                    {/*  <button
                         onClick={() => savePending()}
                         className="btn btn-icon btn-icon-md"
                     >
                         <FiSend className="btn-icon-sm" />
-                    </button>
+                    </button> */}
+                    <SaveButton
+                        onClick={() => props.setInlineEditorActive(false)}
+                        icon={BsSend}
+                    />
                 </div>
             </div>
         </>
     );
-});
-
-export default ToolbarContent;
+};

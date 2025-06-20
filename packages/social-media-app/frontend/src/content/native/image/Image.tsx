@@ -13,7 +13,6 @@ import { StaticImage } from "@giga-app/interface";
 import { sha256Base64Sync } from "@peerbit/crypto";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
-
 /* -------------------------------------------------------------------------
  * ImageContent – stable‑height version
  * -------------------------------------------------------------------------
@@ -182,8 +181,41 @@ export const ImageContent = memo(function ImageContent({
             : fit === "contain"
             ? "object-contain"
             : "";
+    const overlayOpacityHidden = 0.6;
     const overlayOpacity =
-        1 - Math.min(Math.abs(translateY) / window.innerHeight, 1);
+        overlayOpacityHidden -
+        Math.min(
+            Math.abs(translateY) / window.innerHeight,
+            overlayOpacityHidden
+        );
+
+    let imageRef = useRef<HTMLImageElement | undefined>(undefined);
+
+    const closeIfClickedLetterboxInsideImg = (
+        e: React.MouseEvent<HTMLImageElement, MouseEvent>
+    ) => {
+        const img = e.currentTarget;
+        const { offsetX, offsetY } = e.nativeEvent as MouseEvent;
+        const scale = Math.min(
+            img.clientWidth / imageRef.current.naturalWidth, // img.naturalHeight seem to return undefined so we use imageRef
+            img.clientHeight / imageRef.current.naturalHeight // img.naturalHeight seem to return undefined so we use imageRef
+        );
+        const realW = imageRef.current.naturalWidth * scale; // img.naturalWidth seem to return undefined so we use imageRef
+        const realH = imageRef.current.naturalHeight * scale; // img.naturalHeight seem to return undefined so we use imageRef
+        const left = (img.clientWidth - realW) / 2;
+        const top = (img.clientHeight - realH) / 2;
+
+        const clickedInsidePicture =
+            offsetX >= left &&
+            offsetX <= left + realW &&
+            offsetY >= top &&
+            offsetY <= top + realH;
+
+        if (!clickedInsidePicture) {
+            setDialogOpen(false);
+        }
+        e.stopPropagation();
+    };
 
     /* ------------------------------------------------------------------- */
     /* Full‑screen portal                                                 */
@@ -191,18 +223,19 @@ export const ImageContent = memo(function ImageContent({
     const fullScreen = (
         <Dialog.Portal>
             <Dialog.Overlay
-                onClick={() => setDialogOpen(false)}
+                onClick={closeIfClickedLetterboxInsideImg}
                 style={{
                     backgroundColor: `rgba(0,0,0,${overlayOpacity})`,
                     transition: isDragging
                         ? "none"
                         : "background-color .3s ease",
+                    backdropFilter: `blur(${overlayOpacity * 10}px)`,
                 }}
                 className="fixed inset-0 z-[10000]"
             />
             <Dialog.Content
                 className="fixed inset-0 z-[10001] flex items-center justify-center"
-                onClick={(e) => e.stopPropagation()}
+                onClick={closeIfClickedLetterboxInsideImg}
                 onTouchStart={start}
                 onTouchMove={move}
                 onTouchEnd={end}
@@ -213,19 +246,22 @@ export const ImageContent = memo(function ImageContent({
                 }}
             >
                 <Dialog.Title className="sr-only">Image Preview</Dialog.Title>
-                <div className="w-full h-full flex justify-center max-w-4xl max-h-[100vh]">
+                <Dialog.Description className="w-fit h-full flex justify-center max-w-4xl max-h-[100vh]">
                     {imgUrl && (
                         <img
                             src={imgUrl}
                             alt={content.alt ?? ""}
-                            className="h-full object-contain"
-                            onLoad={onLoad}
+                            className="h-full object-contain max-w-screen"
+                            onLoad={(e) => {
+                                imageRef.current = e.currentTarget;
+                                onLoad?.();
+                            }}
                         />
                     )}
-                </div>
+                </Dialog.Description>
                 {translateY === 0 && (
                     <Dialog.Close asChild>
-                        <button className="absolute btn top-0 right-0 w-10 h-10 text-white bg-black opacity-60 text-2xl rounded-none">
+                        <button className="absolute btn top-0 right-0 w-10 h-10 text-black bg-white dark:text-white dark:bg-black opacity-60 text-2xl rounded-none">
                             <FiX />
                         </button>
                     </Dialog.Close>
@@ -241,9 +277,7 @@ export const ImageContent = memo(function ImageContent({
         <div
             ref={containerRef}
             className={`relative w-full h-full ${
-                editable
-                    ? "cursor-pointer border-2 border-dashed p-4 transition-colors duration-150"
-                    : ""
+                editable ? "cursor-pointer  transition-colors duration-150" : ""
             } ${
                 editable && isDragOver
                     ? "border-primary-500 bg-primary-50 dark:bg-primary-900"
@@ -289,7 +323,7 @@ export const ImageContent = memo(function ImageContent({
                                 <img
                                     src={imgUrl}
                                     alt={content.alt ?? ""}
-                                    className={`w-full  ${fitClass}`}
+                                    className={`w-full h-full ${fitClass}`}
                                     onLoad={onLoad}
                                 />
                             </Dialog.Trigger>
@@ -304,12 +338,7 @@ export const ImageContent = memo(function ImageContent({
                                 className={`w-full h-full ${fitClass}`}
                                 onLoad={onLoad}
                             />
-                            <button
-                                onClick={() => setDialogOpen(true)}
-                                className="absolute bottom-4 right-4 p-2 bg-black bg-opacity-50 rounded-full text-white"
-                            >
-                                <FiMaximize />
-                            </button>
+
                             <Dialog.Root
                                 open={dialogOpen}
                                 onOpenChange={setDialogOpen}
@@ -329,7 +358,7 @@ export const ImageContent = memo(function ImageContent({
 
             {editable && (
                 <>
-                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                    <div className="absolute  m-2 bottom-0 left-0  ">
                         <span className="text-sm text-neutral-500 dark:text-neutral-300 bg-white dark:bg-neutral-900 bg-opacity-75 px-2 py-1 rounded">
                             Click to upload or drop an image
                         </span>

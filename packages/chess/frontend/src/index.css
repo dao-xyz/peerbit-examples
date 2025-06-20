@@ -142,6 +142,8 @@
     --color-secondary-800: oklch(0.476 0.114 61.907);
     --color-secondary-900: oklch(0.421 0.095 57.708);
 
+
+
 }
 
 @tailwind utilities;

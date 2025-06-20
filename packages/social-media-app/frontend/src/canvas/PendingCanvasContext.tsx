@@ -1,4 +1,3 @@
-// PendingCanvasContext.tsx
 import React, {
     createContext,
     useContext,
@@ -15,6 +14,7 @@ interface PendingCanvasContextType {
     pendingCanvas: Canvas | undefined;
     savePending: () => Promise<void>;
     setReplyTo: (canvas: Canvas | undefined) => Promise<void>;
+    isSaving: boolean;
 }
 
 const PendingCanvasContext = createContext<
@@ -24,11 +24,13 @@ const PendingCanvasContext = createContext<
 export const PendingCanvasProvider: React.FC<{
     viewRoot: Canvas;
     children: ReactNode;
-}> = ({ viewRoot, children }) => {
+    pendingCanvas?: Canvas;
+}> = ({ viewRoot, children, pendingCanvas: fromPendingCanvas }) => {
     const { peer } = usePeer();
     const [pendingCanvasState, setPendingCanvasState] = useState<
         Canvas | undefined
     >(undefined);
+
     const isSaving = useRef(false);
 
     const pendingCanvas = useProgram<Canvas>(pendingCanvasState, {
@@ -42,16 +44,18 @@ export const PendingCanvasProvider: React.FC<{
     useEffect(() => {
         if (peer && viewRoot) {
             if (!pendingCanvasState) {
-                const newPendingCanvas = new Canvas({
-                    publicKey: peer.identity.publicKey,
-                    parent: replyTo || viewRoot,
-                });
+                const newPendingCanvas =
+                    fromPendingCanvas ||
+                    new Canvas({
+                        publicKey: peer.identity.publicKey,
+                        parent: replyTo || viewRoot,
+                    });
                 setPendingCanvasState(newPendingCanvas);
             } else {
                 // set reply to ? we already have auto reply which also does this...
             }
         }
-    }, [peer, viewRoot]);
+    }, [peer, viewRoot, fromPendingCanvas]);
 
     useEffect(() => {
         if (
@@ -71,10 +75,11 @@ export const PendingCanvasProvider: React.FC<{
         if (pendingCanvas?.program) {
             await pendingCanvas.program.load();
             await pendingCanvas.program.setParent(replyTo || viewRoot);
+
+            setPendingCanvasState(pendingCanvas.program);
         }
 
         /*  console.log("UPDATE REPLY TO", { replyTo: replyTo?.idString, viewRoot: viewRoot?.idString, idString: pendingCanvas.program?.idString, address: pendingCanvas.program?.address }); */
-        setPendingCanvasState(pendingCanvasState);
     };
 
     const savePending = async () => {
@@ -85,16 +90,16 @@ export const PendingCanvasProvider: React.FC<{
                 viewRoot
                     .createReply(prev)
                     .then(() => savePromise.resolve())
-                    .catch(savePromise.reject)
-                    .finally(() => {
-                        console.log(
-                            "SAVED PREV " +
-                                prev.address.toString() +
-                                "/" +
-                                prev.idString +
-                                " and creating a new one"
-                        );
-                    });
+                    .catch(savePromise.reject);
+                /*  .finally(() => {
+                     console.log(
+                         "SAVED PREV " +
+                         prev.address.toString() +
+                         "/" +
+                         prev.idString +
+                         " and creating a new one"
+                     );
+                 }); */
                 //  setReplyTo(null);
 
                 return new Canvas({
@@ -115,8 +120,9 @@ export const PendingCanvasProvider: React.FC<{
         <PendingCanvasContext.Provider
             value={{
                 pendingCanvas: pendingCanvas?.program,
-                savePending: savePending,
+                savePending,
                 setReplyTo,
+                isSaving: isSaving.current,
             }}
         >
             {children}

@@ -92,7 +92,7 @@ export const useAutoScroll = (properties: {
         properties.debug &&
             console.log("trigger scroll because the view changed", setting);
         triggerScroll();
-    }, [setting, properties.enabled]);
+    }, [setting.view.id, properties.enabled]);
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
@@ -253,12 +253,27 @@ export const useAutoScroll = (properties: {
                 behavior: "instant",
             });
         } else {
-            window.scrollTo({
-                top: 0,
-                left: 0,
-                behavior: "instant",
-            });
+            if (repliesContainerRef.current) {
+                // put new reply in the top of the viewport
+                const boundingRect =
+                    repliesContainerRef.current.getBoundingClientRect();
+                window.scrollTo({
+                    top: boundingRect.top + window.scrollY - 200, // 200 px extra offset
+                    left: 0,
+                    behavior: "instant",
+                });
+            } else {
+                // scroll to the top of the page
+                window.scrollTo({
+                    top: repliesContainerRef.current
+                        ? repliesContainerRef.current.offsetTop
+                        : 0,
+                    left: 0,
+                    behavior: "instant",
+                });
+            }
         }
+
         setIsAtBottom(false);
     };
 

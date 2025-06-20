@@ -193,7 +193,7 @@ export const ViewSelectorSubheader = ({
                             {/* ── Dynamic section ───────────────────────────── */}
                             {dynamicList.length > 0 && (
                                 <>
-                                    <DropdownMenu.Label className="px-4 py-1 text-xs text-blue-600">
+                                    <DropdownMenu.Label className="px-4 py-1 text-xs text-primary-600">
                                         Your views
                                     </DropdownMenu.Label>
                                     {dynamicList.map((v) => (
@@ -441,7 +441,6 @@ export const SubHeader = ({
     onCollapse,
 }: SubHeaderProps) => {
     const { view: currentView } = useView();
-
     return (
         <StickyHeader onStateChange={onCollapse}>
             <div className="w-full max-w-[876px] mx-auto flex flex-col gap-y-1 py-1">

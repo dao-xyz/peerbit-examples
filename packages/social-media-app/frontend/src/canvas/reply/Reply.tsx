@@ -1,21 +1,24 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import {
     Canvas as CanvasDB,
-    getOwnedAndSubownedElementsQuery,
+    Element,
+    ElementContent,
+    getImmediateRepliesQuery,
     getOwnedElementsQuery,
+    getRepliesQuery,
     IndexableCanvas,
     MEDIUM_QUALITY,
 } from "@giga-app/interface";
 import { Canvas } from "../Canvas.js";
 import { usePeer } from "@peerbit/react";
-import { CanvasPreview } from "../Preview.js";
+import { CanvasPreview } from "../preview/Preview.js";
 import { WithIndexedContext } from "@peerbit/document";
 import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
 import { useView } from "./view/ViewContex.js";
-import { rectIsStaticMarkdownText } from "../utils/rect.js";
+import { rectIsStaticImage, rectIsStaticMarkdownText } from "../utils/rect.js";
 import { useLeaveSnapshotFn } from "./feedRestoration.js";
 
 const ReplyButton = ({
@@ -128,7 +131,12 @@ export const Reply = ({
          return () => observer.disconnect();
      }, [canvas, showMore, contentRef.current, previewContainerRef.current]); // Re-run if canvas content or showMore toggles
   */
-    const handleCanvasClick = async (e?: any) => {
+    const handleCanvasClick = async (e?: Element<ElementContent>) => {
+        // if we click on an image, just make it fullscreen instead of navigating
+        if (e && (rectIsStaticImage(e) || rectIsStaticMarkdownText(e))) {
+            return;
+        }
+
         leaveSnapshot(canvas);
         let viewAfterNavigation = "chat";
         canvas = canvas.closed
@@ -137,11 +145,11 @@ export const Reply = ({
         await canvas.load();
 
         const totalReplies = await canvas.replies.count({
-            query: getOwnedAndSubownedElementsQuery(canvas),
+            query: getRepliesQuery(canvas),
             approximate: true,
         });
         const immediateReplies = await canvas.replies.count({
-            query: getOwnedElementsQuery(canvas),
+            query: getImmediateRepliesQuery(canvas),
             approximate: true,
         });
         if (
@@ -151,7 +159,6 @@ export const Reply = ({
             viewAfterNavigation = "best";
         }
         viewAfterNavigation = "chat";
-
         navigate(getCanvasPath(canvas, viewAfterNavigation), {});
         onClick && onClick();
     };
@@ -220,7 +227,7 @@ export const Reply = ({
                 {/* Preview / Canvas Section*/}
                 <div
                     ref={previewContainerRef}
-                    className={` relative overflow-hidden flex flex-col min-h-0 max-height-inherit-children ${
+                    className={` relative overflow-y-scroll flex flex-col min-h-0 max-height-inherit-children ${
                         showMore ? "max-h-full" : "max-h-[40vh]"
                     }`}
                 >

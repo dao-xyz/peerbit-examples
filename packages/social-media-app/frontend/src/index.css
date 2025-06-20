@@ -52,7 +52,6 @@ code {
     --color-secondary-700: oklch(0.554 0.135 66.442);
     --color-secondary-800: oklch(0.476 0.114 61.907);
     --color-secondary-900: oklch(0.421 0.095 57.708);
-
 }
 
 @tailwind utilities;
@@ -128,6 +127,7 @@ code {
         margin-block-end: 0.67em;
         margin-inline-start: 0px;
         margin-inline-end: 0px;
+        margin-top: 0;
         font-weight: bold;
         unicode-bidi: isolate;
     }
@@ -199,6 +199,11 @@ code {
     ::-webkit-scrollbar-thumb:hover {
         background-color: rgba(136, 136, 136, 0.8);
         /* 80% opacity */
+    }
+
+    ::-webkit-scrollbar-corner {
+
+        background: transparent
     }
 }
 
@@ -295,10 +300,21 @@ code {
         outline: none;
     }
 
+
+
     .btn-toggle[data-state="on"] {
         @apply bg-primary-400 dark:bg-primary-600;
         box-shadow: 0 1px #666 !important;
         transform: translateY(4px) !important;
+    }
+
+    .btn-toggle-flat {
+        box-shadow: 0 0px
+    }
+
+    .btn-toggle-flat[data-state="on"] {
+        box-shadow: 0 0px #666 !important;
+        transform: translateY(0px) !important;
     }
 
     .btn-toggle:focus {
@@ -392,6 +408,10 @@ code {
         @apply outline-none ring-2 ring-primary-300 dark:ring-primary-500;
     }
 
+    .btn-bouncy {
+        @apply transform transition duration-200 hover:scale-110 active:scale-125
+    }
+
 
 
     /* Sample menu item style */
@@ -460,6 +480,47 @@ code {
             @apply opacity-50 cursor-not-allowed;
         }
     }
+
+    .radio-group-root {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+    }
+
+    .radio-group-item {
+        background-color: white;
+        width: 25px;
+        height: 25px;
+        border-radius: 100%;
+        box-shadow: 0 2px 10px var(--black-a7);
+    }
+
+    .radio-group-item:hover {
+        background-color: var(--violet-3);
+    }
+
+    .radio-group-item:focus {
+        box-shadow: 0 0 0 2px black;
+    }
+
+    .radio-group-indicator {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 100%;
+        height: 100%;
+        position: relative;
+    }
+
+    .radio-group-indicator::after {
+        content: "";
+        display: block;
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background-color: var(--violet-11);
+    }
+
 
 
     /* Example for a dropdown menu with animation */

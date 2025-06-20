@@ -1,12 +1,15 @@
 // ToolbarContext.tsx
 import React, { useState, createContext, ReactNode, useContext } from "react";
 import { CanvasWrapper } from "../CanvasWrapper";
-import { usePendingCanvas } from "../PendingCanvasContext";
+import {
+    PendingCanvasProvider,
+    usePendingCanvas,
+} from "../PendingCanvasContext";
 import { AutoReplyProvider } from "../AutoReplyContext";
+import { useView } from "../reply/view/ViewContex";
+import { Canvas } from "@giga-app/interface";
 
 interface ToolbarContextType {
-    fullscreenEditorActive: boolean;
-    setFullscreenEditorActive: React.Dispatch<React.SetStateAction<boolean>>;
     appSelectOpen: boolean;
     setAppSelectOpen: React.Dispatch<React.SetStateAction<boolean>>;
 }
@@ -16,39 +19,63 @@ const ToolbarContext = createContext<ToolbarContextType | undefined>(undefined);
 
 type ToolbarProviderProps = {
     children: ReactNode;
+    pendingCanvas?: Canvas;
 };
 
-// This provider wraps children with your CanvasWrapper and AutoReplyProvider,
-// and exposes both the fullscreen editor state and the app select state.
-export const ToolbarProvider = ({ children }: ToolbarProviderProps) => {
-    const [fullscreenEditor, setFullscreenEditor] = useState(false);
+const ToolbarProviderContextComponent = ({
+    children,
+}: ToolbarProviderProps) => {
+    // This inner component is used to ensure the context is always available
+    // even if fullscreenEditorActive is not provided.
+
     const [appSelectOpen, setAppSelectOpen] = useState(false);
-
-    const { pendingCanvas, savePending: onSavePending } = usePendingCanvas();
-
     return (
         <ToolbarContext.Provider
             value={{
-                fullscreenEditorActive: fullscreenEditor,
-                setFullscreenEditorActive: setFullscreenEditor,
                 appSelectOpen,
                 setAppSelectOpen,
             }}
         >
-            <CanvasWrapper
-                canvas={pendingCanvas}
-                draft={true}
-                multiCanvas
-                onSave={onSavePending}
-            >
-                <AutoReplyProvider>{children}</AutoReplyProvider>
-            </CanvasWrapper>
+            <AutoReplyProvider>{children}</AutoReplyProvider>
         </ToolbarContext.Provider>
     );
 };
 
+const CanvasWrapperComponent = ({ children }: ToolbarProviderProps) => {
+    const { pendingCanvas, savePending: onSavePending } = usePendingCanvas();
+    return (
+        <CanvasWrapper
+            canvas={pendingCanvas}
+            draft={true}
+            multiCanvas
+            onSave={onSavePending}
+        >
+            <ToolbarProviderContextComponent>
+                {children}
+            </ToolbarProviderContextComponent>
+        </CanvasWrapper>
+    );
+};
+
+// This provider wraps children with your CanvasWrapper and AutoReplyProvider,
+// and exposes both the fullscreen editor state and the app select state.
+export const CanvasEditorProvider = ({
+    children,
+    pendingCanvas,
+}: ToolbarProviderProps) => {
+    const { viewRoot } = useView();
+    return (
+        <PendingCanvasProvider
+            pendingCanvas={pendingCanvas}
+            viewRoot={viewRoot}
+        >
+            <CanvasWrapperComponent>{children}</CanvasWrapperComponent>
+        </PendingCanvasProvider>
+    );
+};
+
 // Custom hook so you can use the toolbar context anywhere in your app.
-export const useToolbar = (): ToolbarContextType => {
+export const useEditTools = (): ToolbarContextType => {
     const context = useContext(ToolbarContext);
     if (!context) {
         throw new Error("useToolbar must be used within a ToolbarProvider");

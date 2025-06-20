@@ -4,7 +4,8 @@ import { useCanvases } from "../canvas/useCanvas";
 import { getCanvasPath } from "../routes";
 import { Canvas as CanvasDB, LOWEST_QUALITY } from "@giga-app/interface";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
-import { CanvasPreview } from "../canvas/Preview";
+import { CanvasPreview } from "../canvas/preview/Preview";
+import { HeaderLogo } from "../Logo";
 const BreadCrumb = ({ path }: { path: CanvasDB[] }) => {
     const endMarkerRef = useRef<HTMLSpanElement>(null);
 
@@ -99,7 +100,7 @@ export const CanvasPath = ({
         <div className="flex flex-row gap-2 h-full items-center overflow-hidden">
             {/*  {lastThreeElements && lastThreeElements.length > 0 && */}
             <button
-                className="h-full rounded hover:bg-neutral-200  dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch border border-neutral-400 dark:border-neutral-600 inset-shadow-xs   inset-shadow-neutral-400/30 dark:inset-shadow-neutral-800/30 i overflow-hidden"
+                className="h-full rounded hover:bg-neutral-200  dark:hover:bg-neutral-700 w-full leading-normal justify-start flex flex-row cursor-pointer items-stretch  inset-shadow-xs    inset-shadow-neutral-400/30 dark:inset-shadow-neutral-400/30 i overflow-hidden"
                 onClick={() =>
                     setIsBreadcrumbExpanded((breadcrumb) => !breadcrumb)
                 }

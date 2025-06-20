@@ -200,7 +200,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                                     new TextEncoder().encode(GIGA_ROOT_POST)
                                 ),
                             }),
-                            parent: result,
+                            canvasId: result.id,
                         })
                     );
                 }

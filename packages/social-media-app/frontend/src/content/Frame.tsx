@@ -1,5 +1,10 @@
 import React, { SyntheticEvent, useCallback, useEffect, useState } from "react";
-import { IFrameContent, Element, StaticContent } from "@giga-app/interface";
+import {
+    IFrameContent,
+    Element,
+    StaticContent,
+    ElementContent,
+} from "@giga-app/interface";
 import { useNavigate } from "react-router";
 import { EditableStaticContent } from "./native/NativeContent";
 import { useApps } from "./useApps";
@@ -76,7 +81,7 @@ export const Frame = (properties: {
     fit?: "cover" | "contain";
     previewLines?: number;
     noPadding?: boolean;
-    onClick?: (e: React.MouseEvent<HTMLElement>) => void;
+    onClick?: (e: Element<ElementContent>) => void;
     // edit related stuff
     inFullscreen?: boolean;
     canOpenFullscreen?: boolean;
@@ -295,7 +300,7 @@ export const Frame = (properties: {
     return (
         <div
             key={properties.key}
-            className={`flex flex-row w-full h-full max-w-full  group ${
+            className={`flex flex-row w-full h-full max-w-full group ${
                 properties.className || ""
             }`}
         >

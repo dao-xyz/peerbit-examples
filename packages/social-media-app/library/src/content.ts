@@ -1,5 +1,6 @@
 import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
+    ByteMatchQuery,
     coerceWithContext,
     Compare,
     Context,
@@ -35,6 +36,8 @@ import { RPC } from "@peerbit/rpc";
 import { concat, equals } from "uint8arrays";
 import { AbortError, waitFor } from "@peerbit/time";
 import { debouncedAccumulatorMap } from "./utils.js";
+import { EntryType } from "@peerbit/log";
+import { ModedThemePalette } from "./colors.js";
 
 @variant(0)
 export class Layout {
@@ -156,8 +159,8 @@ export class Element<T extends ElementContent = ElementContent> {
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
-    @field({ type: vec(CanvasReference) })
-    path: CanvasReference[];
+    @field({ type: fixedArray("u8", 32) })
+    canvasId: Uint8Array; // we don't use AddressReference here because if the canvas address might change when its property change, but we still want to associate elements with the right canvas
 
     @field({ type: Layout })
     location: Layout;
@@ -165,28 +168,22 @@ export class Element<T extends ElementContent = ElementContent> {
     @field({ type: ElementContent })
     content: T;
 
-    constructor(
-        properties: {
-            id?: Uint8Array;
-            location: Layout;
-            publicKey: PublicSignKey;
-            content: T;
-        } & PathProperties
-    ) {
+    constructor(properties: {
+        id?: Uint8Array;
+        location: Layout;
+        publicKey: PublicSignKey;
+        content: T;
+        canvasId: Uint8Array;
+    }) {
         this.location = properties.location;
         this.publicKey = properties.publicKey;
         this.content = properties.content;
         this.id = properties.id || randomBytes(32);
-        this.path = resolvePathFromProperties(properties);
+        this.canvasId = properties.canvasId;
     }
 
     set parent(canvas: Canvas) {
-        this.path = [
-            ...canvas.path,
-            new CanvasAddressReference({
-                canvas,
-            }),
-        ];
+        this.canvasId = canvas.id;
     }
 
     private _idString: string;
@@ -205,11 +202,8 @@ export class IndexableElement {
     @field({ type: "string" })
     type: string;
 
-    @field({ type: vec("string") })
-    path: string[]; // address path
-
-    @field({ type: "u32" })
-    pathDepth: number;
+    @field({ type: fixedArray("u8", 32) })
+    canvasId: Uint8Array; // we don't use AddressReference here because if the canvas address might change when its property change, but we still want to associate elements with the right canvas
 
     @field({ type: "string" })
     content: string;
@@ -229,7 +223,7 @@ export class IndexableElement {
         type: string;
         content: string;
         location: Layout;
-        path: string[];
+        canvasId: Uint8Array;
         quality: number;
     }) {
         this.id = properties.id;
@@ -237,8 +231,7 @@ export class IndexableElement {
         this.content = properties.content;
         this.type = properties.type;
         this.location = properties.location;
-        this.path = properties.path;
-        this.pathDepth = properties.path.length;
+        this.canvasId = properties.canvasId;
         if (properties.quality == null) {
             throw new Error("Quality is required");
         }
@@ -316,7 +309,6 @@ export class IndexableCanvas {
         if (canvas.closed) {
             canvas = await node.open(canvas, { existing: "reuse", args });
         }
-        console.log("from", canvas.idString, canvas.address);
         const context = await canvas.createContext();
         const replies = await canvas.countReplies();
         const elements = await canvas.elements.index
@@ -374,6 +366,15 @@ export class CanvasAddressReference extends CanvasReference {
     }
 }
 
+export const getOwnedVisualizationQuery = (to: { id: Uint8Array }) => {
+    return [
+        new ByteMatchQuery({
+            key: "canvasId",
+            value: to.id,
+        }),
+    ];
+};
+
 export const getImmediateRepliesQuery = (to: {
     address: string;
     path: any[];
@@ -422,49 +423,14 @@ export const getQualityEqualsQuery = (quality: number) => {
     ];
 };
 
-export const getOwnedElementsQuery = (to: { address: string; path: any[] }) => {
+export const getOwnedElementsQuery = (to: { id: Uint8Array }) => {
     return [
-        new StringMatch({
-            key: "path",
-            value: to.address,
-            caseInsensitive: true,
-            method: StringMatchMethod.exact,
-        }),
-        new IntegerCompare({
-            key: "pathDepth",
-            value: to.path.length + 1,
-            compare: Compare.Equal,
+        new ByteMatchQuery({
+            key: "canvasId",
+            value: to.id,
         }),
     ];
 };
-
-export const getOwnedAndSubownedElementsQuery = (to: { address: string }) => {
-    return [
-        new StringMatch({
-            key: "path",
-            value: to.address,
-            caseInsensitive: true,
-            method: StringMatchMethod.exact,
-        }),
-    ];
-};
-
-export const getSubownedElementsQuery = (to: {
-    address: string;
-    path: any[];
-}) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-    new IntegerCompare({
-        key: "pathDepth",
-        value: to.path.length + 1,
-        compare: Compare.Greater,
-    }),
-];
 
 export const getTextElementsQuery = () =>
     new StringMatch({
@@ -489,6 +455,7 @@ export const getImagesQuery = () =>
             method: StringMatchMethod.exact,
         }),
     ]);
+
 export const getTimeQuery = (ageMilliseconds: number) =>
     new IntegerCompare({
         key: ["__context", "created"],
@@ -560,6 +527,108 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
     }
 }
 
+/* -------------- STYLING ------------------ */
+
+export abstract class AbstractBackground {}
+
+@variant(0)
+export class ModedBackground {
+    @field({ type: AbstractBackground })
+    light: BackGroundTypes;
+
+    @field({ type: option(AbstractBackground) })
+    dark?: BackGroundTypes;
+
+    constructor(props?: { light?: BackGroundTypes; dark?: BackGroundTypes }) {
+        this.light = props?.light ?? new StyledBackground({ css: "" });
+        this.dark = props?.dark;
+    }
+}
+
+@variant(0)
+export class StyledBackground extends AbstractBackground {
+    @field({ type: "string" })
+    css: string;
+
+    constructor(props: { css: string }) {
+        super();
+        this.css = props.css;
+    }
+}
+
+@variant(1)
+export class CanvasBackground extends AbstractBackground {
+    @field({ type: CanvasAddressReference })
+    ref: CanvasAddressReference;
+
+    constructor(props: CanvasBackground) {
+        super();
+        this.ref = props.ref;
+    }
+}
+
+export type BackGroundTypes = StyledBackground | CanvasBackground;
+
+export abstract class Visualization {
+    id: Uint8Array;
+    canvasId: Uint8Array;
+}
+
+export class IndexedVisualization {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: fixedArray("u8", 32) })
+    canvasId: Uint8Array;
+
+    constructor(props: { id: Uint8Array; canvasId: Uint8Array }) {
+        this.id = props.id;
+        this.canvasId = props.canvasId;
+    }
+}
+
+@variant(0)
+export class BasicVisualization {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: fixedArray("u8", 32) })
+    canvasId: Uint8Array;
+
+    @field({ type: option(ModedBackground) })
+    background?: ModedBackground;
+
+    @field({ type: option(ModedThemePalette) })
+    palette?: ModedThemePalette;
+
+    @field({ type: "bool" })
+    showAuthorInfo: boolean;
+
+    @field({ type: option("string") })
+    previewHeight?: string;
+
+    @field({ type: option("string") })
+    font?: string;
+
+    constructor(props: {
+        id?: Uint8Array;
+        canvasId: Uint8Array;
+        background?: ModedBackground;
+        palette?: ModedThemePalette;
+        showAuthorInfo?: boolean;
+        previewHeight?: string;
+        font?: string;
+    }) {
+        this.id = props?.id || randomBytes(32);
+        this.canvasId = props.canvasId;
+        this.background = props?.background;
+        this.palette = props?.palette;
+        this.showAuthorInfo = props?.showAuthorInfo ?? true;
+        this.previewHeight = props?.previewHeight;
+        this.font = props?.font;
+    }
+}
+
 type CanvasArgs = {
     debug?: boolean;
     replicate?: boolean;
@@ -570,17 +639,20 @@ export class Canvas extends Program<CanvasArgs> {
     @id({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
+    @field({ type: PublicSignKey })
+    publicKey: PublicSignKey;
+
     @field({ type: Documents })
     private _elements: Documents<Element, IndexableElement>; // Elements are either data points or sub-canvases (comments)
 
     @field({ type: Documents })
     private _replies: Documents<Canvas, IndexableCanvas>; // Replies or Sub Replies
 
+    @field({ type: Documents })
+    private _visualizations: Documents<Visualization, IndexedVisualization>;
+
     @field({ type: RPC })
     private _messages: RPC<CanvasMessage, CanvasMessage>;
-
-    @field({ type: PublicSignKey })
-    publicKey: PublicSignKey;
 
     @field({ type: vec(CanvasReference) })
     path: CanvasReference[];
@@ -588,17 +660,21 @@ export class Canvas extends Program<CanvasArgs> {
     @field({ type: vec(CanvasReference) })
     replyTo: CanvasReference[];
 
+    @field({ type: "u8" })
+    acl: 0; // TODO
+
     constructor(
         properties: { seed?: Uint8Array } & {
             publicKey: PublicSignKey;
         } & { replyTo?: CanvasReference[] } & {
             topMostCanvasWithSameACL?: Canvas | null;
-        } & PathProperties & { id?: Uint8Array }
+        } & PathProperties & {
+                id?: Uint8Array;
+            }
     ) {
         super();
         this.publicKey = properties.publicKey;
         this.path = resolvePathFromProperties(properties);
-
         this.replyTo = properties["replyTo"] ?? [];
         const elementsId =
             properties.id ||
@@ -608,8 +684,23 @@ export class Canvas extends Program<CanvasArgs> {
         this.id = elementsId;
         this._elements = new Documents({ id: elementsId });
         this._replies = new Documents({ id: sha256Sync(elementsId) });
+        this._visualizations = new Documents({
+            id: sha256Sync(sha256Sync(elementsId)),
+        });
         this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
         this._messages = new RPC();
+        this.acl = 0;
+    }
+
+    private async maybeSave() {
+        // update address
+        let addressBefore = this.address;
+        await this.save(this.node.services.blocks, { reset: true });
+        if (addressBefore === this.address) {
+            return; // no change
+        }
+
+        // TODO things if address changed
     }
 
     async setParent(canvas: Canvas) {
@@ -618,17 +709,6 @@ export class Canvas extends Program<CanvasArgs> {
             throw error;
         });
 
-        // fetch elements before updating address and apth
-        const elements = await this.elements.index
-            .iterate({ query: getOwnedElementsQuery(this) })
-            .all();
-        const elementsWithSubElements = await this.elements.index
-            .iterate({ query: getOwnedAndSubownedElementsQuery(this) })
-            .all();
-        if (elementsWithSubElements.length !== elements.length) {
-            throw new Error("Cannot move canvas with sub-elements");
-        }
-
         this.path = [
             ...canvas.path,
             new CanvasAddressReference({
@@ -636,26 +716,7 @@ export class Canvas extends Program<CanvasArgs> {
             }),
         ];
 
-        // update address
-        let addressBefore = this.address;
-        await this.save(this.node.services.blocks, { reset: true });
-        if (addressBefore === this.address) {
-            return; // no change
-        }
-
-        const newElementPath = [
-            ...this.path,
-            new CanvasAddressReference({
-                canvas: this,
-            }),
-        ];
-        // move all elements
-        // TODO what if the origin has changed?
-        // TODO implement sub canvases movements?
-        for (const element of elements) {
-            element.path = newElementPath;
-            await this.elements.put(element);
-        }
+        await this.maybeSave();
     }
 
     private _idString: string;
@@ -709,6 +770,8 @@ export class Canvas extends Program<CanvasArgs> {
             this._elements.allPrograms.map((x) => (x.closed = true));
             this._messages.closed = true;
             this._messages.allPrograms.map((x) => (x.closed = true));
+            this._visualizations.closed = true;
+            this._visualizations.allPrograms.map((x) => (x.closed = true));
             return;
         } else {
             this.debug &&
@@ -765,7 +828,7 @@ export class Canvas extends Program<CanvasArgs> {
                             type: indexable.type,
                             content: indexable.content,
                             location: arg.location,
-                            path: arg.path.map((x) => x.address),
+                            canvasId: arg.canvasId,
                             quality:
                                 arg.content instanceof StaticContent
                                     ? arg.content.quality
@@ -820,6 +883,30 @@ export class Canvas extends Program<CanvasArgs> {
                     },
                 },
             });
+
+            await this._visualizations.open({
+                type: BasicVisualization,
+                replicas: args?.replicas,
+                replicate:
+                    args?.replicate != null
+                        ? args?.replicate
+                            ? { factor: 1 }
+                            : false
+                        : { factor: 1 }, // TODO choose better
+                timeUntilRoleMaturity: 6e4,
+                keep: "self",
+                index: {
+                    type: IndexedVisualization,
+                },
+                canPerform: async (operation) => {
+                    /**
+                     * Only allow updates if we created it
+                     *  or from myself (this allows us to modifying someone elsecanvas locally)
+                     */
+                    return true;
+                },
+            });
+
             this.debug &&
                 console.timeEnd(this.getValueWithContext("openReplies"));
 
@@ -1125,7 +1212,7 @@ export class Canvas extends Program<CanvasArgs> {
                         }),
                         location: Layout.zero(),
                         publicKey: this.node.identity.publicKey,
-                        parent: nextCanvas,
+                        canvasId: nextCanvas.id,
                     })
                 );
                 await currentCanvas.createReply(nextCanvas);
@@ -1262,12 +1349,72 @@ export class Canvas extends Program<CanvasArgs> {
         if (!this._topMostCanvasWithSameACL && this.path.length > 0) {
             throw new Error("Root not found or loaded");
         }
+
         return this._topMostCanvasWithSameACL;
     }
 
     get replies(): Documents<Canvas, IndexableCanvas, any> {
         const root: Canvas = this.origin ?? this;
         return root._replies;
+    }
+
+    get visualizations(): Documents<Visualization, IndexedVisualization, any> {
+        const root: Canvas = this.origin ?? this;
+        return root._visualizations;
+    }
+
+    async setVisualization(
+        visualization: BasicVisualization | null
+    ): Promise<void> {
+        const origin = this.origin;
+        if (!origin) {
+            throw new Error("Cannot set visualization on non-origin canvas");
+        }
+        const visualizations = await this.visualizations.index
+            .iterate(
+                {
+                    query: {
+                        canvasId: this.id,
+                    },
+                },
+                { resolve: false }
+            )
+            .all();
+        for (const visualization of visualizations) {
+            await this.visualizations.del(visualization.id);
+        }
+
+        if (visualization) {
+            await this.visualizations.put(visualization);
+        } else {
+            // previous visualization was removed
+        }
+    }
+
+    async getVisualization(): Promise<WithIndexedContext<
+        Visualization,
+        IndexedVisualization
+    > | null> {
+        const origin = this.origin;
+        if (!origin) {
+            throw new Error("Cannot get visualization on non-origin canvas");
+        }
+        const visualizations = await this.visualizations.index
+            .iterate({
+                query: {
+                    canvasId: this.id,
+                },
+            })
+            .all();
+        if (visualizations.length === 0) {
+            return null;
+        }
+        if (visualizations.length > 1) {
+            throw new Error(
+                `Multiple visualizations found for canvas ${this.idString}`
+            );
+        }
+        return visualizations[0];
     }
 
     private async updateIndexedReplyCounter(
@@ -1393,7 +1540,7 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     isInScope(element: Element) {
-        return element.path[element.path.length - 1].address === this.address;
+        return equals(element.canvasId, this.id);
     }
 
     async openWithSameSettings<T extends Canvas | WithContext<Canvas>>(

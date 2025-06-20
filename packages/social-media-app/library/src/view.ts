@@ -27,6 +27,7 @@ export class PinnedPosts extends Filter {
 export interface ViewModel {
     id: string; // Key to identify the view.
     name: string; // Human-readable name for the view.
+    index?: number; // where this view is in the list of views, useful for sorting or ordering.
     query?: (from: Canvas) => SearchRequest; // The query associated with this view.
     settings: ViewSettings; // Extra settings for customization.
 }
@@ -45,6 +46,9 @@ export interface ViewSettings {
 export class View {
     @field({ type: "string" })
     id: string; // gallery, best, latest, etc
+
+    @field({ type: option("u32") })
+    index?: number; // Index of the view, useful for sorting or ordering.
 
     @field({ type: CanvasAddressReference })
     canvas: CanvasAddressReference;
@@ -66,17 +70,20 @@ export class View {
         canvas: CanvasAddressReference;
         description?: CanvasAddressReference;
         filter?: Filter;
+        index?: number;
     }) {
         this.id = properties.id;
         this.canvas = properties.canvas;
         this.description = properties.description;
         this.filter = properties.filter;
+        this.index = properties.index;
     }
 
     toViewModel(): ViewModel {
         return {
             id: this.id,
             name: this.id,
+            index: this.index,
             query:
                 this.filter && this.filter instanceof PinnedPosts
                     ? (from: Canvas) => {
@@ -109,8 +116,12 @@ export class IndexableView {
     @field({ type: "string" })
     id: string; // gallery, best, latest, etc
 
+    @field({ type: option("u32") })
+    index: number | undefined;
+
     constructor(properties: View) {
         this.id = properties.id;
+        this.index = properties.index;
     }
 }
 

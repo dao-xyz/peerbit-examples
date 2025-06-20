@@ -1,15 +1,13 @@
 import React, { useRef, useEffect } from "react";
-import ToolbarContent from "./ToolbarContent"; // Assume you have this component
 import { AppSelectPaneInline } from "./AppSelectPaneInline"; // And this one
 import { SimpleWebManifest } from "@giga-app/interface"; // Make sure this import works for you
-import { useToolbar } from "./ToolbarContext";
+import { useEditTools } from "./ToolbarContext";
 
-export const Toolbar = (props: { className?: string }) => {
-    return <ToolbarInner className={props?.className} />;
-};
-
-const ToolbarInner = (props: { className: string }) => {
-    const { appSelectOpen, setAppSelectOpen } = useToolbar();
+export const CloseableAppPane = (props: {
+    className?: string;
+    children: React.ReactNode;
+}) => {
+    const { appSelectOpen, setAppSelectOpen } = useEditTools();
     const toolbarRef = useRef<HTMLDivElement>(null);
     const appSelectRef = useRef<HTMLDivElement>(null);
 
@@ -45,7 +43,7 @@ const ToolbarInner = (props: { className: string }) => {
             className={"w-full flex justify-center " + props.className}
         >
             <div className="flex flex-col w-full rounded-t-lg items-center safe-area-bottom max-w-[876px] bg-neutral-100 dark:bg-neutral-900">
-                <ToolbarContent />
+                {props.children}
                 <div
                     ref={appSelectRef}
                     className="overflow-hidden w-full"

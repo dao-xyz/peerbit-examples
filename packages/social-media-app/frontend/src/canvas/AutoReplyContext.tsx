@@ -53,12 +53,9 @@ export const AutoReplyProvider: React.FC<{
             return;
         }
         typedOnce.current = false; // reset typedOnce when pending canvas changes
-        const newPath = [
-            ...pendingCanvas.path,
-            new CanvasAddressReference({ canvas: pendingCanvas }),
-        ];
+
         mutate((element) => {
-            element.path = newPath;
+            element.canvasId = pendingCanvas.id;
             return true;
         });
     }, [pendingCanvas?.closed === false ? pendingCanvas?.address : undefined]); // important is to observe address changes, not just path changes because address depends on the path
@@ -118,10 +115,11 @@ export const AutoReplyProvider: React.FC<{
 
     useEffect(() => {
         // this behaviour we only want if we have not typed anything
-        /*    if (typedOnce.current) {
-               return;
-           }
-    */
+        /*    
+        if (typedOnce.current) {
+            return;
+        }
+        */
         // auto reply to the last processed reply
         if (view?.id === "chat") {
             if (processedReplies.length > 0) {

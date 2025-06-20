@@ -62,6 +62,32 @@ export const MarkdownContent = ({
 
     const suggestedReplyForParent = useRef<string | null>(null);
 
+    //   Helper: is the caret at the logical end?
+    const caretIsAtEnd = () =>
+        textareaRef.current &&
+        textareaRef.current.selectionStart ===
+            textareaRef.current.value.length &&
+        textareaRef.current.selectionEnd === textareaRef.current.value.length;
+
+    // Helper: push the scroll container (or window) so the caret line is visible
+    const scrollToBottom = () => {
+        // If the MarkdownContent itself is scroll-able, use it
+        if (containerRef.current) {
+            containerRef.current.scrollTop = containerRef.current.scrollHeight;
+        }
+
+        // Fallback: if the div isn't scrollable, bump the page instead
+        requestAnimationFrame(() => {
+            const { bottom } = containerRef.current!.getBoundingClientRect();
+            if (bottom > window.innerHeight) {
+                window.scrollTo({
+                    top: document.body.scrollHeight,
+                    behavior: "instant",
+                });
+            }
+        });
+    };
+
     useEffect(() => {
         if (
             !isReady ||
@@ -170,6 +196,11 @@ export const MarkdownContent = ({
                 ? containerRef.current.clientWidth
                 : 0;
             onResize({ width: newWidth, height: newHeight });
+
+            if (caretIsAtEnd() && inFullscreen) {
+                console.log("SCROLL TO BOTTOM");
+                scrollToBottom();
+            }
         }
     }, [onResize]);
 
@@ -196,7 +227,7 @@ export const MarkdownContent = ({
 
     useEffect(() => {
         if (editable && containerRef.current && canvas) {
-            if (!suggestReply) {
+            if (!suggestReply && !isEditing) {
                 handleStartEditing(true);
             }
         }
@@ -285,7 +316,7 @@ export const MarkdownContent = ({
     // If noPadding is true, we remove the padding.
     const commonClasses = noPadding
         ? "text-base leading-6 "
-        : "p-1 pt-0.5 text-base leading-6";
+        : "p-1 px-2 text-base leading-6";
 
     // Utility function to check if a text selection is present
     const isTextSelected = () => {
@@ -307,13 +338,17 @@ export const MarkdownContent = ({
             e.stopPropagation();
         }
     };
-
+    const containerStyle =
+        !inFullscreen && editable && isEditing
+            ? { maxHeight: "200px", overflowY: "auto" as const }
+            : {};
     return (
         <div
             ref={containerRef}
             className={`${commonClasses} w-full text-left  ${
                 editable ? "cursor-text" : ""
             }`}
+            style={containerStyle}
             onClick={handleClick}
         >
             {editable && isEditing ? (
@@ -352,11 +387,11 @@ export const MarkdownContent = ({
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={`${commonClasses} ${
+                    className={`${
                         previewLines ? "line-clamp-[var(--preview-lines)]" : ""
-                    } ${previewLines === 1 ? "break-all" : ""} ${
-                        editable ? "bg-neutral-800" : ""
-                    }`}
+                    } ${
+                        previewLines > 0 ? "break-all whitespace-pre-wrap" : ""
+                    } ${editable ? "" : ""} ${editable ? "min-h-10" : ""} `}
                 >
                     <Markdown
                         disallowedElements={
@@ -373,6 +408,38 @@ export const MarkdownContent = ({
                                     className=" wrap-anywhere underline "
                                 />
                             ),
+
+                            // the first h1, h2, h3, or h4 should be rendered without top margin
+                            /*  h1: ({ node, className, children, ...props }) => {
+                                 return <h1
+                                     className={`mt-0 mb-2 ${className}`}
+                                     {...props}
+                                 >
+                                     {children}
+                                 </h1>
+                             }, */
+
+                            code: ({ node, className, children, ...props }) => {
+                                // break if previewLines is set
+                                if (previewLines) {
+                                    return (
+                                        <code
+                                            className={`break-all whitespace-pre-wrap ${className}`}
+                                            {...props}
+                                        >
+                                            {children}
+                                        </code>
+                                    );
+                                }
+                                return (
+                                    <code
+                                        className={`whitespace-pre-wrap ${className}`}
+                                        {...props}
+                                    >
+                                        {children}
+                                    </code>
+                                );
+                            },
                         }}
                     >
                         {text}

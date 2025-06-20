@@ -38,7 +38,6 @@ export const Header = ({
     forwardRef?: React.Ref<HTMLDivElement>;
     detailed?: boolean; // detailed view
 }) => {
-    const [bgColor, setBgColor] = useState("transparent");
     const { peer } = usePeer();
     const { create } = useProfiles();
     const { dynamicViews, pinToView } = useView();
@@ -95,8 +94,6 @@ export const Header = ({
         }
     };
 
-    const handlePin = async () => {};
-
     return (
         <>
             {canvas && (
@@ -107,13 +104,6 @@ export const Header = ({
                     } items-center gap-1 ${
                         direction === "col" ? "flex-col" : "flex-row"
                     } ${className ?? ""} ${variant === "large" && "w-full"}`}
-                    style={
-                        {
-                            "--bgcolor": bgColor
-                                .replace("rgb", "rgba")
-                                .replace(")", ",0.2)"),
-                        } as React.CSSProperties
-                    }
                 >
                     <div
                         className={`overflow-hidden flex mr-1   ${
@@ -124,7 +114,6 @@ export const Header = ({
                     >
                         <ProfileButton
                             publicKey={canvas.publicKey}
-                            setBgColor={setBgColor}
                             size={
                                 variant === "large"
                                     ? 32
@@ -261,7 +250,7 @@ export const Header = ({
                                     {/* dynamic (user) views first */}
                                     {dynamicViews.length > 0 && (
                                         <>
-                                            <DropdownMenu.Label className="px-4 py-1 text-xs text-blue-600">
+                                            <DropdownMenu.Label className="px-4 py-1 text-xs text-primary-600">
                                                 Your views
                                             </DropdownMenu.Label>
                                             {dynamicViews.map((v) => (

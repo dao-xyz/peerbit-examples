@@ -56,7 +56,7 @@ export const createProfile = async (client: ProgramClient) => {
                                 quality: x,
                                 contentId,
                             }),
-                            parent: canvas,
+                            canvasId: canvas.id,
                             publicKey: client.identity.publicKey,
                         })
                     )

@@ -3,7 +3,8 @@ import {
     getScrollTop,
     useHeaderVisibilityContext,
 } from "../../HeaderVisibilitiyProvider";
-import { useToolbar } from "../toolbar/ToolbarContext";
+import { useCanvas } from "../CanvasWrapper";
+import { useView } from "../reply/view/ViewContex";
 
 function getScrollBottomOffset() {
     return (
@@ -13,15 +14,17 @@ function getScrollBottomOffset() {
 }
 
 export const useToolbarVisibility = (
-    elementRef: React.RefObject<HTMLElement>,
     scrollThreshold = 50,
     topThreshold = 100 // distance (in pixels) from the top of the viewport for the element to be considered "close"
 ) => {
     const [visible, setVisible] = useState(true);
     const prevScrollTopRef = useRef(getScrollTop());
-    const headerIsShowing = useHeaderVisibilityContext();
-    const { setAppSelectOpen } = useToolbar();
+    const { view } = useView();
+    const { visible: headerIsShowing, setDisabled: x } =
+        useHeaderVisibilityContext();
     const isAtBottom = useRef(false);
+    const [isEmpty, setIsEmpty] = useState(true);
+    const [disabled, setDisabled] = useState(false);
 
     const show = () => {
         setVisible(true);
@@ -29,20 +32,38 @@ export const useToolbarVisibility = (
 
     const unshow = () => {
         setVisible(false);
-        setAppSelectOpen(false);
     };
 
+    /* useEffect(() => {
+        console.log(view.id)
+        if (view.settings.focus === 'last') {
+            x(true)
+            setDisabled(true); // disable toolbar for chat view
+        }
+        else {
+            setDisabled(false); // enable toolbar for other views
+        }
+    }, [view.id]) */
     useEffect(() => {
+        if (disabled) {
+            unshow();
+            return;
+        }
+
         if (headerIsShowing) {
             show();
         } else {
-            if (!isAtBottom.current) {
+            // if header is not showing and the toolbar has no content, then we should hide it (TODO add manual hide mode)
+            if (!isAtBottom.current && isEmpty) {
                 unshow();
             }
         }
-    }, [headerIsShowing]);
+    }, [headerIsShowing, disabled]);
 
     useEffect(() => {
+        if (disabled) {
+            return;
+        }
         const handleScroll = () => {
             const currentScrollTop = getScrollTop();
             const scrollBottomOffset = getScrollBottomOffset();
@@ -71,7 +92,16 @@ export const useToolbarVisibility = (
 
         window.addEventListener("scroll", handleScroll);
         return () => window.removeEventListener("scroll", handleScroll);
-    }, [elementRef, scrollThreshold, topThreshold]);
+    }, [/* elementRef,  */ scrollThreshold, topThreshold, disabled]);
 
-    return visible;
+    return {
+        visible,
+        setDisabled,
+        disabled,
+        show,
+        unshow,
+        isAtBottom: isAtBottom.current,
+        setIsEmpty,
+        isEmpty,
+    };
 };
