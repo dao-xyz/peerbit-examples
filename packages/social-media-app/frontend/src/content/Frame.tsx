@@ -251,10 +251,9 @@ export const Frame = (properties: {
         }
         // For static content (markdown or images), use EditableStaticContent.
         if (properties.element.content instanceof StaticContent) {
-            const staticContent = properties.element.content.content;
             return (
                 <EditableStaticContent
-                    staticContent={staticContent}
+                    element={properties.element as Element<StaticContent>}
                     editable={properties.editMode}
                     thumbnail={properties.thumbnail}
                     canOpenFullscreen={properties.canOpenFullscreen}
@@ -281,6 +280,7 @@ export const Frame = (properties: {
                                 },
                             }
                         );
+
                         if (options?.save /* && properties.draft */) {
                             await savePending();
                         }
@@ -293,6 +293,8 @@ export const Frame = (properties: {
                 />
             );
         }
+
+        console.log("UNSUPPORTED?", properties.element);
         return <span>Unsupported content</span>;
     };
 

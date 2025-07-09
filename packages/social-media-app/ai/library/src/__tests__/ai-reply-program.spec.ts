@@ -9,7 +9,7 @@ import {
 } from "../ai-reply-program";
 import { expect } from "chai";
 import { DEEP_SEEK_R1_1_5b, DEEP_SEEK_R1_7b } from "../model.js";
-import { rootDevelopment, Canvas } from "@giga-app/interface";
+import { Canvas, createRoot } from "@giga-app/interface";
 import { waitForResolved } from "@peerbit/time";
 import { ProgramClient } from "@peerbit/program";
 
@@ -120,14 +120,7 @@ describe("AIResponseProgram", () => {
             args: { server: true, llm: "ollama" },
         });
 
-        const clientCanvasRoot = await session.peers[1].open<Canvas>(
-            rootDevelopment.clone(),
-            {
-                args: {
-                    replicate: false,
-                },
-            }
-        );
+        const clientCanvasRoot = await createRoot(await session.peers[1], true);
         await clientCanvasRoot.replies.log.waitForReplicators();
         expect([
             ...(await clientCanvasRoot.replies.log.getReplicators()),

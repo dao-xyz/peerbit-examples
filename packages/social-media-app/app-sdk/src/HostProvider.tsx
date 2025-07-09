@@ -20,7 +20,7 @@ export interface HostProviderProps {
      * A function child that receives the iframe ref.
      */
     children: (
-        iframeRef: React.RefObject<HTMLIFrameElement>
+        iframeRef: React.RefObject<HTMLIFrameElement | null>
     ) => React.ReactNode;
     /**
      * Optional callback for handling resize messages from the app.
@@ -65,7 +65,7 @@ export const HostProvider: React.FC<HostProviderProps> = ({
     onResize,
     onNavigate,
 }) => {
-    const iframeRef = useRef<HTMLIFrameElement>(null);
+    const iframeRef = useRef<HTMLIFrameElement | null>(null);
     const hostRef = useRef<AppHost | null>(null);
     const { registerHost, unregisterHost } = useHostRegistry();
     const registeredFn = useRef<((args: any) => any) | undefined>(undefined);

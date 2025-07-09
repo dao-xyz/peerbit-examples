@@ -2,6 +2,7 @@ import { usePeer } from "@peerbit/react";
 import { useIdentities } from "./useIdentities";
 import { Connection } from "@giga-app/interface";
 import { CiCircleRemove } from "react-icons/ci";
+import { JSX } from "react";
 
 export const ListDevices = () => {
     const { identities, devices } = useIdentities();

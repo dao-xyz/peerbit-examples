@@ -36,7 +36,7 @@ describe("profile", () => {
                 seed: new Uint8Array(),
             })
         );
-        const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
+        const [_a, _b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
 
         const profiles = await session.peers[0].open(new Profiles());
         await profiles.create({ profile: c });
@@ -58,8 +58,8 @@ describe("profile", () => {
                 seed: new Uint8Array(),
             })
         );
-        const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
-        const [__a, __b, d] = await root.getCreateRoomByPath(["a", "b", "d"]);
+        const [_a, _b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
+        const [__a, __b, d] = await root.getCreateCanvasByPath(["a", "b", "d"]);
 
         const profiles = await session.peers[0].open(new Profiles());
         await profiles.create({ profile: c });
@@ -111,7 +111,7 @@ describe("profile", () => {
                 seed: new Uint8Array(),
             })
         );
-        const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
+        const [_a, _b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
 
         const profiles = await session.peers[0].open(new Profiles());
         await profiles.create({ profile: c });

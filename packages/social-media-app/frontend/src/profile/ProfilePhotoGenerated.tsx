@@ -77,5 +77,12 @@ export const ProfilePhotoGenerated = ({
         }
     }, [publicKey?.hashcode(), cellSize, cells, size]);
 
-    return <canvas ref={canvasRef} width={sizeDefined} height={sizeDefined} />;
+    return (
+        <canvas
+            className="w-auto h-full"
+            ref={canvasRef}
+            width={sizeDefined}
+            height={sizeDefined}
+        />
+    );
 };

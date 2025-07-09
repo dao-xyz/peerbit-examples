@@ -1,7 +1,6 @@
-import React, { useContext } from "react";
+import React, { JSX, useContext } from "react";
 import { Multiaddr } from "@multiformats/multiaddr";
 import { Peerbit } from "peerbit";
-import { DirectSub } from "@peerbit/pubsub";
 import {
     getFreeKeypair,
     getClientId,
@@ -17,9 +16,7 @@ import sodium from "libsodium-wrappers";
 import { useMount } from "./useMount.js";
 import { createClient, createHost } from "@peerbit/proxy-window";
 import { ProgramClient } from "@peerbit/program";
-import { identify } from "@libp2p/identify";
 import { webSockets } from "@libp2p/websockets";
-import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import * as filters from "@libp2p/websockets/filters";
 import { detectIncognito } from "detectincognitojs";
 

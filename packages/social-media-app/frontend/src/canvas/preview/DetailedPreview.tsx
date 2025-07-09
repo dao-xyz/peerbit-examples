@@ -1,38 +1,35 @@
 import React, { useState } from "react";
-import { useView } from "../reply/view/ViewContex";
+import { useView } from "../view/ViewContext";
 import { Header } from "../header/Header";
 import { CanvasPreview } from "./Preview";
 import { IoColorPaletteOutline, IoSave, IoSaveOutline } from "react-icons/io5";
 import { MdPublic } from "react-icons/md";
 import { usePeer } from "@peerbit/react";
 import { CustomizationSettings } from "../custom/CustomizationSettings";
-import { useVisualization } from "../custom/CustomizationProvider";
 import * as Toggle from "@radix-ui/react-toggle";
 import { FiEdit } from "react-icons/fi";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { MdAutoFixHigh } from "react-icons/md";
 import { LuOrigami } from "react-icons/lu";
-import { CanvasEditorProvider, useEditTools } from "../toolbar/ToolbarContext";
-import { InlineEditor } from "../toolbar/FullscreenEditor";
-import { CloseableAppPane } from "../toolbar/Toolbar";
-import { ToolbarEdit } from "../toolbar/ToolbarEdit";
-import { useToolbarVisibilityContext } from "../toolbar/ToolbarVisibilityProvider";
+import { CanvasEditorProvider, useEditTools } from "../edit/ToolbarContext";
+import { InlineEditor } from "../edit/InlineEditor";
+import { CloseableAppPane } from "../edit/CloseableAppPane";
+import { ToolbarEdit } from "../edit/ToolbarEdit";
+import { useToolbarVisibilityContext } from "../edit/ToolbarVisibilityProvider";
 import { CanvasWrapper } from "../CanvasWrapper";
 import { HIGH_QUALITY } from "@giga-app/interface";
-import {
-    EditModeProvider,
-    useEditModeContext,
-} from "../toolbar/EditModeProvider";
+import { EditModeProvider, useEditModeContext } from "../edit/EditModeProvider";
+import { useVisualizationContext } from "../custom/CustomizationProvider";
 
 const DetailedViewInner: React.FC<{
     ref?: React.Ref<HTMLDivElement>;
     onEditModeChange?: (value: boolean) => void;
 }> = ({ ref, onEditModeChange }) => {
-    const { canvases, viewRoot } = useView();
+    const { viewRoot } = useView();
     const { setDisabled: setBottomToolbarDisabled } =
         useToolbarVisibilityContext();
     const { peer } = usePeer();
-    const { createDraft, cancelDraft } = useVisualization();
+    const { createDraft, cancelDraft } = useVisualizationContext();
     const isOwner = viewRoot?.publicKey.equals(peer.identity.publicKey);
     const { editMode, setEditMode } = useEditModeContext();
 
@@ -40,28 +37,24 @@ const DetailedViewInner: React.FC<{
     const [openCustomizer, _setOpenCustomizer] = useState(false);
 
     const toggleOpenCustomizer = () => {
-        _setOpenCustomizer((prev) => {
-            let value = !prev;
-            if (value) {
-                createDraft();
-            } else {
-                cancelDraft();
-            }
-            return value;
-        });
+        let value = !openCustomizer;
+        if (value) {
+            createDraft();
+        } else {
+            cancelDraft();
+        }
+        _setOpenCustomizer(value);
     };
 
     const toggleEditMode = (newValue?: boolean) => {
-        setEditMode((prev) => {
-            let value = newValue ?? !prev;
-            if (value) {
-                setBottomToolbarDisabled(true);
-            } else {
-                setBottomToolbarDisabled(false);
-            }
-            onEditModeChange?.(value);
-            return value;
-        });
+        let value = newValue ?? !editMode;
+        if (value) {
+            setBottomToolbarDisabled(true);
+        } else {
+            setBottomToolbarDisabled(false);
+        }
+        onEditModeChange?.(value);
+        setEditMode(value);
     };
 
     const postTypes: { label: string; value: string; icon: React.ReactNode }[] =
@@ -71,11 +64,17 @@ const DetailedViewInner: React.FC<{
         ];
 
     const [currentType, setCurrentType] = useState(postTypes[0]);
+    const shouldShowMetaInfo =
+        viewRoot?.path.length >
+        0; /* !visualization || visualization.replies !== ReplyVisualization.NAVIGATION */
     return (
         <div className="mx-auto w-full" ref={ref}>
             {editMode ? (
-                <CanvasEditorProvider pendingCanvas={viewRoot}>
-                    <InlineEditor />
+                <CanvasEditorProvider
+                    parent={viewRoot}
+                    pendingCanvas={viewRoot}
+                >
+                    <InlineEditor className="pb-12 " />
                     <CloseableAppPane>
                         <ToolbarEdit />
                     </CloseableAppPane>
@@ -83,13 +82,14 @@ const DetailedViewInner: React.FC<{
             ) : (
                 <CanvasPreview variant="detail" />
             )}
-            {canvases.length > 1 && (
+            {shouldShowMetaInfo && (
                 <div className="flex flex-row justify-center items-center w-full inset-shadow-sm">
                     <Header
                         variant="medium"
                         canvas={viewRoot}
                         detailed
-                        className="pb-2 h-8 "
+                        className="h-8 "
+                        showPath={false}
                     />
 
                     <div className="ml-auto pr-2 flex gap-1">

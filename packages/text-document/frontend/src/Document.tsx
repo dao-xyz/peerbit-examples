@@ -11,7 +11,7 @@ const ID = new Uint8Array([
 ]);
 
 export const Document = () => {
-    const testAreaRef = useRef<HTMLTextAreaElement>();
+    const testAreaRef = useRef<HTMLTextAreaElement>(undefined);
     const { program } = useProgram(new CollaborativeTextDocument({ id: ID }), {
         existing: "reuse",
     });

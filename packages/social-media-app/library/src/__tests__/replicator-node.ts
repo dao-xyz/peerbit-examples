@@ -7,10 +7,10 @@ process.addListener("unhandledRejection", (reason, promise) => {
 });
 
 import { Peerbit } from "peerbit";
-import { rootDevelopment } from "../root.js";
 import { Canvas, Element, StaticContent } from "../content.js";
 import { StaticMarkdownText } from "../static/text.js";
 import { StaticPartialImage } from "../static/image.js";
+import { createRoot } from "../root.js";
 console.log(
     Canvas,
     Element,
@@ -22,6 +22,6 @@ const client = await Peerbit.create();
 console.log("Client created: ", client.identity.publicKey.hashcode());
 const localPeerId = await (await fetch("http://localhost:8082/peer/id")).text();
 await client.dial("/ip4/127.0.0.1/tcp/8002/ws/p2p/" + localPeerId);
-await client.open(rootDevelopment);
+const root = await createRoot(client, true);
 
-console.log("Connected to root: " + rootDevelopment.address);
+console.log("Connected to root: " + root.address);

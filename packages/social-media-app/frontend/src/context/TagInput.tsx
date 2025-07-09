@@ -32,7 +32,7 @@ const DefaultTag = ({
  * - Pressing Enter with nonempty input adds a tag.
  * - Pressing Backspace when input is empty removes the last tag.
  */
-const TagInput = ({
+export const TagInput = ({
     tags,
     onTagsChange,
     renderTag,
@@ -96,5 +96,3 @@ const TagInput = ({
         </label>
     );
 };
-
-export default TagInput;

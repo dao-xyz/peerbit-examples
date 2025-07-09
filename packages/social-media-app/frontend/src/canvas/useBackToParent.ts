@@ -1,7 +1,7 @@
 // utils/navBackToParent.ts
 import { useNavigate } from "react-router";
 import type { Canvas as CanvasDB } from "@giga-app/interface";
-import { useLeaveSnapshotFn } from "./reply/feedRestoration";
+import { useLeaveSnapshotFn } from "./feed/feedRestoration";
 import { getCanvasPath } from "../routes";
 import { peekPrevPaths, consumePaths } from "../useNavHistory";
 

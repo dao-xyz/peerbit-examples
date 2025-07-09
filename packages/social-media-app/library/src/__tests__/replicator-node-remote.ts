@@ -7,7 +7,6 @@ process.addListener("unhandledRejection", (reason, promise) => {
 });
 
 import { Peerbit } from "peerbit";
-import { rootDevelopment } from "../root.js";
 import {
     Canvas,
     Element,
@@ -17,6 +16,7 @@ import {
 import { StaticMarkdownText } from "../static/text.js";
 import { StaticPartialImage } from "../static/image.js";
 import { Sort, SortDirection } from "@peerbit/document";
+import { createRoot } from "../root.js";
 console.log(
     Canvas,
     Element,
@@ -26,9 +26,9 @@ console.log(
 );
 const client = await Peerbit.create();
 await client.bootstrap();
-const root = await client.open(rootDevelopment);
+const root = await createRoot(client, true);
 
-console.log("Connected to root: " + rootDevelopment.address);
+console.log("Connected to root: " + root.address);
 await root.replies.log.waitForReplicators();
 const iterator = root.replies.index.iterate({
     query: getOwnedElementsQuery(root),

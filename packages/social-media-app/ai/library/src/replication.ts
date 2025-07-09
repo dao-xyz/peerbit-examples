@@ -1,5 +1,5 @@
 import { ProgramClient } from "@peerbit/program";
-import { rootDevelopment, Canvas } from "@giga-app/interface";
+import { createRoot, Canvas } from "@giga-app/interface";
 export interface LifeCycle {
     start: () => Promise<void>;
     stop: () => Promise<void>;
@@ -13,9 +13,7 @@ export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
             if (canvas) {
                 return;
             }
-            canvas = await client.open(rootDevelopment.clone(), {
-                existing: "reuse",
-            });
+            canvas = await createRoot(client, true);
             console.log(
                 "Starting replicator at canvas root: " + canvas.address
             );

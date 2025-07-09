@@ -562,7 +562,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
     const [sourceType, setSourceType] = useState<StreamType | undefined>(
         undefined
     );
-    const sourceTypeRef = useRef<StreamType | undefined>();
+    const sourceTypeRef = useRef<StreamType | undefined>(undefined);
 
     const videoLoadedOnce = useRef(false);
     const { program: mediaStreamDB } = useProgram<MediaStreamDB>(args.stream, {
@@ -585,7 +585,7 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         close: () => void | Promise<void>;
         drop: () => Promise<void>;
     }>(undefined);
-    const tickWorkerRef = useRef<Worker>();
+    const tickWorkerRef = useRef<Worker>(undefined);
     const lastFrameRate = useRef(30);
     const scheduleFrameFn =
         useRef<
@@ -593,14 +593,14 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                 now: DOMHighResTimeStamp,
                 metadata: VideoFrameCallbackMetadata
             ) => void
-        >();
+        >(undefined);
     const sourceId = useRef(0);
     const startId = useRef(0);
 
     const preferCPUEncodingRef = useRef(preferCPUEncodingDefault);
     const sessionTimestampRef = useRef<number | undefined>(undefined);
 
-    let videoRef = useRef<HTMLVideoElementWithCaptureStream>();
+    let videoRef = useRef<HTMLVideoElementWithCaptureStream>(undefined);
 
     const [errorMessage, setErrorMessage] = useState<string | undefined>(
         undefined

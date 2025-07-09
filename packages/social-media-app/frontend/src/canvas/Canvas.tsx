@@ -18,7 +18,7 @@ import {
 import { IoIosArrowDown, IoIosArrowUp } from "react-icons/io";
 import { MdClear } from "react-icons/md";
 import { Spinner } from "../utils/Spinner";
-import { useEditModeContext } from "./toolbar/EditModeProvider";
+import { useEditModeContext } from "./edit/EditModeProvider";
 
 type SizeProps = {
     width?: number;

@@ -3,7 +3,7 @@ import { useCanvases } from "./useCanvas";
 import { Spinner } from "../utils/Spinner";
 import { Canvas } from "./Canvas";
 import { CanvasWrapper } from "./CanvasWrapper";
-import { SaveButton } from "./SaveCanvasButton";
+import { SaveButton } from "./edit/SaveCanvasButton";
 import { usePeer, useProgram } from "@peerbit/react";
 import { Canvas as CanvasDB } from "@giga-app/interface";
 import { useNavigate } from "react-router";

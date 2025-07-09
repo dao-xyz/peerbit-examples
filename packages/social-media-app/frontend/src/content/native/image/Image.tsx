@@ -9,7 +9,7 @@ import React, {
 } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { FiMaximize, FiX } from "react-icons/fi";
-import { StaticImage } from "@giga-app/interface";
+import { Element, StaticContent, StaticImage } from "@giga-app/interface";
 import { sha256Base64Sync } from "@peerbit/crypto";
 import { readFileAsImage } from "./utils";
 import { ChangeCallback } from "../types";
@@ -23,12 +23,16 @@ import { ChangeCallback } from "../types";
  * ---------------------------------------------------------------------- */
 
 export type ImageContentProps = {
-    content: StaticImage & {
-        /** Intrinsic bitmap width */
-        width?: number;
-        /** Intrinsic bitmap height */
-        height?: number;
-    };
+    element: Element<
+        StaticContent<
+            StaticImage & {
+                /** Intrinsic bitmap width */
+                width?: number;
+                /** Intrinsic bitmap height */
+                height?: number;
+            }
+        >
+    >;
     onResize: (dims: { width: number; height: number }) => void;
     editable?: boolean;
     onChange?: ChangeCallback;
@@ -41,7 +45,7 @@ export type ImageContentProps = {
 };
 
 export const ImageContent = memo(function ImageContent({
-    content,
+    element,
     onResize,
     editable = false,
     onChange,
@@ -50,6 +54,7 @@ export const ImageContent = memo(function ImageContent({
     fallbackRatio = 4 / 3,
     onLoad,
 }: ImageContentProps) {
+    const content = element.content.content;
     /* ------------------------------------------------------------------- */
     /* Internal state                                                      */
     /* ------------------------------------------------------------------- */

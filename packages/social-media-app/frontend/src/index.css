@@ -42,6 +42,24 @@ code {
 
 
     /* Define your secondary color shades using oklch() */
+    --color-secondary-50: #f4ffe5;
+    --color-secondary-100: #e5ffc7;
+    --color-secondary-200: #ccff96;
+    --color-secondary-300: #aafc5a;
+    --color-secondary-400: #8df32e;
+    --color-secondary-500: #6ad909;
+    --color-secondary-600: #4fae02;
+    --color-secondary-700: #3d8407;
+    --color-secondary-800: #33680c;
+    --color-secondary-900: #2c580f;
+    --color-secondary-950: #133102;
+
+
+}
+
+/* custom colors for dark mode */
+
+.dark {
     --color-secondary-50: oklch(0.987 0.026 102.212);
     --color-secondary-100: oklch(0.973 0.071 103.193);
     --color-secondary-200: oklch(0.945 0.129 101.54);
@@ -53,6 +71,8 @@ code {
     --color-secondary-800: oklch(0.476 0.114 61.907);
     --color-secondary-900: oklch(0.421 0.095 57.708);
 }
+
+
 
 @tailwind utilities;
 
@@ -247,11 +267,11 @@ code {
     }
 
     .btn:hover {
-        @apply bg-primary-200 dark:bg-primary-400;
+        @apply bg-primary-300 dark:bg-primary-600;
     }
 
     .btn:active {
-        @apply bg-primary-400 dark:bg-primary-600;
+        @apply bg-primary-400 dark:bg-primary-700;
     }
 
     /* Narrow focus ring or outline for accessibility */

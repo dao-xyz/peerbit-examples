@@ -7,7 +7,7 @@ import {
     CanvasBackground,
     BackGroundTypes,
 } from "@giga-app/interface";
-import { useVisualization } from "./CustomizationProvider";
+import { useVisualizationContext } from "./CustomizationProvider";
 import { useThemeContext } from "../../theme/useTheme";
 
 /* ───────── helper: css string → style object ───────── */
@@ -43,7 +43,7 @@ export const CustomizedBackground: React.FC<{
     className?: string;
     children?: React.ReactNode;
 }> = ({ className = "", children }) => {
-    const { visualization, draft } = useVisualization();
+    const { visualization, draft } = useVisualizationContext();
     const { theme } = useThemeContext(); // 'light' | 'dark'
     const isDark = theme === "dark";
 

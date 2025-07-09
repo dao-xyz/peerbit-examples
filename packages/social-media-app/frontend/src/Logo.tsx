@@ -1,18 +1,24 @@
 import { useNavigate } from "react-router";
 import Logo from "/android-icon-192x192.png";
 
-export const HeaderLogo = ({ onClick }: { onClick?: () => void }) => {
+export const HeaderLogo = ({
+    onClick,
+    className,
+}: {
+    onClick?: () => void;
+    className?: string;
+}) => {
     const navigate = useNavigate();
     const asText = () => {
         return (
             <span
-                className="p-1"
+                className="p-0"
                 style={{
                     fontSize: "1.5rem",
-                    marginTop: "-0.4rem",
                     fontFamily: '"Gamja Flower", sans-serif',
                     fontWeight: 400,
                     fontStyle: "normal",
+                    lineHeight: "0.8",
                 }}
             >
                 Giga
@@ -25,22 +31,27 @@ export const HeaderLogo = ({ onClick }: { onClick?: () => void }) => {
             src={Logo}
             style={{
                 maxWidth: "40px",
-                height: "auto",
+                height: "inherit",
                 marginLeft: "0px",
                 marginTop: "-5px",
                 width: "auto",
+                objectFit: "contain",
             }}
         />
     );
     return (
         <button
-            className=" p-0 mb-[-10px] rounded-none hover:cursor-pointer h-full flex flex-col content-center items-center outline-0  border-none bg-transparent btn-bouncy"
+            className={
+                "p-0  rounded-none hover:cursor-pointer h-full flex flex-col content-center items-center outline-0  border-none bg-transparent btn-bouncy " +
+                className
+            }
             onClick={() => {
                 navigate("/", {});
                 onClick && onClick();
             }}
         >
-            {asImage()}
+            {/* {asImage()} */}
+            {asText()}
         </button>
     );
 };

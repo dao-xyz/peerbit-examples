@@ -6,12 +6,9 @@ import React, {
     useState,
     useEffect,
 } from "react";
-import { useQuery } from "@peerbit/react";
 import {
     BasicVisualization,
     Visualization,
-    IndexedVisualization,
-    getOwnedVisualizationQuery,
     Canvas,
     ModedBackground,
     StyledBackground,
@@ -19,8 +16,11 @@ import {
     SimpleThemePalette,
 } from "@giga-app/interface";
 import { equals } from "uint8arrays";
-import { useView } from "../reply/view/ViewContex";
+import { useView } from "../view/ViewContext";
 import { useThemeContext } from "../../theme/useTheme";
+import { useVisualization } from "./useVisualization";
+import { useNavigate } from "react-router";
+import { getCanvasPath } from "../../routes";
 
 /* ─── context type ───────────────────────────────────────────── */
 interface VisualizationCtx {
@@ -41,65 +41,18 @@ interface VisualizationCtx {
     createDraft: (replace?: boolean) => void;
 }
 const Ctx = createContext<VisualizationCtx>({} as any);
-export const useVisualization = () => useContext(Ctx);
+export const useVisualizationContext = () => useContext(Ctx);
 
 /* ─── provider ───────────────────────────────────────────────── */
 export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     children,
 }) => {
-    const { viewRoot: canvas } = useView();
+    const { viewRoot: canvas, canvases } = useView();
     const { theme } = useThemeContext(); // 'light' | 'dark'
 
-    const [visualization, setVisualization] = useState<
-        Visualization | undefined
-    >();
-
-    const query = useMemo(() => {
-        return !canvas || canvas.closed
-            ? null
-            : {
-                  query: getOwnedVisualizationQuery(canvas),
-              };
-    }, [canvas?.closed, canvas?.idString]);
-
-    /* 1. fetch the current saved visualization ------------------- */
-    const { items, isLoading } = useQuery(
-        canvas?.loadedElements ? canvas?.visualizations ?? null : null,
-        {
-            query,
-            onChange: {
-                merge: (ch) => ({
-                    added: ch.added.filter((v) =>
-                        equals(v.canvasId, canvas.id)
-                    ),
-                    removed: ch.removed.filter((v) =>
-                        equals(v.canvasId, canvas.id)
-                    ),
-                }),
-            },
-            resolve: true,
-            local: true,
-            remote: {
-                eager: true,
-            },
-            prefetch: true,
-        }
-    );
-
-    useEffect(() => {
-        if (items && items.length > 0) {
-            // we have a visualization, set it
-            const v = items[0] as IndexedVisualization;
-            if (canvas && equals(v.canvasId, canvas.id)) {
-                setVisualization(v);
-            } else {
-                setVisualization(undefined);
-            }
-        } else {
-            // no visualization found
-            setVisualization(undefined);
-        }
-    }, [items, canvas?.id]);
+    const { isLoading, visualization, setVisualization } = useVisualization({
+        canvas,
+    });
 
     const [draft, setDraft] = useState<BasicVisualization | undefined>();
 
@@ -164,9 +117,9 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
                 }
             };
 
-            if (theme === "dark" && visualizationToUse.palette.dark) {
+            if (theme === "dark" && visualizationToUse.palette?.dark) {
                 applyPalette(visualizationToUse.palette.dark);
-            } else {
+            } else if (visualizationToUse.palette?.light) {
                 applyPalette(visualizationToUse.palette.light);
             }
         } else {
@@ -230,6 +183,17 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             );
         }
     };
+    const navigate = useNavigate();
+
+    const navigateToNarrative = async () => {
+        // navigate to the first leaf that is of narrative type
+        let root = canvases[canvases.length - 1];
+        let feedContext = await root.getFeedContext();
+        if (feedContext !== root) {
+            navigate(getCanvasPath(feedContext));
+        }
+    };
+
     /* 4. context value ------------------------------------------- */
     const value = useMemo<VisualizationCtx>(
         () => ({
@@ -241,6 +205,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             updateDraft,
             saveDraft,
             cancelDraft,
+            navigateToNarrative,
         }),
         [canvas, isLoading, visualization, draft]
     );

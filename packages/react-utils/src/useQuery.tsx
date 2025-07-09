@@ -50,7 +50,10 @@ export const useQuery = <
                       | DocumentsChange<T, I>
                       | Promise<DocumentsChange<T, I>>
                       | undefined);
-            update?: (prev: RT[], change: DocumentsChange<T, I>) => RT[];
+            update?: (
+                prev: RT[],
+                change: DocumentsChange<T, I>
+            ) => RT[] | Promise<RT[]>;
         };
         local?: boolean;
         remote?: boolean | RemoteQueryOptions;
@@ -200,7 +203,10 @@ export const useQuery = <
                 let merged: Item[];
                 if (options.onChange?.update) {
                     merged = [
-                        ...options.onChange?.update(allRef.current, filtered),
+                        ...(await options.onChange?.update(
+                            allRef.current,
+                            filtered
+                        )),
                     ];
                 } else {
                     merged = await db.index.updateResults(
@@ -210,7 +216,12 @@ export const useQuery = <
                         options.resolve ?? true
                     );
 
-                    log("After update", allRef.current, merged);
+                    log("After update", {
+                        current: allRef.current,
+                        merged,
+                        filtered,
+                        query: options.query,
+                    });
                     const expectedDiff =
                         filtered.added.length - filtered.removed.length;
 

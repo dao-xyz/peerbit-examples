@@ -4,6 +4,7 @@ import React, {
     useState,
     useReducer,
     useMemo,
+    JSX,
 } from "react";
 import { usePeer, useProgram } from "@peerbit/react";
 import {

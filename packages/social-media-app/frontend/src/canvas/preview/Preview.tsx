@@ -30,6 +30,7 @@ type AlignedVariantType = "quote" | "chat-message";
 type VariantType =
     | "tiny"
     | "post"
+    | "row"
     | "breadcrumb"
     | "expanded-breadcrumb"
     | "detail"
@@ -79,6 +80,7 @@ function getRectsForVariant<V extends VariantType>(
         case "detail":
         case "expanded-breadcrumb":
         case "quote":
+        case "row":
         case "chat-message":
             return {
                 text: separatedRects.text[0],
@@ -98,6 +100,7 @@ const PreviewFrame = ({
     className,
     onLoad,
     canOpenFullscreen,
+    classNameContent,
 }: {
     element: Element<ElementContent>;
     previewLines?: number;
@@ -109,6 +112,7 @@ const PreviewFrame = ({
     className?: string | ((element: Element<ElementContent>) => string);
     onLoad?: () => void;
     canOpenFullscreen?: boolean;
+    classNameContent?: string;
 }) => (
     <div
         className={`flex flex-col relative w-full ${
@@ -254,7 +258,7 @@ const BreadcrumbPreview = ({
             className={tw(
                 isText
                     ? textLength && textLength > 10
-                        ? "w-[10ch]"
+                        ? "w-[8ch]"
                         : "w-fit"
                     : "w-",
                 isText && "px-1",
@@ -271,6 +275,64 @@ const BreadcrumbPreview = ({
                 onLoad={onLoad}
                 className={"w-full h-full flex items-center justify-center"}
             />
+        </div>
+    );
+};
+
+const RowPreview = ({
+    rects,
+    onClick,
+    className,
+    onLoad,
+}: {
+    rects;
+    className?: string;
+    onClick?: (e: Element<ElementContent>) => void;
+    onLoad?: () => void;
+}) => {
+    const { other: apps, text } = rects;
+
+    const loadedSet: Set<string> = useMemo(() => new Set(), []);
+
+    const handleLoad = (element: Element<ElementContent>) => {
+        loadedSet.add(element.idString);
+        if (onLoad && loadedSet.size === rects.other.length + (text ? 1 : 0)) {
+            onLoad();
+        }
+    };
+
+    return (
+        <div className={"flex flex-row   items-center " + (className ?? "")}>
+            {apps.slice(0, 2).map((app, i) => (
+                <div
+                    key={i}
+                    className="w-6 rounded-sm overflow-hidden  relative"
+                >
+                    <PreviewFrame
+                        element={app}
+                        fit="cover"
+                        maximizeHeight
+                        onClick={onClick}
+                        onLoad={() => handleLoad(app)}
+                    />
+                    {i === 1 && apps.slice(2).length > 0 && (
+                        <div className="absolute inset-0 bg-neutral-50/80 dark:bg-neutral-950/80 flex items-center justify-center">
+                            +{apps.slice(2).length}
+                        </div>
+                    )}
+                </div>
+            ))}
+            {text && (
+                <div className="rounded-md px-1.5 max-w-[150px] py-1">
+                    <PreviewFrame
+                        element={text}
+                        previewLines={1}
+                        noPadding
+                        onClick={onClick}
+                        onLoad={() => handleLoad(text)}
+                    />
+                </div>
+            )}
         </div>
     );
 };
@@ -458,7 +520,10 @@ const PostPreview = ({
 
     /* ─────────────── layout ─────────────── */
     return (
-        <div ref={forwardRef} className={tw("flex flex-col w-full", className)}>
+        <div
+            ref={forwardRef}
+            className={tw("flex flex-col w-full gap-2", className)}
+        >
             {media.length > 0 && (
                 /* 1️⃣ height-capped wrapper */
                 <div className="max-h-[60vh] min-h-20 overflow-hidden">
@@ -473,7 +538,7 @@ const PostPreview = ({
             )}
 
             {text && (
-                <div className="px-2 pt-2">
+                <div className="px-2">
                     <PreviewFrame
                         element={text}
                         noPadding
@@ -571,14 +636,14 @@ const MediaCarousel = ({
                     <button
                         aria-label="Previous image"
                         onClick={() => scrollTo(index - 1)}
-                        className=" flex absolute left-2 top-1/2 -translate-y-1/2 z-10 bg-white/70 dark:bg-black/40 backdrop-blur p-1.5 rounded-full hover:scale-105 transition"
+                        className=" flex absolute left-2 top-1/2 -translate-y-1/2 z-1 bg-white/70 dark:bg-black/40 backdrop-blur p-1.5 rounded-full hover:scale-105 transition"
                     >
                         <FaChevronLeft size={20} />
                     </button>
                     <button
                         aria-label="Next image"
                         onClick={() => scrollTo(index + 1)}
-                        className=" flex absolute right-2 top-1/2 -translate-y-1/2 z-10 bg-white/70 dark:bg-black/40 backdrop-blur p-1.5 rounded-full hover:scale-105 transition"
+                        className=" flex absolute right-2 top-1/2 -translate-y-1/2 z-1 bg-white/70 dark:bg-black/40 backdrop-blur p-1.5 rounded-full hover:scale-105 transition"
                     >
                         <FaChevronRight size={20} />
                     </button>
@@ -636,101 +701,6 @@ type CarouselProps = {
     onClick?: (e: Element<ElementContent>) => void;
     onLoad?: (el: Element<ElementContent>) => void;
     classNameContent?: string | ((el: Element<ElementContent>) => string);
-};
-const ImageCarousel = ({
-    elements,
-    onClick,
-    onLoad,
-    classNameContent,
-}: CarouselProps) => {
-    const containerRef = useRef<HTMLDivElement>(null);
-    const [index, setIndex] = useState(0);
-    const total = elements.length;
-
-    // update index on scroll
-    useEffect(() => {
-        const el = containerRef.current;
-        if (!el) return;
-
-        const handleScroll = () => {
-            const newIdx = Math.round(el.scrollLeft / el.clientWidth);
-            setIndex(newIdx);
-        };
-
-        el.addEventListener("scroll", handleScroll, { passive: true });
-        return () => el.removeEventListener("scroll", handleScroll);
-    }, []);
-
-    // helper to scroll programmatically (arrow buttons)
-    const scrollTo = (i: number) => {
-        const el = containerRef.current;
-        if (!el) return;
-        el.scrollTo({ left: i * el.clientWidth, behavior: "smooth" });
-    };
-
-    return (
-        <div className="relative w-full">
-            {/* Scroll‑snap track */}
-            <div
-                ref={containerRef}
-                className="w-full overflow-x-auto no-scrollbar flex snap-x snap-mandatory"
-            >
-                {elements.map((el) => (
-                    <div
-                        key={el.idString}
-                        className="flex-shrink-0 w-full snap-center"
-                        onClick={() => onClick(el)}
-                    >
-                        <PreviewFrame
-                            bgBlur
-                            element={el}
-                            fit="contain"
-                            maximizeHeight
-                            onLoad={() => onLoad?.(el)}
-                            className={classNameContent}
-                        />
-                    </div>
-                ))}
-            </div>
-
-            {/* Arrow controls — shown ≥ md breakpoint */}
-            {total > 1 && !isTouchDevice && (
-                <>
-                    <button
-                        aria-label="Previous image"
-                        onClick={() => scrollTo(Math.max(index - 1, 0))}
-                        className=" flex absolute left-2 top-1/2 -translate-y-1/2 z-1 bg-white/70 dark:bg-black/40 backdrop-blur p-1.5 rounded-full hover:scale-105 transition"
-                    >
-                        <FaChevronLeft size={20} />
-                    </button>
-                    <button
-                        aria-label="Next image"
-                        onClick={() => scrollTo(Math.min(index + 1, total - 1))}
-                        className=" flex absolute right-2 top-1/2 -translate-y-1/2 z-1 bg-white/70 dark:bg-black/40 backdrop-blur p-1.5 rounded-full hover:scale-105 transition"
-                    >
-                        <FaChevronRight size={20} />
-                    </button>
-                </>
-            )}
-
-            {/* Dot indicator */}
-            {total > 1 && (
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex gap-2 z-10">
-                    {elements.map((_, i) => (
-                        <span
-                            key={i}
-                            className={tw(
-                                "w-2 h-2 rounded-full transition-all",
-                                i === index
-                                    ? "bg-white dark:bg-neutral-200 scale-110"
-                                    : "bg-white/50 dark:bg-neutral-700"
-                            )}
-                        />
-                    ))}
-                </div>
-            )}
-        </div>
-    );
 };
 
 /**
@@ -969,8 +939,8 @@ export const CanvasPreview = ({
     onClick,
     forwardRef,
     className,
-    classNameContent,
     onLoad,
+    classNameContent, // TODO is this property really needed?
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
@@ -981,11 +951,16 @@ export const CanvasPreview = ({
         );
         return out;
     }, [rects, pendingRects, variant]);
-
     if (!variantRects) {
-        return null;
+        return <></>;
     }
-
+    if (
+        variantRects instanceof Element === false &&
+        variantRects.other.length === 0 &&
+        !variantRects.text
+    ) {
+        return <></>;
+    }
     switch (variant) {
         case "tiny":
             return (
@@ -995,6 +970,7 @@ export const CanvasPreview = ({
                     onLoad={onLoad}
                 />
             );
+
         case "breadcrumb":
             return (
                 <BreadcrumbPreview
@@ -1006,6 +982,20 @@ export const CanvasPreview = ({
         case "expanded-breadcrumb":
             return (
                 <ExpandedBreadcrumbPreview
+                    rects={
+                        variantRects as {
+                            text?: Element<ElementContent>;
+                            other: Element<ElementContent>[];
+                        }
+                    }
+                    onClick={onClick}
+                    onLoad={onLoad}
+                />
+            );
+        case "row":
+            return (
+                <RowPreview
+                    className={className}
                     rects={
                         variantRects as {
                             text?: Element<ElementContent>;
@@ -1041,9 +1031,9 @@ export const CanvasPreview = ({
                     }
                     onClick={onClick}
                     className={className}
-                    classNameContent={classNameContent}
                     forwardRef={forwardRef}
                     onLoad={onLoad}
+                    classNameContent={classNameContent}
                 />
             );
         case "detail":

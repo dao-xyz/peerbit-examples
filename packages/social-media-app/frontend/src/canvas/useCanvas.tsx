@@ -1,14 +1,6 @@
 import { usePeer } from "@peerbit/react";
-import React, { useContext, useEffect, useState } from "react";
-import {
-    Canvas,
-    Element,
-    Layout,
-    LOWEST_QUALITY,
-    rootDevelopment,
-    StaticContent,
-    StaticMarkdownText,
-} from "@giga-app/interface";
+import React, { JSX, useContext, useEffect, useState } from "react";
+import { Canvas, createRoot } from "@giga-app/interface";
 import { useLocation } from "react-router";
 import { sha256Sync } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
@@ -56,13 +48,8 @@ const getCanvasesPathFromURL = async (
     const current = await peer.open<Canvas>(canvasAddress, {
         existing: "reuse",
     });
-    return current.loadPath(true);
+    return current.loadPath({ includeSelf: true });
 };
-
-const GIGA_ROOT_POST = `
-# Welcome to Giga
-**A *public* and *private* media platform owned by you**
-`;
 
 const CanvasContext = React.createContext<ICanvasContext>({} as any);
 export const useCanvases = () => useContext(CanvasContext);
@@ -70,7 +57,6 @@ export const useCanvases = () => useContext(CanvasContext);
 export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const { peer, loading: loadingPeer, persisted } = usePeer();
     const [root, _setRoot] = useState<Canvas>(undefined);
-    const [leaf, setLeaf] = useState<Canvas>(undefined);
 
     const [canvases, setCanvases] = useState<Canvas[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -81,9 +67,21 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         _setRoot(canvas);
     };
 
+    const leaf = React.useMemo<Canvas | undefined>(
+        () => (canvases?.length ? canvases[canvases.length - 1] : undefined),
+        [canvases]
+    );
+
+    const [viewContext, setViewContext] = useState<Canvas[] | undefined>(
+        undefined
+    );
+
     useEffect(() => {
-        setLeaf(canvases[canvases.length - 1]);
-    }, [root?.closed || !root ? undefined : root.address, canvases]);
+        const fn = async () => {
+            setViewContext(await leaf?.getViewContext());
+        };
+        fn();
+    }, [leaf]);
 
     const memo = React.useMemo<ICanvasContext>(
         () => ({
@@ -168,45 +166,12 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         if (root || !peer) {
             return;
         }
-
-        peer.open(rootDevelopment, {
-            existing: "reuse",
-            args: {
-                replicate: persisted,
-            },
-        })
-            .then(async (result) => {
+        createRoot(peer, persisted)
+            .then((result) => {
                 setRoot(result);
-                let rootElementId = new Uint8Array(32);
-                if (
-                    !(await result.elements.index.get(toId(rootElementId), {
-                        local: true,
-                        remote: {
-                            eager: true,
-                        },
-                    }))
-                ) {
-                    await result.elements.put(
-                        new Element({
-                            location: Layout.zero(),
-                            id: rootElementId,
-                            publicKey: peer.identity.publicKey,
-                            content: new StaticContent({
-                                content: new StaticMarkdownText({
-                                    text: GIGA_ROOT_POST,
-                                }),
-                                quality: LOWEST_QUALITY,
-                                contentId: sha256Sync(
-                                    new TextEncoder().encode(GIGA_ROOT_POST)
-                                ),
-                            }),
-                            canvasId: result.id,
-                        })
-                    );
-                }
             })
             .catch((e) => {
-                console.error("Failed to create root canvas", e);
+                console.error("Error creating root canvas:", e);
             });
     }, [peer?.identity?.toString()]);
 

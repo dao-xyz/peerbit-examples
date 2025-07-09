@@ -26,7 +26,7 @@ export const useProgram = <
     const [id, setId] = useState<string | undefined>(options?.id);
     let [loading, setLoading] = useState(true);
     const [session, forceUpdate] = useReducer((x) => x + 1, 0);
-    let programLoadingRef = useRef<Promise<P>>();
+    let programLoadingRef = useRef<Promise<P>>(undefined);
     const [peers, setPeers] = useState<PublicSignKey[]>([]);
 
     let closingRef = useRef<Promise<any>>(Promise.resolve());
@@ -107,14 +107,15 @@ export const useProgram = <
                                     changeListener
                                 );
                         };
-                        if (options?.keepOpenOnUnmount) {
-                            unsubscribe();
-                        }
 
                         if (programLoadingRef.current === startRef) {
                             setProgram(undefined);
                             programLoadingRef.current = undefined;
-                            return;
+                        }
+
+                        if (options?.keepOpenOnUnmount) {
+                            unsubscribe();
+                            return; // nothing to close
                         }
 
                         return p.close().then(unsubscribe);

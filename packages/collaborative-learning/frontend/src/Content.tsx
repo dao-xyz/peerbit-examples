@@ -159,7 +159,7 @@ export const MODEL_DATABASE_ID = new Uint8Array([
 export const Content = () => {
     const { peer } = usePeer();
     const params = useParams();
-    const status = useRef<HTMLDivElement>();
+    const status = useRef<HTMLDivElement>(undefined);
     const video = useRef<HTMLVideoElement>(null);
     const model = useRef<tf.Sequential>(null);
     const imageNetModel = useRef<tf.GraphModel<string | tf.io.IOHandler>>(null);
@@ -168,7 +168,7 @@ export const Content = () => {
     const [loading, setLoading] = useState(false);
     const loadedModel = useRef(false);
     const [usingCamera, setUsingCamera] = useState(false);
-    const p2pStorage = useRef<P2PStorage | tf.io.IOHandler>();
+    const p2pStorage = useRef<P2PStorage | tf.io.IOHandler>(undefined);
     const [modelDate, setModelDate] = useState<Date>(null);
 
     // The p2p database of model weights

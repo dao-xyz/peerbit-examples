@@ -1,5 +1,4 @@
 import { useRef, useState, useEffect } from "react";
-import * as Slider from "@radix-ui/react-slider";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import * as Select from "@radix-ui/react-select";
 import {

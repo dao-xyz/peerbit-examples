@@ -156,8 +156,8 @@ let videoHeight = () => window.innerHeight;
 let videoWidth = () => window.innerWidth;
 
 export const View = (properties: DBArgs) => {
-    const canvasRef = useRef<HTMLCanvasElement>();
-    const lastCanvasRef = useRef<HTMLCanvasElement>();
+    const canvasRef = useRef<HTMLCanvasElement>(undefined);
+    const lastCanvasRef = useRef<HTMLCanvasElement>(undefined);
     const [resolutionOptions, setResolutionOptions] = useState<Resolution[]>(
         []
     );
@@ -191,7 +191,7 @@ export const View = (properties: DBArgs) => {
             width: videoWidth(),
         });
 
-    const streamListener = useRef<TracksIterator | undefined>();
+    const streamListener = useRef<TracksIterator | undefined>(undefined);
     const updateProgressQueue = useRef<PQueue>(new PQueue({ concurrency: 1 }));
     const [liveStreamAvailable, setLiveStreamAvailable] = useState(false);
 

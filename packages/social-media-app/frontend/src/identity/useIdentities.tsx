@@ -1,5 +1,5 @@
 import { useLocal, usePeer, useProgram } from "@peerbit/react";
-import React, { useContext } from "react";
+import React, { JSX, useContext } from "react";
 import { Connection, Identities } from "@giga-app/interface";
 import { And, BoolQuery, ByteMatchQuery, Or } from "@peerbit/indexer-interface";
 import { generateDefaultDeviceName } from "./utils";

@@ -37,7 +37,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
     const [progress, setProgress] = useState(0);
 
     // for the encoder & track
-    const encoderRef = useRef<WAVEncoder>();
+    const encoderRef = useRef<WAVEncoder>(undefined);
     const { setName } = useNames();
 
     // open your ImageItems store once, reuse

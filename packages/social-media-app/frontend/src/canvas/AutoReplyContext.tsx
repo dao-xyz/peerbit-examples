@@ -8,9 +8,10 @@ import React, {
 } from "react";
 
 import { Canvas, CanvasAddressReference } from "@giga-app/interface";
-import { usePendingCanvas } from "./PendingCanvasContext";
+import { usePendingCanvas } from "./edit/PendingCanvasContext";
 import { useCanvas } from "./CanvasWrapper";
-import { useView } from "./reply/view/ViewContex";
+import { useView } from "./view/ViewContext";
+import { useFeed } from "./feed/FeedContext";
 
 interface AutoReplyContextType {
     typedOnce: boolean;
@@ -29,21 +30,21 @@ export const AutoReplyProvider: React.FC<{
     const { setReplyTo: setReplyToCanvas, pendingCanvas } = usePendingCanvas();
     const { subscribeContentChange, mutate, pendingRects } = useCanvas();
     const typedOnce = useRef(false);
-    const { view, processedReplies, viewRoot } = useView();
-    const [replyTo, _setReplyTo] = useState<Canvas | undefined>(viewRoot);
+    const { view, processedReplies, feedRoot } = useFeed();
+    const [replyTo, _setReplyTo] = useState<Canvas | undefined>(feedRoot);
     const lastPendingCanvasId = useRef<string | undefined>(undefined);
     const enabled = useRef(true);
 
     const setReplyTo = async (canvas: Canvas | undefined) => {
-        let canvasOrRoot = canvas || viewRoot;
+        let canvasOrRoot = canvas || feedRoot;
         _setReplyTo(canvasOrRoot);
         await setReplyToCanvas(canvasOrRoot);
         lastPendingCanvasId.current = pendingCanvas?.idString;
     };
 
     useEffect(() => {
-        setReplyTo(viewRoot);
-    }, [viewRoot]); // reset replyTo when viewRoot changes
+        setReplyTo(feedRoot);
+    }, [feedRoot]); // reset replyTo when viewRoot changes
 
     /**
      * If the pending canvas has updated their path, we need to update all pending rects too
@@ -76,13 +77,16 @@ export const AutoReplyProvider: React.FC<{
      }, [pendingCanvas?.idString]);
   */
     const autoReplyFunctionality = () => {
+        if (!processedReplies) {
+            return;
+        }
         let last = processedReplies[processedReplies.length - 1]?.reply;
         if (
             view?.id === "chat" &&
             last &&
             (replyTo == null ||
-                (replyTo.idString === viewRoot.idString &&
-                    last.idString !== viewRoot.idString))
+                (replyTo.idString === feedRoot.idString &&
+                    last.idString !== feedRoot.idString))
         ) {
             console.log("AUTO REPLY TO", last);
             setReplyTo(last);
@@ -122,7 +126,7 @@ export const AutoReplyProvider: React.FC<{
         */
         // auto reply to the last processed reply
         if (view?.id === "chat") {
-            if (processedReplies.length > 0) {
+            if (processedReplies?.length > 0) {
                 let last = processedReplies[processedReplies.length - 1]?.reply;
                 if (
                     view.id === "chat" &&
@@ -133,7 +137,7 @@ export const AutoReplyProvider: React.FC<{
                 }
             }
         } else {
-            setReplyTo(viewRoot); // clear replyTo when not in chat view
+            setReplyTo(feedRoot); // clear replyTo when not in chat view
         }
     }, [view, processedReplies]);
 

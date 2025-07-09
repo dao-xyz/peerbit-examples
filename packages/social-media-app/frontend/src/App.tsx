@@ -13,18 +13,27 @@ import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
 import { HostRegistryProvider } from "@giga-app/sdk";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ThemeProvider } from "./theme/useTheme";
-import { ReplyProgressProvider } from "./canvas/reply/useReplyProgress";
+import { ReplyProgressProvider } from "./canvas/main/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
-import { ViewProvider } from "./canvas/reply/view/ViewContex";
+import { ViewProvider } from "./canvas/view/ViewContext";
 import {
     HeaderVisibilityProvider,
     useHeaderVisibilityContext,
 } from "./HeaderVisibilitiyProvider";
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
 import type { NetworkOption } from "@peerbit/react";
-import { BlurOnOutsidePointerProvider } from "./canvas/reply/view/BlurOnScrollProvider";
+import { BlurOnOutsidePointerProvider } from "./canvas/feed/BlurOnScrollProvider";
 import { CustomizedBackground } from "./canvas/custom/applyVisualization";
 import { CustomizationProvider } from "./canvas/custom/CustomizationProvider";
+import { FeedProvider } from "./canvas/feed/FeedContext";
+import clsx from "clsx";
+import { FocusProvider } from "./FocusProvider";
+
+const HEADER_EXPANDED_HEIGHT = 12;
+const heightStyle: { [expanded: string]: string } = {
+    true: `min-h-${HEADER_EXPANDED_HEIGHT}`,
+    false: `min-h-${HEADER_EXPANDED_HEIGHT}`,
+};
 
 export const Content = () => {
     const { error: peerError } = usePeer();
@@ -70,27 +79,37 @@ export const Content = () => {
 
     return (
         <ViewProvider>
-            <CustomizationProvider>
-                <CustomizedBackground className=" h-full">
-                    {/* Main header with transform animation */}
-                    <div
-                        ref={headerRef}
-                        className={`sticky top-0   inset-x-0 transition-transform duration-800 ease-in-out z-30`}
-                        style={{
-                            transform: headerVisible
-                                ? "translateY(0)"
-                                : `translateY(-${headerHeight}px)`,
-                            willChange: "transform",
-                            backfaceVisibility: "hidden",
-                        }}
-                    >
-                        <Header fullscreen={inIframe()} />
-                    </div>
+            <FeedProvider>
+                <CustomizationProvider>
+                    <CustomizedBackground className=" h-full">
+                        <FocusProvider>
+                            {/* Main header with transform animation */}
+                            <div
+                                ref={headerRef}
+                                className={clsx(
+                                    "sticky top-0 inset-x-0  z-30",
+                                    heightStyle[String(headerVisible)]
+                                )} /* transition-transform duration-800 ease-in-out */
+                                style={
+                                    {
+                                        /*  transform: headerVisible
+                                         ? "translateY(0)"
+                                         : `translateY(-${headerHeight}px)`, */
+                                        /* transition: "max-height 0.3s ease-in-out", */
+                                        /*     transform: "translateY(0)",
+                                        backfaceVisibility: "hidden", */
+                                    }
+                                }
+                            >
+                                <Header fullscreen={inIframe()} />
+                            </div>
 
-                    {/* Add padding so content isn’t hidden by the fixed header */}
-                    <BaseRoutes />
-                </CustomizedBackground>
-            </CustomizationProvider>
+                            {/* Add padding so content isn’t hidden by the fixed header */}
+                            <BaseRoutes />
+                        </FocusProvider>
+                    </CustomizedBackground>
+                </CustomizationProvider>
+            </FeedProvider>
         </ViewProvider>
     );
 };

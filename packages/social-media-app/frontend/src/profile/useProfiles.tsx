@@ -1,5 +1,5 @@
 // ProfileProvider.tsx
-import React, { useContext, useMemo, useRef } from "react";
+import React, { JSX, useContext, useMemo, useRef } from "react";
 import { useLocal, usePeer, useProgram } from "@peerbit/react";
 import { Canvas, Profile, Profiles } from "@giga-app/interface";
 import { useNavigate } from "react-router";

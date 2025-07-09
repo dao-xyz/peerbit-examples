@@ -89,8 +89,9 @@ export const ProfileButton = forwardRef<
     const content = getContent();
     return (
         <button
+            {...rest}
             ref={ref}
-            className="btn p-0 hover:filter hover:invert"
+            className={"btn p-0 hover:filter hover:invert " + rest?.className}
             onClick={
                 onClick
                     ? onClick
@@ -99,7 +100,6 @@ export const ProfileButton = forwardRef<
                           navigateTo(profile);
                       }
             }
-            {...rest}
         >
             {content}
         </button>

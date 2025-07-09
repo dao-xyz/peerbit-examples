@@ -2,17 +2,13 @@ import React, { useEffect, useRef, useState } from "react";
 import * as Tabs from "@radix-ui/react-tabs";
 import * as Switch from "@radix-ui/react-switch";
 import {
-    /* backgrounds */
     ModedBackground,
-    /* palettes */
     SimpleThemePalette,
     ModedThemePalette,
     BasicVisualization,
-    AbstractBackground,
 } from "@giga-app/interface";
 
-import { MdOutlineLightMode, MdOutlineDarkMode, MdCheck } from "react-icons/md";
-import { useVisualization } from "./CustomizationProvider";
+import { MdOutlineLightMode, MdOutlineDarkMode } from "react-icons/md";
 import { ColorResult, SketchPicker, TwitterPicker } from "react-color";
 
 export const ColorSwatchPicker: React.FC<{
@@ -88,6 +84,7 @@ import {
 import { useThemeContext } from "../../theme/useTheme";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { isTouchDevice } from "../../utils/device";
+import { useVisualizationContext } from "./CustomizationProvider";
 
 /* helpers that emit CSS strings */
 /* tiny helpers to build CSS strings */
@@ -399,7 +396,7 @@ const ModeEditor: React.FC<{
 
 /* ─────────── Main panel ─────────── */
 export const CustomizationSettings = (props: { onClose: () => void }) => {
-    const { saveDraft, updateDraft, draft } = useVisualization();
+    const { saveDraft, updateDraft, draft } = useVisualizationContext();
 
     const { setTheme, theme } = useThemeContext();
 

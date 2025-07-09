@@ -2,6 +2,7 @@ import {
     StaticContent,
     StaticMarkdownText,
     StaticImage,
+    Element,
 } from "@giga-app/interface";
 import { MarkdownContent } from "./Markdown";
 import { ImageContent } from "./image/Image";
@@ -11,7 +12,7 @@ import { ChangeCallback } from "./types";
  * Props for the EditableStaticContent component.
  */
 export type EditableStaticContentProps = {
-    staticContent: StaticContent["content"];
+    element?: Element<StaticContent>;
     onResize: (dims: { width: number; height: number }) => void;
     editable?: boolean;
     onChange?: ChangeCallback;
@@ -40,7 +41,7 @@ export type EditableStaticContentProps = {
  * @returns Rendered content based on type
  */
 export const EditableStaticContent = ({
-    staticContent,
+    element,
     onResize,
     editable = false,
     onChange,
@@ -52,10 +53,10 @@ export const EditableStaticContent = ({
     inFullscreen,
     onLoad,
 }: EditableStaticContentProps) => {
-    if (staticContent instanceof StaticMarkdownText) {
+    if (element.content.content instanceof StaticMarkdownText) {
         return (
             <MarkdownContent
-                content={staticContent}
+                element={element as Element<StaticContent<StaticMarkdownText>>}
                 onResize={onResize}
                 editable={editable}
                 onChange={onChange}
@@ -67,10 +68,10 @@ export const EditableStaticContent = ({
             />
         );
     }
-    if (staticContent instanceof StaticImage) {
+    if (element.content.content instanceof StaticImage) {
         return (
             <ImageContent
-                content={staticContent}
+                element={element as Element<StaticContent<StaticImage>>}
                 onResize={onResize}
                 editable={editable}
                 onChange={onChange}

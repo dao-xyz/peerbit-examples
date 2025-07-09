@@ -8,6 +8,7 @@ import React, {
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+    Element,
     LOWEST_QUALITY,
     StaticContent,
     StaticMarkdownText,
@@ -19,9 +20,10 @@ import { useAIReply } from "../../ai/AIReployContext";
 import { usePeer } from "@peerbit/react";
 import { FaCheck } from "react-icons/fa";
 import { Spinner } from "../../utils/Spinner";
+import debounce from "lodash.debounce";
 
 export type MarkdownContentProps = {
-    content: StaticMarkdownText;
+    element: Element<StaticContent<StaticMarkdownText>>;
     onResize: (dims: { width: number; height: number }) => void;
     editable?: boolean;
     onChange?: ChangeCallback;
@@ -33,7 +35,7 @@ export type MarkdownContentProps = {
 };
 
 export const MarkdownContent = ({
-    content,
+    element,
     onResize,
     editable = false,
     onChange,
@@ -42,6 +44,7 @@ export const MarkdownContent = ({
     inFullscreen,
     onLoad,
 }: MarkdownContentProps) => {
+    const content = element.content.content;
     const containerRef = useRef<HTMLDivElement>(null);
     const lastDims = useRef<{ width: number; height: number } | null>(null);
     const threshold = 1;
@@ -54,13 +57,35 @@ export const MarkdownContent = ({
     // Local state for the markdown text.
     const [text, setText] = useState(content.text);
 
-    const { canvas } = useCanvas();
+    const { canvas, placeholder, classNameContent } = useCanvas();
     const { suggest, isReady } = useAIReply();
     const { peer } = usePeer();
     const [loadingSuggestedReply, setLoadingSuggestedReply] = useState(false);
     const [suggestReply, setSuggestedReply] = useState<string | null>(null);
 
     const suggestedReplyForParent = useRef<string | null>(null);
+
+    const debouncedPropChange = useRef(
+        debounce(
+            (newText: string) => {
+                // We call the parent onChange *outside* React’s event loop
+                onChange?.(
+                    new StaticContent({
+                        content: new StaticMarkdownText({ text: newText }),
+                        quality: LOWEST_QUALITY,
+                        contentId: sha256Sync(
+                            new TextEncoder().encode(newText)
+                        ),
+                    })
+                );
+            },
+            150 // ← tweak the delay (ms) to taste
+        )
+    ).current;
+
+    useEffect(() => {
+        return () => debouncedPropChange.cancel();
+    }, [debouncedPropChange]);
 
     //   Helper: is the caret at the logical end?
     const caretIsAtEnd = () =>
@@ -198,7 +223,6 @@ export const MarkdownContent = ({
             onResize({ width: newWidth, height: newHeight });
 
             if (caretIsAtEnd() && inFullscreen) {
-                console.log("SCROLL TO BOTTOM");
                 scrollToBottom();
             }
         }
@@ -298,14 +322,7 @@ export const MarkdownContent = ({
         const newText = e.target.value;
         setText(newText);
         autoResize();
-        onChange &&
-            onChange(
-                new StaticContent({
-                    content: new StaticMarkdownText({ text: newText }),
-                    quality: LOWEST_QUALITY,
-                    contentId: sha256Sync(new TextEncoder().encode(newText)),
-                })
-            );
+        debouncedPropChange(newText);
     };
 
     const handleBlur = () => {
@@ -364,7 +381,9 @@ export const MarkdownContent = ({
                             !inFullscreen ? "textarea-truncate" : ""
                         }`}
                         rows={1}
-                        placeholder={suggestReply || "Type here..."}
+                        placeholder={
+                            suggestReply || placeholder || "Type here..."
+                        }
                         style={{ overflow: "hidden" }}
                     />
                     {/* Render the "Use suggestion" button if a suggested reply is available.
@@ -391,7 +410,13 @@ export const MarkdownContent = ({
                         previewLines ? "line-clamp-[var(--preview-lines)]" : ""
                     } ${
                         previewLines > 0 ? "break-all whitespace-pre-wrap" : ""
-                    } ${editable ? "" : ""} ${editable ? "min-h-10" : ""} `}
+                    } ${editable ? "" : ""} ${editable ? "min-h-10" : ""} ${
+                        classNameContent
+                            ? typeof classNameContent === "function"
+                                ? classNameContent(element)
+                                : classNameContent
+                            : ""
+                    }`}
                 >
                     <Markdown
                         disallowedElements={

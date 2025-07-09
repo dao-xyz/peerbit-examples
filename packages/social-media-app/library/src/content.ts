@@ -273,8 +273,11 @@ export class IndexableCanvas {
     @field({ type: vec("string") })
     replyTo: string[]; // addresses
 
+    @field({ type: "u8" })
+    type: PurposeTypeEnum;
+
     @field({ type: vec("string") })
-    types: string[]; // types of elements in the canvas, e.g. text, image, etc.
+    contents: string[]; // types of elements in the canvas, e.g. text, image, etc.
 
     constructor(properties: {
         id: Uint8Array;
@@ -284,7 +287,8 @@ export class IndexableCanvas {
         replies: bigint;
         path: string[]; // address path
         replyTo: string[]; // addresses
-        types: string[];
+        type: PurposeTypeEnum;
+        contents: string[];
     }) {
         this.id = properties.id;
         this.address = properties.address;
@@ -294,7 +298,8 @@ export class IndexableCanvas {
         this.path = properties.path;
         this.replyTo = properties.replyTo;
         this.pathDepth = properties.path.length;
-        this.types = properties.types;
+        this.type = properties.type;
+        this.contents = properties.contents;
         this.vector = [];
     }
 
@@ -317,6 +322,7 @@ export class IndexableCanvas {
                 { resolve: false }
             )
             .all();
+        const type = await canvas.getType();
 
         return new IndexableCanvas({
             id: canvas.id,
@@ -326,7 +332,8 @@ export class IndexableCanvas {
             replies,
             path: canvas.path.map((x) => x.address),
             replyTo: canvas.replyTo.map((x) => x.address),
-            types: elements.map((x) => x.type),
+            type: type?.__indexed.type ?? PurposeTypeEnum.NARRATIVE,
+            contents: elements.map((x) => x.type),
         });
     }
 
@@ -366,7 +373,7 @@ export class CanvasAddressReference extends CanvasReference {
     }
 }
 
-export const getOwnedVisualizationQuery = (to: { id: Uint8Array }) => {
+export const getOwnedByCanvasQuery = (to: { id: Uint8Array }) => {
     return [
         new ByteMatchQuery({
             key: "canvasId",
@@ -401,6 +408,22 @@ export const getRepliesQuery = (to: { address: string }) => {
             method: StringMatchMethod.exact,
         }),
     ];
+};
+
+export const getNarrativePostsQuery = () => {
+    return new IntegerCompare({
+        key: "type",
+        value: PurposeTypeEnum.NARRATIVE,
+        compare: Compare.Equal,
+    });
+};
+
+export const getNavigationalPostQuery = () => {
+    return new IntegerCompare({
+        key: "type",
+        value: PurposeTypeEnum.NAVIGATION,
+        compare: Compare.Equal,
+    });
 };
 
 export const getQualityLessThanOrEqualQuery = (quality: number) => {
@@ -567,6 +590,80 @@ export class CanvasBackground extends AbstractBackground {
     }
 }
 
+export abstract class PurposeType {}
+
+@variant(0)
+export class Narrative extends PurposeType {
+    // the children are meant to tell a story
+}
+
+@variant(1)
+export class Navigation extends PurposeType {
+    // the children are meant for navigation
+
+    @field({ type: option(Layout) })
+    layout?: Layout;
+
+    constructor(props?: { layout?: Layout }) {
+        super();
+        this.layout = props?.layout;
+    }
+}
+
+enum PurposeTypeEnum {
+    NARRATIVE = 0,
+    NAVIGATION = 1,
+}
+
+@variant(0)
+export class Purpose {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: fixedArray("u8", 32) })
+    canvasId: Uint8Array;
+
+    @field({ type: PurposeType })
+    type: PurposeType;
+
+    constructor(props: {
+        id?: Uint8Array;
+        canvasId: Uint8Array;
+        type: PurposeType;
+    }) {
+        this.id = props.id || randomBytes(32);
+        this.canvasId = props.canvasId;
+        this.type = props.type;
+        if (
+            !(this.type instanceof Narrative) &&
+            !(this.type instanceof Navigation)
+        ) {
+            throw new Error("Invalid purpose type");
+        }
+    }
+}
+
+@variant(0)
+export class IndexedPurpose {
+    @field({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: fixedArray("u8", 32) })
+    canvasId: Uint8Array;
+
+    @field({ type: "u8" })
+    type: PurposeTypeEnum;
+
+    constructor(props: Purpose) {
+        this.id = props.id;
+        this.canvasId = props.canvasId;
+        this.type =
+            props.type instanceof Narrative
+                ? PurposeTypeEnum.NARRATIVE
+                : PurposeTypeEnum.NAVIGATION;
+    }
+}
+
 export type BackGroundTypes = StyledBackground | CanvasBackground;
 
 export abstract class Visualization {
@@ -634,6 +731,7 @@ type CanvasArgs = {
     replicate?: boolean;
     replicas?: { min?: number };
 };
+
 @variant("canvas")
 export class Canvas extends Program<CanvasArgs> {
     @id({ type: fixedArray("u8", 32) })
@@ -648,7 +746,10 @@ export class Canvas extends Program<CanvasArgs> {
     @field({ type: Documents })
     private _replies: Documents<Canvas, IndexableCanvas>; // Replies or Sub Replies
 
-    @field({ type: Documents })
+    @field({ type: Documents }) // TODO don't make this affeect the address?
+    private _types: Documents<Purpose, IndexedPurpose>;
+
+    @field({ type: Documents }) // TODO don't make this affeect the address?
     private _visualizations: Documents<Visualization, IndexedVisualization>;
 
     @field({ type: RPC })
@@ -684,9 +785,15 @@ export class Canvas extends Program<CanvasArgs> {
         this.id = elementsId;
         this._elements = new Documents({ id: elementsId });
         this._replies = new Documents({ id: sha256Sync(elementsId) });
+
         this._visualizations = new Documents({
             id: sha256Sync(sha256Sync(elementsId)),
         });
+
+        this._types = new Documents({
+            id: sha256Sync(sha256Sync(sha256Sync(elementsId))),
+        });
+
         this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
         this._messages = new RPC();
         this.acl = 0;
@@ -705,7 +812,10 @@ export class Canvas extends Program<CanvasArgs> {
 
     async setParent(canvas: Canvas) {
         await waitFor(() => !this.closed).catch((error) => {
-            console.error("Failed to wait for canvas to open", error);
+            console.error(
+                "Failed to wait for canvas to open: " + this.openOnce,
+                error
+            );
             throw error;
         });
 
@@ -728,6 +838,10 @@ export class Canvas extends Program<CanvasArgs> {
         evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
     ) => void;
 
+    private _typeChangeListener: (
+        evt: CustomEvent<DocumentsChange<Purpose, IndexedPurpose>>
+    ) => void;
+
     private getValueWithContext(value: string) {
         return this.address + ":" + value;
     }
@@ -740,7 +854,9 @@ export class Canvas extends Program<CanvasArgs> {
         }>
     >;
 
+    openOnce = false;
     async open(args?: CanvasArgs): Promise<void> {
+        this.openOnce = true;
         this.reIndexDebouncer = debouncedAccumulatorMap<{
             canvas: Canvas;
             options?: { onlyReplies?: boolean };
@@ -772,6 +888,8 @@ export class Canvas extends Program<CanvasArgs> {
             this._messages.allPrograms.map((x) => (x.closed = true));
             this._visualizations.closed = true;
             this._visualizations.allPrograms.map((x) => (x.closed = true));
+            this._types.closed = true;
+            this._types.allPrograms.map((x) => (x.closed = true));
             return;
         } else {
             this.debug &&
@@ -841,6 +959,52 @@ export class Canvas extends Program<CanvasArgs> {
                 console.timeEnd(this.getValueWithContext("openElements"));
             this.debug && console.time(this.getValueWithContext("openReplies"));
 
+            await this._types.open({
+                type: Purpose,
+                replicas: args?.replicas,
+                replicate:
+                    args?.replicate != null
+                        ? args?.replicate
+                            ? { factor: 1 }
+                            : false
+                        : { factor: 1 }, // TODO choose better
+                timeUntilRoleMaturity: 6e4,
+                keep: "self",
+                index: {
+                    type: IndexedPurpose,
+                },
+                canPerform: async (operation) => {
+                    /**
+                     * Only allow updates if we created it
+                     *  or from myself (this allows us to modifying someone elsecanvas locally)
+                     */
+                    return true;
+                },
+            });
+
+            await this._visualizations.open({
+                type: BasicVisualization,
+                replicas: args?.replicas,
+                replicate:
+                    args?.replicate != null
+                        ? args?.replicate
+                            ? { factor: 1 }
+                            : false
+                        : { factor: 1 }, // TODO choose better
+                timeUntilRoleMaturity: 6e4,
+                keep: "self",
+                index: {
+                    type: IndexedVisualization,
+                },
+                canPerform: async (operation) => {
+                    /**
+                     * Only allow updates if we created it
+                     *  or from myself (this allows us to modifying someone elsecanvas locally)
+                     */
+                    return true;
+                },
+            });
+
             await this._replies.open({
                 type: Canvas,
                 timeUntilRoleMaturity: 6e4,
@@ -884,29 +1048,6 @@ export class Canvas extends Program<CanvasArgs> {
                 },
             });
 
-            await this._visualizations.open({
-                type: BasicVisualization,
-                replicas: args?.replicas,
-                replicate:
-                    args?.replicate != null
-                        ? args?.replicate
-                            ? { factor: 1 }
-                            : false
-                        : { factor: 1 }, // TODO choose better
-                timeUntilRoleMaturity: 6e4,
-                keep: "self",
-                index: {
-                    type: IndexedVisualization,
-                },
-                canPerform: async (operation) => {
-                    /**
-                     * Only allow updates if we created it
-                     *  or from myself (this allows us to modifying someone elsecanvas locally)
-                     */
-                    return true;
-                },
-            });
-
             this.debug &&
                 console.timeEnd(this.getValueWithContext("openReplies"));
 
@@ -925,6 +1066,10 @@ export class Canvas extends Program<CanvasArgs> {
         from: Canvas | WithIndexedContext<Canvas, IndexableCanvas>,
         options?: { onlyReplies?: boolean }
     ) {
+        if (from.path.length === 0) {
+            return; // no path, nothing to re-index (this is the root, and so there will be no parent to re-index)
+        }
+
         if (options?.onlyReplies) {
             await this.updateIndexedReplyCounter(from);
             return;
@@ -1017,62 +1162,101 @@ export class Canvas extends Program<CanvasArgs> {
                 "change",
                 this._repliesChangeListener
             );
+
+        this._typeChangeListener &&
+            this._types.events.removeEventListener(
+                "change",
+                this._typeChangeListener
+            );
+
+        const reIndexRepliesInParents = async (canvas: Canvas) => {
+            canvas = await this.node.open(canvas, {
+                existing: "reuse",
+            });
+            const loadedPath = await canvas.loadPath({ includeSelf: true });
+            // i = 1 start to skip the root, -1 to skip the current canvas
+            // (we only want to-re-index parents)
+
+            for (let i = loadedPath.length - 1; i > 0; i--) {
+                loadedPath[i] = await this.node.open(loadedPath[i], {
+                    existing: "reuse",
+                });
+                await loadedPath[i].load();
+                this.reIndexDebouncer.add({
+                    key: loadedPath[i].idString,
+                    value: {
+                        canvas: loadedPath[i],
+                        options: {
+                            onlyReplies: true,
+                        },
+                    },
+                });
+            }
+        };
         this._repliesChangeListener = async (
             evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
         ) => {
             // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
 
             for (let added of evt.detail.added) {
-                if (added.closed) {
-                    added = await this.openWithSameSettings(added);
-                }
-                const loadedPath = await added.loadPath(true);
-                // i = 1 start to skip the root, -1 to skip the current canvas
-                // (we only want to-re-index parents)
-                for (let i = 1; i < loadedPath.length; i++) {
-                    loadedPath[i] = await this.node.open(loadedPath[i], {
-                        existing: "reuse",
-                    });
-                    await loadedPath[i].load();
-                    this.reIndexDebouncer.add({
-                        key: loadedPath[i].idString,
-                        value: {
-                            canvas: loadedPath[i],
-                            options: {
-                                onlyReplies: true,
-                            },
-                        },
-                    });
-                }
+                await reIndexRepliesInParents(added);
             }
 
             for (let removed of evt.detail.removed) {
-                if (removed.closed) {
-                    removed = await this.node.open(removed, {
-                        existing: "reuse",
-                    });
-                }
-
-                const loadedPath = await removed.loadPath(true);
-                // i = 1 start to skip the root, -1 to skip the current canvas
-                // (we only want to-re-index parents)
-                for (let i = 1; i < loadedPath.length; i++) {
-                    this.reIndexDebouncer.add({
-                        key: loadedPath[i].idString,
-                        value: {
-                            canvas: loadedPath[i],
-                            options: {
-                                onlyReplies: true,
-                            },
-                        },
-                    });
-                }
+                await reIndexRepliesInParents(removed);
                 await removed.close();
             }
         };
         this._replies?.events.addEventListener(
             "change",
             this._repliesChangeListener
+        );
+
+        this._typeChangeListener = async (
+            evt: CustomEvent<DocumentsChange<Purpose, IndexedPurpose>>
+        ) => {
+            // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
+
+            for (let added of evt.detail.added) {
+                const canvas = await this._replies.index.get(added.canvasId);
+                if (!canvas) {
+                    // for the root this will be true
+                    continue;
+                }
+                // update index on self (await this to make sure parent reply re-indexing becomes correct)
+                await this.reIndexDebouncer.add({
+                    key: canvas.idString,
+                    value: {
+                        canvas,
+                    },
+                });
+
+                // and recount repleis in parent
+                canvas && (await reIndexRepliesInParents(canvas));
+            }
+
+            for (let removed of evt.detail.removed) {
+                const canvas = await this._replies.index.get(removed.canvasId);
+                if (!canvas) {
+                    continue;
+                }
+
+                // update index on self (await this to make sure parent reply re-indexing becomes correct)
+                await this.reIndexDebouncer.add({
+                    key: canvas.idString,
+                    value: {
+                        canvas,
+                    },
+                });
+
+                // and recount repleis in parent
+                canvas && (await reIndexRepliesInParents(canvas));
+            }
+        };
+
+        this._types?.events.addEventListener(
+            "change",
+            this._typeChangeListener
         );
         // Dont await this one!!! because this.load might load self
         this.load();
@@ -1085,17 +1269,28 @@ export class Canvas extends Program<CanvasArgs> {
                 "change",
                 this._repliesChangeListener
             );
+        this._typeChangeListener &&
+            this._types.events.removeEventListener(
+                "change",
+                this._typeChangeListener
+            );
+
         this.reIndexDebouncer.close();
         return super.close(from);
     }
 
-    async loadPath(includeSelf?: boolean) {
+    async loadPath(options?: { includeSelf?: boolean; length?: number }) {
         const path: Canvas[] = [];
-        for (const canvas of this.path) {
+
+        let length = Math.min(this.path.length, options?.length ?? 1e3); // TODO choose better upper limit
+
+        for (let i = this.path.length - length; i < this.path.length; i++) {
+            let canvas = this.path[i];
             const next = await canvas.load(this.node);
             path.push(next);
         }
-        if (includeSelf) {
+
+        if (options?.includeSelf) {
             path.push(this);
         }
         return path;
@@ -1112,9 +1307,11 @@ export class Canvas extends Program<CanvasArgs> {
     getCountQuery(options?: {
         onlyImmediate: boolean;
     }): (StringMatch | IntegerCompare)[] {
-        return options?.onlyImmediate
+        const location = options?.onlyImmediate
             ? getImmediateRepliesQuery(this)
             : getRepliesQuery(this);
+        const type = getNarrativePostsQuery(); // only query canvases without type
+        return [...location, type];
     }
 
     async countReplies(options?: { onlyImmediate: boolean }): Promise<bigint> {
@@ -1155,15 +1352,18 @@ export class Canvas extends Program<CanvasArgs> {
         return concat;
     }
 
-    async getCreateRoomByPath(
-        path: string[]
+    async getCreateCanvasByPath(
+        path: string[],
+        options?: {
+            id?: Uint8Array; // leaf id
+        }
     ): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
         const results = await this.findCanvasesByPath(path);
         let end = results.canvases[0];
         if (end.closed) {
             end = await this.openWithSameSettings(end);
         }
-        const existingPath = await end.loadPath(true);
+        const existingPath = await end.loadPath({ includeSelf: true });
         let createdPath: Canvas[] =
             existingPath?.length > 0 ? existingPath : [this];
 
@@ -1182,6 +1382,7 @@ export class Canvas extends Program<CanvasArgs> {
 
             for (let i = results.path.length; i < path.length; i++) {
                 const canvas = new Canvas({
+                    id: i === path.length - 1 ? options?.id : undefined,
                     path: createdPath.map(
                         (x) =>
                             new CanvasAddressReference({
@@ -1363,6 +1564,11 @@ export class Canvas extends Program<CanvasArgs> {
         return root._visualizations;
     }
 
+    get types(): Documents<Purpose, IndexedPurpose, any> {
+        const root: Canvas = this.origin ?? this;
+        return root._types;
+    }
+
     async setVisualization(
         visualization: BasicVisualization | null
     ): Promise<void> {
@@ -1417,6 +1623,113 @@ export class Canvas extends Program<CanvasArgs> {
         return visualizations[0];
     }
 
+    async setType(type: Purpose | null): Promise<void> {
+        const origin = this.origin;
+        if (!origin) {
+            throw new Error("Cannot set visualization on non-origin canvas");
+        }
+        /*         console.log("SET TYPE", this, type); */
+        if (type && !equals(type.canvasId, this.id)) {
+            throw new Error("Unexpected wrong id provided");
+        }
+
+        const types = await this.types.index
+            .iterate(
+                {
+                    query: {
+                        canvasId: this.id,
+                    },
+                },
+                { resolve: false }
+            )
+            .all();
+        for (const type of types) {
+            await this.types.del(type.id);
+        }
+
+        if (type) {
+            await this.types.put(type);
+        } else {
+            // previous visualization was removed
+        }
+    }
+
+    async getType(): Promise<WithIndexedContext<
+        Purpose,
+        IndexedPurpose
+    > | null> {
+        const origin = this.origin;
+        if (!origin) {
+            throw new Error("Cannot get visualization on non-origin canvas");
+        }
+        const types = await this.types.index
+            .iterate({
+                query: {
+                    canvasId: this.id,
+                },
+            })
+            .all();
+        if (types.length === 0) {
+            return null;
+        }
+        if (types.length > 1) {
+            throw new Error(`Multiple types found for canvas ${this.idString}`);
+        }
+        return types[0];
+    }
+
+    async getViewContext(): Promise<Canvas[] | null> {
+        // get the first canvas that is a parent to some navigation
+        let current: Canvas | undefined = this;
+        let path: Canvas[] = [];
+        while (current) {
+            const type = await current.getType();
+            path.push(current);
+
+            if (!type || type.type instanceof Narrative) {
+                // we found a feed visualization, return the path
+                return path.reverse();
+            }
+
+            current =
+                current.path.length > 0
+                    ? await current.loadParent()
+                    : undefined;
+        }
+
+        return path.reverse();
+    }
+
+    async getFeedContext(): Promise<Canvas | undefined> {
+        // opposite to getViewContext
+
+        let current: Canvas = this;
+        while (current) {
+            await current.load();
+            const type = await current.getType();
+            if (
+                (!type?.type && current.path.length > 0) ||
+                type?.type instanceof Narrative
+            ) {
+                return current;
+            }
+
+            // let current be the first child and continue the search for a narrative
+            const iterator = current.replies.index.iterate(
+                { query: getImmediateRepliesQuery(current) },
+                { local: true, remote: { eager: true } }
+            );
+
+            let next = (await iterator.next(1))[0];
+            await iterator.close();
+
+            if (!next) {
+                return current;
+            }
+            current = next;
+        }
+    }
+
     private async updateIndexedReplyCounter(
         canvas: Canvas | WithIndexedContext<Canvas, IndexableCanvas>,
         amount?: bigint
@@ -1453,7 +1766,6 @@ export class Canvas extends Program<CanvasArgs> {
         } else {
             indexed.replies = await canvas.countReplies();
         }
-
         const wrappedValueToIndex = new this.replies.index.wrappedIndexedType(
             indexed,
             context
@@ -1461,13 +1773,13 @@ export class Canvas extends Program<CanvasArgs> {
         await this.replies.index.index.put(wrappedValueToIndex);
     }
 
-    async createReply(canvas: Canvas) {
+    async createReply(canvas: Canvas, type?: "narrative" | "navigation") {
         if (!this.origin!.replies.log.isReplicating()) {
             await this.origin!.replies.log.waitForReplicators();
         }
 
         await this.origin!.replies.put(canvas);
-        const path = await canvas.loadPath(true);
+        const path = await canvas.loadPath({ includeSelf: true });
         for (let i = 1; i < path.length; i++) {
             const loadedPathElement = await this.node.open(path[i], {
                 existing: "reuse",
@@ -1477,10 +1789,24 @@ export class Canvas extends Program<CanvasArgs> {
             // we only need to bump the reply counters of the parent
             await this.updateIndexedReplyCounter(loadedPathElement);
         }
+
+        if (type) {
+            const purpose = new Purpose({
+                type: type === "narrative" ? new Narrative() : new Navigation(),
+                canvasId: canvas.id,
+            });
+            await canvas.setType(purpose);
+        }
     }
 
-    createElement(element: Element) {
-        return this.origin!.elements.put(element);
+    async createElement(element: Element) {
+        await this.origin!.elements.put(element);
+        await this.reIndexDebouncer.add({
+            key: this.idString,
+            value: {
+                canvas: this,
+            },
+        });
     }
 
     get elements(): Documents<Element, IndexableElement, any> {

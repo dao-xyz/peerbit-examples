@@ -1,10 +1,13 @@
 import React, {
     createContext,
+    useCallback,
     useContext,
-    useState,
     useEffect,
+    useMemo,
     useRef,
+    useState,
 } from "react";
+import debounce from "lodash/debounce";
 
 export const getViewportHeight = () =>
     window.visualViewport ? window.visualViewport.height : window.innerHeight;
@@ -17,13 +20,10 @@ export const keyboardIsOpen = (
         ? baseline - window.visualViewport.height > tolerance
         : false;
 
-export const getScrollTop = () => {
-    return (
-        window.visualViewport?.pageTop ||
-        window.scrollY ||
-        document.documentElement.scrollTop
-    );
-};
+export const getScrollTop = () =>
+    window.visualViewport?.pageTop ||
+    window.scrollY ||
+    document.documentElement.scrollTop;
 
 export const getMaxScrollTop = () => {
     const documentHeight = Math.max(
@@ -38,20 +38,28 @@ export const getMaxScrollTop = () => {
 
 const useHeaderVisibility = (
     threshold = 50,
-    downDeltaThreshold = 20, // amount to scroll down from last upward position to hide header
-    bottomBounceTolerance = 50 // tolerance for bounce near bottom
+    downDeltaThreshold = 20,
+    bottomBounceTolerance = 50,
+    /** Delay (ms) used for lodash‑debounced scroll handler. */
+    debounceDelay = 50
 ) => {
-    // inside HeaderVisibilityProvider or a top‑level layout component
     const baseViewportHeightRef = useRef(getViewportHeight());
     const [disabled, setDisabled] = useState(false);
+    const [visible, setVisible] = useState(true);
 
+    const prevScrollTopRef = useRef(getScrollTop());
+    const lastUpPositionRef = useRef(getScrollTop());
+
+    /* -------------------------------------------------------------- */
+    /*  Visual‑viewport resize (virtual keyboard detection)            */
+    /* -------------------------------------------------------------- */
     useEffect(() => {
         const handleVpResize = () => {
-            // refresh the baseline after the keyboard has been closed for a moment
             if (!keyboardIsOpen(baseViewportHeightRef.current)) {
                 baseViewportHeightRef.current = getViewportHeight();
             }
         };
+
         window.visualViewport?.addEventListener("resize", handleVpResize);
         return () =>
             window.visualViewport?.removeEventListener(
@@ -60,102 +68,113 @@ const useHeaderVisibility = (
             );
     }, []);
 
-    const [visible, setVisible] = useState(true);
-    const prevScrollTopRef = useRef(getScrollTop());
-    const lastUpPositionRef = useRef(getScrollTop());
-    const baseViewportHeight = baseViewportHeightRef.current; // inject via context
-
+    /* -------------------------------------------------------------- */
+    /*  Ensure header is shown when disabled is toggled                */
+    /* -------------------------------------------------------------- */
     useEffect(() => {
         if (disabled) {
-            setVisible(false);
-        } else {
             setVisible(true);
         }
     }, [disabled]);
 
-    useEffect(() => {
-        const handleScroll = () => {
-            if (disabled) {
-                return;
-            }
+    /* -------------------------------------------------------------- */
+    /*  Core visibility algorithm                                     */
+    /* -------------------------------------------------------------- */
+    const computeVisibility = useCallback(() => {
+        if (disabled) return;
+        if (keyboardIsOpen(baseViewportHeightRef.current)) return;
 
-            if (keyboardIsOpen(baseViewportHeight)) {
-                return;
-            }
+        const currentScrollTop = getScrollTop();
+        const maxScrollTop = getMaxScrollTop();
 
-            const currentScrollTop = getScrollTop();
-            const maxScrollTop = getMaxScrollTop();
-
-            // If content isn't scrollable, always show the header.
-            if (maxScrollTop < bottomBounceTolerance) {
-                setVisible(true);
-                prevScrollTopRef.current = currentScrollTop;
-                lastUpPositionRef.current = currentScrollTop;
-                return;
-            }
-
-            // If we're near the bottom (bounce zone), hide the header.
-            if (maxScrollTop - currentScrollTop < bottomBounceTolerance) {
-                setVisible(false);
-                prevScrollTopRef.current = currentScrollTop;
-                return;
-            }
-
-            if (currentScrollTop < threshold) {
-                // Near top, always show.
-                setVisible(true);
-                lastUpPositionRef.current = currentScrollTop;
-            } else {
-                if (currentScrollTop < prevScrollTopRef.current) {
-                    // Scrolling up (even slowly): lock the header visible and record this upward position.
-                    setVisible(true);
-                    lastUpPositionRef.current = currentScrollTop;
-                } else if (currentScrollTop > prevScrollTopRef.current) {
-                    // Scrolling down: only hide header if we've gone down enough from the last upward position.
-                    if (
-                        currentScrollTop - lastUpPositionRef.current >
-                        downDeltaThreshold
-                    ) {
-                        setVisible(false);
-                    }
-                }
-            }
+        // Not scrollable ⇒ keep showing.
+        if (maxScrollTop < bottomBounceTolerance) {
+            setVisible(true);
             prevScrollTopRef.current = currentScrollTop;
-        };
+            lastUpPositionRef.current = currentScrollTop;
+            return;
+        }
 
-        window.addEventListener("scroll", handleScroll);
+        // Bottom bounce tolerance ⇒ hide.
+        if (maxScrollTop - currentScrollTop < bottomBounceTolerance) {
+            setVisible(false);
+            prevScrollTopRef.current = currentScrollTop;
+            return;
+        }
+
+        if (currentScrollTop < threshold) {
+            setVisible(true);
+            lastUpPositionRef.current = currentScrollTop;
+        } else {
+            if (currentScrollTop < prevScrollTopRef.current) {
+                // Scrolling up: show.
+                setVisible(true);
+                lastUpPositionRef.current = currentScrollTop;
+            } else if (
+                currentScrollTop - lastUpPositionRef.current >
+                downDeltaThreshold
+            ) {
+                // Scrolling down enough: hide.
+                setVisible(false);
+            }
+        }
+        prevScrollTopRef.current = currentScrollTop;
+    }, [disabled, threshold, downDeltaThreshold, bottomBounceTolerance]);
+
+    /* -------------------------------------------------------------- */
+    /*  Debounced scroll listener (lodash)                             */
+    /* -------------------------------------------------------------- */
+    const debouncedScroll = useMemo(
+        () =>
+            debounce(computeVisibility, debounceDelay, {
+                leading: true,
+                trailing: true,
+            }),
+        [computeVisibility, debounceDelay]
+    );
+
+    useEffect(() => {
+        window.addEventListener("scroll", debouncedScroll, { passive: true });
         return () => {
-            window.removeEventListener("scroll", handleScroll);
+            window.removeEventListener("scroll", debouncedScroll);
+            debouncedScroll.cancel();
         };
-    }, [threshold, downDeltaThreshold, bottomBounceTolerance, disabled]);
+    }, [debouncedScroll]);
 
-    return { visible, setDisabled, disabled };
+    return { visible, setDisabled, disabled } as const;
 };
 
-const HeaderVisibilityContext = createContext<{
+/* ------------------------------------------------------------------ */
+/*  Context helpers                                                   */
+/* ------------------------------------------------------------------ */
+
+type Ctx = {
     visible: boolean;
     disabled: boolean;
-    setDisabled: (disabled: boolean) => void;
-}>(undefined);
+    setDisabled: (d: boolean) => void;
+};
+
+const HeaderVisibilityContext = React.createContext<Ctx | undefined>(undefined);
 
 export const HeaderVisibilityProvider = ({
     children,
 }: {
     children: React.ReactNode;
 }) => {
-    const { visible, disabled, setDisabled } = useHeaderVisibility();
+    const ctx = useHeaderVisibility();
     return (
-        <HeaderVisibilityContext.Provider
-            value={{
-                visible,
-                disabled,
-                setDisabled,
-            }}
-        >
+        <HeaderVisibilityContext.Provider value={ctx}>
             {children}
         </HeaderVisibilityContext.Provider>
     );
 };
 
-export const useHeaderVisibilityContext = () =>
-    useContext(HeaderVisibilityContext);
+export const useHeaderVisibilityContext = () => {
+    const ctx = useContext(HeaderVisibilityContext);
+    if (!ctx) {
+        throw new Error(
+            "useHeaderVisibilityContext must be used within HeaderVisibilityProvider"
+        );
+    }
+    return ctx;
+};

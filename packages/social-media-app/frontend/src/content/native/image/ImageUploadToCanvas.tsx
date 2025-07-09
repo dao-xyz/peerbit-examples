@@ -1,3 +1,4 @@
+import { JSX } from "react";
 import { useCanvas } from "../../../canvas/CanvasWrapper";
 import { FaCamera } from "react-icons/fa";
 

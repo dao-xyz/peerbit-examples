@@ -10,6 +10,10 @@ import {
     getTextElementsQuery,
     getImagesQuery,
     LOWEST_QUALITY,
+    Purpose,
+    Navigation,
+    Narrative,
+    getNarrativePostsQuery,
 } from "../content.js";
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
 import { expect } from "chai";
@@ -17,6 +21,7 @@ import { delay, waitForResolved } from "@peerbit/time";
 import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { StaticImage } from "../static/image.js";
 import { Peerbit } from "peerbit";
+import { createRoot } from "../root.js";
 
 describe("canvas", () => {
     let session: TestSession;
@@ -28,6 +33,7 @@ describe("canvas", () => {
     afterEach(async () => {
         await session.stop();
     });
+
     it("can make path", async () => {
         const randomRootKey = (await Ed25519Keypair.create()).publicKey;
         const root = await session.peers[0].open(
@@ -36,17 +42,17 @@ describe("canvas", () => {
                 seed: new Uint8Array(),
             })
         );
-        const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
+        const [_a, _b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
         expect(await c.createContext()).to.eq("c");
-        expect((await c.loadPath(true)).length).to.eq(4);
+        expect((await c.loadPath({ includeSelf: true })).length).to.eq(4);
 
-        expect((await c.loadPath(true))[3]).to.eq(c);
+        expect((await c.loadPath({ includeSelf: true }))[3]).to.eq(c);
 
-        const [__a, __b, d] = await root.getCreateRoomByPath(["a", "b", "d"]);
+        const [__a, __b, d] = await root.getCreateCanvasByPath(["a", "b", "d"]);
         expect(await d.createContext()).to.eq("d");
-        expect((await d.loadPath(true)).length).to.eq(4);
+        expect((await d.loadPath({ includeSelf: true })).length).to.eq(4);
 
-        expect((await d.loadPath(true))[3]).to.eq(d);
+        expect((await d.loadPath({ includeSelf: true }))[3]).to.eq(d);
 
         const childrenFromRoot = await root.replies.index.index
             .iterate({ query: getImmediateRepliesQuery(root) })
@@ -91,6 +97,254 @@ describe("canvas", () => {
         });
     });
 
+    describe("loadPath", () => {
+        it("can load path with length", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                })
+            );
+            const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
+            const path = await c.loadPath({ length: 2, includeSelf: true });
+            expect(path).to.have.length(3);
+            expect(path.map((x) => x.idString)).to.deep.eq([
+                a.idString,
+                b.idString,
+                c.idString,
+            ]);
+        });
+    });
+    describe("createRoot", () => {
+        it("can create", async () => {
+            const root = await createRoot(session.peers[0], true);
+            expect(root).to.exist;
+
+            // expect root to have 1 reply which is "Comments"
+            expect(await root.replies.index.getSize()).to.eq(1);
+            const replies = await root.replies.index
+                .iterate({ query: getRepliesQuery(root) })
+                .all();
+            const [first] = replies;
+            const elements = await first.elements.index
+                .iterate({ query: getOwnedElementsQuery(first) })
+                .all();
+            expect(elements).to.have.length(1);
+            expect(first.__indexed.context).to.eq("Feed");
+
+            const type = await root.getType();
+            expect(type).to.not.exist;
+
+            const feedType = await first.getType();
+            expect(feedType).to.exist;
+            expect(feedType?.type).to.be.instanceOf(Navigation);
+
+            // creating again should resolve in the same address
+            const root2 = await createRoot(session.peers[1], true);
+            expect(root2.address).to.eq(root.address);
+
+            await root2.replies.log.waitForReplicator(
+                session.peers[0].identity.publicKey
+            );
+            const replies2 = await root2.replies.index
+                .iterate({ query: getRepliesQuery(root) })
+                .all();
+            const [first2] = replies2;
+            expect(first2.address).to.eq(first.address);
+        });
+    });
+
+    describe("getViewContext", () => {
+        it("view context from root", async () => {
+            const root = await createRoot(session.peers[0], true);
+            expect((await root.getType())?.type).to.be.undefined;
+            const [feed] = await root.getCreateCanvasByPath(["Feed"]);
+            expect((await feed.getType())?.type).to.be.instanceOf(Navigation);
+
+            const path = await feed.getCreateCanvasByPath(["a"]);
+            const a = path[path.length - 1];
+            const rootFromA = await a.getViewContext();
+            expect(rootFromA![0].idString).to.eq(a.idString);
+
+            const rootFromFeed = await feed.getViewContext();
+            expect(rootFromFeed![0].idString).to.eq(root.idString);
+
+            const rootFromRoot = await root.getViewContext();
+            expect(rootFromRoot![0].idString).to.eq(root.idString);
+        });
+
+        it("root as navigation", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            const [a] = await root.getCreateCanvasByPath(["a"]);
+            await root.setType(
+                new Purpose({
+                    canvasId: root.id,
+                    type: new Navigation(),
+                })
+            );
+
+            await a.setType(
+                new Purpose({
+                    canvasId: a.id,
+                    type: new Navigation(),
+                })
+            );
+
+            expect(await root.getType()).to.exist;
+            expect(await a.getType()).to.exist;
+            const rootFromC = await a.getViewContext();
+            expect(rootFromC?.map((x) => x.idString)).to.deep.eq([
+                root.idString,
+                a.idString,
+            ]);
+        });
+
+        it("skips tab visualization", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
+
+            await a.setType(
+                new Purpose({
+                    canvasId: a.id,
+                    type: new Narrative(),
+                })
+            );
+
+            await b.setType(
+                new Purpose({
+                    canvasId: b.id,
+                    type: new Navigation(),
+                })
+            );
+
+            await c.setType(
+                new Purpose({
+                    canvasId: c.id,
+                    type: new Navigation(),
+                })
+            );
+
+            expect(await a.getType()).to.exist;
+            expect(await b.getType()).to.exist;
+            expect(await c.getType()).to.exist;
+
+            const rootFromC = await c.getViewContext();
+            expect(rootFromC?.map((x) => x.idString)).to.deep.eq([
+                a.idString,
+                b.idString,
+                c.idString,
+            ]);
+        });
+
+        it("root returns root", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            const rootFromRoot = await root.getViewContext();
+            expect(rootFromRoot?.map((x) => x.idString)).to.deep.eq([
+                root.idString,
+            ]);
+        });
+    });
+
+    describe("getFeedContext", () => {
+        it("feed context from root", async () => {
+            const root = await createRoot(session.peers[0], true);
+            const [feed] = await root.getCreateCanvasByPath(["Feed"]);
+            const path = await feed.getCreateCanvasByPath(["a"]);
+            const a = path[path.length - 1];
+            const feedFromA = await a.getFeedContext();
+            expect(feedFromA!.idString).to.eq(a.idString);
+
+            const feedFromRoot = await root.getFeedContext();
+            expect(feedFromRoot!.idString).to.eq(feed.idString);
+        });
+
+        it("narrative at root", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
+
+            await a.setType(
+                new Purpose({
+                    canvasId: a.id,
+                    type: new Narrative(),
+                })
+            );
+
+            await b.setType(
+                new Purpose({
+                    canvasId: b.id,
+                    type: new Navigation(),
+                })
+            );
+            expect(await a.getType()).to.exist;
+            expect(await b.getType()).to.exist;
+            const feedFromA = await a.getFeedContext();
+            expect(feedFromA?.idString).to.deep.eq(a.idString);
+        });
+
+        it("narrative at middle", async () => {
+            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+            const root = await session.peers[0].open(
+                new Canvas({
+                    publicKey: randomRootKey,
+                    seed: new Uint8Array(),
+                })
+            );
+
+            const [a, b, _c] = await root.getCreateCanvasByPath([
+                "a",
+                "b",
+                "c",
+            ]);
+
+            await a.setType(
+                new Purpose({
+                    canvasId: a.id,
+                    type: new Navigation(),
+                })
+            );
+
+            await b.setType(
+                new Purpose({
+                    canvasId: b.id,
+                    type: new Narrative(),
+                })
+            );
+
+            expect(await a.getType()).to.exist;
+            expect(await b.getType()).to.exist;
+            const feedFromA = await a.getFeedContext();
+            expect(feedFromA?.idString).to.deep.eq(b.idString);
+        });
+    });
+
     it("index once", async () => {
         const randomRootKey = (await Ed25519Keypair.create()).publicKey;
         const root = await session.peers[0].open(
@@ -110,7 +364,7 @@ describe("canvas", () => {
             return putIndexCalls(a, b, c);
         };
 
-        await root.getCreateRoomByPath(["a"]);
+        await root.getCreateCanvasByPath(["a"]);
         expect(putCount).to.eq(1);
     });
 
@@ -122,10 +376,51 @@ describe("canvas", () => {
                 seed: new Uint8Array(),
             })
         );
-        const [a, b] = await root1.getCreateRoomByPath(["a", "b"]);
+        const [a, b] = await root1.getCreateCanvasByPath(["a", "b"]);
 
         expect(Number(a.__indexed.replies)).to.eq(1); // a has one reply (b)
         expect(Number(b.__indexed.replies)).to.eq(0); // b has no replies
+    });
+
+    it("indexes replies ignores navigational posts", async () => {
+        const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+        const root1 = await session.peers[0].open(
+            new Canvas({
+                publicKey: randomRootKey,
+                seed: new Uint8Array(),
+            })
+        );
+        let [a, b, c] = await root1.getCreateCanvasByPath(["a", "b", "c"]);
+
+        expect(Number(a.__indexed.replies)).to.eq(2);
+        expect(Number(b.__indexed.replies)).to.eq(1);
+        expect(Number(c.__indexed.replies)).to.eq(0);
+
+        // await delay(2e3)
+
+        await b.setType(
+            new Purpose({
+                canvasId: b.id,
+                type: new Navigation({}),
+            })
+        );
+
+        await delay(5e3);
+        const iterator = root1.replies.index.iterate({
+            query: getNarrativePostsQuery(),
+        });
+        const all = await iterator.all();
+        expect(all).to.have.length(2);
+
+        let [aMod, bMod, cMod] = await root1.getCreateCanvasByPath([
+            "a",
+            "b",
+            "c",
+        ]);
+
+        expect(Number(aMod.__indexed.replies)).to.eq(1);
+        expect(Number(bMod.__indexed.replies)).to.eq(1);
+        expect(Number(cMod.__indexed.replies)).to.eq(0);
     });
 
     /*
@@ -140,7 +435,7 @@ describe("canvas", () => {
                  seed: new Uint8Array(),
              })
          );
-         const [a1] = await root1.getCreateRoomByPath(["a"]);
+         const [a1] = await root1.getCreateCanvasByPath(["a"]);
  
          const root2 = await session.peers[1].open(root1.clone(), {
              args: {
@@ -161,13 +456,13 @@ describe("canvas", () => {
              return putIndexCalls(a, b, c);
          };
  
-         const [a2, b2] = await root2.getCreateRoomByPath(["a", "b"]);
+         const [a2, b2] = await root2.getCreateCanvasByPath(["a", "b"]);
          await waitForResolved(async () => expect(Number(await a1.countReplies({ onlyImmediate: true }))).to.eq(1))
  
          expect(putCount).to.eq(1);
  
          const checkReplies = async (root: Canvas) => {
-             const a = await root.getCreateRoomByPath(["a"])
+             const a = await root.getCreateCanvasByPath(["a"])
              expect(a).to.have.length(1);
              const asIndexed = a[0] as WithIndexedContext<Canvas, IndexableCanvas>;
  
@@ -194,12 +489,12 @@ describe("canvas", () => {
         const indexSize = await root1.replies.index.getSize();
         expect(indexSize).to.eq(0);
 
-        const [a1] = await root1.getCreateRoomByPath(["a"]);
+        const [a1] = await root1.getCreateCanvasByPath(["a"]);
 
         const indexSize1 = await root1.replies.index.getSize();
         expect(indexSize1).to.eq(1);
 
-        const [a2, b2] = await root1.getCreateRoomByPath(["a", "b"]);
+        const [a2, b2] = await root1.getCreateCanvasByPath(["a", "b"]);
 
         const indexSize2 = await root1.replies.index.getSize();
         expect(indexSize2).to.eq(2);
@@ -212,9 +507,9 @@ describe("canvas", () => {
                 seed: new Uint8Array(),
             })
         );
-        let [a] = await root.getCreateRoomByPath(["a"]);
-        await root.getCreateRoomByPath(["a", "b"]);
-        await root.getCreateRoomByPath(["a", "c"]);
+        let [a] = await root.getCreateCanvasByPath(["a"]);
+        await root.getCreateCanvasByPath(["a", "b"]);
+        await root.getCreateCanvasByPath(["a", "c"]);
 
         const allReplies = await a.replies.index
             .iterate({ query: getImmediateRepliesQuery(a) })
@@ -257,7 +552,7 @@ describe("canvas", () => {
                 seed: new Uint8Array(),
             })
         );
-        const [a, b] = await root.getCreateRoomByPath(["a", "b"]);
+        const [a, b] = await root.getCreateCanvasByPath(["a", "b"]);
         const experience = await peer.services.blocks.get(b.address);
         expect(experience).to.exist;
 
@@ -280,7 +575,7 @@ describe("canvas", () => {
                 })
             );
 
-            const [a, b] = await root.getCreateRoomByPath(["a", "b"]);
+            const [a, b] = await root.getCreateCanvasByPath(["a", "b"]);
             expect(a).to.exist;
             expect(b).to.exist;
 
@@ -313,9 +608,9 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            await root.getCreateRoomByPath(["a", "b", "c"]);
-            await root.getCreateRoomByPath(["a", "b", "d"]);
-            const a = (await root.getCreateRoomByPath(["a"]))[0];
+            await root.getCreateCanvasByPath(["a", "b", "c"]);
+            await root.getCreateCanvasByPath(["a", "b", "d"]);
+            const a = (await root.getCreateCanvasByPath(["a"]))[0];
             expect(await a.createContext()).to.eq("a");
 
             const all = await a.replies.index
@@ -339,9 +634,9 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            await root.getCreateRoomByPath(["a", "b", "c"]);
-            await root.getCreateRoomByPath(["a", "b", "d"]);
-            const [_a, b] = await root.getCreateRoomByPath(["a", "b"]);
+            await root.getCreateCanvasByPath(["a", "b", "c"]);
+            await root.getCreateCanvasByPath(["a", "b", "d"]);
+            const [_a, b] = await root.getCreateCanvasByPath(["a", "b"]);
             expect(await b.createContext()).to.eq("b");
 
             const all = await b.replies.index
@@ -363,10 +658,10 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            await root.getCreateRoomByPath(["b", "b"]);
-            await root.getCreateRoomByPath(["a", "b"]);
-            await root.getCreateRoomByPath(["c"]);
-            await root.getCreateRoomByPath(["a", "c"]);
+            await root.getCreateCanvasByPath(["b", "b"]);
+            await root.getCreateCanvasByPath(["a", "b"]);
+            await root.getCreateCanvasByPath(["c"]);
+            await root.getCreateCanvasByPath(["a", "c"]);
 
             const sortedByReplies = await root.replies.index.search({
                 query: getImmediateRepliesQuery(root),
@@ -397,7 +692,7 @@ describe("canvas", () => {
             for (const [key, count] of Object.entries(childrenCount)) {
                 for (let i = 0; i < count; i++) {
                     // console.log("key: " + key + "key", "i", i)
-                    await rootA.getCreateRoomByPath([key, i.toString()]);
+                    await rootA.getCreateCanvasByPath([key, i.toString()]);
                 }
             }
 
@@ -457,7 +752,7 @@ describe("canvas", () => {
             for (const [key, count] of Object.entries(childrenCount)) {
                 for (let i = 0; i < count; i++) {
                     // console.log("key: " + key + "key", "i", i)
-                    await rootA.getCreateRoomByPath([key, i.toString()]);
+                    await rootA.getCreateCanvasByPath([key, i.toString()]);
                 }
             }
 
@@ -518,10 +813,10 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            await root.getCreateRoomByPath(["b", "b"]);
-            await root.getCreateRoomByPath(["a", "b"]);
-            await root.getCreateRoomByPath(["c"]);
-            await root.getCreateRoomByPath(["a", "c"]);
+            await root.getCreateCanvasByPath(["b", "b"]);
+            await root.getCreateCanvasByPath(["a", "b"]);
+            await root.getCreateCanvasByPath(["c"]);
+            await root.getCreateCanvasByPath(["a", "c"]);
 
             const checkSort = async () => {
                 const sortedByReplies = await root.replies.index.search({
@@ -568,10 +863,10 @@ describe("canvas", () => {
             );
             let replicator = await session.peers[1].open(root.clone());
 
-            await root.getCreateRoomByPath(["b", "b"]);
-            await root.getCreateRoomByPath(["a", "b"]);
-            await root.getCreateRoomByPath(["c"]);
-            await root.getCreateRoomByPath(["a", "c"]);
+            await root.getCreateCanvasByPath(["b", "b"]);
+            await root.getCreateCanvasByPath(["a", "b"]);
+            await root.getCreateCanvasByPath(["c"]);
+            await root.getCreateCanvasByPath(["a", "c"]);
 
             await waitForResolved(() =>
                 expect(replicator.replies.log.log.length).to.eq(6)
@@ -633,7 +928,7 @@ describe("canvas", () => {
                     },
                 },
             });
-            await replicator.getCreateRoomByPath(["a", "b"]);
+            await replicator.getCreateCanvasByPath(["a", "b"]);
 
             const all = await viewer.replies.index.search({
                 sort: new Sort({
@@ -673,7 +968,7 @@ describe("canvas", () => {
                     },
                 }
             );
-            await first.getCreateRoomByPath(["a", "b"]);
+            await first.getCreateCanvasByPath(["a", "b"]);
 
             let second = await session.peers[1].open(first.clone(), {
                 args: {
@@ -707,9 +1002,9 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            const [a] = await root.getCreateRoomByPath(["a"]);
-            await root.getCreateRoomByPath(["a", "b1"]);
-            await root.getCreateRoomByPath(["a", "b2"]);
+            const [a] = await root.getCreateCanvasByPath(["a"]);
+            await root.getCreateCanvasByPath(["a", "b1"]);
+            await root.getCreateCanvasByPath(["a", "b2"]);
 
             expect(await a.createContext()).to.eq("a");
 
@@ -729,8 +1024,8 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            const [a] = await root.getCreateRoomByPath(["a"]);
-            await root.getCreateRoomByPath(["a", "b1"]);
+            const [a] = await root.getCreateCanvasByPath(["a"]);
+            await root.getCreateCanvasByPath(["a", "b1"]);
 
             const subcanvasWithImage = await session.peers[0].open(
                 new Canvas({
@@ -800,9 +1095,13 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            const [_a, _b, c] = await root.getCreateRoomByPath(["a", "b", "c"]);
-            const [a] = await root.getCreateRoomByPath(["a"]);
-            const [__a, b] = await root.getCreateRoomByPath(["a", "b"]);
+            const [_a, _b, c] = await root.getCreateCanvasByPath([
+                "a",
+                "b",
+                "c",
+            ]);
+            const [a] = await root.getCreateCanvasByPath(["a"]);
+            const [__a, b] = await root.getCreateCanvasByPath(["a", "b"]);
             expect(a.path).to.have.length(1);
             expect(b.path).to.have.length(2);
             expect(c.path).to.have.length(3);
@@ -841,7 +1140,7 @@ describe("canvas", () => {
             await root2.replies.log.waitForReplicators({
                 waitForNewPeers: true,
             });
-            const [_a2, c2] = await root2.getCreateRoomByPath(["a", "c"]);
+            const [_a2, c2] = await root2.getCreateCanvasByPath(["a", "c"]);
             await checkCanvas(c2);
         });
 
@@ -859,7 +1158,7 @@ describe("canvas", () => {
                  rootTrust: session.peers[0].identity.publicKey,
              })
          );
-         const pathA = await rootA.getCreateRoomByPath(["a", "b", "c"]);
+         const pathA = await rootA.getCreateCanvasByPath(["a", "b", "c"]);
  
          await session.peers[0].stop();
          await session.peers[0].start();
@@ -873,7 +1172,7 @@ describe("canvas", () => {
  
          expect(rootA.address).to.eq(rootB.address);
  
-         const pathB = await rootB.getCreateRoomByPath(["a", "b", "c"]);
+         const pathB = await rootB.getCreateCanvasByPath(["a", "b", "c"]);
          for (const room of pathB) {
              await session.peers[0].open(room);
          }

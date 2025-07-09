@@ -6,7 +6,7 @@ export interface IFrameResizerProps {
     /**
      * A ref to the iframe element that will be resized.
      */
-    iframeRef: React.RefObject<HTMLIFrameElement>;
+    iframeRef: React.RefObject<HTMLIFrameElement | null>;
     children: React.ReactNode;
     onResize: (data: { height: number; width: number }) => void;
 }

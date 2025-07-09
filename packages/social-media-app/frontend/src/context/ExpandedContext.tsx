@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { useCanvases } from "../canvas/useCanvas";
-import { Reply } from "../canvas/reply/Reply"; // Uses the updated Reply component
+import { Reply } from "../canvas/feed/Reply"; // Uses the updated Reply component
 import { Canvas } from "@giga-app/interface";
 
 interface ExpandedContextProps {

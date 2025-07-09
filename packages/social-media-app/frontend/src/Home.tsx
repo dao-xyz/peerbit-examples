@@ -1,4 +1,4 @@
-import { CanvasAndReplies } from "./canvas/reply/CanvasAndReplies";
+import { CanvasAndReplies } from "./canvas/main/CanvasAndReplies";
 
 export const Home = () => {
     return (

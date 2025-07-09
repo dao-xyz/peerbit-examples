@@ -40,7 +40,8 @@ function debounce(func, delay) {
 
 export const Room = () => {
     // Manage names and identities
-    const identitiesInChatMap = useRef<Map<string, Ed25519PublicKey>>();
+    const identitiesInChatMap =
+        useRef<Map<string, Ed25519PublicKey>>(undefined);
 
     // This fields is meant for when one uses encryption (not used as of now)
     const [receivers, setRecievers] = useState<string[]>([]);

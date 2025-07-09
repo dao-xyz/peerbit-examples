@@ -1,23 +1,22 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useState } from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HiDotsHorizontal } from "react-icons/hi";
-import { useCount, usePeer } from "@peerbit/react";
+import { usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
 import {
     Canvas,
     getOwnedElementsQuery,
     IFrameContent,
     IndexableCanvas,
-    PinnedPosts,
 } from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
 import { WithIndexedContext } from "@peerbit/document";
-import * as Dialog from "@radix-ui/react-dialog";
 import { FaRegComment } from "react-icons/fa";
 import { MdOpenInFull } from "react-icons/md";
-import { useView } from "../reply/view/ViewContex";
-import { CreateNewViewMenuItem } from "../reply/view/CreateNewViewMenuItem";
+import { CanvasSettingsButton } from "./CanvasSettingsButton";
+import { TinyPath } from "../path/RelativePath";
+import { useRelativePath } from "./useRelativePath";
 
 export const Header = ({
     canvas,
@@ -28,6 +27,7 @@ export const Header = ({
     reverseLayout,
     forwardRef,
     detailed,
+    showPath,
 }: {
     canvas?: Canvas | WithIndexedContext<Canvas, IndexableCanvas>;
     direction?: "row" | "col";
@@ -37,11 +37,8 @@ export const Header = ({
     reverseLayout?: boolean;
     forwardRef?: React.Ref<HTMLDivElement>;
     detailed?: boolean; // detailed view
+    showPath?: boolean; // show the path in the header
 }) => {
-    const { peer } = usePeer();
-    const { create } = useProfiles();
-    const { dynamicViews, pinToView } = useView();
-
     /* useEffect(() => {
         if (!canvas) return;
         if (canvas.isOrigin) {
@@ -68,38 +65,67 @@ export const Header = ({
      ); */
 
     // State for controlling the More Info dialog and its content.
-    const [moreInfoOpen, setMoreInfoOpen] = useState(false);
-    const [elementsInfo, setElementsInfo] = useState<
-        Array<{ type: string; url?: string }>
-    >([]);
 
-    // Always show "More info" regardless of ownership.
-    const handleMoreInfo = async () => {
-        if (!canvas) return;
-        try {
-            const elements = await canvas.elements.index
-                .iterate({ query: getOwnedElementsQuery(canvas) })
-                .all();
-            const info = elements.map((x) => {
-                if (x.content instanceof IFrameContent) {
-                    return { type: "IFrame", url: x.content.src };
-                } else {
-                    return { type: x.content.constructor.name };
-                }
-            });
-            setElementsInfo(info);
-            setMoreInfoOpen(true);
-        } catch (error) {
-            console.error("Failed to fetch elements info", error);
-        }
-    };
+    // load the path
 
+    const controls = (
+        <div className="ml-auto flex flex-row ">
+            {variant === "large" && !detailed && (
+                <>
+                    {/* Show comment icon with comment counts if applicable */}
+
+                    <button
+                        className="btn flex p-2 flex-row items-center gap-1"
+                        onClick={open}
+                    >
+                        <FaRegComment size={16} />
+                        {(canvas as WithIndexedContext<Canvas, IndexableCanvas>)
+                            .__indexed.replies ? (
+                            <span className="text-xs">
+                                {Number(
+                                    (
+                                        canvas as WithIndexedContext<
+                                            Canvas,
+                                            IndexableCanvas
+                                        >
+                                    ).__indexed.replies
+                                )}
+                            </span>
+                        ) : (
+                            <></>
+                        )}
+                    </button>
+
+                    {/* Show a "go to post" buttom */}
+                    <button
+                        className="btn flex p-2 flex-row items-center gap-1"
+                        onClick={open}
+                    >
+                        <MdOpenInFull size={16} />
+                    </button>
+                </>
+            )}
+
+            {/* Dropdown menu always available */}
+            <CanvasSettingsButton canvas={canvas} onOpen={open} />
+        </div>
+    );
+
+    const relativePath = useRelativePath({ canvas, disabled: !showPath });
+    const hasPath = relativePath.length > 0;
     return (
-        <>
+        <div className="flex flex-col w-full  px-2">
+            {hasPath && (
+                <div className="flex flex-row">
+                    <TinyPath path={relativePath} />
+                    {controls}
+                </div>
+            )}
+
             {canvas && (
                 <div
                     ref={forwardRef}
-                    className={`flex px-2 pt-2 ${
+                    className={`flex pt-0 ${
                         reverseLayout ? "flex-row-reverse" : ""
                     } items-center gap-1 ${
                         direction === "col" ? "flex-col" : "flex-row"
@@ -114,15 +140,17 @@ export const Header = ({
                     >
                         <ProfileButton
                             publicKey={canvas.publicKey}
+                            className="h-full "
                             size={
                                 variant === "large"
-                                    ? 32
+                                    ? 20
                                     : variant === "medium"
-                                    ? 24
-                                    : 16
+                                    ? 16
+                                    : 12
                             }
                         />
                     </div>
+
                     {canvas.loadedContext && (
                         <div className="px-1">
                             <RelativeTimestamp
@@ -142,196 +170,9 @@ export const Header = ({
                             />
                         </div>
                     )}
-
-                    {variant === "large" && !detailed && (
-                        <>
-                            {/* Show comment icon with comment counts if applicable */}
-
-                            <button
-                                className="btn flex p-2 flex-row items-center gap-1"
-                                onClick={open}
-                            >
-                                <FaRegComment size={16} />
-                                {(
-                                    canvas as WithIndexedContext<
-                                        Canvas,
-                                        IndexableCanvas
-                                    >
-                                ).__indexed.replies ? (
-                                    <span className="text-xs">
-                                        {Number(
-                                            (
-                                                canvas as WithIndexedContext<
-                                                    Canvas,
-                                                    IndexableCanvas
-                                                >
-                                            ).__indexed.replies
-                                        )}
-                                    </span>
-                                ) : (
-                                    <></>
-                                )}
-                            </button>
-
-                            {/* Show a "go to post" buttom */}
-                            <button
-                                className="btn flex p-2 flex-row items-center gap-1"
-                                onClick={open}
-                            >
-                                <MdOpenInFull size={16} />
-                            </button>
-                        </>
-                    )}
-
-                    {/* Dropdown menu always available */}
-                    <DropdownMenu.Root>
-                        <DropdownMenu.Trigger
-                            asChild
-                            onPointerDown={(e) => {
-                                console.log(e);
-                                e.preventDefault();
-                            }}
-                        >
-                            <button
-                                className={"ml-auto btn btn-icon btn-icon-sm "}
-                            >
-                                <HiDotsHorizontal size={20} />
-                            </button>
-                        </DropdownMenu.Trigger>
-                        <DropdownMenu.Content className="dropdown-menu-responsive bg-white dark:bg-black p-2 rounded shadow-md">
-                            <DropdownMenu.Item
-                                className="menu-item"
-                                onSelect={() => open?.()}
-                            >
-                                Open
-                            </DropdownMenu.Item>
-                            {canvas &&
-                                peer.identity.publicKey.equals(
-                                    canvas.publicKey
-                                ) &&
-                                variant !== "tiny" && (
-                                    <>
-                                        <DropdownMenu.Item
-                                            className="menu-item"
-                                            onSelect={() => {
-                                                console.log("Delete post");
-                                            }}
-                                        >
-                                            Delete Post
-                                        </DropdownMenu.Item>
-                                        <DropdownMenu.Item
-                                            className="menu-item"
-                                            onSelect={() => {
-                                                return create({
-                                                    profile: canvas,
-                                                });
-                                            }}
-                                        >
-                                            Set as Profile Photo
-                                        </DropdownMenu.Item>
-                                    </>
-                                )}
-                            <DropdownMenu.Item
-                                className="menu-item"
-                                onSelect={handleMoreInfo}
-                            >
-                                More info
-                            </DropdownMenu.Item>
-                            {/* ───────────────── Add-to-view (submenu) ───────────────── */}
-                            <DropdownMenu.Sub>
-                                <DropdownMenu.SubTrigger className="menu-item flex justify-between">
-                                    Add to view
-                                </DropdownMenu.SubTrigger>
-
-                                <DropdownMenu.SubContent
-                                    alignOffset={-4}
-                                    className="dropdown-menu-responsive bg-white dark:bg-black p-2 rounded shadow-md max-h-[280px] overflow-y-auto"
-                                >
-                                    {/* dynamic (user) views first */}
-                                    {dynamicViews.length > 0 && (
-                                        <>
-                                            <DropdownMenu.Label className="px-4 py-1 text-xs text-primary-600">
-                                                Your views
-                                            </DropdownMenu.Label>
-                                            {dynamicViews.map((v) => (
-                                                <DropdownMenu.Item
-                                                    key={v.id}
-                                                    onSelect={() => {
-                                                        pinToView(v, canvas);
-                                                    }}
-                                                    className="cursor-pointer px-4 py-2 text-sm whitespace-nowrap hover:bg-neutral-100 dark:hover:bg-neutral-800 rounded"
-                                                >
-                                                    {v.id}{" "}
-                                                    {/* TODO Display view ID or name */}
-                                                </DropdownMenu.Item>
-                                            ))}
-                                        </>
-                                    )}
-                                    {dynamicViews.length === 0 && (
-                                        <>
-                                            <DropdownMenu.Item className="cursor-pointer px-4 py-2 text-sm whitespace-nowrap text-gray-500">
-                                                No views available
-                                            </DropdownMenu.Item>
-                                        </>
-                                    )}
-                                    <DropdownMenu.Separator className="my-2 h-px bg-neutral-200 dark:bg-neutral-700" />
-                                    <CreateNewViewMenuItem />
-                                </DropdownMenu.SubContent>
-                            </DropdownMenu.Sub>
-                        </DropdownMenu.Content>
-                    </DropdownMenu.Root>
+                    {!hasPath && controls}
                 </div>
             )}
-
-            {/* Dialog to display the additional post information */}
-            <Dialog.Root open={moreInfoOpen} onOpenChange={setMoreInfoOpen}>
-                <Dialog.Portal>
-                    <Dialog.Overlay
-                        className="fixed inset-0 z-20"
-                        style={{
-                            backgroundColor: "rgba(0,0,0,0.1)",
-                            backdropFilter: "blur(4px)",
-                        }}
-                    />
-                    <Dialog.Content className="fixed top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2 p-6 rounded-lg shadow-lg w-11/12 max-w-md bg-neutral-100 dark:bg-neutral-900 z-30">
-                        <Dialog.Title className="text-lg font-bold mb-2">
-                            Post Details
-                        </Dialog.Title>
-                        <div className="space-y-2">
-                            <p>Element Count: {elementsInfo.length}</p>
-                            <ul className="space-y-1">
-                                {elementsInfo.map((info, index) => (
-                                    <li key={index} className="py-1">
-                                        <span>Type: {info.type}</span>
-                                        {info.url && (
-                                            <div className="mt-1">
-                                                <a
-                                                    href={info.url}
-                                                    target="_blank"
-                                                    rel="noopener noreferrer"
-                                                    className="text-blue-500 underline break-all block"
-                                                    style={{
-                                                        wordBreak: "break-all",
-                                                    }}
-                                                >
-                                                    {info.url}
-                                                </a>
-                                            </div>
-                                        )}
-                                    </li>
-                                ))}
-                            </ul>
-                        </div>
-                        <Dialog.Close asChild>
-                            <div className="w-full flex">
-                                <button className="mt-4 ml-auto btn btn-secondary">
-                                    Close
-                                </button>
-                            </div>
-                        </Dialog.Close>
-                    </Dialog.Content>
-                </Dialog.Portal>
-            </Dialog.Root>
-        </>
+        </div>
     );
 };

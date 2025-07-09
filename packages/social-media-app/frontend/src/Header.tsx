@@ -1,20 +1,19 @@
-import { useState, forwardRef, ReactNode, useEffect } from "react";
+import { ReactNode, useEffect, useLayoutEffect, useRef } from "react";
 import { MdOutlineDarkMode, MdOutlineLightMode } from "react-icons/md";
-import { CanvasPath } from "./context/CanvasPath";
 import { ProfileButton } from "./profile/ProfileButton";
 import { usePeer } from "@peerbit/react";
 import { Spinner } from "./utils/Spinner";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useNavigate } from "react-router";
-import { CONNECT_DEVICES, getCanvasPath } from "./routes";
-import { HeaderLogo } from "./Logo";
+import { CONNECT_DEVICES } from "./routes";
 import { useCanvases } from "./canvas/useCanvas";
-import { IoIosArrowBack } from "react-icons/io";
-import ExpandedContext from "./context/ExpandedContext";
 import { useThemeContext } from "./theme/useTheme";
 import { useHeaderVisibilityContext } from "./HeaderVisibilitiyProvider";
 import { buildCommit } from "./utils";
-import { useBackToParent } from "./canvas/useBackToParent";
+import { CanvasPathInput } from "./canvas/path/CanvasPathInput";
+import { MdKeyboardDoubleArrowUp } from "react-icons/md";
+import { useFocusProvider } from "./FocusProvider";
+import { useFeed } from "./canvas/feed/FeedContext";
 
 // Define props interface
 interface HeaderProps {
@@ -22,179 +21,170 @@ interface HeaderProps {
     fullscreen?: boolean;
 }
 
-const EXPANDED_BREADCRUMB_PADDING = "100px";
-
-export const Header = forwardRef((props: HeaderProps, ref) => {
+export const Header = (props: HeaderProps) => {
     // Read initial theme from localStorage or default to "light"
     const { toggleTheme, theme } = useThemeContext();
-    const [isBreadcrumbExpanded, setIsBreadcrumbExpanded] = useState(false); // Add breadcrumbExpanded state
     const { peer } = usePeer();
     const { path } = useCanvases();
     const navigate = useNavigate();
     const { visible: headerIsVisible } = useHeaderVisibilityContext();
-    const backToParent = useBackToParent(path[path.length - 2]);
+    const ref = useRef<HTMLDivElement>(null);
+    const { view } = useFeed();
 
-    useEffect(() => {
-        if (!headerIsVisible) {
-            setIsBreadcrumbExpanded(false);
+    // show profile button if we are at the root of the path, or screen is wider than sm
+    const showProfileButton = path.length <= 1 || window.innerWidth >= 640;
+
+    const setHeaderHeight = (h: number) => {
+        document.documentElement.style.setProperty("--header-h", `${h}px`);
+    };
+
+    useLayoutEffect(() => {
+        if (ref) {
+            setHeaderHeight(ref.current.offsetHeight);
         }
-    }, [headerIsVisible]);
+        const resizeObserver = new ResizeObserver((entries) => {
+            for (let entry of entries) {
+                if (entry.target === ref.current) {
+                    setHeaderHeight(entry.contentRect.height);
+                }
+            }
+        });
+        if (ref.current) {
+            resizeObserver.observe(ref.current);
+        }
+        return () => {
+            resizeObserver.disconnect();
+        };
+    }, []);
+
+    const { onScrollToTop, scrollToTop, focused } = useFocusProvider();
 
     return (
         <div
-            ref={ref as any}
-            className="h-fit flex flex-row w-full min-h-full relative  justify-center "
+            ref={ref}
+            className={`flex flex-row w-full relative  h-full justify-center `}
         >
             {!props.fullscreen && (
-                <div className="flex flex-row max-w-[876px] w-full px-2 gap-2 z-50 bg-neutral-50 dark:bg-neutral-900 py-2">
-                    <div className=" flex items-center">
-                        <HeaderLogo
-                            onClick={() => setIsBreadcrumbExpanded(false)}
-                        />
-                    </div>
-                    {path?.length > 1 && (
+                <div
+                    className={`flex flex-row max-w-[876px] items-start w-full px-1  z-50 bg-neutral-50 dark:bg-neutral-900 py-1`}
+                >
+                    <CanvasPathInput
+                        className="py-1" /* className={"transition-padding ease-in-out duration-500 " + (headerIsVisible ? "p-1" : "p-0")}  */
+                    />
+                    {view.id === "chat" && focused && (
                         <button
-                            className=" btn btn-icon flex flex-row items-center gap-1 h-8 self-center"
-                            onClick={() => {
-                                backToParent();
-                            }}
+                            className="btn flex flex-row p-1 gap-1"
+                            onClick={scrollToTop}
                         >
-                            <IoIosArrowBack size={15} />
+                            <span className="flex flex-row text-nowrap text-sm">
+                                Go to top
+                            </span>
+                            <MdKeyboardDoubleArrowUp size={20} />
                         </button>
                     )}
-                    <div className=" flex-grow relative flex h-full w-full items-center ">
-                        <div
-                            className={`w-full flex-grow z-10 h-[40px] overflow-visible `}
-                        >
-                            <CanvasPath
-                                isBreadcrumbExpanded={isBreadcrumbExpanded}
-                                setIsBreadcrumbExpanded={
-                                    setIsBreadcrumbExpanded
-                                }
-                            />
-                            {/* overlay with expanded breadcrumbs and search results */}
-                            {isBreadcrumbExpanded && (
-                                <div
-                                    onClick={() => {
-                                        setIsBreadcrumbExpanded(false);
-                                    }}
-                                    className="fixed inset-x-0   h-full sm:absolute sm:top-full z-40 sm:pb-10"
-                                >
-                                    <div
-                                        className="w-full  sm:h-fit overflow-y-auto sm:border-x sm:border-b sm:rounded-b-md  sm:bg-neutral-50 dark:sm:bg-neutral-950"
-                                        style={{
-                                            maxHeight: `calc(100vh - ${EXPANDED_BREADCRUMB_PADDING})`,
-                                        }}
+
+                    {/*  TODO do we really need to set the z-index to 2 here? */}
+                    {(view.id !== "chat" || !focused) && showProfileButton && (
+                        <div className="z-4 col-start-10 flex items-center ">
+                            {" "}
+                            {/*  last class is needed to prevent max-h-[inherit] to be applied to the menu*/}
+                            {peer ? (
+                                <DropdownMenu.Root>
+                                    <DropdownMenu.Trigger asChild>
+                                        <ProfileButton
+                                            size={26}
+                                            className="h-full"
+                                            publicKey={peer.identity.publicKey}
+                                        />
+                                    </DropdownMenu.Trigger>
+                                    <DropdownMenu.Content
+                                        className="z-10 bg-white dark:bg-neutral-950 p-2 rounded shadow-md max-h-[unset]"
+                                        style={{ minWidth: "200px" }}
                                     >
-                                        <div className="w-full h-full p-5  border-b-1">
-                                            <ExpandedContext />
-                                        </div>
-                                    </div>
-                                </div>
+                                        <DropdownMenu.Item
+                                            className="menu-item"
+                                            onSelect={() =>
+                                                console.log("See profile")
+                                            }
+                                        >
+                                            See Profile
+                                        </DropdownMenu.Item>
+                                        <DropdownMenu.Item
+                                            className="menu-item"
+                                            onSelect={() =>
+                                                console.log("Share profile")
+                                            }
+                                        >
+                                            Share Profile
+                                        </DropdownMenu.Item>
+                                        <DropdownMenu.Item
+                                            className="menu-item"
+                                            onSelect={() =>
+                                                console.log("Change identity")
+                                            }
+                                        >
+                                            Change Identity
+                                        </DropdownMenu.Item>
+                                        <DropdownMenu.Item
+                                            className="menu-item"
+                                            onSelect={() =>
+                                                navigate(CONNECT_DEVICES, {})
+                                            }
+                                        >
+                                            Connect Devices
+                                        </DropdownMenu.Item>
+
+                                        <hr className="my-1" />
+                                        {/* Custom theme toggle that prevents menu closing */}
+                                        <DropdownMenu.Item asChild>
+                                            <div
+                                                className="menu-item"
+                                                onClick={(e) => {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                    toggleTheme();
+                                                }}
+                                            >
+                                                {theme === "dark" ? (
+                                                    <div className="flex items-center gap-2">
+                                                        <MdOutlineLightMode />
+                                                        <span>
+                                                            Turn on the lights
+                                                        </span>
+                                                    </div>
+                                                ) : (
+                                                    <div className="flex items-center gap-2">
+                                                        <MdOutlineDarkMode />
+                                                        <span>
+                                                            Turn off the lights
+                                                        </span>
+                                                    </div>
+                                                )}
+                                            </div>
+                                        </DropdownMenu.Item>
+                                        <DropdownMenu.Item
+                                            disabled /* keeps menu open */
+                                            className="menu-item cursor-default select-text text-xs text-neutral-500"
+                                        >
+                                            {`Version ${buildCommit}`}
+                                        </DropdownMenu.Item>
+                                    </DropdownMenu.Content>
+                                </DropdownMenu.Root>
+                            ) : (
+                                <Spinner />
                             )}
                         </div>
-                        {/* helper block to cover the distance between overlay and breadcrumb bar */}
-                        {isBreadcrumbExpanded && (
-                            <div className="hidden sm:block absolute top-1/2 bottom-0 inset-x-0 bg-neutral-50 dark:bg-neutral-900 border-neutral-950 dark:border-neutral-50 border-x"></div>
-                        )}
-                    </div>
-                    {/*  TODO do we really need to set the z-index to 2 here? */}
-                    <div className="z-4 col-start-10 flex items-center">
-                        {peer ? (
-                            <DropdownMenu.Root>
-                                <DropdownMenu.Trigger asChild>
-                                    <ProfileButton
-                                        size={40}
-                                        publicKey={peer.identity.publicKey}
-                                    />
-                                </DropdownMenu.Trigger>
-                                <DropdownMenu.Content
-                                    className="z-10 bg-white dark:bg-neutral-950 p-2 rounded shadow-md"
-                                    style={{ minWidth: "200px" }}
-                                >
-                                    <DropdownMenu.Item
-                                        className="menu-item"
-                                        onSelect={() =>
-                                            console.log("See profile")
-                                        }
-                                    >
-                                        See Profile
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        className="menu-item"
-                                        onSelect={() =>
-                                            console.log("Share profile")
-                                        }
-                                    >
-                                        Share Profile
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        className="menu-item"
-                                        onSelect={() =>
-                                            console.log("Change identity")
-                                        }
-                                    >
-                                        Change Identity
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        className="menu-item"
-                                        onSelect={() =>
-                                            navigate(CONNECT_DEVICES, {})
-                                        }
-                                    >
-                                        Connect Devices
-                                    </DropdownMenu.Item>
-
-                                    <hr className="my-1" />
-                                    {/* Custom theme toggle that prevents menu closing */}
-                                    <DropdownMenu.Item asChild>
-                                        <div
-                                            className="menu-item"
-                                            onClick={(e) => {
-                                                e.preventDefault();
-                                                e.stopPropagation();
-                                                toggleTheme();
-                                            }}
-                                        >
-                                            {theme === "dark" ? (
-                                                <div className="flex items-center gap-2">
-                                                    <MdOutlineLightMode />
-                                                    <span>
-                                                        Turn on the lights
-                                                    </span>
-                                                </div>
-                                            ) : (
-                                                <div className="flex items-center gap-2">
-                                                    <MdOutlineDarkMode />
-                                                    <span>
-                                                        Turn off the lights
-                                                    </span>
-                                                </div>
-                                            )}
-                                        </div>
-                                    </DropdownMenu.Item>
-                                    <DropdownMenu.Item
-                                        disabled /* keeps menu open */
-                                        className="menu-item cursor-default select-text text-xs text-neutral-500"
-                                    >
-                                        {`Version ${buildCommit}`}
-                                    </DropdownMenu.Item>
-                                </DropdownMenu.Content>
-                            </DropdownMenu.Root>
-                        ) : (
-                            <Spinner />
-                        )}
-                    </div>
+                    )}
                 </div>
             )}
             {/* background blur overlay over content (header still visible)*/}
-            {isBreadcrumbExpanded && (
+            {/* {isBreadcrumbExpanded && (
                 <div
                     onClick={() => setIsBreadcrumbExpanded(false)}
                     className="absolute h-screen  inset-0 z-30 transparent"
                 ></div>
-            )}
+            )} */}
             {props.children}
         </div>
     );
-});
+};

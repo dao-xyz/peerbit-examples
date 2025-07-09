@@ -33,12 +33,11 @@ import {
     rectIsStaticMarkdownText,
     rectIsStaticPartialImage,
 } from "./utils/rect.js";
-import { useReplyProgress } from "./reply/useReplyProgress.js";
+import { useReplyProgress } from "./main/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
 import { waitFor } from "@peerbit/time";
 import { DocumentsChange } from "@peerbit/document";
-import { useView } from "./reply/view/ViewContex.js";
-import { set } from "lodash";
+import { useFeed } from "./feed/FeedContext.js";
 
 // ---------------------------------------------------------------------
 //  Context definitions
@@ -55,6 +54,7 @@ export interface CanvasContextType {
         app?: SimpleWebManifest;
         increment?: boolean;
         pending?: boolean;
+        once?: boolean;
         y?: number | "optimize" | "max";
     }) => Promise<Element | Element[]>;
     removePending: (id: Uint8Array) => void;
@@ -89,6 +89,8 @@ export interface CanvasContextType {
     ) => () => void;
     isLoading: boolean;
     isSaving: boolean;
+    placeholder?: string;
+    classNameContent?: string | ((el: Element<ElementContent>) => string);
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -101,9 +103,6 @@ export const useCanvas = () => {
     return ctx;
 };
 
-// ---------------------------------------------------------------------
-//  Component
-// ---------------------------------------------------------------------
 interface CanvasWrapperProps {
     children: React.ReactNode;
     canvas: CanvasDB;
@@ -113,6 +112,8 @@ interface CanvasWrapperProps {
     onContentChange?: (elements: Element[]) => void;
     quality?: Quality;
     onLoad?: () => void;
+    placeholder?: string;
+    classNameContent?: string | ((el: Element<ElementContent>) => string);
 }
 
 export const CanvasWrapper = ({
@@ -124,6 +125,8 @@ export const CanvasWrapper = ({
     onContentChange,
     quality,
     onLoad,
+    placeholder,
+    classNameContent,
 }: CanvasWrapperProps) => {
     // -------------------------------------------------- basic hooks ----
     const { peer, persisted } = usePeer();
@@ -138,7 +141,7 @@ export const CanvasWrapper = ({
     const { showError } = useErrorDialog();
     const { announceReply } = useReplyProgress();
     const { request } = useAIReply();
-    const { typeFilter } = useView();
+    const { typeFilter } = useFeed();
 
     // -------------------------------------------------- local state ----
     const [pendingRects, setPendingRects] = useState<Element[]>([]);
@@ -148,13 +151,15 @@ export const CanvasWrapper = ({
     const [savedOnce, setSavedOnce] = useState(false);
     const [requestAIReply, setRequestAIReply] = useState(false);
     const [text, setText] = useState<string>("");
+    const insertedDefault = useRef(false);
 
     const pendingCounter = useRef(0);
     const latestBreakpoint = useRef<"xxs" | "md">("md");
-    const setupForCanvasIdDone = useRef<string>();
+    const setupForCanvasIdDone = useRef<string>(undefined);
 
     // -------------------------------------------------- query ---------
     const query = useMemo(() => {
+        insertedDefault.current = false;
         if (!canvas || canvas.closed) return null;
         return {
             query: [
@@ -356,6 +361,7 @@ export const CanvasWrapper = ({
         options?: { filter: (rect: Element) => boolean }
     ): boolean => {
         if (!canvas?.publicKey.equals(peer?.identity.publicKey)) return false;
+
         let mutated = false;
         let updated = [...pendingRects];
 
@@ -380,7 +386,10 @@ export const CanvasWrapper = ({
             }
         }
 
-        if (mutated) setPendingRects(updated);
+        if (mutated) {
+            setPendingRects(updated);
+        }
+
         return mutated;
     };
 
@@ -492,8 +501,19 @@ export const CanvasWrapper = ({
         app?: SimpleWebManifest;
         increment?: boolean;
         pending?: boolean;
+        once?: boolean;
         y?: number | "optimize" | "max";
     }) => {
+        if (options?.once) {
+            if (
+                pendingRects.length > 0 ||
+                rects.length > 0 ||
+                insertedDefault.current
+            ) {
+                return;
+            }
+        }
+        insertedDefault.current = true;
         if (options?.increment) {
             const last = pendingRects[pendingRects.length - 1];
             if (
@@ -658,6 +678,8 @@ export const CanvasWrapper = ({
         subscribeContentChange,
         isLoading,
         isSaving,
+        placeholder,
+        classNameContent,
     };
 
     return (
