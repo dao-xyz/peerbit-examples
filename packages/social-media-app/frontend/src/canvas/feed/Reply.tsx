@@ -308,7 +308,7 @@ export const Reply = ({
                 >
                     <div className="ml-auto p-2">
                         <ReplyButton
-                            className="  btn btn-xs h-full ganja-font text-lg leading-3 "
+                            className="  btn btn-xs h-full font-ganja text-lg leading-3 "
                             onClick={() => {
                                 setShowMore((prev) => !prev);
                                 onClick && onClick();

@@ -1,6 +1,6 @@
 import React, { useRef, useState, useLayoutEffect } from "react";
-import { useEditTools } from "./ToolbarContext";
 import { useToolbarVisibilityContext } from "./ToolbarVisibilityProvider";
+import { useCssVarHeight } from "../../utils/useCssVarHeight";
 
 interface AnimatedStickyToolbarProps {
     children: React.ReactNode;
@@ -16,34 +16,14 @@ export const AnimatedStickyToolbar = ({
 }: AnimatedStickyToolbarProps) => {
     const { visible: toolbarVisible } = useToolbarVisibilityContext();
 
-    const innerRef = useRef<HTMLDivElement>(null);
     const [toolbarHeight, _setToolbarHeight] = useState(0);
-
-    const updateToolbarHeight = (h: number) => {
-        // 1. expose to CSS immediately – no React render needed
-        document.documentElement.style.setProperty("--toolbar-h", `${h}px`);
-        _setToolbarHeight(h); // (optional) still keep your local state
-        onHeightChange?.(h); // keep existing API
-    };
-
-    useLayoutEffect(() => {
-        if (innerRef.current) {
-            updateToolbarHeight(innerRef.current.offsetHeight);
-        }
-        const resizeObserver = new ResizeObserver((entries) => {
-            for (let entry of entries) {
-                if (entry.target === innerRef.current) {
-                    updateToolbarHeight(entry.contentRect.height);
-                }
-            }
-        });
-        if (innerRef.current) {
-            resizeObserver.observe(innerRef.current);
-        }
-        return () => {
-            resizeObserver.disconnect();
-        };
-    }, []);
+    const ref = useCssVarHeight<HTMLDivElement>({
+        cssVar: "--toolbar-h",
+        onChange: (height) => {
+            _setToolbarHeight(height);
+            onHeightChange?.(height);
+        },
+    });
 
     // When hidden, move the toolbar down by its measured height.
     const translateY = toolbarVisible ? "0" : `${toolbarHeight}px`;
@@ -58,7 +38,7 @@ export const AnimatedStickyToolbar = ({
         >
             {/* The inner toolbar is animated with transform */}
             <div
-                ref={innerRef}
+                ref={ref}
                 className="w-full duration-800 ease-in-out  "
                 style={{ transform: `translateY(${translateY})` }}
             >

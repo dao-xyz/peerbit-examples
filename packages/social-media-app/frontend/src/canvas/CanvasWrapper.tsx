@@ -589,7 +589,9 @@ export const CanvasWrapper = ({
             if (toSave.length === 0) return;
 
             pendingCounter.current += toSave.length;
-            for (const el of toSave) el.parent = canvas; // see original comment
+            for (const el of toSave) {
+                el.parent = canvas; // see original comment
+            }
 
             await Promise.all(toSave.map((x) => canvas.elements.put(x)));
 

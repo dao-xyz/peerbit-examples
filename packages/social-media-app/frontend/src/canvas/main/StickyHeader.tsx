@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
+import { useCssVarHeight } from "../../utils/useCssVarHeight";
 
 export const StickyHeader = ({
     children,
@@ -15,7 +16,9 @@ export const StickyHeader = ({
     const { visible: headerVisible } = useHeaderVisibilityContext();
     const [shouldOffsetSubheader, setShouldOffsetSubheader] = useState(true);
     const [isScrolled, setIsScrolled] = useState(false);
-    const ref = useRef<HTMLDivElement>(null);
+    const ref = useCssVarHeight<HTMLDivElement>({
+        cssVar: "--sticky-header-h",
+    });
 
     useEffect(() => {
         let animationFrame: number;
@@ -52,7 +55,7 @@ export const StickyHeader = ({
                 (className ?? "")
             }
             style={{
-                top: "calc(var(--header-h, 0px",
+                top: "calc(var(--header-h, 0px))",
                 transform:
                     !shouldOffsetSubheader || !collapsable
                         ? "translateY(0)"

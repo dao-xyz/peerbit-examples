@@ -65,7 +65,7 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
             <div className="flex flex-col h-full">
                 {nativeApps.length > 0 && (
                     <>
-                        <span className="ganja-font">Native apps</span>
+                        <span className="font-ganja">Native apps</span>
                         <div className="flex gap-2">
                             {window.location.hostname !== "giga.place" && (
                                 <DebugGeneratePostButton />
@@ -85,7 +85,7 @@ export const AppSelectPaneInline: React.FC<AppSelectPaneInlineProps> = ({
                 )}
                 {nonNativeApps.length > 0 && (
                     <div className="mt-2">
-                        <span className="ganja-font">Web apps</span>
+                        <span className="font-ganja">Web apps</span>
                         <div className="flex flex-wrap gap-2">
                             {nonNativeApps.map((app, ix) => (
                                 <AppButton

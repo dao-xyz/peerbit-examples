@@ -61,7 +61,8 @@ export const ReplyingInProgress = (properties: { canvas: Canvas }) => {
                                         key={peerKey.toString()}
                                         publicKey={peerKey}
                                         size={15}
-                                        className="rounded-full overflow-hidden typing-circle scaling-demure"
+                                        rounded
+                                        className="overflow-hidden typing-circle scaling-demure"
                                     />
                                 ))}
                             {/* And show a plus indicator for the extra peers */}

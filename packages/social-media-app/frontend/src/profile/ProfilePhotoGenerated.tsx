@@ -5,12 +5,14 @@ interface ProfilePhotoGeneratedProps {
     publicKey: PublicSignKey;
     onColorGenerated?: (color: string) => void;
     size?: number;
+    className?: string;
 }
 
 export const ProfilePhotoGenerated = ({
     publicKey,
     onColorGenerated,
     size,
+    className,
 }: ProfilePhotoGeneratedProps) => {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const sizeDefined = size || 64; // overall image size in pixels
@@ -79,7 +81,7 @@ export const ProfilePhotoGenerated = ({
 
     return (
         <canvas
-            className="w-auto h-full"
+            className={"w-auto h-full " + className}
             ref={canvasRef}
             width={sizeDefined}
             height={sizeDefined}

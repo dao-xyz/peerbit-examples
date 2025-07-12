@@ -43,7 +43,7 @@ export const CreatePostTitle = (properties?: { className?: string }) => {
 
     return (
         <h2
-            className={"py-0 my-4 ganja-font " + properties?.className}
+            className={"py-0 my-4 font-ganja " + properties?.className}
             style={{ fontWeight: 100 }}
         >
             {randomTitle}

@@ -5,7 +5,7 @@ import { ReplyingInProgress } from "../feed/ReplyingInProgress.js";
 import { CloseableAppPane } from "../edit/CloseableAppPane.js";
 import { useView } from "../view/ViewContext.js";
 import { DetailedView } from "../preview/DetailedPreview.js";
-import { SubHeader } from "../navigation/SubHeader.js";
+import { BottomControls, SubHeader } from "../navigation/SubHeader.js";
 import { AnimatedStickyToolbar } from "../edit/AnimatedStickyToolbar.js";
 import { CanvasEditorProvider } from "../edit/ToolbarContext.js";
 import { ScrollSettings } from "./useAutoScroll.js";
@@ -401,8 +401,8 @@ export const CanvasAndReplies = () => {
                                 <div
                                     className="relative flex-1 h-full"
                                     /*    style={{
-        height: `${spacerHeight}px`,
-        }} */
+    height: `${spacerHeight}px`,
+    }} */
                                 >
                                     <div
                                         // When not focused, make the container fill the available area and show a pointer cursor.
@@ -418,7 +418,7 @@ export const CanvasAndReplies = () => {
         When focused, no extra wrapper is applied so the Replies render inline. */}
                                         <div
                                             id="replies-container"
-                                            className={`box pt-12  ${
+                                            className={`box flex flex-col items-center  ${
                                                 !repliesFocused
                                                     ? "absolute inset-0 overflow-y-auto hide-scrollbar "
                                                     : ""
@@ -432,7 +432,87 @@ export const CanvasAndReplies = () => {
                                                 }
                                             }
                                         >
-                                            <>
+                                            <div className="flex flex-col w-full gap-2 max-w-[876px] items-center ">
+                                                {feedRoot &&
+                                                    view?.id !== "chat" &&
+                                                    !showInlineEditor && (
+                                                        <div className="px-2 pt-2 w-full">
+                                                            <ToolbarCreateNew
+                                                                showProfile
+                                                                className="rounded-lg bg-neutral-100 dark:bg-neutral-800/60"
+                                                                parent={
+                                                                    feedRoot
+                                                                }
+                                                                inlineEditorActive={
+                                                                    showInlineEditor
+                                                                }
+                                                                setInlineEditorActive={
+                                                                    setShowInlineEditor
+                                                                }
+                                                            />
+                                                        </div>
+                                                    )}
+
+                                                {showInlineEditor && (
+                                                    <div className="w-full">
+                                                        <div className="m-2 bg-neutral-100 dark:bg-neutral-800 rounded-xl shadow-sm">
+                                                            <div className="flex flex-col">
+                                                                <div className="flex flex-col px-2">
+                                                                    <CreatePostTitle className="px-2 mb-0" />
+                                                                    <ToolbarInline
+                                                                        close={() =>
+                                                                            setShowInlineEditor(
+                                                                                false
+                                                                            )
+                                                                        }
+                                                                    />
+                                                                </div>
+                                                                <InlineEditor className="min-h-[calc(70vh-10rem)] pb-12" />
+                                                            </div>
+                                                        </div>
+                                                    </div>
+                                                )}
+                                                {/*     <div className="text-secondary-500/50 my-2 w-full">
+                                                    <svg
+                                                        width="100%"
+                                                        height="40"
+                                                        viewBox="0 0 100 10"
+                                                        preserveAspectRatio="none"
+                                                        xmlns="http://www.w3.org/2000/svg"
+                                                    >
+                                                        <path
+                                                            d="M0 5 Q 22 0, 20 5 T 40 5 T 60 5 T 80 5 T 100 5"
+                                                            fill="transparent"
+                                                            stroke="currentColor"
+                                                            strokeWidth="1"
+                                                        />
+                                                    </svg>
+                                                </div> */}
+
+                                                <div
+                                                    className="w-full px-2 sticky"
+                                                    style={{
+                                                        top: repliesFocused
+                                                            ? "calc(var(--header-h,0px) + var(--sticky-header-h,0px) + 0.5rem)"
+                                                            : "10px",
+                                                        //     transform: visible
+                                                        //        ? "translateY(0)"
+                                                        //        : `translateY(-${headerHeight}px)`,
+                                                        willChange: "transform",
+                                                        backfaceVisibility:
+                                                            "hidden",
+                                                        zIndex: 15,
+                                                    }}
+                                                >
+                                                    <div
+                                                        //  ref={headerRef}
+                                                        className={` rounded-xl h-8  shadow-sm bg-neutral-100 dark:bg-neutral-800  transition-transform duration-800 ease-in-out  w-full`}
+                                                    >
+                                                        <BottomControls /* onViewChange={onViewChange} */
+                                                        />
+                                                    </div>
+                                                </div>
+
                                                 <Feed
                                                     // viewRef is body if focused, otherwise the scrollRef
                                                     viewRef={
@@ -451,24 +531,26 @@ export const CanvasAndReplies = () => {
                                                         showInlineEditor
                                                     } /* when showing inline editor we want to scroll up and down to perhaps read content so we disable the load more. TODO add a button so we still can trigger load more */
                                                 />
-                                                {feedRoot && (
-                                                    <AnimatedStickyToolbar>
-                                                        <CloseableAppPane>
-                                                            <ToolbarCreateNew
-                                                                parent={
-                                                                    feedRoot
-                                                                }
-                                                                inlineEditorActive={
-                                                                    showInlineEditor
-                                                                }
-                                                                setInlineEditorActive={
-                                                                    setShowInlineEditor
-                                                                }
-                                                            />
-                                                        </CloseableAppPane>
-                                                    </AnimatedStickyToolbar>
-                                                )}
-                                            </>
+                                                {feedRoot &&
+                                                    view?.id === "chat" && (
+                                                        <AnimatedStickyToolbar>
+                                                            <CloseableAppPane>
+                                                                <ToolbarCreateNew
+                                                                    className="rounded-t-lg px-2 "
+                                                                    parent={
+                                                                        feedRoot
+                                                                    }
+                                                                    inlineEditorActive={
+                                                                        showInlineEditor
+                                                                    }
+                                                                    setInlineEditorActive={
+                                                                        setShowInlineEditor
+                                                                    }
+                                                                />
+                                                            </CloseableAppPane>
+                                                        </AnimatedStickyToolbar>
+                                                    )}
+                                            </div>
                                         </div>
                                         {/* Render the gradient overlay only when unfocused.
         This overlay is absolutely positioned over the container and does not receive pointer events. */}
@@ -513,37 +595,6 @@ export const CanvasAndReplies = () => {
                             <div className="absolute right-1 bottom-0">
                                 <ReplyingInProgress canvas={lastReply} />
                             </div>
-                        </div>
-                        <div className="max-w-[876px] mx-auto w-full ">
-                            {showInlineEditor && (
-                                <>
-                                    <div className="text-secondary-500/50 mb-8">
-                                        <svg
-                                            width="100%"
-                                            height="40"
-                                            viewBox="0 0 100 10"
-                                            preserveAspectRatio="none"
-                                            xmlns="http://www.w3.org/2000/svg"
-                                        >
-                                            <path
-                                                d="M0 5 Q 22 0, 20 5 T 40 5 T 60 5 T 80 5 T 100 5"
-                                                fill="transparent"
-                                                stroke="currentColor"
-                                                strokeWidth="1"
-                                            />
-                                        </svg>
-                                    </div>
-                                    <div className="m-2 bg-neutral-100 dark:bg-neutral-900 rounded-t-xl shadow-sm">
-                                        <div className="flex flex-col">
-                                            <div className="flex flex-col px-2">
-                                                <CreatePostTitle className="px-2 mb-0" />
-                                                <ToolbarInline />
-                                            </div>
-                                            <InlineEditor className="min-h-[calc(100vh-10rem)] pb-12" />
-                                        </div>
-                                    </div>
-                                </>
-                            )}
                         </div>
                     </CanvasEditorProvider>
                 </EditModeProvider>

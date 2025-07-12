@@ -19,7 +19,6 @@ import { IoSettingsOutline } from "react-icons/io5";
 import { useFeed } from "../feed/FeedContext";
 import { TabsOrList } from "./Collections";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
-import { HiChevronDoubleUp } from "react-icons/hi";
 
 interface SubHeaderProps {
     collapsable?: boolean; // if true, the header can be collapsed
@@ -156,7 +155,7 @@ export const ViewSelectorSubheader = ({
     const defaultList = [...defaultViews];
 
     const selectedViewStyle =
-        "px-2 py-1 text-sm font-semibold underline underline-offset-4  whitespace-nowrap";
+        "px-2 py-1 text-sm font-semibold underline underline-offset-4  whitespace-nowrap  text-primary-600 dark:text-primary-400";
 
     const buttonStyle = (v: ViewModel) =>
         "btn h-full rounded-t-none px-2 py-1 text-sm text-neutral-500 dark:text-neutral-400  hover:text-white hover:dark:text-black whitespace-nowrap transition " +
@@ -168,7 +167,7 @@ export const ViewSelectorSubheader = ({
             {/* hidden measurer */}
             <div
                 aria-hidden
-                className="absolute h-0 overflow-hidden whitespace-nowrap flex flex-row gap-2 w-full"
+                className="absolute h-0 overflow-hidden whitespace-nowrap flex flex-row gap-2 w-full "
                 style={{ visibility: "hidden" }}
             >
                 {[currentView, ...orderedOthers].map(
@@ -343,11 +342,11 @@ const People = () => {
 
 } */
 
-const BottomControls = (props: {
+export const BottomControls = (props: {
     onViewChange?: (view: ViewModel) => void;
 }) => {
     return (
-        <div className="flex flex-row h-full px-2 shadow-sm">
+        <div className="flex flex-row h-full px-2 ">
             <ViewSelectorSubheader onViewChange={props?.onViewChange} />
             {/*  <People /> */}
             {
@@ -425,7 +424,7 @@ export const SubHeader = ({
                     }}
                     onBackToTop={onBackToTop}
                 />
-                {navType === "tabs" && (
+                {/*  {navType === "tabs" && (
                     <div className="relative">
                         <div
                             ref={headerRef}
@@ -441,7 +440,7 @@ export const SubHeader = ({
                             <BottomControls onViewChange={onViewChange} />
                         </div>
                     </div>
-                )}
+                )} */}
             </div>
         </StickyHeader>
     );

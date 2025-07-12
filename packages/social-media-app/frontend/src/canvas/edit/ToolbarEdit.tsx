@@ -4,7 +4,10 @@ import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanv
 import { BsCamera } from "react-icons/bs";
 import { useCanvas } from "../CanvasWrapper";
 
-export const ToolbarEdit = (properties?: { className?: string }) => {
+export const ToolbarEdit = (properties?: {
+    className?: string;
+    onSave?: () => void;
+}) => {
     const { appSelectOpen, setAppSelectOpen } = useEditTools();
     const onToggleAppSelect = (open) => {
         if (open != null) {
@@ -14,6 +17,9 @@ export const ToolbarEdit = (properties?: { className?: string }) => {
         }
     };
     const { savePending } = useCanvas();
+    const save = () => {
+        return savePending().then(() => properties?.onSave?.());
+    };
 
     const AddButton = () => (
         <button
@@ -45,7 +51,7 @@ export const ToolbarEdit = (properties?: { className?: string }) => {
                 <BsCamera />
             </ImageUploadTrigger>
             <button
-                onClick={savePending}
+                onClick={save}
                 className="btn p-2 flex items-center justify-center"
             >
                 Save

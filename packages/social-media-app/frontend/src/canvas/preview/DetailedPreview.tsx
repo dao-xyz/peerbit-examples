@@ -76,7 +76,7 @@ const DetailedViewInner: React.FC<{
                 >
                     <InlineEditor className="pb-12 " />
                     <CloseableAppPane>
-                        <ToolbarEdit />
+                        <ToolbarEdit onSave={() => setEditMode(false)} />
                     </CloseableAppPane>
                 </CanvasEditorProvider>
             ) : (

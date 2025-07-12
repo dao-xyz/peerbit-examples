@@ -331,9 +331,8 @@ export const MarkdownContent = ({
 
     // Common Tailwind classes for consistent padding, font size, and line-height.
     // If noPadding is true, we remove the padding.
-    const commonClasses = noPadding
-        ? "text-base leading-6 "
-        : "p-1 px-2 text-base leading-6";
+    const commonClasses = "text-base leading-6";
+    const padding = noPadding ? "" : "px-1";
 
     // Utility function to check if a text selection is present
     const isTextSelected = () => {
@@ -377,7 +376,7 @@ export const MarkdownContent = ({
                         onBlur={handleBlur}
                         onKeyDown={handleKeyDown}
                         onInput={autoResize}
-                        className={`${commonClasses} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800 ${
+                        className={`${commonClasses} ${padding} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800 ${
                             !inFullscreen ? "textarea-truncate" : ""
                         }`}
                         rows={1}

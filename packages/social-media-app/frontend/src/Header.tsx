@@ -14,6 +14,7 @@ import { CanvasPathInput } from "./canvas/path/CanvasPathInput";
 import { MdKeyboardDoubleArrowUp } from "react-icons/md";
 import { useFocusProvider } from "./FocusProvider";
 import { useFeed } from "./canvas/feed/FeedContext";
+import { useCssVarHeight } from "./utils/useCssVarHeight";
 
 // Define props interface
 interface HeaderProps {
@@ -28,34 +29,13 @@ export const Header = (props: HeaderProps) => {
     const { path } = useCanvases();
     const navigate = useNavigate();
     const { visible: headerIsVisible } = useHeaderVisibilityContext();
-    const ref = useRef<HTMLDivElement>(null);
+
+    const ref = useCssVarHeight<HTMLDivElement>({ cssVar: "--header-h" });
+
     const { view } = useFeed();
 
     // show profile button if we are at the root of the path, or screen is wider than sm
     const showProfileButton = path.length <= 1 || window.innerWidth >= 640;
-
-    const setHeaderHeight = (h: number) => {
-        document.documentElement.style.setProperty("--header-h", `${h}px`);
-    };
-
-    useLayoutEffect(() => {
-        if (ref) {
-            setHeaderHeight(ref.current.offsetHeight);
-        }
-        const resizeObserver = new ResizeObserver((entries) => {
-            for (let entry of entries) {
-                if (entry.target === ref.current) {
-                    setHeaderHeight(entry.contentRect.height);
-                }
-            }
-        });
-        if (ref.current) {
-            resizeObserver.observe(ref.current);
-        }
-        return () => {
-            resizeObserver.disconnect();
-        };
-    }, []);
 
     const { onScrollToTop, scrollToTop, focused } = useFocusProvider();
 
@@ -69,7 +49,7 @@ export const Header = (props: HeaderProps) => {
                     className={`flex flex-row max-w-[876px] items-start w-full px-1  z-50 bg-neutral-50 dark:bg-neutral-900 py-1`}
                 >
                     <CanvasPathInput
-                        className="py-1" /* className={"transition-padding ease-in-out duration-500 " + (headerIsVisible ? "p-1" : "p-0")}  */
+                        className="py-1 px-1" /* className={"transition-padding ease-in-out duration-500 " + (headerIsVisible ? "p-1" : "p-0")}  */
                     />
                     {view.id === "chat" && focused && (
                         <button

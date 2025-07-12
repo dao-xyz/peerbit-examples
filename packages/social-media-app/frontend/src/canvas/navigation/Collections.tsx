@@ -50,7 +50,7 @@ export const TabsOrList = (properties?: {
                 <EditModeProvider>
                     <div
                         className={
-                            "flex flex-col gap-2 z-30 min-h-8 " +
+                            "flex flex-col gap-2 z-30 min-h-8 rounded-b-xl " +
                             (properties?.className ?? "")
                         }
                     >

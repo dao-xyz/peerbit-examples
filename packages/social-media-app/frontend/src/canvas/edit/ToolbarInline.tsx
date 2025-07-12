@@ -4,8 +4,12 @@ import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanv
 import { BsCamera, BsSend } from "react-icons/bs";
 import { useCanvas } from "../CanvasWrapper";
 import { SaveButton } from "./SaveCanvasButton";
+import { TbArrowsDiagonalMinimize2 } from "react-icons/tb";
 
-export const ToolbarInline = (properties?: { className?: string }) => {
+export const ToolbarInline = (properties?: {
+    className?: string;
+    close?: () => void;
+}) => {
     const { isEmpty } = useCanvas();
     const { appSelectOpen, setAppSelectOpen } = useEditTools();
     const onToggleAppSelect = (open) => {
@@ -34,12 +38,6 @@ export const ToolbarInline = (properties?: { className?: string }) => {
         <div className={"flex flex-row  items-center " + properties?.className}>
             {AddButton()}
 
-            {/* <button
-                                className="btn btn-icon btn-icon-md ml-auto"
-                                onClick={() => props.setInlineEditorActive(false)}
-                            >
-                                <TbArrowsDiagonalMinimize2 />
-                            </button> */}
             <ImageUploadTrigger
                 onFileChange={() => onToggleAppSelect(false)}
                 className="btn btn-icon btn-icon-md flex items-center justify-center"
@@ -47,8 +45,14 @@ export const ToolbarInline = (properties?: { className?: string }) => {
                 <BsCamera />
             </ImageUploadTrigger>
 
+            <button
+                className="btn btn-icon btn-icon-md ml-auto"
+                onClick={() => properties.close?.()}
+            >
+                <TbArrowsDiagonalMinimize2 />
+            </button>
             <SaveButton
-                className="ml-auto"
+                className=""
                 onClick={
                     () => {}
                     /*  props.setInlineEditorActive(false) */

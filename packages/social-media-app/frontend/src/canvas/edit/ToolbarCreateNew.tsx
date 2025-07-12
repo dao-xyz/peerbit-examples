@@ -13,20 +13,34 @@ import { BsArrowsAngleExpand } from "react-icons/bs";
 import { useEditTools } from "./ToolbarContext";
 import { TbArrowsDiagonalMinimize2 } from "react-icons/tb";
 import { useFeed } from "../feed/FeedContext";
+import { ProfileButton } from "../../profile/ProfileButton";
+import { usePeer } from "@peerbit/react";
+import * as Toggle from "@radix-ui/react-toggle";
 
 export const ToolbarCreateNew = (props: {
+    showProfile?: boolean;
     setInlineEditorActive: (value: boolean) => void;
     inlineEditorActive: boolean;
     parent: CanvasDB;
+    className?: string;
 }) => {
-    const { isEmpty, text, insertDefault, canvas, pendingRects, savedOnce } =
-        useCanvas();
+    const {
+        isEmpty,
+        text,
+        insertDefault,
+        canvas,
+        pendingRects,
+        savedOnce,
+        requestAIReply,
+        setRequestAIReply,
+    } = useCanvas();
     const { replyTo, disable: disableAutoReply } = useAutoReply();
     const { view } = useFeed();
     const { search } = useApps();
     const [resolvedApp, setResolvedApp] = useState<null | SimpleWebManifest>(
         null
     );
+    const { peer } = usePeer();
 
     useEffect(() => {
         if (
@@ -127,10 +141,11 @@ export const ToolbarCreateNew = (props: {
     const colorStyle =
         "dark:bg-neutral-700 " +
         (view?.id === "chat" ? "bg-neutral-200" : "bg-neutral-50");
+
     return (
         <>
             <div
-                className={`flex flex-col z-20 w-full left-0  ${colorStyle} rounded-t-lg`}
+                className={`flex flex-col z-20 w-full left-0  ${colorStyle} ${props.className}`}
             >
                 {/* Top area: pending images canvas positioned above the toolbar */}
                 <div
@@ -149,12 +164,25 @@ export const ToolbarCreateNew = (props: {
 
                 {/* First row: Input field */}
                 {/* We set the min height here because without it switching views might lead to flickering behaviour where the input field gets removed and re-added */}
-                <Canvas
-                    fitWidth
-                    draft={true}
-                    appearance="chat-view-text"
-                    className="rounded min-h-10 pt-1"
-                />
+                <div className="flex flex-row ">
+                    <div className="p-2">
+                        {props.showProfile && (
+                            <ProfileButton
+                                size={24}
+                                rounded
+                                className="p-1"
+                                publicKey={peer.identity.publicKey}
+                            />
+                        )}
+                    </div>
+                    <Canvas
+                        fitWidth
+                        fitHeight
+                        draft={true}
+                        appearance="chat-view-text"
+                        className="pt-2 rounded min-h-10 justify-center"
+                    />
+                </div>
                 {/* Second row: Toolbar buttons */}
                 <div className="flex items-center p-1 pt-0 ">
                     {/* Left: Plus button */}
@@ -163,7 +191,7 @@ export const ToolbarCreateNew = (props: {
                     {/* <form>
                         <div className="flex items-center px-1">
                             <label
-                                className={`ganja-font ${
+                                className={`font-ganja ${
                                     !isReady ? "text-neutral-500" : ""
                                 }`}
                                 htmlFor="use-ai"
@@ -186,16 +214,27 @@ export const ToolbarCreateNew = (props: {
                     </form> */}
 
                     {/* AI reply button */}
-                    <button
-                        onClick={() => {}}
-                        className="btn btn-icon flex flex-row gap-2 h-full  px-2  p-1 "
+                    {/*  <button
+                        onClick={() => { }}
+                        className="btn btn-toggle btn-icon flex flex-row gap-2 h-full  px-2  p-1 "
                         style={{
                             fontFamily: "monospace",
                         }}
                         aria-label="Toggle italic"
                     >
                         <span>Ask AI</span>
-                    </button>
+                    </button> */}
+
+                    <Toggle.Root
+                        onPressedChange={(e) => {
+                            setRequestAIReply(e);
+                        }}
+                        pressed={requestAIReply}
+                        className="btn btn-icon btn-toggle btn-toggle-flat flex flex-row gap-2 h-full px-2  p-1 font-normal"
+                        aria-label="Ask AI toggle"
+                    >
+                        Ask AI
+                    </Toggle.Root>
 
                     {/* Center: Space for additional buttons */}
                     <div className="flex justify-center ml-auto">

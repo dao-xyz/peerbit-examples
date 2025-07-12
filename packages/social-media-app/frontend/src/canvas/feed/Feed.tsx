@@ -485,9 +485,7 @@ export const Feed = (props: {
                 {processedReplies?.length > 0 ? (
                     <div
                         ref={repliesContainerRef}
-                        className={tw(
-                            "max-w-[876px] w-full mx-auto flex relative"
-                        )}
+                        className={"max-w-[876px] w-full mx-auto flex relative"}
                     >
                         {/* TMP DISABLE  {view?.id === "chat" && (
                             <StraightReplyLine
@@ -502,7 +500,7 @@ export const Feed = (props: {
                         <div
                             className={`${
                                 view?.id === "chat" ? "pl-[15px]" : ""
-                            } flex flex-col gap-4 w-full ${
+                            } flex flex-col gap-2 w-full ${
                                 view.settings.classNameContainer
                             }`}
                         >
@@ -546,7 +544,7 @@ export const Feed = (props: {
                         </div>
                     </div>
                 ) : (
-                    <div className="flex-grow flex items-center justify-center h-40 font ganja-font">
+                    <div className="flex-grow flex items-center justify-center h-40 font font-ganja">
                         Nothing to see here
                     </div>
                 )}
