@@ -122,7 +122,7 @@ const networkConfig: NetworkOption =
         : {
               type: "remote",
               bootstrap: [
-                  "/dns4/a5c173e3e5dc4a3a7a07cf805da8d1643cbb6d22.peerchecker.com/tcp/4003/wss/p2p/12D3KooWQ6iCbymYAy6YbBU3VJrXZf2p7974uwHq45SRguEb5mzE",
+                  "/dns4/139addd561462895f63820536f36c08a5bd23daa.peerchecker.com/tcp/4003/wss/p2p/12D3KooWMwHdVQHuYd22aUWwBNAStsmVAEchxFhpvdUC6mQiC9wi",
               ],
           };
 
