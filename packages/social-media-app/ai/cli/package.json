@@ -13,7 +13,7 @@
         "import": "./lib/esm/index.js"
     },
     "bin": {
-        "videoseed": "./lib/esm/bin.js"
+        "giga-app-llm": "./lib/esm/bin.js"
     },
     "files": [
         "lib",

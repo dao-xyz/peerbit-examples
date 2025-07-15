@@ -1778,6 +1778,12 @@ export class Canvas extends Program<CanvasArgs> {
             await this.origin!.replies.log.waitForReplicators();
         }
 
+        // if existing, just return
+        const existing = await this.origin!.replies.index.get(canvas.id);
+        if (existing) {
+            return false;
+        }
+
         await this.origin!.replies.put(canvas);
         const path = await canvas.loadPath({ includeSelf: true });
         for (let i = 1; i < path.length; i++) {
@@ -1797,6 +1803,8 @@ export class Canvas extends Program<CanvasArgs> {
             });
             await canvas.setType(purpose);
         }
+
+        return true;
     }
 
     async createElement(element: Element) {
@@ -1886,6 +1894,106 @@ export class Canvas extends Program<CanvasArgs> {
             },
         });
         return (context ? coerceWithContext(out, context) : out) as T;
+    }
+
+    async addTextElement(properties: {
+        text: string;
+        id?: Uint8Array;
+    }): Promise<void> {
+        await this.load();
+
+        let elementId = properties?.id || randomBytes(32);
+        if (
+            await this.elements.index.get(toId(elementId), {
+                local: true,
+                remote: {
+                    eager: true,
+                },
+            })
+        ) {
+            return;
+        }
+        return this.createElement(
+            new Element({
+                location: Layout.zero(),
+                id: elementId,
+                publicKey: this.node.identity.publicKey,
+                content: new StaticContent({
+                    content: new StaticMarkdownText({
+                        text: properties.text,
+                    }),
+                    quality: LOWEST_QUALITY,
+                    contentId: sha256Sync(
+                        new TextEncoder().encode(properties.text)
+                    ),
+                }),
+                canvasId: this.id,
+            })
+        );
+    }
+
+    async cloneInto(dstParent: Canvas): Promise<Canvas> {
+        /* 1️⃣  Create a fresh canvas under dstParent */
+        const draft = new Canvas({
+            publicKey: this.node.identity.publicKey,
+            parent: dstParent, // path is derived here
+        });
+        const dst = await this.node.open(draft, { existing: "reuse" });
+        await dst.load();
+        await dstParent.createReply(dst);
+
+        /* 2️⃣  Copy *elements* (text, images, …) -------------------- */
+        const elements = await this.elements.index
+            .iterate({ query: getOwnedElementsQuery(this) })
+            .all();
+
+        for (const e of elements) {
+            await dst.createElement(
+                new Element({
+                    location: e.location,
+                    publicKey: this.node.identity.publicKey,
+                    content: e.content, // content objects are immutable
+                    canvasId: dst.id,
+                })
+            );
+        }
+
+        /* 3️⃣  Copy optional purpose / visualisation ---------------- */
+        const type = await this.getType();
+        if (type) {
+            await dst.setType(
+                new Purpose({
+                    canvasId: dst.id,
+                    type:
+                        type.type instanceof Navigation
+                            ? new Navigation({
+                                  layout: (type.type as Navigation).layout,
+                              })
+                            : new Narrative(),
+                })
+            );
+        }
+
+        const vis = await this.getVisualization();
+        if (vis) {
+            await dst.setVisualization(
+                new (vis.constructor as any)({
+                    ...vis,
+                    id: undefined,
+                    canvasId: dst.id,
+                })
+            );
+        }
+
+        /* 4️⃣  Recurse over *direct* children ----------------------- */
+        const children = await this.replies.index
+            .iterate({ query: getImmediateRepliesQuery(this) })
+            .all();
+
+        for (const child of children) {
+            await child.cloneInto(dst);
+        }
+        return dst;
     }
 }
 

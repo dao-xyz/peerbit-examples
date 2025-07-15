@@ -401,8 +401,8 @@ export const CanvasAndReplies = () => {
                                 <div
                                     className="relative flex-1 h-full"
                                     /*    style={{
-    height: `${spacerHeight}px`,
-    }} */
+height: `${spacerHeight}px`,
+}} */
                                 >
                                     <div
                                         // When not focused, make the container fill the available area and show a pointer cursor.
@@ -450,6 +450,7 @@ export const CanvasAndReplies = () => {
                                                                     setShowInlineEditor
                                                                 }
                                                             />
+                                                            <CloseableAppPane className="rounded-xl mt-2"></CloseableAppPane>
                                                         </div>
                                                     )}
 
@@ -470,6 +471,7 @@ export const CanvasAndReplies = () => {
                                                                 <InlineEditor className="min-h-[calc(70vh-10rem)] pb-12" />
                                                             </div>
                                                         </div>
+                                                        <CloseableAppPane className="fixed z-30 bottom-0 shadow-t-lg"></CloseableAppPane>
                                                     </div>
                                                 )}
                                                 {/*     <div className="text-secondary-500/50 my-2 w-full">

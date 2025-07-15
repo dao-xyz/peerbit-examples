@@ -352,14 +352,6 @@ function useFeedContextHook() {
         }
     );
 
-    /*  console.log("Sorted Replies", {
-         sortedReplies,
-         viewModel,
-         canvasQuery,
-         feedRoot,
-     });
-  */
-
     const lastReply = useMemo(() => {
         if (sortedReplies && sortedReplies.length > 0) {
             return sortedReplies[sortedReplies.length - 1];

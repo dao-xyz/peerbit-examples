@@ -120,7 +120,9 @@ describe("AIResponseProgram", () => {
             args: { server: true, llm: "ollama" },
         });
 
-        const clientCanvasRoot = await createRoot(await session.peers[1], true);
+        const clientCanvasRoot = await createRoot(await session.peers[1], {
+            persisted: true,
+        });
         await clientCanvasRoot.replies.log.waitForReplicators();
         expect([
             ...(await clientCanvasRoot.replies.log.getReplicators()),

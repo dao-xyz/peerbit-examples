@@ -18,7 +18,7 @@ import {
     rectIsStaticMarkdownText,
     rectIsStaticPartialImage,
 } from "../utils/rect";
-import { tw } from "../../utils/tailwind";
+import clsx from "clsx";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { toString } from "mdast-util-to-string";
 import { useCanvas } from "../CanvasWrapper";
@@ -255,7 +255,7 @@ const BreadcrumbPreview = ({
     }
     return (
         <div
-            className={tw(
+            className={clsx(
                 isText
                     ? textLength && textLength > 10
                         ? "w-[8ch]"
@@ -439,13 +439,13 @@ const PostQuotePreview = ({
             {apps.slice(0, 2).map((app, i) => (
                 <div
                     key={i}
-                    className={tw(
+                    className={clsx(
                         "shrink-0 w-[3.625rem] h-[3.625rem] rounded-sm overflow-hidden outline outline-neutral-700 dark:outline-neutral-300 relative",
                         i === 1 ? "-ml-10" : "z-1"
                     )}
                 >
                     <div
-                        className={tw(
+                        className={clsx(
                             "w-full h-full",
                             i === 1 &&
                                 apps.slice(1).length > 0 &&
@@ -522,7 +522,7 @@ const PostPreview = ({
     return (
         <div
             ref={forwardRef}
-            className={tw("flex flex-col w-full gap-2", className)}
+            className={clsx("flex flex-col w-full gap-2", className)}
         >
             {media.length > 0 && (
                 /* 1️⃣ height-capped wrapper */
@@ -669,7 +669,7 @@ const MediaCarousel = ({
                             key={el.idString}
                             aria-label={`Slide ${i + 1}`}
                             onClick={() => scrollTo(i)}
-                            className={tw(
+                            className={clsx(
                                 "flex-none w-8 h-8 rounded-full overflow-hidden btn-bouncy",
                                 "transition",
                                 i === index
@@ -815,7 +815,7 @@ export const DetailedPreview = ({
         return (
             <div
                 ref={forwardRef}
-                className={tw("flex flex-col w-full", className)}
+                className={clsx("flex flex-col w-full", className)}
             >
                 <MediaCarousel
                     elements={images}
@@ -853,7 +853,7 @@ export const DetailedPreview = ({
         return (
             <div
                 ref={forwardRef}
-                className={tw("flex flex-col w-full px-4 py-4", className)}
+                className={clsx("flex flex-col w-full px-4 py-4", className)}
             >
                 <Expandable collapsedMaxHeight="60vh">
                     <PreviewFrame

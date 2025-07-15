@@ -13,7 +13,7 @@ export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
             if (canvas) {
                 return;
             }
-            canvas = await createRoot(client, true);
+            canvas = await createRoot(client, { persisted: true });
             console.log(
                 "Starting replicator at canvas root: " + canvas.address
             );

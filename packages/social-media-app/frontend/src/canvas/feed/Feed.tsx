@@ -9,7 +9,6 @@ import React, {
 } from "react";
 import * as Toast from "@radix-ui/react-toast";
 import { Reply } from "./Reply";
-import { tw } from "../../utils/tailwind";
 import { useView } from "../view/ViewContext";
 import { usePeer } from "@peerbit/react";
 import { useAutoReply } from "../AutoReplyContext";

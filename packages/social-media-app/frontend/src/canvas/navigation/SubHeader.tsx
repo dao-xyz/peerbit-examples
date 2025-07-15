@@ -158,7 +158,7 @@ export const ViewSelectorSubheader = ({
         "px-2 py-1 text-sm font-semibold underline underline-offset-4  whitespace-nowrap  text-primary-600 dark:text-primary-400";
 
     const buttonStyle = (v: ViewModel) =>
-        "btn h-full rounded-t-none px-2 py-1 text-sm text-neutral-500 dark:text-neutral-400  hover:text-white hover:dark:text-black whitespace-nowrap transition " +
+        "btn h-full rounded-t-none px-2 py-1 text-sm text-neutral-500 dark:text-neutral-400  hover:text-text-neutral-50 hover:dark:text-neutral-50 whitespace-nowrap transition " +
         (currentView?.id === v.id ? selectedViewStyle : "");
 
     /* ─────────────────────────── render ─────────────────────────── */
@@ -413,8 +413,8 @@ export const SubHeader = ({
                             ? ""
                             : `${
                                   visible
-                                      ? "bg-neutral-200 dark:bg-neutral-700"
-                                      : "bg-neutral-50 dark:bg-neutral-900 transition-colors duration-800 ease-in-out"
+                                      ? "bg-white dark:bg-neutral-700"
+                                      : "bg-neutral-50 dark:bg-neutral-900 transition-colors  duration-800 ease-in-out"
                               } shadow-md `
                     }
                     canvas={viewRoot}

@@ -45,7 +45,10 @@ export const start = async (directory?: string | null) => {
 
     // Check if an API key is passed as a CLI argument using the flag "--api-key".
     let chatgptApiKey: string | undefined;
-    const apiKeyIndex = process.argv.indexOf("--api-key");
+    const apiKeyIndex =
+        process.argv.indexOf("--api-key") != -1
+            ? process.argv.indexOf("--api-key")
+            : process.argv.indexOf("--apiKey");
     if (apiKeyIndex > -1 && process.argv.length > apiKeyIndex + 1) {
         chatgptApiKey = process.argv[apiKeyIndex + 1];
     }

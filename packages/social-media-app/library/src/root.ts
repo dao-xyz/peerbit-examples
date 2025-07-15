@@ -1,18 +1,9 @@
 import { deserialize } from "@dao-xyz/borsh";
-import {
-    BasicVisualization,
-    Canvas,
-    Element,
-    Layout,
-    LOWEST_QUALITY,
-    Navigation,
-    Purpose,
-    StaticContent,
-} from "./content.js";
+import { Canvas, Navigation, Purpose } from "./content.js";
 import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { toId } from "@peerbit/document";
-import { StaticMarkdownText } from "./static/text.js";
+import { concat } from "uint8arrays";
 
 const ROOT_ID_SEED = new TextEncoder().encode("giga | place");
 
@@ -38,86 +29,79 @@ const rootDevelopment = new Canvas({
     publicKey: ROOT_IDENTITY_DEVELOPMENT.publicKey,
 });
 
-const rootFeedDevelopment = (parent: Canvas) =>
+const createSection = (parent: Canvas, seed: string) =>
     new Canvas({
-        seed: sha256Sync(ROOT_ID_SEED),
+        seed: new TextEncoder().encode(seed),
         publicKey: ROOT_IDENTITY_DEVELOPMENT.publicKey,
         parent,
     });
 
-const addText = async (peer: ProgramClient, canvas: Canvas, text: string) => {
-    let rootElementId = new Uint8Array(canvas.id);
-    if (
-        await canvas.elements.index.get(toId(rootElementId), {
-            local: true,
-            remote: {
-                eager: true,
-            },
-        })
-    ) {
-        return;
-    }
-    return canvas.createElement(
-        new Element({
-            location: Layout.zero(),
-            id: rootElementId,
-            publicKey: peer.identity.publicKey,
-            content: new StaticContent({
-                content: new StaticMarkdownText({
-                    text,
-                }),
-                quality: LOWEST_QUALITY,
-                contentId: sha256Sync(new TextEncoder().encode(text)),
-            }),
-            canvasId: canvas.id,
-        })
-    );
-};
-
 export const createRoot = (
     peer: ProgramClient,
-    persisted?: boolean
+    options?: {
+        persisted?: boolean;
+        sections?: string[];
+    }
 ): Promise<Canvas> => {
     return peer
         .open(rootDevelopment.clone(), {
             existing: "reuse",
             args: {
-                replicate: persisted,
+                replicate: options?.persisted,
             },
         })
         .then(async (result) => {
-            await addText(peer, result, GIGA_ROOT_POST);
-            const rootFeedCanvas = rootFeedDevelopment(result);
-            const rootFeedExisting = await result.replies.index.get(
-                toId(rootFeedCanvas.id),
-                {
-                    local: true,
-                    remote: {
-                        eager: true,
-                    },
-                }
-            );
-
-            const rootFeed = rootFeedExisting || rootFeedCanvas;
-            await peer.open(rootFeed, {
-                existing: "reuse",
-                args: {
-                    replicate: persisted,
-                },
+            await result.addTextElement({
+                id: new Uint8Array(result.id),
+                text: GIGA_ROOT_POST,
             });
 
-            if (!rootFeedExisting) {
-                await result.replies.put(rootFeed);
-                await rootFeed.load();
-                await rootFeed.setType(
-                    new Purpose({
-                        canvasId: rootFeed.id,
-                        type: new Navigation({}),
-                    })
-                );
+            if (options?.sections) {
+                for (const section of options.sections) {
+                    const sectionCanvasNew = createSection(result, section);
+                    const sectionCanvasExisting =
+                        await result.replies.index.get(
+                            toId(sectionCanvasNew.id),
+                            {
+                                local: true,
+                                remote: {
+                                    eager: true,
+                                },
+                            }
+                        );
 
-                await addText(peer, rootFeed, "Feed");
+                    const sectionCanvas =
+                        sectionCanvasExisting || sectionCanvasNew;
+                    await peer.open(sectionCanvas, {
+                        existing: "reuse",
+                        args: {
+                            replicate: options?.persisted,
+                        },
+                    });
+
+                    if (!sectionCanvasExisting) {
+                        await result.replies.put(sectionCanvas);
+                        await sectionCanvas.load();
+                        await sectionCanvas.setType(
+                            new Purpose({
+                                canvasId: sectionCanvas.id,
+                                type: new Navigation({}),
+                            })
+                        );
+
+                        await sectionCanvas.addTextElement({
+                            id: sha256Sync(
+                                concat([
+                                    sectionCanvas.id,
+                                    new TextEncoder().encode(section),
+                                ])
+                            ),
+                            text: section,
+                        });
+                    }
+                }
             }
+
             return result;
         });
 };

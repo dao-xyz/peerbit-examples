@@ -26,7 +26,7 @@ console.log(
 );
 const client = await Peerbit.create();
 await client.bootstrap();
-const root = await createRoot(client, true);
+const root = await createRoot(client, { persisted: true });
 
 console.log("Connected to root: " + root.address);
 await root.replies.log.waitForReplicators();

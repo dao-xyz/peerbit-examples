@@ -34,6 +34,14 @@ describe("canvas", () => {
         await session.stop();
     });
 
+    const checkContent = async (canvas: Canvas, content: string) => {
+        const elements = await canvas.elements.index
+            .iterate({ query: getOwnedElementsQuery(canvas) })
+            .all();
+        expect(elements).to.have.length(1);
+        expect(elements[0].__indexed.content).to.eq(content);
+    };
+
     it("can make path", async () => {
         const randomRootKey = (await Ed25519Keypair.create()).publicKey;
         const root = await session.peers[0].open(
@@ -117,20 +125,26 @@ describe("canvas", () => {
     });
     describe("createRoot", () => {
         it("can create", async () => {
-            const root = await createRoot(session.peers[0], true);
+            let sections = ["About", "Help"];
+            const root = await createRoot(session.peers[0], {
+                persisted: true,
+                sections,
+            });
             expect(root).to.exist;
 
-            // expect root to have 1 reply which is "Comments"
-            expect(await root.replies.index.getSize()).to.eq(1);
+            const repliesCount = await root.replies.index.getSize();
+
+            expect(repliesCount).to.eq(2);
             const replies = await root.replies.index
                 .iterate({ query: getRepliesQuery(root) })
                 .all();
-            const [first] = replies;
-            const elements = await first.elements.index
-                .iterate({ query: getOwnedElementsQuery(first) })
-                .all();
-            expect(elements).to.have.length(1);
-            expect(first.__indexed.context).to.eq("Feed");
+            replies.sort((a, b) =>
+                a.__indexed.context.localeCompare(b.__indexed.context)
+            );
+            const [first, second] = replies;
+
+            await checkContent(first, "About");
+            await checkContent(second, "Help");
 
             const type = await root.getType();
             expect(type).to.not.exist;
@@ -140,7 +154,10 @@ describe("canvas", () => {
             expect(feedType?.type).to.be.instanceOf(Navigation);
 
             // creating again should resolve in the same address
-            const root2 = await createRoot(session.peers[1], true);
+            const root2 = await createRoot(session.peers[1], {
+                persisted: true,
+                sections,
+            });
             expect(root2.address).to.eq(root.address);
 
             await root2.replies.log.waitForReplicator(
@@ -156,7 +173,9 @@ describe("canvas", () => {
 
     describe("getViewContext", () => {
         it("view context from root", async () => {
-            const root = await createRoot(session.peers[0], true);
+            const root = await createRoot(session.peers[0], {
+                persisted: true,
+            });
             expect((await root.getType())?.type).to.be.undefined;
             const [feed] = await root.getCreateCanvasByPath(["Feed"]);
             expect((await feed.getType())?.type).to.be.instanceOf(Navigation);
@@ -268,7 +287,9 @@ describe("canvas", () => {
 
     describe("getFeedContext", () => {
         it("feed context from root", async () => {
-            const root = await createRoot(session.peers[0], true);
+            const root = await createRoot(session.peers[0], {
+                persisted: true,
+            });
             const [feed] = await root.getCreateCanvasByPath(["Feed"]);
             const path = await feed.getCreateCanvasByPath(["a"]);
             const a = path[path.length - 1];

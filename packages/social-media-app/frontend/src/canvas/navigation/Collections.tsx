@@ -148,9 +148,9 @@ export const Tabs = (properties: {
                         canvas={post}
                         quality={LOWEST_QUALITY}
                         classNameContent={
-                            "hover:text-neutral-50 dark:hover:text-neutral-800 !whitespace-nowrap " +
+                            "hover:text-neutral-50 dark:hover:text-neutral-50 !whitespace-nowrap text-sm font-medium transition focus:outline-none focus-visible:ring-2 focus-visible:ring-primary-500 " +
                             (isSelected(post)
-                                ? "text-secondary-700 dark:text-secondary-300 underline underline-offset-4  "
+                                ? "text-secondary-600 dark:text-secondary-300 underline underline-offset-4  "
                                 : "text-neutral-500 dark:text-neutral-400")
                         }
                     >

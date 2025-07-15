@@ -166,7 +166,7 @@ export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         if (root || !peer) {
             return;
         }
-        createRoot(peer, persisted)
+        createRoot(peer, { persisted, sections: ["Home", "About", "Help"] })
             .then((result) => {
                 setRoot(result);
             })

@@ -16,6 +16,9 @@ import { useFeed } from "../feed/FeedContext";
 import { ProfileButton } from "../../profile/ProfileButton";
 import { usePeer } from "@peerbit/react";
 import * as Toggle from "@radix-ui/react-toggle";
+import { useAIReply } from "../../ai/AIReployContext";
+import { PrivacySwitch } from "./PrivacySwitch";
+import { AiToggle } from "./AskAIToggle";
 
 export const ToolbarCreateNew = (props: {
     showProfile?: boolean;
@@ -34,6 +37,8 @@ export const ToolbarCreateNew = (props: {
         requestAIReply,
         setRequestAIReply,
     } = useCanvas();
+
+    const { isReady } = useAIReply();
     const { replyTo, disable: disableAutoReply } = useAutoReply();
     const { view } = useFeed();
     const { search } = useApps();
@@ -225,19 +230,27 @@ export const ToolbarCreateNew = (props: {
                         <span>Ask AI</span>
                     </button> */}
 
-                    <Toggle.Root
+                    {/*  <Toggle.Root
                         onPressedChange={(e) => {
                             setRequestAIReply(e);
                         }}
+                        disabled={!isReady}
                         pressed={requestAIReply}
                         className="btn btn-icon btn-toggle btn-toggle-flat flex flex-row gap-2 h-full px-2  p-1 font-normal"
                         aria-label="Ask AI toggle"
                     >
                         Ask AI
-                    </Toggle.Root>
+                    </Toggle.Root> */}
+                    <AiToggle
+                        onPressedChange={(e) => {
+                            setRequestAIReply(e);
+                        }}
+                        disabled={!isReady}
+                        pressed={requestAIReply}
+                    />
 
                     {/* Center: Space for additional buttons */}
-                    <div className="flex justify-center ml-auto">
+                    <div className="flex justify-center ">
                         {resolvedApp && (
                             <AppButton
                                 app={resolvedApp}
@@ -258,7 +271,7 @@ export const ToolbarCreateNew = (props: {
                     </div>
                     {/* Right: Fullscreen button */}
                     <button
-                        className="btn btn-icon btn-icon-md ml-auto"
+                        className="btn btn-icon btn-icon-md "
                         onClick={() => props.setInlineEditorActive(true)}
                     >
                         <BsArrowsAngleExpand />
@@ -284,6 +297,8 @@ export const ToolbarCreateNew = (props: {
                     >
                         <FiSend className="btn-icon-sm" />
                     </button> */}
+                    <PrivacySwitch className="ml-auto" />
+
                     <SaveButton
                         onClick={() => props.setInlineEditorActive(false)}
                         icon={BsSend}

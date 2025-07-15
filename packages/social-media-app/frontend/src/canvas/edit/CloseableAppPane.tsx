@@ -5,7 +5,7 @@ import { useEditTools } from "./ToolbarContext";
 
 export const CloseableAppPane = (props: {
     className?: string;
-    children: React.ReactNode;
+    children?: React.ReactNode;
 }) => {
     const { appSelectOpen, setAppSelectOpen } = useEditTools();
     const toolbarRef = useRef<HTMLDivElement>(null);
@@ -38,10 +38,7 @@ export const CloseableAppPane = (props: {
     }, [appSelectOpen, setAppSelectOpen]);
 
     return (
-        <div
-            ref={toolbarRef}
-            className={"w-full flex justify-center " + props.className}
-        >
+        <div ref={toolbarRef} className={"w-full flex justify-center "}>
             <div className="flex flex-col w-full items-center safe-area-bottom max-w-[876px] ">
                 {props.children}
                 <div
@@ -54,13 +51,17 @@ export const CloseableAppPane = (props: {
                                   pointerEvents: "auto",
                               }
                             : {
+                                  display: "none",
                                   height: "0px",
                                   pointerEvents: "none",
                               }
                     }
                 >
                     <AppSelectPaneInline
-                        className="p-4 pt-2 bg-neutral-100 dark:bg-neutral-900"
+                        className={
+                            "p-4 pt-2 bg-neutral-100 dark:bg-neutral-900 " +
+                            props.className
+                        }
                         onSelected={handleAppSelected}
                     />
                 </div>

@@ -5,6 +5,7 @@ import React, {
     useReducer,
     useMemo,
     JSX,
+    useCallback,
 } from "react";
 import { usePeer, useProgram } from "@peerbit/react";
 import {
@@ -80,6 +81,8 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
             : undefined
     );
 
+    const search = useCallback(allApps.search, [allApps]);
+
     const memo = useMemo<IApps>(
         () => ({
             apps,
@@ -88,7 +91,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
                 nativeApps.find((x) => x.manifest.url === url),
             getCuratedWebApp: (url: string) =>
                 allCuratedWebApps.find((x) => x.manifest.url === url),
-            search: allApps.search,
+            search,
             resolve: async (url: string) => {
                 // Check our current list first.
                 let found = apps.find((x) => x.url === url);

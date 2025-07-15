@@ -54,8 +54,50 @@ code {
     --color-secondary-900: #2c580f;
     --color-secondary-950: #133102;
 
+    /* Top (negative-Y) shadows */
+    --shadow-t-sm: 0 -1px 2px 0 rgba(0, 0, 0, .05);
+    --shadow-t-md: 0 -4px 6px -1px rgba(0, 0, 0, .10), 0 2px 4px -1px rgba(0, 0, 0, .06);
+    --shadow-t-lg: 0 -10px 15px -3px rgba(0, 0, 0, .10), 0 4px 6px -2px rgba(0, 0, 0, .05);
+    --shadow-t-xl: 0 -20px 25px -5px rgba(0, 0, 0, .10), 0 10px 10px -5px rgba(0, 0, 0, .04);
+    --shadow-t-2xl: 0 -25px 50px -12px rgba(0, 0, 0, .25);
+    --shadow-t-3xl: 0 -35px 60px -15px rgba(0, 0, 0, .30);
+
+    /* Bottom (positive-Y) shadows */
+    --shadow-b-sm: 0 1px 2px 0 rgba(0, 0, 0, .05);
+    --shadow-b-md: 0 4px 6px -1px rgba(0, 0, 0, .10), 0 -2px 4px -1px rgba(0, 0, 0, .06);
+    --shadow-b-lg: 0 10px 15px -3px rgba(0, 0, 0, .10), 0 -4px 6px -2px rgba(0, 0, 0, .05);
+    --shadow-b-xl: 0 20px 25px -5px rgba(0, 0, 0, .10), 0 -10px 10px -5px rgba(0, 0, 0, .04);
+    --shadow-b-2xl: 0 25px 50px -12px rgba(0, 0, 0, .25);
+    --shadow-b-3xl: 0 35px 60px -15px rgba(0, 0, 0, .30);
+
+    /* Left (negative-X) shadows */
+    --shadow-l-sm: -1px 0 2px 0 rgba(0, 0, 0, .05);
+    --shadow-l-md: -4px 0 6px -1px rgba(0, 0, 0, .10), 2px 0 4px -1px rgba(0, 0, 0, .06);
+    --shadow-l-lg: -10px 0 15px -3px rgba(0, 0, 0, .10), 4px 0 6px -2px rgba(0, 0, 0, .05);
+    --shadow-l-xl: -20px 0 25px -5px rgba(0, 0, 0, .10), 10px 0 10px -5px rgba(0, 0, 0, .04);
+    --shadow-l-2xl: -25px 0 50px -12px rgba(0, 0, 0, .25);
+    --shadow-l-3xl: -35px 0 60px -15px rgba(0, 0, 0, .30);
+
+    /* Right (positive-X) shadows */
+    --shadow-r-sm: 1px 0 2px 0 rgba(0, 0, 0, .05);
+    --shadow-r-md: 4px 0 6px -1px rgba(0, 0, 0, .10), -2px 0 4px -1px rgba(0, 0, 0, .06);
+    --shadow-r-lg: 10px 0 15px -3px rgba(0, 0, 0, .10), -4px 0 6px -2px rgba(0, 0, 0, .05);
+    --shadow-r-xl: 20px 0 25px -5px rgba(0, 0, 0, .10), -10px 0 10px -5px rgba(0, 0, 0, .04);
+    --shadow-r-2xl: 25px 0 50px -12px rgba(0, 0, 0, .25);
+    --shadow-r-3xl: 35px 0 60px -15px rgba(0, 0, 0, .30);
+
+    /* All-sides (blur-only) shadows */
+    --shadow-all-sm: 0 0 2px 0 rgba(0, 0, 0, .05);
+    --shadow-all-md: 0 0 6px -1px rgba(0, 0, 0, .10), 0 0 4px -1px rgba(0, 0, 0, .06);
+    --shadow-all-lg: 0 0 15px -3px rgba(0, 0, 0, .10), 0 0 6px -2px rgba(0, 0, 0, .05);
+    --shadow-all-xl: 0 0 25px -5px rgba(0, 0, 0, .10), 0 0 10px -5px rgba(0, 0, 0, .04);
+    --shadow-all-2xl: 0 0 50px -12px rgba(0, 0, 0, .25);
+    --shadow-all-3xl: 0 0 60px -15px rgba(0, 0, 0, .30);
+
 
 }
+
+
 
 /* custom colors for dark mode */
 
@@ -73,12 +115,166 @@ code {
 }
 
 
+/* Top */
+@utility shadow-t-sm {
+    --tw-shadow: var(--shadow-t-sm);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-t-md {
+    --tw-shadow: var(--shadow-t-md);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-t-lg {
+    --tw-shadow: var(--shadow-t-lg);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-t-xl {
+    --tw-shadow: var(--shadow-t-xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-t-2xl {
+    --tw-shadow: var(--shadow-t-2xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-t-3xl {
+    --tw-shadow: var(--shadow-t-3xl);
+    box-shadow: var(--tw-shadow);
+}
+
+/* Bottom */
+@utility shadow-b-sm {
+    --tw-shadow: var(--shadow-b-sm);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-b-md {
+    --tw-shadow: var(--shadow-b-md);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-b-lg {
+    --tw-shadow: var(--shadow-b-lg);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-b-xl {
+    --tw-shadow: var(--shadow-b-xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-b-2xl {
+    --tw-shadow: var(--shadow-b-2xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-b-3xl {
+    --tw-shadow: var(--shadow-b-3xl);
+    box-shadow: var(--tw-shadow);
+}
+
+/* Left */
+@utility shadow-l-sm {
+    --tw-shadow: var(--shadow-l-sm);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-l-md {
+    --tw-shadow: var(--shadow-l-md);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-l-lg {
+    --tw-shadow: var(--shadow-l-lg);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-l-xl {
+    --tw-shadow: var(--shadow-l-xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-l-2xl {
+    --tw-shadow: var(--shadow-l-2xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-l-3xl {
+    --tw-shadow: var(--shadow-l-3xl);
+    box-shadow: var(--tw-shadow);
+}
+
+/* Right */
+@utility shadow-r-sm {
+    --tw-shadow: var(--shadow-r-sm);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-r-md {
+    --tw-shadow: var(--shadow-r-md);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-r-lg {
+    --tw-shadow: var(--shadow-r-lg);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-r-xl {
+    --tw-shadow: var(--shadow-r-xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-r-2xl {
+    --tw-shadow: var(--shadow-r-2xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-r-3xl {
+    --tw-shadow: var(--shadow-r-3xl);
+    box-shadow: var(--tw-shadow);
+}
+
+/* All-sides (blur-only) */
+@utility shadow-all-sm {
+    --tw-shadow: var(--shadow-all-sm);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-all-md {
+    --tw-shadow: var(--shadow-all-md);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-all-lg {
+    --tw-shadow: var(--shadow-all-lg);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-all-xl {
+    --tw-shadow: var(--shadow-all-xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-all-2xl {
+    --tw-shadow: var(--shadow-all-2xl);
+    box-shadow: var(--tw-shadow);
+}
+
+@utility shadow-all-3xl {
+    --tw-shadow: var(--shadow-all-3xl);
+    box-shadow: var(--tw-shadow);
+}
 
 @tailwind utilities;
 
 
 
-/*
+/*´
 @layer base {
     input {
         @apply font-sans,
