@@ -5,11 +5,11 @@ import React, {
     useState,
     useEffect,
 } from "react";
-import { Canvas, Purpose, getOwnedByCanvasQuery } from "@giga-app/interface";
+import { Canvas, getOwnedByCanvasQuery } from "@giga-app/interface";
 import { useQuery } from "@peerbit/react";
 import { equals } from "uint8arrays";
 
-const useType = (properies: { canvas: Canvas }) => {
+/* const useType = (properies: { canvas: Canvas }) => {
     const { canvas } = properies;
     const [type, setType] = useState<Purpose | undefined>();
 
@@ -17,11 +17,10 @@ const useType = (properies: { canvas: Canvas }) => {
         return !canvas || canvas.closed
             ? null
             : {
-                  query: getOwnedByCanvasQuery(canvas),
-              };
+                query: getOwnedByCanvasQuery(canvas),
+            };
     }, [canvas?.closed, canvas?.idString]);
 
-    /* 1. fetch the current saved visualization ------------------- */
     const { items, isLoading } = useQuery(
         canvas?.loadedElements ? canvas?.types ?? null : null,
         {
@@ -67,18 +66,15 @@ const useType = (properies: { canvas: Canvas }) => {
     };
 };
 
-/* ─── context type ───────────────────────────────────────────── */
 interface TypeCtx {
     canvas?: Canvas;
 
     isLoading: boolean;
-    /** last saved vis (DB) */
     type: Purpose | undefined;
 }
 const Ctx = createContext<TypeCtx>({} as any);
 export const useTypeContext = () => useContext(Ctx);
 
-/* ─── provider ───────────────────────────────────────────────── */
 export const CanvasTypeProvider: React.FC<{
     canvas: Canvas;
     children: React.ReactNode;
@@ -99,3 +95,4 @@ export const CanvasTypeProvider: React.FC<{
 
     return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 };
+ */

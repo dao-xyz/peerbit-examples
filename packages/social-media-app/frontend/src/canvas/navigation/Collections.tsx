@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import { CanvasPreview } from "../preview/Preview";
-import { useAllPosts } from "../view/useCollection";
-import { Canvas, LOWEST_QUALITY } from "@giga-app/interface";
+import { useAllPosts } from "../feed/useCollection";
+import {
+    Canvas,
+    ChildVisualization,
+    LOWEST_QUALITY,
+} from "@giga-app/interface";
 import { FaChevronRight, FaList, FaPlus } from "react-icons/fa";
 import { PiTabs } from "react-icons/pi";
 import { BiSolidChevronsUp } from "react-icons/bi";
@@ -16,20 +20,19 @@ import { useCanvases } from "../useCanvas";
 import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes";
 import { CanvasSettingsButton } from "../header/CanvasSettingsButton";
-import { usePendingCanvas } from "../edit/PendingCanvasContext";
 import { usePeer } from "@peerbit/react";
 
 export const TabsOrList = (properties?: {
     className?: string;
     canvas?: Canvas;
-    onChange: (view: "tabs" | "rows") => void;
+    view: "tabs" | "rows";
+    setView?: ((view: "tabs" | "rows") => void);
     onBackToTop?: () => void;
 }) => {
-    const [view, setView] = useState<"tabs" | "rows">("tabs");
+    const { view, setView } = properties;
     const toggleView = () => {
         let newView = (view === "tabs" ? "rows" : "tabs") as "tabs" | "rows";
-        setView(newView);
-        properties?.onChange(newView);
+        setView?.(newView);
     };
     const { posts } = useAllPosts({
         canvas: properties?.canvas,
@@ -64,7 +67,7 @@ export const TabsOrList = (properties?: {
                             )}
                             {view === "rows" && (
                                 <span className="text-sm dark:text-neutral-400 text-neutral-600 ">
-                                    Explore this place
+                                    Places
                                 </span>
                             )}
                             <div className="ml-auto   flex flex-row h-full align-middle justify-between  items-start">
@@ -79,7 +82,7 @@ export const TabsOrList = (properties?: {
                                         <FaPlus className="w-4 h-4" />
                                     </button>
                                 )}
-                                <button
+                                {setView && <button
                                     className="btn btn-icon btn-sm  h-full flex flex-row  align-middle justify-center items-center gap-1 text-sm "
                                     onClick={toggleView}
                                 >
@@ -88,7 +91,7 @@ export const TabsOrList = (properties?: {
                                     ) : (
                                         <PiTabs className="w-5 h-5" size={24} />
                                     )}
-                                </button>
+                                </button>}
                                 {properties?.onBackToTop && (
                                     <button
                                         className="btn btn-icon btn-sm h-full flex flex-row gap-1"
@@ -194,7 +197,7 @@ export const Rows = (properties: {
                 </div>
             ))}
             <CanvasEditorProvider
-                type="navigation"
+                type={ChildVisualization.TREE}
                 parent={properties.canvas}
                 placeholder="Give your new space a name..."
             >
@@ -212,7 +215,7 @@ const NewSection = () => {
         if (
             !savedOnce &&
             /*  !isSavingCanvas && !isSavingElements &&  */ pendingRects.length ===
-                0 &&
+            0 &&
             canvas
         ) {
             insertDefault();

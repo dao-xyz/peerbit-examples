@@ -16,9 +16,9 @@ import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
-import { useView } from "../view/ViewContext.js";
 import { rectIsStaticImage, rectIsStaticMarkdownText } from "../utils/rect.js";
 import { useLeaveSnapshotFn } from "./feedRestoration.js";
+import { useCanvases } from "../useCanvas.js";
 
 const ReplyButton = ({
     children,
@@ -74,7 +74,7 @@ export const Reply = ({
     const previewContainerRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
 
-    const { viewRoot } = useView();
+    const { viewRoot } = useCanvases();
     const { peer } = usePeer();
 
     const navigate = useNavigate();
@@ -142,21 +142,7 @@ export const Reply = ({
             : canvas;
         await canvas.load();
 
-        const totalReplies = await canvas.replies.count({
-            query: getRepliesQuery(canvas),
-            approximate: true,
-        });
-        const immediateReplies = await canvas.replies.count({
-            query: getImmediateRepliesQuery(canvas),
-            approximate: true,
-        });
-        if (
-            totalReplies > immediateReplies * 3 ||
-            totalReplies > 100 // this means that replies are very nested, and we should open the thread
-        ) {
-            viewAfterNavigation = "best";
-        }
-        viewAfterNavigation = "chat";
+
         navigate(getCanvasPath(canvas, viewAfterNavigation), {});
         onClick && onClick();
     };
@@ -171,7 +157,7 @@ export const Reply = ({
     const highlightStyle =
         (highlightType
             ? "animated-border p-0 " +
-              (highlightType === "pre-selected" ? "unfocused" : "focused")
+            (highlightType === "pre-selected" ? "unfocused" : "focused")
             : "") +
         " " +
         (classNameHighlight ?? "");
@@ -182,13 +168,12 @@ export const Reply = ({
     return (
         <div
             ref={forwardRef}
-            className={`flex flex-col  ${
-                isChat
-                    ? align === "right"
-                        ? " items-end ml-10"
-                        : "items-start mr-10"
-                    : ""
-            } ${styleFromFromMode} ${className}`}
+            className={`flex flex-col  ${isChat
+                ? align === "right"
+                    ? " items-end ml-10"
+                    : "items-start mr-10"
+                : ""
+                } ${styleFromFromMode} ${className}`}
         >
             {/* {lineType && lineType !== "none" && (
                 <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">
@@ -196,23 +181,21 @@ export const Reply = ({
                 </div>
             )} */}
             <div
-                className={`inline-flex h-full flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${
-                    isThread ? "w-full" : ""
-                }`}
+                className={`inline-flex h-full flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${isThread ? "w-full" : ""
+                    }`}
             >
                 {!hideHeader && (
                     <div
-                        className={`flex items-center mb-1 ${
-                            align === "right" ? "justify-end" : "justify-start"
-                        }`}
+                        className={`flex items-center mb-1 ${align === "right" ? "justify-end" : "justify-start"
+                            }`}
                     >
                         <Header
                             variant={
                                 isChat
                                     ? "medium"
                                     : isExpandedBreadcrumb
-                                    ? "tiny"
-                                    : "large"
+                                        ? "tiny"
+                                        : "large"
                             }
                             forwardRef={headerRef}
                             canvas={canvas}
@@ -226,9 +209,8 @@ export const Reply = ({
                 {/* Preview / Canvas Section*/}
                 <div
                     ref={previewContainerRef}
-                    className={` relative overflow-y-scroll flex flex-col min-h-0 max-height-inherit-children ${
-                        showMore ? "max-h-full" : "max-h-[40vh]"
-                    }`}
+                    className={` relative overflow-y-scroll flex flex-col min-h-0 max-height-inherit-children ${showMore ? "max-h-full" : "max-h-[40vh]"
+                        }`}
                 >
                     <CanvasWrapper canvas={canvas} quality={MEDIUM_QUALITY}>
                         {isExpandedBreadcrumb ? (
@@ -244,18 +226,17 @@ export const Reply = ({
                                 onClick={handleCanvasClick}
                                 variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
-                                className={`flex flex-col gap-2  ${
-                                    align === "right"
-                                        ? "flex flex-col justify-end items-end"
-                                        : ""
-                                }`}
+                                className={`flex flex-col gap-2  ${align === "right"
+                                    ? "flex flex-col justify-end items-end"
+                                    : ""
+                                    }`}
                                 classNameContent={
                                     align === "right"
                                         ? (element) =>
-                                              "bg-neutral-200 dark:bg-neutral-700 rounded " +
-                                              (rectIsStaticMarkdownText(element)
-                                                  ? "p-2"
-                                                  : "")
+                                            "bg-neutral-200 dark:bg-neutral-700 rounded " +
+                                            (rectIsStaticMarkdownText(element)
+                                                ? "p-2"
+                                                : "")
                                         : ""
                                 }
                                 onLoad={onLoad}
@@ -302,9 +283,8 @@ export const Reply = ({
             {!isExpandedBreadcrumb && isOverflowing && (
                 /* Show more button, overlay with content, if contracted */
                 <div
-                    className={`flex gap-2.5 w-full ${
-                        !showMore ? "-translate-y-full" : ""
-                    }`}
+                    className={`flex gap-2.5 w-full ${!showMore ? "-translate-y-full" : ""
+                        }`}
                 >
                     <div className="ml-auto p-2">
                         <ReplyButton

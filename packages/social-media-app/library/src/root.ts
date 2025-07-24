@@ -1,5 +1,5 @@
 import { deserialize } from "@dao-xyz/borsh";
-import { Canvas, Navigation, Purpose } from "./content.js";
+import { Canvas, ChildVisualization } from "./content.js";
 import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
 import { ProgramClient } from "@peerbit/program";
 import { toId } from "@peerbit/document";
@@ -52,9 +52,17 @@ export const createRoot = (
         })
         .then(async (result) => {
             await result.addTextElement({
-                id: new Uint8Array(result.id),
+                id: sha256Sync(
+                    concat([
+                        result.id,
+                        new TextEncoder().encode(GIGA_ROOT_POST),
+                    ])
+                ),
+
                 text: GIGA_ROOT_POST,
             });
+
+            // await result.setMode('narrative'); not needed, for the root
 
             if (options?.sections) {
                 for (const section of options.sections) {
@@ -72,6 +80,7 @@ export const createRoot = (
 
                     const sectionCanvas =
                         sectionCanvasExisting || sectionCanvasNew;
+
                     await peer.open(sectionCanvas, {
                         existing: "reuse",
                         args: {
@@ -82,11 +91,9 @@ export const createRoot = (
                     if (!sectionCanvasExisting) {
                         await result.replies.put(sectionCanvas);
                         await sectionCanvas.load();
-                        await sectionCanvas.setType(
-                            new Purpose({
-                                canvasId: sectionCanvas.id,
-                                type: new Navigation({}),
-                            })
+                        await result.setChildPosition(sectionCanvas.id, 1);
+                        await sectionCanvas.setExperience(
+                            ChildVisualization.TREE
                         );
 
                         await sectionCanvas.addTextElement({

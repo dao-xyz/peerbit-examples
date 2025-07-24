@@ -5,6 +5,7 @@ import {
     StaticMarkdownText,
 } from "@giga-app/interface";
 import {
+    JSX,
     ReactNode,
     useEffect,
     useLayoutEffect,
@@ -24,6 +25,7 @@ import { toString } from "mdast-util-to-string";
 import { useCanvas } from "../CanvasWrapper";
 import { FaChevronLeft, FaChevronRight } from "react-icons/fa";
 import { isTouchDevice } from "../../utils/device";
+import { on } from "events";
 
 type AlignedVariantType = "quote" | "chat-message";
 
@@ -44,6 +46,7 @@ type BaseCanvasPreviewProps = {
     className?: string;
     classNameContent?: string | ((element: Element<ElementContent>) => string);
     onLoad?: () => void;
+    whenEmpty?: JSX.Element;
 };
 
 type StandardVariantProps = BaseCanvasPreviewProps & {
@@ -67,9 +70,9 @@ function getRectsForVariant<V extends VariantType>(
 ): V extends "tiny" | "breadcrumb"
     ? Element<ElementContent> | undefined
     : {
-          text?: Element<StaticContent<StaticMarkdownText>>;
-          other: Element<ElementContent>[];
-      } {
+        text?: Element<StaticContent<StaticMarkdownText>>;
+        other: Element<ElementContent>[];
+    } {
     switch (variant) {
         case "tiny":
         case "breadcrumb":
@@ -115,15 +118,14 @@ const PreviewFrame = ({
     classNameContent?: string;
 }) => (
     <div
-        className={`flex flex-col relative w-full ${
-            maximizeHeight ? "h-full" : ""
-        }`}
+        className={`flex flex-col relative w-full ${maximizeHeight ? "h-full" : ""
+            }`}
     >
         <Frame
             thumbnail={false}
             active={false}
-            setActive={() => {}}
-            delete={() => {}}
+            setActive={() => { }}
+            delete={() => { }}
             editMode={false}
             showEditControls={false}
             element={element}
@@ -203,12 +205,12 @@ const BlurredBackground = ({
                 /* ← same props you already pass elsewhere */
                 thumbnail={false}
                 active={false}
-                setActive={() => {}}
-                delete={() => {}}
+                setActive={() => { }}
+                delete={() => { }}
                 editMode={false}
                 showEditControls={false}
                 element={element}
-                onLoad={() => {}}
+                onLoad={() => { }}
                 fit="cover"
                 /* ⚡ key performance classes */
                 className="w-full h-full object-cover
@@ -448,8 +450,8 @@ const PostQuotePreview = ({
                         className={clsx(
                             "w-full h-full",
                             i === 1 &&
-                                apps.slice(1).length > 0 &&
-                                "[filter:url('#gaussianBlurCanvas')]"
+                            apps.slice(1).length > 0 &&
+                            "[filter:url('#gaussianBlurCanvas')]"
                         )}
                     >
                         <PreviewFrame
@@ -737,12 +739,12 @@ const Expandable = ({
     const style = expanded
         ? undefined
         : ({
-              maxHeight:
-                  typeof collapsedMaxHeight === "number"
-                      ? `${collapsedMaxHeight}px`
-                      : collapsedMaxHeight,
-              overflow: "hidden",
-          } as React.CSSProperties);
+            maxHeight:
+                typeof collapsedMaxHeight === "number"
+                    ? `${collapsedMaxHeight}px`
+                    : collapsedMaxHeight,
+            overflow: "hidden",
+        } as React.CSSProperties);
 
     const toggle = (e: React.MouseEvent) => {
         e.stopPropagation();
@@ -940,6 +942,7 @@ export const CanvasPreview = ({
     forwardRef,
     className,
     onLoad,
+    whenEmpty,
     classNameContent, // TODO is this property really needed?
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
@@ -951,16 +954,32 @@ export const CanvasPreview = ({
         );
         return out;
     }, [rects, pendingRects, variant]);
-    if (!variantRects) {
+
+
+
+    const isEmpty = useMemo(() => {
+        return !variantRects || (variantRects instanceof Element === false &&
+            variantRects.other.length === 0 &&
+            !variantRects.text)
+    }, [variantRects]);
+
+    useEffect(() => {
+        if (isEmpty) {
+            onLoad?.();
+        }
+    }, [isEmpty])
+
+    const onEmpty = useMemo(() => {
+        if (whenEmpty) {
+            whenEmpty
+        }
         return <></>;
+    }, [whenEmpty]);
+
+    if (isEmpty) {
+        return onEmpty;
     }
-    if (
-        variantRects instanceof Element === false &&
-        variantRects.other.length === 0 &&
-        !variantRects.text
-    ) {
-        return <></>;
-    }
+
     switch (variant) {
         case "tiny":
             return (

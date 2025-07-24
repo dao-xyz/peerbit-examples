@@ -1,9 +1,9 @@
 import { FaPlus } from "react-icons/fa";
 import { useState } from "react";
-import { useFeed } from "./FeedContext";
+import { useStream } from "./StreamContext";
 
 export const CreateNewViewMenuItem = () => {
-    const { createView } = useFeed();
+    const { createSettings } = useStream();
 
     /* ───────────── create-new view local state ───────────── */
     const [newName, setNewName] = useState("");
@@ -12,7 +12,7 @@ export const CreateNewViewMenuItem = () => {
     const handleCreate = async () => {
         if (!newName.trim()) return;
         setSaving(true);
-        await createView(newName.trim());
+        await createSettings(newName.trim());
         setNewName("");
         setSaving(false);
     };

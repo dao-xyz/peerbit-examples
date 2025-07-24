@@ -2,18 +2,18 @@ import {
     Canvas,
     getImmediateRepliesQuery,
     getRepliesQuery,
-    ViewModel,
+    FilterModel,
 } from "@giga-app/interface";
 import { SearchRequest } from "@peerbit/document-interface";
 import { Sort, SortDirection } from "@peerbit/indexer-interface";
 
 export type DefaultViewType = "new" | "old" | "best" | "chat" | "gallery";
 
-export const ALL_DEFAULT_VIEWS: ViewModel[] = [
+export const ALL_DEFAULT_FILTERS: FilterModel[] = [
     {
         query: (canvas) =>
             new SearchRequest({
-                query: getRepliesQuery(canvas),
+                query: getImmediateRepliesQuery(canvas),
                 sort: [
                     new Sort({
                         key: ["replies"],
@@ -29,7 +29,24 @@ export const ALL_DEFAULT_VIEWS: ViewModel[] = [
         name: "Best",
         settings: {
             layout: "list",
-            focus: "first",
+            paginationLimit: 10,
+            showAuthorInfo: true,
+        },
+    }, {
+        query: (canvas) =>
+            new SearchRequest({
+                query: getRepliesQuery(canvas),
+                sort: [
+                    new Sort({
+                        key: ["__context", "created"],
+                        direction: SortDirection.DESC,
+                    }),
+                ],
+            }),
+        id: "chat",
+        name: "Chat",
+        settings: {
+            layout: "list",
             paginationLimit: 10,
             showAuthorInfo: true,
         },
@@ -46,9 +63,8 @@ export const ALL_DEFAULT_VIEWS: ViewModel[] = [
                 ],
             }),
         id: "gallery",
-        name: "Explore",
+        name: "Gallery",
         settings: {
-            focus: "first",
             layout: "grid",
             paginationLimit: 10,
             showAuthorInfo: false,
@@ -56,26 +72,26 @@ export const ALL_DEFAULT_VIEWS: ViewModel[] = [
             classNameReply: "w-fit max-w-40 max-h-40 overflow-hidden",
         },
     },
-    {
-        query: (canvas) =>
-            new SearchRequest({
-                query: getRepliesQuery(canvas),
-                sort: [
-                    new Sort({
-                        key: ["__context", "created"],
-                        direction: SortDirection.DESC,
-                    }),
-                ],
-            }),
-        id: "chat",
-        name: "Chat",
-        settings: {
-            layout: "list",
-            focus: "last",
-            paginationLimit: 10,
-            showAuthorInfo: true,
-        },
-    },
+    /*  {
+         query: (canvas) =>
+             new SearchRequest({
+                 query: getRepliesQuery(canvas),
+                 sort: [
+                     new Sort({
+                         key: ["__context", "created"],
+                         direction: SortDirection.DESC,
+                     }),
+                 ],
+             }),
+         id: "chat",
+         name: "Chat",
+         settings: {
+             layout: "list",
+             focus: "last",
+             paginationLimit: 10,
+             showAuthorInfo: true,
+         },
+     }, */
     {
         query: (canvas) =>
             new SearchRequest({
@@ -88,7 +104,6 @@ export const ALL_DEFAULT_VIEWS: ViewModel[] = [
         id: "recent",
         name: "Recent",
         settings: {
-            focus: "first",
             layout: "list",
             paginationLimit: 10,
             showAuthorInfo: true,
@@ -106,7 +121,6 @@ export const ALL_DEFAULT_VIEWS: ViewModel[] = [
         id: "new",
         name: "New",
         settings: {
-            focus: "first",
             layout: "list",
             paginationLimit: 10,
             showAuthorInfo: true,

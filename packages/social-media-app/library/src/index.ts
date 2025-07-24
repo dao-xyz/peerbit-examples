@@ -5,6 +5,6 @@ export * from "./profile.js";
 export * from "./identity.js";
 export * from "./types.js";
 export * from "./root.js";
-export * from "./view.js";
+export * from "./filter.js";
 export * from "./colors.js";
 export * from "./template.js";

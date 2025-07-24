@@ -7,11 +7,11 @@ import React, {
     useRef,
 } from "react";
 
-import { Canvas, CanvasAddressReference } from "@giga-app/interface";
+import { Canvas, ChildVisualization } from "@giga-app/interface";
 import { usePendingCanvas } from "./edit/PendingCanvasContext";
 import { useCanvas } from "./CanvasWrapper";
-import { useView } from "./view/ViewContext";
-import { useFeed } from "./feed/FeedContext";
+import { useStream } from "./feed/StreamContext";
+import { useVisualizationContext } from "./custom/CustomizationProvider";
 
 interface AutoReplyContextType {
     typedOnce: boolean;
@@ -30,10 +30,11 @@ export const AutoReplyProvider: React.FC<{
     const { setReplyTo: setReplyToCanvas, pendingCanvas } = usePendingCanvas();
     const { subscribeContentChange, mutate, pendingRects } = useCanvas();
     const typedOnce = useRef(false);
-    const { view, processedReplies, feedRoot } = useFeed();
+    const { processedReplies, feedRoot } = useStream();
     const [replyTo, _setReplyTo] = useState<Canvas | undefined>(feedRoot);
     const lastPendingCanvasId = useRef<string | undefined>(undefined);
     const enabled = useRef(true);
+    const visualization = useVisualizationContext();
 
     const setReplyTo = async (canvas: Canvas | undefined) => {
         let canvasOrRoot = canvas || feedRoot;
@@ -76,13 +77,16 @@ export const AutoReplyProvider: React.FC<{
          }
      }, [pendingCanvas?.idString]);
   */
+    const isChat =
+        visualization.visualization?.childrenVisualization ===
+        ChildVisualization.CHAT;
     const autoReplyFunctionality = () => {
         if (!processedReplies) {
             return;
         }
         let last = processedReplies[processedReplies.length - 1]?.reply;
         if (
-            view?.id === "chat" &&
+            isChat &&
             last &&
             (replyTo == null ||
                 (replyTo.idString === feedRoot.idString &&
@@ -125,21 +129,17 @@ export const AutoReplyProvider: React.FC<{
         }
         */
         // auto reply to the last processed reply
-        if (view?.id === "chat") {
+        if (isChat) {
             if (processedReplies?.length > 0) {
                 let last = processedReplies[processedReplies.length - 1]?.reply;
-                if (
-                    view.id === "chat" &&
-                    last &&
-                    replyTo.address !== last.address
-                ) {
+                if (isChat && last && replyTo.address !== last.address) {
                     setReplyTo(last);
                 }
             }
         } else {
             setReplyTo(feedRoot); // clear replyTo when not in chat view
         }
-    }, [view, processedReplies]);
+    }, [isChat, processedReplies]);
 
     return (
         <AutoReplyContext.Provider

@@ -1,6 +1,4 @@
-import { field, variant, fixedArray, option } from "@dao-xyz/borsh";
-import { StaticImage } from "./static";
-import { CanvasAddressReference } from "./content";
+import { field, variant, option } from "@dao-xyz/borsh";
 
 // ───── Helpers ────────────────────────────────────────────────────────────────
 const ramp: Record<number, number> = {

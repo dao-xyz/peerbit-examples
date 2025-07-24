@@ -9,6 +9,7 @@ import {
 } from "@giga-app/interface";
 import { useVisualizationContext } from "./CustomizationProvider";
 import { useThemeContext } from "../../theme/useTheme";
+import { BodyStyler } from "./BodyStyler";
 
 /* ───────── helper: css string → style object ───────── */
 function parseStyle(css: string): React.CSSProperties {
@@ -50,9 +51,10 @@ export const CustomizedBackground: React.FC<{
     /* build style when viz or theme changes */
     const style = useMemo(() => {
         let visualizationToUse = draft || visualization;
-        if (!visualizationToUse) return {};
+        if (!visualizationToUse) return
         const v = visualizationToUse as BasicVisualization;
         const bgWrap = v.background as ModedBackground;
+        if (!bgWrap) return
         const chosen = isDark ? bgWrap.dark ?? bgWrap.light : bgWrap.light;
         return styleFrom(chosen);
     }, [
@@ -67,6 +69,7 @@ export const CustomizedBackground: React.FC<{
             className={`min-h-screen h-full w-full ${className}`}
             style={style}
         >
+            {!style && <BodyStyler />}
             {children}
         </div>
     );

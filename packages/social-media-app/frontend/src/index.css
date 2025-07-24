@@ -383,7 +383,7 @@ code {
         /* Remove default border */
         height: 1px;
         /* Set the thickness */
-        margin: 2rem 0;
+        /*   margin: 2rem 0; */
         /* Vertical spacing to separate sections */
     }
 

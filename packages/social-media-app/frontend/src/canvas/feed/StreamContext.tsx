@@ -11,23 +11,21 @@ import { usePeer, useProgram, useQuery } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Canvas,
-    Views,
-    View,
+    StreamSettings,
+    StreamSetting,
     CanvasAddressReference,
     IndexableCanvas,
     PinnedPosts,
     getTimeQuery,
     getCanvasWithContentQuery,
     getCanvasWithContentTypesQuery,
-    Narrative,
     getNarrativePostsQuery,
-    Navigation,
+    ChildVisualization,
 } from "@giga-app/interface";
-import { useCanvases } from "../useCanvas";
+import { PrivateCanvasScope, useCanvases } from "../useCanvas";
 import type { WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
-import { BodyStyler } from "./BodyStyler";
-import { ALL_DEFAULT_VIEWS } from "./defaultViews.js";
+import { ALL_DEFAULT_FILTERS } from "./defaultViews.js";
 import { type WithIndexedContext } from "@peerbit/document";
 import {
     DEFAULT_TIME_FILTER,
@@ -39,8 +37,8 @@ import {
     TypeFilter,
     TypeFilterType,
 } from "./filters.js";
-import { head, merge } from "lodash";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
+import { useVisualizationContext } from "../custom/CustomizationProvider";
 
 /**
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
@@ -70,7 +68,7 @@ function useCombinedDebounced<A, B>(a: A, b: B, delay: number): { a: A; b: B } {
 }
 
 export type LineType = "start" | "end" | "end-and-start" | "none" | "middle";
-
+export const STREAM_QUERY_PARAM_KEY = "r"; // the query parameter key for the stream view
 // Helper: retrieves parent's address from a canvas message.
 function getParentAddress(msg: WithContext<Canvas>): string | undefined {
     return msg.path.length ? msg.path[msg.path.length - 1].address : undefined;
@@ -84,9 +82,10 @@ const calculateAddress = async (
     return p;
 };
 
-function useFeedContextHook() {
-    const { path: canvases, loading, leaf } = useCanvases();
+function useStreamContextHook(options?: { private?: boolean }) {
+    const { path: canvases, loading, leaf } = options?.private ? PrivateCanvasScope.useCanvases() : useCanvases();
     const [feedRoot, setFeedRoot] = useState<CanvasDB | undefined>(undefined);
+    const visualization = useVisualizationContext().visualization;
 
     useEffect(() => {
         const fn = async () => {
@@ -112,7 +111,7 @@ function useFeedContextHook() {
 
     // Instead of separate view state, derive view from URL:
     const [searchParams, setSearchParams] = useSearchParams();
-    const view: string = (searchParams.get("v") as string) || "best";
+    const settingsQuery: string = (searchParams.get(STREAM_QUERY_PARAM_KEY) as string);
 
     const timeFilter: TimeFilter = TIME_FILTERS.get(
         (searchParams.get("t") as TimeFilterType) || DEFAULT_TIME_FILTER
@@ -147,7 +146,7 @@ function useFeedContextHook() {
             query?: string; // ''     ⇢ delete 'q'
         }) =>
             mutateParams((p) => {
-                if (opts.view !== undefined) p.set("v", opts.view);
+                if (opts.view !== undefined) p.set(STREAM_QUERY_PARAM_KEY, opts.view);
                 if (opts.time !== undefined)
                     opts.time === "all" ? p.delete("t") : p.set("t", opts.time);
                 if (opts.type !== undefined)
@@ -159,7 +158,8 @@ function useFeedContextHook() {
     );
 
     // ------------ keep old wrappers for convenience ---------------------
-    const changeView = (v: string) => v !== view && setQueryParams({ view: v });
+    const changeView = (v: string) =>
+        v !== settingsQuery && setQueryParams({ view: v });
     const setTimeFilter = (t: TimeFilterType) =>
         t !== timeFilter.key && setQueryParams({ time: t });
     const setTypeFilter = (t: TypeFilterType) =>
@@ -169,47 +169,57 @@ function useFeedContextHook() {
     /* =====================================================================================
      *  Debounce *both* values together so the next effect fires only once per change‑set.
      * ===================================================================================== */
-    const { a: debouncedView } = useCombinedDebounced(view, canvases, 123);
+    const { a: debouncedView } = useCombinedDebounced(
+        settingsQuery,
+        canvases,
+        123
+    );
 
-    const views = useProgram(
+    const streamSettings = useProgram(
         useMemo(
-            () => (feedRoot ? new Views({ canvasId: feedRoot.id }) : undefined),
+            () =>
+                feedRoot
+                    ? new StreamSettings({ canvasId: feedRoot.id })
+                    : undefined,
             [feedRoot]
         ),
         { existing: "reuse", keepOpenOnUnmount: true } // don't keep open? (exescissive open closing) or make view a global db isch?
     );
 
-    const { items: dynamicViewItems } = useQuery(views.program?.views, {
-        query: useMemo(() => {
-            return {};
-        }, []),
-        onChange: {
-            merge: true,
-        },
-        prefetch: true,
-        local: true,
-        remote: {
-            eager: true,
-            joining: {
-                waitFor: 5e3,
+    const { items: dynamicViewItems } = useQuery(
+        streamSettings.program?.settings,
+        {
+            query: useMemo(() => {
+                return {};
+            }, []),
+            onChange: {
+                merge: true,
             },
-        },
-    });
+            prefetch: true,
+            local: true,
+            remote: {
+                eager: true,
+                joining: {
+                    waitFor: 5e3,
+                },
+            },
+        }
+    );
 
-    const createView = async (
+    const createSettings = async (
         name: string,
         description?: CanvasAddressReference /* filter */
     ) => {
-        const view = new View({
+        const setting = new StreamSetting({
             id: name,
             canvas: new CanvasAddressReference({ canvas: feedRoot }),
             description: description,
         });
-        await views.program.views.put(view);
-        return view;
+        await streamSettings.program.settings.put(setting);
+        return setting;
     };
 
-    const pinToView = async (view: View, canvas: Canvas) => {
+    const pinToView = async (view: StreamSetting, canvas: Canvas) => {
         if (!view.filter) {
             view.filter = new PinnedPosts({ pinned: [] });
         } else if (view.filter instanceof PinnedPosts === false) {
@@ -225,37 +235,40 @@ function useFeedContextHook() {
 
         // Pin the canvas to the view
         pinnedPosts.pinned.push(new CanvasAddressReference({ canvas }));
-        await views.program.views.put(view);
+        await streamSettings.program.settings.put(view);
     };
 
     const headerVisibility = useHeaderVisibilityContext();
 
     // Set the query based on view and viewRoot.
-    const viewModel = useMemo(() => {
-        const newView =
-            dynamicViewItems
-                .find((x) => x.id === debouncedView)
-                ?.toViewModel() ||
-            ALL_DEFAULT_VIEWS.find((x) => x.id == debouncedView);
-        if (newView.id === "chat") {
+    const filterModel = useMemo(() => {
+        if (visualization?.childrenVisualization === ChildVisualization.CHAT) {
             headerVisibility.setDisabled(true); // scrolling direction is different in chat so we disable hiding of headers by sroll
+            return ALL_DEFAULT_FILTERS.find(x => x.id === "chat");
         } else {
             headerVisibility.setDisabled(false);
+            let viewToFind = debouncedView || "best"; // default to "best" if no view is set
+            const newView =
+                dynamicViewItems
+                    .find((x) => x.id === viewToFind)
+                    ?.toFilterModel() ||
+                ALL_DEFAULT_FILTERS.find((x) => x.id == viewToFind);
+            return newView;
+
         }
-        return newView;
-    }, [debouncedView, dynamicViewItems]);
+    }, [debouncedView, dynamicViewItems, visualization]);
 
     const canvasQuery = useMemo(() => {
         if (!feedRoot) {
             return undefined;
         }
-        if (!viewModel) {
+        if (!filterModel) {
             return undefined;
         }
-        if (!viewModel?.query) {
+        if (!filterModel?.query) {
             return undefined;
         }
-        const queryObject = viewModel?.query(feedRoot);
+        const queryObject = filterModel?.query(feedRoot);
         if (timeFilter) {
             if (timeFilter.key !== "all") {
                 let delta = 0;
@@ -287,11 +300,10 @@ function useFeedContextHook() {
             queryObject.query.push(getCanvasWithContentQuery(query));
         }
         return queryObject;
-    }, [feedRoot, viewModel, timeFilter, typeFilter?.key, query]);
+    }, [feedRoot, filterModel, timeFilter, typeFilter?.key, query]);
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(3); // Default batch size
-
     const {
         items: sortedReplies,
         loadMore,
@@ -302,7 +314,10 @@ function useFeedContextHook() {
         feedRoot && feedRoot.loadedReplies ? feedRoot.replies : undefined,
         {
             query: canvasQuery,
-            reverse: viewModel?.settings.focus === "last" ? true : false,
+            reverse:
+                visualization?.childrenVisualization === ChildVisualization.CHAT
+                    ? true
+                    : false,
             transform: calculateAddress,
             batchSize,
             debug: false /* { id: "replies" }, */,
@@ -334,7 +349,10 @@ function useFeedContextHook() {
                         canvasQuery,
                         true
                     );
-                    if (viewModel?.settings.focus === "first") {
+                    if (
+                        visualization?.childrenVisualization !==
+                        ChildVisualization.CHAT
+                    ) {
                         // put added at the top
                         for (const added of filtered.added) {
                             const index = merged.findIndex(
@@ -399,8 +417,8 @@ function useFeedContextHook() {
         return lastElements.next.address !== lastElements.current?.address &&
             current.address !== lastElements.next.address
             ? replies.filter(
-                  (reply) => reply.address === lastElements.next.address
-              )
+                (reply) => reply.address === lastElements.next.address
+            )
             : [];
     }
 
@@ -469,21 +487,21 @@ function useFeedContextHook() {
             }
             return sortedReplies
                 ? sortedReplies.map((reply) => ({
-                      reply,
-                      type: "reply" as const,
-                      lineType: "none" as const,
-                      id: reply.idString,
-                  }))
+                    reply,
+                    type: "reply" as const,
+                    lineType: "none" as const,
+                    id: reply.idString,
+                }))
                 : [];
         }, [sortedReplies, debouncedView, feedRoot?.closed, feedRoot]);
 
     return {
         feedRoot,
         pinToView,
-        defaultViews: ALL_DEFAULT_VIEWS,
+        defaultViews: ALL_DEFAULT_FILTERS.filter(x => x.id !== "chat"), // chat is not a default view, it is a special view used when the mode is "chat". TODO do this code less ugly
         dynamicViews: dynamicViewItems,
-        createView,
-        view: viewModel,
+        createSettings,
+        filterModel,
         setView: changeView, // now changes update the URL
         loadMore,
         isLoading,
@@ -510,29 +528,36 @@ function useFeedContextHook() {
 }
 
 // Define the context type.
-export type FeedContextType = ReturnType<typeof useFeedContextHook>;
+export type StreamContextType = ReturnType<typeof useStreamContextHook>;
 
 // Create the context.
-const FeedContext = createContext<FeedContextType | undefined>(undefined);
+const StreamContext = createContext<StreamContextType | undefined>(undefined);
 
 // Provider component wrapping children.
-export const FeedProvider: React.FC<{ children: ReactNode }> = ({
-    children,
-}) => {
-    const view = useFeedContextHook();
-    return (
-        <FeedContext.Provider value={view}>
-            <BodyStyler />
-            {children}
-        </FeedContext.Provider>
-    );
-};
+const createStreamProvider = (properties?: { private: boolean }) => {
 
-// Custom hook for consumers.
-export const useFeed = (): FeedContextType => {
-    const context = useContext(FeedContext);
-    if (!context) {
-        throw new Error("useFeed must be used within a FeedContext");
-    }
-    return context;
-};
+    const StreamProvider: React.FC<{ children: ReactNode }> = (options) => {
+        const view = useStreamContextHook({ private: properties?.private });
+        return (
+            <StreamContext.Provider value={view}>
+                {options.children}
+            </StreamContext.Provider>
+        );
+    };
+
+    // Custom hook for consumers.
+    const useStream = (): StreamContextType => {
+        const context = useContext(StreamContext);
+        if (!context) {
+            throw new Error("useStream must be used within a FeedContext");
+        }
+        return context;
+    };
+
+    return { StreamProvider, useStream };
+
+}
+
+export const PublicStreamScope = createStreamProvider();
+export const PrivateStreamScope = createStreamProvider({ private: true });
+export const useStream = PublicStreamScope.useStream;

@@ -33,15 +33,18 @@ export const useAllPosts = (properties: {
             : undefined,
         {
             query: useMemo(() => {
+                if (!properties.canvas) {
+                    return undefined;
+                }
                 return {
                     query: [
                         ...getImmediateRepliesQuery(properties.canvas),
                         ...(properties.type != null
                             ? [
-                                  properties.type === "navigational"
-                                      ? getNavigationalPostQuery()
-                                      : getNarrativePostsQuery(),
-                              ]
+                                properties.type === "navigational"
+                                    ? getNavigationalPostQuery()
+                                    : getNarrativePostsQuery(),
+                            ]
                             : []),
                     ],
                 };

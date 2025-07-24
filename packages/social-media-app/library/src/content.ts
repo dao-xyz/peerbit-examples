@@ -1,5 +1,6 @@
 import { field, variant, fixedArray, vec, option } from "@dao-xyz/borsh";
 import {
+    BoolQuery,
     ByteMatchQuery,
     coerceWithContext,
     Compare,
@@ -36,36 +37,35 @@ import { RPC } from "@peerbit/rpc";
 import { concat, equals } from "uint8arrays";
 import { AbortError, waitFor } from "@peerbit/time";
 import { debouncedAccumulatorMap } from "./utils.js";
-import { EntryType } from "@peerbit/log";
 import { ModedThemePalette } from "./colors.js";
 
 @variant(0)
 export class Layout {
-    @field({ type: "u32" })
-    x: number;
+    @field({ type: option("u32") })
+    x?: number;
 
-    @field({ type: "u32" })
-    y: number;
+    @field({ type: option("u32") })
+    y?: number;
 
-    @field({ type: "u32" })
-    z: number;
+    @field({ type: option("u32") })
+    z?: number;
 
-    @field({ type: "u32" })
-    w: number;
+    @field({ type: option("u32") })
+    w?: number;
 
-    @field({ type: "u32" })
-    h: number;
+    @field({ type: option("u32") })
+    h?: number;
 
-    @field({ type: "string" })
-    breakpoint: string;
+    @field({ type: option("string") })
+    breakpoint?: string;
 
     constructor(properties: {
-        breakpoint: string;
-        x: number;
-        y: number;
-        z: number;
-        w: number;
-        h: number;
+        x?: number;
+        y?: number;
+        z?: number;
+        w?: number;
+        h?: number;
+        breakpoint?: string;
     }) {
         this.breakpoint = properties.breakpoint;
         this.x = properties.x;
@@ -135,8 +135,8 @@ const resolvePathFromProperties = (
 
 type PathProperties =
     | {
-          parent: Canvas;
-      }
+        parent: Canvas;
+    }
     | { path: CanvasReference[] }
     | {};
 
@@ -245,6 +245,7 @@ export class IndexableElement {
     }
 }
 
+@variant(0)
 export class IndexableCanvas {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
@@ -274,7 +275,10 @@ export class IndexableCanvas {
     replyTo: string[]; // addresses
 
     @field({ type: "u8" })
-    type: PurposeTypeEnum;
+    childrenVisualization?: ChildVisualization;
+
+    @field({ type: "bool" })
+    hasLayout: boolean;
 
     @field({ type: vec("string") })
     contents: string[]; // types of elements in the canvas, e.g. text, image, etc.
@@ -287,7 +291,8 @@ export class IndexableCanvas {
         replies: bigint;
         path: string[]; // address path
         replyTo: string[]; // addresses
-        type: PurposeTypeEnum;
+        hasLayout?: boolean;
+        childrenVisualization?: ChildVisualization;
         contents: string[];
     }) {
         this.id = properties.id;
@@ -298,7 +303,8 @@ export class IndexableCanvas {
         this.path = properties.path;
         this.replyTo = properties.replyTo;
         this.pathDepth = properties.path.length;
-        this.type = properties.type;
+        this.hasLayout = properties.hasLayout ?? false;
+        this.childrenVisualization = properties.childrenVisualization;
         this.contents = properties.contents;
         this.vector = [];
     }
@@ -322,19 +328,24 @@ export class IndexableCanvas {
                 { resolve: false }
             )
             .all();
-        const type = await canvas.getType();
-
-        return new IndexableCanvas({
-            id: canvas.id,
-            publicKey: canvas.publicKey,
-            address: canvas.address,
-            context,
-            replies,
-            path: canvas.path.map((x) => x.address),
-            replyTo: canvas.replyTo.map((x) => x.address),
-            type: type?.__indexed.type ?? PurposeTypeEnum.NARRATIVE,
-            contents: elements.map((x) => x.type),
-        });
+        const visualization = await canvas.getVisualization();
+        const hasLayout = await canvas.hasParentLinks();
+        /*    const type = await canvas.getType() */ return new IndexableCanvas(
+            {
+                id: canvas.id,
+                publicKey: canvas.publicKey,
+                address: canvas.address,
+                context,
+                replies,
+                hasLayout,
+                path: canvas.path.map((x) => x.address),
+                replyTo: canvas.replyTo.map((x) => x.address),
+                childrenVisualization:
+                    visualization?.childrenVisualization ??
+                    ChildVisualization.FEED,
+                contents: elements.map((x) => x.type),
+            }
+        );
     }
 
     private _idString: string;
@@ -364,8 +375,8 @@ export class CanvasAddressReference extends CanvasReference {
         return this.reference && !this.reference.closed
             ? this.reference
             : (this.reference = await node.open<Canvas>(this.canvas, {
-                  existing: "reuse",
-              }));
+                existing: "reuse",
+            }));
     }
 
     get address() {
@@ -386,18 +397,18 @@ export const getImmediateRepliesQuery = (to: {
     address: string;
     path: any[];
 }) => [
-    new StringMatch({
-        key: "path",
-        value: to.address,
-        caseInsensitive: true,
-        method: StringMatchMethod.exact,
-    }),
-    new IntegerCompare({
-        key: "pathDepth",
-        value: to.path.length + 1,
-        compare: Compare.Equal,
-    }),
-];
+        new StringMatch({
+            key: "path",
+            value: to.address,
+            caseInsensitive: true,
+            method: StringMatchMethod.exact,
+        }),
+        new IntegerCompare({
+            key: "pathDepth",
+            value: to.path.length + 1,
+            compare: Compare.Equal,
+        }),
+    ];
 
 export const getRepliesQuery = (to: { address: string }) => {
     return [
@@ -411,18 +422,16 @@ export const getRepliesQuery = (to: { address: string }) => {
 };
 
 export const getNarrativePostsQuery = () => {
-    return new IntegerCompare({
-        key: "type",
-        value: PurposeTypeEnum.NARRATIVE,
-        compare: Compare.Equal,
+    return new BoolQuery({
+        key: "hasLayout",
+        value: false,
     });
 };
 
 export const getNavigationalPostQuery = () => {
-    return new IntegerCompare({
-        key: "type",
-        value: PurposeTypeEnum.NAVIGATION,
-        compare: Compare.Equal,
+    return new BoolQuery({
+        key: "hasLayout",
+        value: true,
     });
 };
 
@@ -516,7 +525,7 @@ export const getCanvasWithContentQuery = (source: string) => {
     });
 };
 
-export abstract class CanvasMessage {}
+export abstract class CanvasMessage { }
 
 @variant(0)
 export class ReplyingInProgresss extends CanvasMessage {
@@ -529,8 +538,8 @@ export class ReplyingInProgresss extends CanvasMessage {
             properties.reference instanceof CanvasReference
                 ? properties.reference
                 : new CanvasAddressReference({
-                      canvas: properties.reference,
-                  });
+                    canvas: properties.reference,
+                });
     }
 }
 
@@ -545,14 +554,14 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
             properties.reference instanceof CanvasReference
                 ? properties.reference
                 : new CanvasAddressReference({
-                      canvas: properties.reference,
-                  });
+                    canvas: properties.reference,
+                });
     }
 }
 
 /* -------------- STYLING ------------------ */
 
-export abstract class AbstractBackground {}
+export abstract class AbstractBackground { }
 
 @variant(0)
 export class ModedBackground {
@@ -590,53 +599,28 @@ export class CanvasBackground extends AbstractBackground {
     }
 }
 
-export abstract class PurposeType {}
-
-@variant(0)
-export class Narrative extends PurposeType {
-    // the children are meant to tell a story
-}
-
-@variant(1)
-export class Navigation extends PurposeType {
-    // the children are meant for navigation
-
-    @field({ type: option(Layout) })
-    layout?: Layout;
-
-    constructor(props?: { layout?: Layout }) {
-        super();
-        this.layout = props?.layout;
-    }
-}
-
-enum PurposeTypeEnum {
-    NARRATIVE = 0,
-    NAVIGATION = 1,
-}
-
-@variant(0)
-export class Purpose {
+/* @variant(0)
+export class Mode {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
     @field({ type: fixedArray("u8", 32) })
     canvasId: Uint8Array;
 
-    @field({ type: PurposeType })
-    type: PurposeType;
+    @field({ type: ModeType })
+    type: ModeType;
 
     constructor(props: {
         id?: Uint8Array;
         canvasId: Uint8Array;
-        type: PurposeType;
+        type: ModeType;
     }) {
         this.id = props.id || randomBytes(32);
         this.canvasId = props.canvasId;
         this.type = props.type;
         if (
             !(this.type instanceof Narrative) &&
-            !(this.type instanceof Navigation)
+            !(this.type instanceof Page)
         ) {
             throw new Error("Invalid purpose type");
         }
@@ -654,15 +638,15 @@ export class IndexedPurpose {
     @field({ type: "u8" })
     type: PurposeTypeEnum;
 
-    constructor(props: Purpose) {
+    constructor(props: Mode) {
         this.id = props.id;
         this.canvasId = props.canvasId;
         this.type =
             props.type instanceof Narrative
                 ? PurposeTypeEnum.NARRATIVE
-                : PurposeTypeEnum.NAVIGATION;
+                : PurposeTypeEnum.PAGE;
     }
-}
+} */
 
 export type BackGroundTypes = StyledBackground | CanvasBackground;
 
@@ -671,6 +655,7 @@ export abstract class Visualization {
     canvasId: Uint8Array;
 }
 
+@variant(0)
 export class IndexedVisualization {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
@@ -682,6 +667,13 @@ export class IndexedVisualization {
         this.id = props.id;
         this.canvasId = props.canvasId;
     }
+}
+
+export enum ChildVisualization {
+    FEED = 0,
+    TREE = 1,
+    EXPLORE = 2,
+    CHAT = 3,
 }
 
 @variant(0)
@@ -707,6 +699,9 @@ export class BasicVisualization {
     @field({ type: option("string") })
     font?: string;
 
+    @field({ type: option("u8") })
+    childrenVisualization?: ChildVisualization;
+
     constructor(props: {
         id?: Uint8Array;
         canvasId: Uint8Array;
@@ -715,6 +710,7 @@ export class BasicVisualization {
         showAuthorInfo?: boolean;
         previewHeight?: string;
         font?: string;
+        childrenVisualization?: ChildVisualization;
     }) {
         this.id = props?.id || randomBytes(32);
         this.canvasId = props.canvasId;
@@ -723,6 +719,7 @@ export class BasicVisualization {
         this.showAuthorInfo = props?.showAuthorInfo ?? true;
         this.previewHeight = props?.previewHeight;
         this.font = props?.font;
+        this.childrenVisualization = props?.childrenVisualization;
     }
 }
 
@@ -732,6 +729,123 @@ type CanvasArgs = {
     replicas?: { min?: number };
 };
 
+/* ---------------------------------------------------------
+ * The edge that lives * inside the parent * and describes
+ * how one child should appear under that parent.
+ * --------------------------------------------------------- */
+
+@variant(0)
+export class LinkPlacement {
+    @id({ type: fixedArray("u8", 32) })
+    id: Uint8Array;
+
+    @field({ type: fixedArray("u8", 32) })
+    parent: Uint8Array;
+
+    @field({ type: fixedArray("u8", 32) })
+    child: Uint8Array;
+
+    /* Optional — spatial info for grid / kanban style */
+    @field({ type: option(Layout) })
+    layout?: Layout; // x, y, w, h, breakpoint…
+
+    constructor(props: {
+        id?: Uint8Array;
+        parent: Uint8Array;
+        child: Uint8Array;
+        layout?: Layout;
+    }) {
+        this.id = props.id || randomBytes(32);
+        this.parent = props.parent;
+        this.child = props.child;
+        this.layout = props.layout;
+    }
+}
+
+const reIndexRepliesInParents = async (from: Canvas, canvas: Canvas) => {
+    canvas = await from.node.open(canvas, {
+        existing: "reuse",
+    });
+    const loadedPath = await canvas.loadPath({ includeSelf: true });
+    // i = 1 start to skip the root, -1 to skip the current canvas
+    // (we only want to-re-index parents)
+
+    for (let i = loadedPath.length - 1; i > 0; i--) {
+        loadedPath[i] = await from.node.open(loadedPath[i], {
+            existing: "reuse",
+        });
+        await loadedPath[i].load();
+        from.reIndexDebouncer.add({
+            key: loadedPath[i].idString,
+            value: {
+                canvas: loadedPath[i],
+                options: {
+                    onlyReplies: true,
+                },
+            },
+        });
+    }
+};
+
+const createCanvasChangeListener = <T, I>(
+    from: Canvas,
+    resolveKeys: (t: T) => Uint8Array[],
+    options?: {
+        debug?: boolean,
+        reIndexParent?: boolean;
+    }
+) => {
+    return async (evt: CustomEvent<DocumentsChange<T, I>>) => {
+        // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
+
+        for (let added of evt.detail.added) {
+            const keys = resolveKeys(added);
+
+            for (const key of keys) {
+                const canvas = await from.replies.index.get(key);
+                if (!canvas) {
+                    // for the root this will be true
+                    continue;
+                }
+                // update index on self (await this to make sure parent reply re-indexing becomes correct)
+                await from.reIndexDebouncer.add({
+                    key: canvas.idString,
+                    value: {
+                        canvas,
+                    },
+                });
+
+                // and recount repleis in parent TODO?
+                options?.reIndexParent &&
+                    canvas &&
+                    (await reIndexRepliesInParents(from, canvas));
+            }
+        }
+
+        for (let removed of evt.detail.removed) {
+            const keys = resolveKeys(removed);
+            for (const key of keys) {
+                const canvas = await from.replies.index.get(key);
+                if (!canvas) {
+                    // for the root this will be true
+                    continue;
+                }
+                // update index on self (await this to make sure parent reply re-indexing becomes correct)
+                await from.reIndexDebouncer.add({
+                    key: canvas.idString,
+                    value: {
+                        canvas,
+                    },
+                });
+
+                // and recount repleis in parent TODO?
+                options?.reIndexParent &&
+                    canvas &&
+                    (await reIndexRepliesInParents(from, canvas));
+            }
+        }
+    };
+};
 @variant("canvas")
 export class Canvas extends Program<CanvasArgs> {
     @id({ type: fixedArray("u8", 32) })
@@ -746,8 +860,11 @@ export class Canvas extends Program<CanvasArgs> {
     @field({ type: Documents })
     private _replies: Documents<Canvas, IndexableCanvas>; // Replies or Sub Replies
 
-    @field({ type: Documents }) // TODO don't make this affeect the address?
-    private _types: Documents<Purpose, IndexedPurpose>;
+    /* @field({ type: Documents }) // TODO don't make this affeect the address?
+    private _types: Documents<Mode, IndexedPurpose>; */
+
+    @field({ type: Documents })
+    private _links!: Documents<LinkPlacement, LinkPlacement>;
 
     @field({ type: Documents }) // TODO don't make this affeect the address?
     private _visualizations: Documents<Visualization, IndexedVisualization>;
@@ -770,8 +887,8 @@ export class Canvas extends Program<CanvasArgs> {
         } & { replyTo?: CanvasReference[] } & {
             topMostCanvasWithSameACL?: Canvas | null;
         } & PathProperties & {
-                id?: Uint8Array;
-            }
+            id?: Uint8Array;
+        }
     ) {
         super();
         this.publicKey = properties.publicKey;
@@ -790,9 +907,13 @@ export class Canvas extends Program<CanvasArgs> {
             id: sha256Sync(sha256Sync(elementsId)),
         });
 
-        this._types = new Documents({
-            id: sha256Sync(sha256Sync(sha256Sync(elementsId))),
+        this._links = new Documents({
+            id: sha256Sync(sha256Sync(sha256Sync(sha256Sync(elementsId)))),
         });
+
+        /*  this._types = new Documents({
+             id: sha256Sync(sha256Sync(sha256Sync(elementsId))),
+         }); */
 
         this._topMostCanvasWithSameACL = properties.topMostCanvasWithSameACL;
         this._messages = new RPC();
@@ -838,16 +959,24 @@ export class Canvas extends Program<CanvasArgs> {
         evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
     ) => void;
 
-    private _typeChangeListener: (
-        evt: CustomEvent<DocumentsChange<Purpose, IndexedPurpose>>
+    private _visalizationChangeListener: (
+        evt: CustomEvent<DocumentsChange<Visualization, IndexedVisualization>>
     ) => void;
+
+    private _linksChangeListener: (
+        evt: CustomEvent<DocumentsChange<LinkPlacement, LinkPlacement>>
+    ) => void;
+
+    /*  private _typeChangeListener: (
+         evt: CustomEvent<DocumentsChange<Mode, IndexedPurpose>>
+     ) => void; */
 
     private getValueWithContext(value: string) {
         return this.address + ":" + value;
     }
     public debug: boolean = false;
     private closeController: AbortController | null = null;
-    private reIndexDebouncer: ReturnType<
+    reIndexDebouncer: ReturnType<
         typeof debouncedAccumulatorMap<{
             canvas: Canvas;
             options?: { onlyReplies?: boolean };
@@ -888,8 +1017,10 @@ export class Canvas extends Program<CanvasArgs> {
             this._messages.allPrograms.map((x) => (x.closed = true));
             this._visualizations.closed = true;
             this._visualizations.allPrograms.map((x) => (x.closed = true));
-            this._types.closed = true;
-            this._types.allPrograms.map((x) => (x.closed = true));
+            /*  this._types.closed = true;
+             this._types.allPrograms.map((x) => (x.closed = true)); */
+            this._links.closed = true;
+            this._links.allPrograms.map((x) => (x.closed = true));
             return;
         } else {
             this.debug &&
@@ -959,28 +1090,25 @@ export class Canvas extends Program<CanvasArgs> {
                 console.timeEnd(this.getValueWithContext("openElements"));
             this.debug && console.time(this.getValueWithContext("openReplies"));
 
-            await this._types.open({
-                type: Purpose,
-                replicas: args?.replicas,
-                replicate:
-                    args?.replicate != null
-                        ? args?.replicate
-                            ? { factor: 1 }
-                            : false
-                        : { factor: 1 }, // TODO choose better
-                timeUntilRoleMaturity: 6e4,
-                keep: "self",
-                index: {
-                    type: IndexedPurpose,
-                },
-                canPerform: async (operation) => {
-                    /**
-                     * Only allow updates if we created it
-                     *  or from myself (this allows us to modifying someone elsecanvas locally)
-                     */
-                    return true;
-                },
-            });
+            /*  await this._types.open({
+                 type: Mode,
+                 replicas: args?.replicas,
+                 replicate:
+                     args?.replicate != null
+                         ? args?.replicate
+                             ? { factor: 1 }
+                             : false
+                         : { factor: 1 }, // TODO choose better
+                 timeUntilRoleMaturity: 6e4,
+                 keep: "self",
+                 index: {
+                     type: IndexedPurpose,
+                 },
+                 canPerform: async (operation) => {
+                  
+                     return true;
+                 },
+             }); */
 
             await this._visualizations.open({
                 type: BasicVisualization,
@@ -995,6 +1123,29 @@ export class Canvas extends Program<CanvasArgs> {
                 keep: "self",
                 index: {
                     type: IndexedVisualization,
+                },
+                canPerform: async (operation) => {
+                    /**
+                     * Only allow updates if we created it
+                     *  or from myself (this allows us to modifying someone elsecanvas locally)
+                     */
+                    return true;
+                },
+            });
+
+            await this._links.open({
+                type: LinkPlacement,
+                replicas: args?.replicas,
+                replicate:
+                    args?.replicate != null
+                        ? args?.replicate
+                            ? { factor: 1 }
+                            : false
+                        : { factor: 1 }, // TODO choose better
+                timeUntilRoleMaturity: 6e4,
+                keep: "self",
+                index: {
+                    type: LinkPlacement,
                 },
                 canPerform: async (operation) => {
                     /**
@@ -1057,7 +1208,7 @@ export class Canvas extends Program<CanvasArgs> {
                 topic: sha256Base64Sync(
                     concat([this.id, new TextEncoder().encode("messages")])
                 ),
-                responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
+                responseHandler: async () => { }, // need an empty response handle to make response events to emit TODO fix this?
             });
         }
     }
@@ -1108,8 +1259,9 @@ export class Canvas extends Program<CanvasArgs> {
                 },
             });
             if (!indexedCanvas) {
-                console.trace("MISSING INDEXED CANVAS", canvas.idString);
+                /*   console.trace("MISSING INDEXED CANVAS", canvas.idString); */
                 // because we might index children before parents, this might be undefined
+                // or we add content, visualization, or links to someting that does not exist yet
                 // but it is fine, since when the parent is to be re-indexed, its children will be considered
                 return;
             }
@@ -1163,101 +1315,64 @@ export class Canvas extends Program<CanvasArgs> {
                 this._repliesChangeListener
             );
 
-        this._typeChangeListener &&
-            this._types.events.removeEventListener(
+        this._visalizationChangeListener &&
+            this._visualizations.events.removeEventListener(
                 "change",
-                this._typeChangeListener
+                this._visalizationChangeListener
             );
 
-        const reIndexRepliesInParents = async (canvas: Canvas) => {
-            canvas = await this.node.open(canvas, {
-                existing: "reuse",
-            });
-            const loadedPath = await canvas.loadPath({ includeSelf: true });
-            // i = 1 start to skip the root, -1 to skip the current canvas
-            // (we only want to-re-index parents)
+        this._linksChangeListener &&
+            this._links.events.removeEventListener(
+                "change",
+                this._linksChangeListener
+            );
 
-            for (let i = loadedPath.length - 1; i > 0; i--) {
-                loadedPath[i] = await this.node.open(loadedPath[i], {
-                    existing: "reuse",
-                });
-                await loadedPath[i].load();
-                this.reIndexDebouncer.add({
-                    key: loadedPath[i].idString,
-                    value: {
-                        canvas: loadedPath[i],
-                        options: {
-                            onlyReplies: true,
-                        },
-                    },
-                });
-            }
-        };
+        /*  this._typeChangeListener &&
+             this._types.events.removeEventListener(
+                 "change",
+                 this._typeChangeListener
+             );
+  */
+
         this._repliesChangeListener = async (
             evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
         ) => {
             // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
 
             for (let added of evt.detail.added) {
-                await reIndexRepliesInParents(added);
+                await reIndexRepliesInParents(this, added);
             }
 
             for (let removed of evt.detail.removed) {
-                await reIndexRepliesInParents(removed);
+                await reIndexRepliesInParents(this, removed);
                 await removed.close();
             }
         };
+
         this._replies?.events.addEventListener(
             "change",
             this._repliesChangeListener
         );
 
-        this._typeChangeListener = async (
-            evt: CustomEvent<DocumentsChange<Purpose, IndexedPurpose>>
-        ) => {
-            // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
-
-            for (let added of evt.detail.added) {
-                const canvas = await this._replies.index.get(added.canvasId);
-                if (!canvas) {
-                    // for the root this will be true
-                    continue;
-                }
-                // update index on self (await this to make sure parent reply re-indexing becomes correct)
-                await this.reIndexDebouncer.add({
-                    key: canvas.idString,
-                    value: {
-                        canvas,
-                    },
-                });
-
-                // and recount repleis in parent
-                canvas && (await reIndexRepliesInParents(canvas));
-            }
-
-            for (let removed of evt.detail.removed) {
-                const canvas = await this._replies.index.get(removed.canvasId);
-                if (!canvas) {
-                    continue;
-                }
-
-                // update index on self (await this to make sure parent reply re-indexing becomes correct)
-                await this.reIndexDebouncer.add({
-                    key: canvas.idString,
-                    value: {
-                        canvas,
-                    },
-                });
-
-                // and recount repleis in parent
-                canvas && (await reIndexRepliesInParents(canvas));
-            }
-        };
-
-        this._types?.events.addEventListener(
-            "change",
-            this._typeChangeListener
+        this._visalizationChangeListener = createCanvasChangeListener(
+            this,
+            (v) => [v.canvasId]
         );
+        this._visualizations?.events.addEventListener(
+            "change",
+            this._visalizationChangeListener
+        );
+
+        this._linksChangeListener = createCanvasChangeListener(this, (v) => [
+            v.child,
+        ], {
+            debug: true
+        });
+        this._links?.events.addEventListener(
+            "change",
+            this._linksChangeListener
+        );
+
         // Dont await this one!!! because this.load might load self
         this.load();
     }
@@ -1269,11 +1384,22 @@ export class Canvas extends Program<CanvasArgs> {
                 "change",
                 this._repliesChangeListener
             );
-        this._typeChangeListener &&
+        this._visalizationChangeListener &&
+            this._visualizations.events.removeEventListener(
+                "change",
+                this._visalizationChangeListener
+            );
+        this._links &&
+            this._links.events.removeEventListener(
+                "change",
+                this._linksChangeListener
+            );
+
+        /* this._typeChangeListener &&
             this._types.events.removeEventListener(
                 "change",
                 this._typeChangeListener
-            );
+            ); */
 
         this.reIndexDebouncer.close();
         return super.close(from);
@@ -1306,7 +1432,7 @@ export class Canvas extends Program<CanvasArgs> {
 
     getCountQuery(options?: {
         onlyImmediate: boolean;
-    }): (StringMatch | IntegerCompare)[] {
+    }): (StringMatch | IntegerCompare | BoolQuery)[] {
         const location = options?.onlyImmediate
             ? getImmediateRepliesQuery(this)
             : getRepliesQuery(this);
@@ -1319,11 +1445,12 @@ export class Canvas extends Program<CanvasArgs> {
             const replies = this.replies.index.closed
                 ? 0n
                 : BigInt(
-                      await this.replies.count({
-                          query: this.getCountQuery(options),
-                          approximate: true,
-                      })
-                  );
+                    await this.replies.count({
+                        query: this.getCountQuery(options),
+                        approximate: true,
+                    })
+                );
+
             return replies;
         } catch (error) {
             // TODO handle errors that arrise from the database being closed
@@ -1356,6 +1483,7 @@ export class Canvas extends Program<CanvasArgs> {
         path: string[],
         options?: {
             id?: Uint8Array; // leaf id
+            layout?: Layout | null; // layout of the leaf canvas
         }
     ): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
         const results = await this.findCanvasesByPath(path);
@@ -1401,22 +1529,45 @@ export class Canvas extends Program<CanvasArgs> {
                 createdPath.push(nextCanvas);
 
                 const name = path[i];
+
+                /*  await nextCanvas.elements.put(
+                     new Element({
+                         content: new StaticContent<StaticMarkdownText>({
+                             content: new StaticMarkdownText({ text: name }),
+                             quality: LOWEST_QUALITY,
+                             contentId: sha256Sync(
+                                 new TextEncoder().encode(name)
+                             ),
+                         }),
+                         location: Layout.zero(),
+                         publicKey: this.node.identity.publicKey,
+                         canvasId: nextCanvas.id,
+                     })
+                 ); */
+
                 // TODO Dont put if already exists
-                await nextCanvas.elements.put(
-                    new Element({
-                        content: new StaticContent<StaticMarkdownText>({
-                            content: new StaticMarkdownText({ text: name }),
-                            quality: LOWEST_QUALITY,
-                            contentId: sha256Sync(
-                                new TextEncoder().encode(name)
-                            ),
-                        }),
-                        location: Layout.zero(),
-                        publicKey: this.node.identity.publicKey,
-                        canvasId: nextCanvas.id,
-                    })
-                );
-                await currentCanvas.createReply(nextCanvas);
+                await nextCanvas.addTextElement({
+                    id: sha256Sync(
+                        concat([nextCanvas.id, new TextEncoder().encode(name)])
+                    ),
+                    text: name,
+                    skipReindex: true,
+                });
+                let layout: Layout | undefined;
+                if (i === path.length - 1) {
+                    if (options?.layout === null || options?.layout) {
+                        layout = options?.layout || undefined;
+                    } else {
+                        layout = new Layout({ x: 0 });
+                    }
+                } else {
+                    layout = new Layout({ x: 0 }); // TODO choose better default (i.e. count siblings and place next to them)
+                }
+                await currentCanvas.createReply(nextCanvas, {
+                    layout,
+                    type: ChildVisualization.TREE,
+                });
+
                 currentCanvas = nextCanvas;
             }
         }
@@ -1510,13 +1661,13 @@ export class Canvas extends Program<CanvasArgs> {
         this.node
             ? Promise.resolve(this.node)
             : await waitFor(() => this.node, {
-                  signal: this.closeController?.signal,
-              }).catch((error) => {
-                  if (error instanceof AbortError) {
-                      return;
-                  }
-                  throw new Error("Failed to load, canvas was never opened");
-              });
+                signal: this.closeController?.signal,
+            }).catch((error) => {
+                if (error instanceof AbortError) {
+                    return;
+                }
+                throw new Error("Failed to load, canvas was never opened");
+            });
         if (!this.node && this.closed) {
             // return silently if closed
             return;
@@ -1559,15 +1710,20 @@ export class Canvas extends Program<CanvasArgs> {
         return root._replies;
     }
 
+    get links(): Documents<LinkPlacement, LinkPlacement, any> {
+        const root: Canvas = this.origin ?? this;
+        return root._links;
+    }
+
     get visualizations(): Documents<Visualization, IndexedVisualization, any> {
         const root: Canvas = this.origin ?? this;
         return root._visualizations;
     }
 
-    get types(): Documents<Purpose, IndexedPurpose, any> {
-        const root: Canvas = this.origin ?? this;
-        return root._types;
-    }
+    /*  get types(): Documents<Mode, IndexedPurpose, any> {
+         const root: Canvas = this.origin ?? this;
+         return root._types;
+     } */
 
     async setVisualization(
         visualization: BasicVisualization | null
@@ -1598,7 +1754,7 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     async getVisualization(): Promise<WithIndexedContext<
-        Visualization,
+        BasicVisualization,
         IndexedVisualization
     > | null> {
         const origin = this.origin;
@@ -1620,42 +1776,171 @@ export class Canvas extends Program<CanvasArgs> {
                 `Multiple visualizations found for canvas ${this.idString}`
             );
         }
-        return visualizations[0];
+        const first = visualizations[0];
+        if (first instanceof BasicVisualization) {
+            return first;
+        }
+        throw new Error(
+            `Unexpected visualization type for canvas ${this.idString}`
+        );
     }
 
-    async setType(type: Purpose | null): Promise<void> {
-        const origin = this.origin;
-        if (!origin) {
-            throw new Error("Cannot set visualization on non-origin canvas");
-        }
-        /*         console.log("SET TYPE", this, type); */
-        if (type && !equals(type.canvasId, this.id)) {
-            throw new Error("Unexpected wrong id provided");
-        }
+    /*  async setMode(type: "narrative" | "page"): Promise<void> {
+         const origin = this.origin;
+         if (!origin) {
+             throw new Error("Cannot set visualization on non-origin canvas");
+         }
+         const types = await this.types.index
+             .iterate(
+                 {
+                     query: {
+                         canvasId: this.id,
+                     },
+                 },
+                 { resolve: false }
+             )
+             .all();
+         for (const type of types) {
+             await this.types.del(type.id);
+         }
+ 
+         if (type) {
+             await this.types.put(
+                 new Mode({
+                     type:
+                         type === "narrative"
+                             ? new Narrative()
+                             : new Page(),
+                     canvasId: this.id,
+                     id: randomBytes(32),
+                 })
+             );
+         } else {
+             // previous visualization was removed
+         }
+     } */
 
-        const types = await this.types.index
-            .iterate(
-                {
-                    query: {
-                        canvasId: this.id,
-                    },
+    /** Create or update the edge that places `child` under `this`. */
+    async link(child: Uint8Array, opts?: { layout?: Layout }) {
+        const id = sha256Sync(child); // deterministic edge id
+        const existing = await this.links.index.get(id);
+
+        const link = new LinkPlacement({
+            parent: this.id,
+            child,
+            layout: opts?.layout ?? existing?.layout,
+        });
+
+        await this.links.put(link);
+    }
+
+    async setChildPosition(child: Uint8Array, x: number) {
+        const link = new LinkPlacement({
+            parent: this.id,
+            child: child,
+            layout: new Layout({ x }),
+        });
+
+        await this.links.put(link);
+    }
+
+    async getChildPosition(child: Uint8Array): Promise<Layout | undefined> {
+        const links = await this.links.index
+            .iterate({
+                query: {
+                    parent: this.id,
+                    child: child,
                 },
-                { resolve: false }
-            )
+            })
             .all();
-        for (const type of types) {
-            await this.types.del(type.id);
-        }
 
-        if (type) {
-            await this.types.put(type);
-        } else {
-            // previous visualization was removed
+        if (links?.length > 0) {
+            if (links.length > 1) {
+                console.warn(
+                    `Multiple links found for child ${sha256Base64Sync(
+                        child
+                    )} on canvas ${this.idString}`
+                );
+            }
+            return links[0].layout; // return the first link's layout
+        }
+        return undefined;
+    }
+
+    /** Remove the visual placement but keep the semantic reply. */
+    async unlink(child: Uint8Array) {
+        const links = await this.links.index
+            .iterate({
+                query: {
+                    parent: this.id,
+                    child: child,
+                },
+            })
+            .all();
+
+        for (const link of links) {
+            await this.links.del(link.id);
         }
     }
 
-    async getType(): Promise<WithIndexedContext<
-        Purpose,
+    async getParentLinks(): Promise<LinkPlacement[]> {
+        const links = await this.links.index
+            .iterate({
+                query: {
+                    child: this.id,
+                },
+            })
+            .all();
+        return links;
+    }
+
+    async getChildrenLinks(): Promise<LinkPlacement[]> {
+        const links = await this.links.index
+            .iterate({
+                query: {
+                    parent: this.id,
+                },
+            })
+            .all();
+        return links;
+    }
+
+
+
+    async hasParentLinks(): Promise<boolean> {
+        const links = await this.getParentLinks();
+        return links.length > 0;
+    }
+
+    async setExperience(type: ChildVisualization) {
+        let visualization: BasicVisualization | null =
+            (await this.getVisualization()) as BasicVisualization | null;
+        if (!visualization) {
+            visualization = new BasicVisualization({
+                canvasId: this.id,
+                childrenVisualization: type,
+            });
+        } else {
+            if (visualization.childrenVisualization !== type) {
+                visualization.childrenVisualization = type;
+            } else {
+                return;
+            }
+        }
+        await this.setVisualization(visualization);
+    }
+
+    async getExperience(): Promise<ChildVisualization | undefined> {
+        const visualization = await this.getVisualization();
+        if (visualization instanceof BasicVisualization) {
+            return visualization.childrenVisualization;
+        } else {
+            return undefined; // no experience set
+        }
+    }
+
+    /* async getType(): Promise<WithIndexedContext<
+        Mode,
         IndexedPurpose
     > | null> {
         const origin = this.origin;
@@ -1676,17 +1961,17 @@ export class Canvas extends Program<CanvasArgs> {
             throw new Error(`Multiple types found for canvas ${this.idString}`);
         }
         return types[0];
-    }
+    } */
 
-    async getViewContext(): Promise<Canvas[] | null> {
-        // get the first canvas that is a parent to some navigation
+    async getStandaloneParent(): Promise<Canvas[] | null> {
+        // get the first parent that is not positioned under another canvas
         let current: Canvas | undefined = this;
         let path: Canvas[] = [];
         while (current) {
-            const type = await current.getType();
+            const hasParentLinks = await current.hasParentLinks();
             path.push(current);
 
-            if (!type || type.type instanceof Narrative) {
+            if (!hasParentLinks) {
                 // we found a feed visualization, return the path
                 return path.reverse();
             }
@@ -1700,7 +1985,7 @@ export class Canvas extends Program<CanvasArgs> {
         return path.reverse();
     }
 
-    async getFeedContext(): Promise<Canvas | undefined> {
+    /* async getFeedContext(): Promise<Canvas | undefined> {
         // opposite to getViewContext
 
         let current: Canvas = this;
@@ -1728,7 +2013,7 @@ export class Canvas extends Program<CanvasArgs> {
             }
             current = next;
         }
-    }
+    } */
 
     private async updateIndexedReplyCounter(
         canvas: Canvas | WithIndexedContext<Canvas, IndexableCanvas>,
@@ -1757,6 +2042,11 @@ export class Canvas extends Program<CanvasArgs> {
                 },
             });
 
+            if (!indexedCanvas) {
+                // we could end up because the parent has not indexed the child yet
+                return; // TODO warning message?
+            }
+
             indexed = indexedCanvas;
             context = indexedCanvas.__context;
         }
@@ -1773,18 +2063,38 @@ export class Canvas extends Program<CanvasArgs> {
         await this.replies.index.index.put(wrappedValueToIndex);
     }
 
-    async createReply(canvas: Canvas, type?: "narrative" | "navigation") {
+    async createReply(
+        canvas: Canvas,
+        options?: { type?: ChildVisualization; layout?: Layout }
+    ) {
         if (!this.origin!.replies.log.isReplicating()) {
             await this.origin!.replies.log.waitForReplicators();
         }
 
         // if existing, just return
-        const existing = await this.origin!.replies.index.get(canvas.id);
-        if (existing) {
-            return false;
+        await this.load()
+        await this.origin!.load()
+        try {
+            const existing = await this.origin!.replies.index.get(canvas.id);
+            if (existing) {
+                return [false, existing] as const; // already exists
+            }
+        } catch (error) {
+            throw error;
         }
 
+        let promises: Promise<void>[] = [];
+        if (options?.layout) {
+            promises.push(this.link(canvas.id, options));
+        }
+
+        if (options?.type) {
+            promises.push(canvas.setExperience(options?.type));
+        }
         await this.origin!.replies.put(canvas);
+
+        await Promise.all(promises);
+
         const path = await canvas.loadPath({ includeSelf: true });
         for (let i = 1; i < path.length; i++) {
             const loadedPathElement = await this.node.open(path[i], {
@@ -1796,25 +2106,23 @@ export class Canvas extends Program<CanvasArgs> {
             await this.updateIndexedReplyCounter(loadedPathElement);
         }
 
-        if (type) {
-            const purpose = new Purpose({
-                type: type === "narrative" ? new Narrative() : new Navigation(),
-                canvasId: canvas.id,
-            });
-            await canvas.setType(purpose);
-        }
-
-        return true;
+        return [true, canvas] as const; // created
     }
 
-    async createElement(element: Element) {
+    async createElement(
+        element: Element,
+        options?: {
+            skipReindex?: boolean;
+        }
+    ): Promise<void> {
         await this.origin!.elements.put(element);
-        await this.reIndexDebouncer.add({
-            key: this.idString,
-            value: {
-                canvas: this,
-            },
-        });
+        !options?.skipReindex &&
+            (await this.reIndexDebouncer.add({
+                key: this.idString,
+                value: {
+                    canvas: this,
+                },
+            }));
     }
 
     get elements(): Documents<Element, IndexableElement, any> {
@@ -1878,13 +2186,13 @@ export class Canvas extends Program<CanvasArgs> {
     }
 
     async openWithSameSettings<T extends Canvas | WithContext<Canvas>>(
-        other: T
+        toOpen: T
     ): Promise<T> {
-        let context = (other as WithContext<any>).__context;
+        let context = (toOpen as WithContext<any>).__context;
         const replies = this._replies.closed ? this.replies : this._replies;
         let replicating = await replies.log.isReplicating();
         let minReplicas = replies.log.replicas.min.getValue(replies.log);
-        const out = await this.node.open<Canvas>(other, {
+        const out = await this.node.open<Canvas>(toOpen, {
             existing: "reuse",
             args: {
                 replicate: replicating,
@@ -1893,12 +2201,14 @@ export class Canvas extends Program<CanvasArgs> {
                 },
             },
         });
+        await out.load();
         return (context ? coerceWithContext(out, context) : out) as T;
     }
 
     async addTextElement(properties: {
         text: string;
         id?: Uint8Array;
+        skipReindex?: boolean;
     }): Promise<void> {
         await this.load();
 
@@ -1928,21 +2238,23 @@ export class Canvas extends Program<CanvasArgs> {
                     ),
                 }),
                 canvasId: this.id,
-            })
+            }),
+            properties
         );
     }
 
     async cloneInto(dstParent: Canvas): Promise<Canvas> {
-        /* 1️⃣  Create a fresh canvas under dstParent */
+        /* Create a fresh canvas under dstParent */
         const draft = new Canvas({
             publicKey: this.node.identity.publicKey,
             parent: dstParent, // path is derived here
         });
-        const dst = await this.node.open(draft, { existing: "reuse" });
+        const dst = await dstParent.openWithSameSettings(draft);
         await dst.load();
-        await dstParent.createReply(dst);
 
-        /* 2️⃣  Copy *elements* (text, images, …) -------------------- */
+
+
+        /* Copy *elements* (text, images, …) -------------------- */
         const elements = await this.elements.index
             .iterate({ query: getOwnedElementsQuery(this) })
             .all();
@@ -1958,21 +2270,7 @@ export class Canvas extends Program<CanvasArgs> {
             );
         }
 
-        /* 3️⃣  Copy optional purpose / visualisation ---------------- */
-        const type = await this.getType();
-        if (type) {
-            await dst.setType(
-                new Purpose({
-                    canvasId: dst.id,
-                    type:
-                        type.type instanceof Navigation
-                            ? new Navigation({
-                                  layout: (type.type as Navigation).layout,
-                              })
-                            : new Narrative(),
-                })
-            );
-        }
+        /*  Copy optional purpose / visualisation ---------------- */
 
         const vis = await this.getVisualization();
         if (vis) {
@@ -1984,16 +2282,83 @@ export class Canvas extends Program<CanvasArgs> {
                 })
             );
         }
+        /* Copy *links* (visual placement) ----------------------- */
+        for (const link of await this.getParentLinks()) {
+            const newLink = new LinkPlacement({
+                parent: dstParent.id,
+                child: dst.id,
+                layout: link.layout, // layout objects are immutable
+            });
+            await dst.links.put(newLink);
+        }
 
-        /* 4️⃣  Recurse over *direct* children ----------------------- */
+
+
+        const [success, createdReply] = await dstParent.createReply(dst)
+        if (!success) {
+            return createdReply; // if the reply already exists, just return it
+        }
+
+
+
+        /* Recurse over *direct* children ----------------------- */
         const children = await this.replies.index
             .iterate({ query: getImmediateRepliesQuery(this) })
             .all();
 
-        for (const child of children) {
+
+
+
+        for (let child of children) {
+            child = await dst.openWithSameSettings(child);
             await child.cloneInto(dst);
         }
+
+
+
+
         return dst;
+    }
+
+    static async delete(canvas: Canvas, peer: ProgramClient): Promise<boolean> {
+        if (canvas.closed !== false) {
+            canvas = await peer.open(canvas, { existing: "reuse", args: { replicate: false } });
+        }
+        return canvas.drop();
+    }
+
+    async drop(from?: Program): Promise<boolean> {
+        // drop related stuff too!
+        const elements = await this.elements.index
+            .iterate({ query: getOwnedElementsQuery(this) })
+            .all();
+        for (const element of elements) {
+            await this.elements.del(element.id);
+        }
+        const links = [...await this.getParentLinks(), ...await this.getChildrenLinks()];
+        for (const link of links) {
+            await this.links.del(link.id);
+        }
+
+        const visualizations = await this.visualizations.index
+            .iterate({ query: { canvasId: this.id } }, { resolve: false })
+            .all();
+
+        for (const visualization of visualizations) {
+            await this.visualizations.del(visualization.id);
+        }
+
+        for (const reply of await this.replies.index.iterate({ query: getImmediateRepliesQuery(this) }).all()) {
+            // we can not use reply.drop() because it would delete the reply itself
+            // but we want to delete the reply from the index
+            await Canvas.delete(reply, this.node);
+        }
+
+        if (await this.replies.index.get(this.id)) {
+            await this.replies.del(this.id);
+        }
+
+        return true
     }
 }
 

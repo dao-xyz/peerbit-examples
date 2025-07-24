@@ -1,11 +1,10 @@
-import React, {
+import {
     createContext,
     useContext,
     useState,
     useEffect,
     ReactNode,
 } from "react";
-import { useHostRegistry } from "@giga-app/sdk";
 import { useMount } from "react-use";
 export type Theme = "dark" | "light";
 

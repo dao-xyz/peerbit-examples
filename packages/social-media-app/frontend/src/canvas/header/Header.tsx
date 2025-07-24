@@ -1,22 +1,13 @@
 import React, { useState } from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { HiDotsHorizontal } from "react-icons/hi";
-import { usePeer } from "@peerbit/react";
-import { useProfiles } from "../../profile/useProfiles";
-import {
-    Canvas,
-    getOwnedElementsQuery,
-    IFrameContent,
-    IndexableCanvas,
-} from "@giga-app/interface";
+import { Canvas, IndexableCanvas } from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
 import { WithIndexedContext } from "@peerbit/document";
 import { FaRegComment } from "react-icons/fa";
-import { MdOpenInFull } from "react-icons/md";
 import { CanvasSettingsButton } from "./CanvasSettingsButton";
 import { TinyPath } from "../path/RelativePath";
 import { useRelativePath } from "./useRelativePath";
+import { IoEnterOutline } from "react-icons/io5";
 
 export const Header = ({
     canvas,
@@ -101,7 +92,7 @@ export const Header = ({
                         className="btn flex p-2 flex-row items-center gap-1"
                         onClick={open}
                     >
-                        <MdOpenInFull size={16} />
+                        <IoEnterOutline className="ml-[-4px]" size={20} />
                     </button>
                 </>
             )}

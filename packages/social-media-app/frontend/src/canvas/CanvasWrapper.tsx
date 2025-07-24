@@ -37,7 +37,7 @@ import { useReplyProgress } from "./main/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
 import { waitFor } from "@peerbit/time";
 import { DocumentsChange } from "@peerbit/document";
-import { useFeed } from "./feed/FeedContext.js";
+import { useStream } from "./feed/StreamContext.js";
 
 // ---------------------------------------------------------------------
 //  Context definitions
@@ -141,7 +141,7 @@ export const CanvasWrapper = ({
     const { showError } = useErrorDialog();
     const { announceReply } = useReplyProgress();
     const { request } = useAIReply();
-    const { typeFilter } = useFeed();
+    const { typeFilter } = useStream();
 
     // -------------------------------------------------- local state ----
     const [pendingRects, setPendingRects] = useState<Element[]>([]);

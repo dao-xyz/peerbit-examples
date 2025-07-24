@@ -1,27 +1,27 @@
 import { useRef, useState, useEffect, useMemo } from "react";
 import { InlineEditor } from "../edit/InlineEditor.js";
 import { Spinner } from "../../utils/Spinner.js";
-import { ReplyingInProgress } from "../feed/ReplyingInProgress.js";
+import { ReplyingInProgress } from "./ReplyingInProgress.js";
 import { CloseableAppPane } from "../edit/CloseableAppPane.js";
-import { useView } from "../view/ViewContext.js";
 import { DetailedView } from "../preview/DetailedPreview.js";
-import { BottomControls, SubHeader } from "../navigation/SubHeader.js";
+import { BottomControls, SubHeader } from "./StreamControls.js";
 import { AnimatedStickyToolbar } from "../edit/AnimatedStickyToolbar.js";
 import { CanvasEditorProvider } from "../edit/ToolbarContext.js";
-import { ScrollSettings } from "./useAutoScroll.js";
-import { getSnapshot } from "../feed/feedRestoration.js";
+import { ScrollSettings } from "../main/useAutoScroll.js";
+import { getSnapshot } from "./feedRestoration.js";
 import { useLocation } from "react-router";
-import { ViewModel } from "@giga-app/interface";
-import { Feed } from "../feed/Feed.js";
+import { Feed } from "./Feed.js";
 import { ToolbarCreateNew } from "../edit/ToolbarCreateNew.js";
 import { ToolbarVisibilityProvider } from "../edit/ToolbarVisibilityProvider.js";
 import { EditModeProvider } from "../edit/EditModeProvider.js";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider.js";
-import { useFeed } from "../feed/FeedContext.js";
+import { PrivateStreamScope, useStream } from "./StreamContext.js";
 import { useOnScrollToTop, useFocusProvider } from "../../FocusProvider.js";
 import { CreatePostTitle } from "../edit/CreatePostTitle.js";
 import { ToolbarInline } from "../edit/ToolbarInline.js";
-import { set } from "lodash";
+import { BasicVisualization, ChildVisualization } from "@giga-app/interface";
+import { useVisualizationContext } from "../custom/CustomizationProvider.js";
+import { useCanvases } from "../useCanvas.js";
 
 const loadingTexts = [
     "Just a moment, we're getting things ready…",
@@ -72,13 +72,15 @@ const textToLoad =
 
 const SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT = 15;
 
-const shouldFocusRepliesByDefault = (view?: ViewModel) => {
+const shouldFocusRepliesByDefault = (visualization?: BasicVisualization) => {
     // For view types other than "best" or "old", we want the new scroll-based effect.
-    if (!view) {
-        return false;
+    if (!visualization) {
+        return true;
     }
-    return view.settings.focus === "first"; // because then we scroll down to see more and hence we can make the replies to be focused by default (because for "chat" style reply sections we scroll up to see more)
+    return visualization.childrenVisualization !== ChildVisualization.CHAT; // because then we scroll down to see more and hence we can make the replies to be focused by default (because for "chat" style reply sections we scroll up to see more)
 };
+
+
 /**
  * CanvasAndReplies component.
  *
@@ -97,8 +99,8 @@ export const CanvasAndReplies = () => {
 
     const [collapsed, setCollapsed] = useState(false);
 
-    const { loading, feedRoot, lastReply, view } = useFeed();
-    const { viewRoot } = useView();
+    const { loading, feedRoot, lastReply } = useStream();
+    const { viewRoot } = useCanvases();
 
     const lastScrollTopRef = useRef(-1);
     const lastHeightTopRef = useRef(-1);
@@ -147,11 +149,13 @@ export const CanvasAndReplies = () => {
         };
     }, [postRef.current, repliesScrollRef.current]);
 
+    const visualization = useVisualizationContext().visualization;
+
     useOnScrollToTop(() => {
         // Scroll to the top of the page
         scrollToSnapEnabled.current = false;
         lastScrollTopRef.current = -1;
-        setRepliesFocused(shouldFocusRepliesByDefault(view));
+        setRepliesFocused(shouldFocusRepliesByDefault(visualization));
         setTimeout(() => {
             scrollToSnapEnabled.current = true;
         }, 100); // This seems to be necessary on IOS Safari to avoid down scrolls to trigger focus again immediately
@@ -164,18 +168,23 @@ export const CanvasAndReplies = () => {
         useFocusProvider();
 
     useEffect(() => {
-        _setRepliesFocused(hasSnap || shouldFocusRepliesByDefault(view)); // reset focused state on mount
+        _setRepliesFocused(
+            hasSnap || shouldFocusRepliesByDefault(visualization)
+        ); // reset focused state on mount
     }, []);
 
     const { setDisabled } = useHeaderVisibilityContext();
     const collapsable = useMemo(
-        () => !shouldFocusRepliesByDefault(view),
-        [view]
+        () => !shouldFocusRepliesByDefault(visualization),
+        [visualization]
     );
 
     const hidePost = useMemo(
-        () => repliesFocused && collapsable && view.settings.focus === "last",
-        [repliesFocused, collapsable, view.settings.focus]
+        () =>
+            repliesFocused &&
+            collapsable &&
+            visualization?.childrenVisualization === ChildVisualization.CHAT,
+        [repliesFocused, collapsable, visualization]
     );
 
     useEffect(() => {
@@ -194,27 +203,36 @@ export const CanvasAndReplies = () => {
         return setScrollSettings((prev) => {
             return {
                 ...prev,
-                view,
+                scrollDirection:
+                    visualization?.childrenVisualization ===
+                        ChildVisualization.CHAT
+                        ? "down"
+                        : "up",
                 scrollUsingWindow: focused,
             };
         });
     };
 
     useEffect(() => {
-        if (view) {
-            setRepliesFocused(shouldFocusRepliesByDefault(view));
+        /*  if (visualization)  */ {
+            setRepliesFocused(shouldFocusRepliesByDefault(visualization));
             setScrollSettings((prev) => {
                 return {
                     ...prev,
-                    scrollUsingWindow: shouldFocusRepliesByDefault(view),
-                    view,
+                    scrollDirection:
+                        visualization?.childrenVisualization ===
+                            ChildVisualization.CHAT
+                            ? "down"
+                            : "up",
+                    scrollUsingWindow:
+                        shouldFocusRepliesByDefault(visualization),
                 };
             });
         }
         return () => {
             // setRepliesFocused(false); // we can't have this unmount it seems. Feed restoration does not work (i.e. focus can not be set autmatically, because this will cancel it)
         };
-    }, [view]);
+    }, [visualization]);
 
     useEffect(() => {
         lastScrollTopRef.current = -1;
@@ -333,6 +351,8 @@ export const CanvasAndReplies = () => {
     /*     const bottomPadding = fullscreenEditorActive
             ? EXTRA_PADDING_BOTTOM
             : EXTRA_PADDING_BOTTOM + toolbarHeight; */
+    const isChat =
+        visualization?.childrenVisualization === ChildVisualization.CHAT;
 
     return (
         <>
@@ -347,60 +367,61 @@ export const CanvasAndReplies = () => {
                     <CanvasEditorProvider parent={feedRoot}>
                         <div
                             ref={scrollContainerRef}
-                            className={`${
-                                repliesFocused ? "h-fit" : "h-full"
-                            } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
+                            className={`${repliesFocused ? "h-fit" : "h-full"
+                                } flex flex-col relative grow shrink-0`} // some extra height so that we can trigger downscroll
                             style={{
                                 paddingBottom: !showInlineEditor
                                     ? `calc(var(--toolbar-h, 0px) + ${EXTRA_PADDING_BOTTOM}px)`
                                     : "2rem", // we use a --toolbar-h var because this will reduce glitchyness from re-rendering
                                 height: repliesFocused
                                     ? "fit-content"
-                                    : `calc(100vh - var(--toolbar-h, 0px) + ${
-                                          spacerHeight +
-                                          EXTRA_PADDING_BOTTOM +
-                                          SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT
-                                      }px)`,
+                                    : `calc(100vh - var(--toolbar-h, 0px) + ${spacerHeight +
+                                    EXTRA_PADDING_BOTTOM +
+                                    SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT
+                                    }px)`,
                             }}
                         >
                             {/* Header section */}
                             {!hidePost && (
                                 <div
                                     ref={postRef}
-                                    className={`transition-all duration-300 ${
-                                        collapsed
-                                            ? "blur-3xl opacity-0"
-                                            : "blur-0 opacity-100"
-                                    }`}
+                                    className={`transition-all duration-300 ${collapsed
+                                        ? "blur-3xl opacity-0"
+                                        : "blur-0 opacity-100"
+                                        }`}
                                 >
                                     <div className="z-5 flex-shrink-0   ">
                                         <div className="max-w-[876px] mx-auto w-full bg-neutral-50 dark:bg-neutral-900 shadow-md">
-                                            {/*  special code to run in the root {!viewRoot || canvases.length === 1 ? (
-                                  TODO 
-                            ) */}
-                                            <DetailedView />
+                                            {!viewRoot ||
+                                                viewRoot?.path.length === 0 ? (
+                                                <></>
+                                            ) : (
+                                                <DetailedView />
+                                            )}
                                         </div>
                                     </div>
                                 </div>
                             )}
 
-                            <SubHeader
-                                collapsable={collapsable}
-                                onCollapse={setCollapsed}
-                                onViewChange={() => {
-                                    // a manual change in view is an indication of that the user is interested in the replies
-                                    setRepliesFocused(true);
-                                }}
-                                onNavTypeChange={(res) => {
-                                    setNavType(res);
-                                }}
-                            />
+                            {!isChat && (
+                                <SubHeader
+                                    collapsable={collapsable}
+                                    onCollapse={setCollapsed}
+                                    onViewChange={() => {
+                                        // a manual change in view is an indication of that the user is interested in the replies
+                                        setRepliesFocused(true);
+                                    }}
+                                    onNavTypeChange={(res) => {
+                                        setNavType(res);
+                                    }}
+                                />
+                            )}
 
                             {/* Replies section */}
                             {navType !== "rows" && (
                                 <div
                                     className="relative flex-1 h-full"
-                                    /*    style={{
+                                /*    style={{
 height: `${spacerHeight}px`,
 }} */
                                 >
@@ -408,21 +429,19 @@ height: `${spacerHeight}px`,
                                         // When not focused, make the container fill the available area and show a pointer cursor.
                                         // When focused, render it inline (relative) and remove the click handler.
 
-                                        className={`${
-                                            !repliesFocused
-                                                ? "absolute inset-0 w-full cursor-pointer "
-                                                : "relative"
-                                        }`}
+                                        className={`${!repliesFocused
+                                            ? "absolute inset-0 w-full cursor-pointer "
+                                            : "relative"
+                                            }`}
                                     >
                                         {/* When unfocused, wrap Replies in an absolutely positioned, scrollable container.
         When focused, no extra wrapper is applied so the Replies render inline. */}
                                         <div
                                             id="replies-container"
-                                            className={`box flex flex-col items-center  ${
-                                                !repliesFocused
-                                                    ? "absolute inset-0 overflow-y-auto hide-scrollbar "
-                                                    : ""
-                                            } `}
+                                            className={`box flex flex-col items-center  ${!repliesFocused
+                                                ? "absolute inset-0 overflow-y-auto hide-scrollbar "
+                                                : ""
+                                                } `}
                                             ref={repliesScrollRef}
                                             style={
                                                 {
@@ -434,12 +453,12 @@ height: `${spacerHeight}px`,
                                         >
                                             <div className="flex flex-col w-full gap-2 max-w-[876px] items-center ">
                                                 {feedRoot &&
-                                                    view?.id !== "chat" &&
+                                                    !isChat &&
                                                     !showInlineEditor && (
                                                         <div className="px-2 pt-2 w-full">
                                                             <ToolbarCreateNew
                                                                 showProfile
-                                                                className="rounded-lg bg-neutral-100 dark:bg-neutral-800/60"
+                                                                className="rounded-lg bg-neutral-50 dark:bg-neutral-800/60"
                                                                 parent={
                                                                     feedRoot
                                                                 }
@@ -495,7 +514,7 @@ height: `${spacerHeight}px`,
                                                     className="w-full px-2 sticky"
                                                     style={{
                                                         top: repliesFocused
-                                                            ? "calc(var(--header-h,0px) + var(--sticky-header-h,0px) + 0.5rem)"
+                                                            ? "calc(var(--header-h,0px) + var(--sticky-header-h,0px))"
                                                             : "10px",
                                                         //     transform: visible
                                                         //        ? "translateY(0)"
@@ -503,16 +522,18 @@ height: `${spacerHeight}px`,
                                                         willChange: "transform",
                                                         backfaceVisibility:
                                                             "hidden",
-                                                        zIndex: 15,
+                                                        zIndex: 2,
                                                     }}
                                                 >
-                                                    <div
-                                                        //  ref={headerRef}
-                                                        className={` rounded-xl h-8  shadow-sm bg-neutral-100 dark:bg-neutral-800  transition-transform duration-800 ease-in-out  w-full`}
-                                                    >
-                                                        <BottomControls /* onViewChange={onViewChange} */
-                                                        />
-                                                    </div>
+                                                    {!isChat && (
+                                                        <div
+                                                            //  ref={headerRef}
+                                                            className={` rounded-b-xl h-8  shadow-sm bg-neutral-100 dark:bg-neutral-800  transition-transform duration-800 ease-in-out  w-full`}
+                                                        >
+                                                            <BottomControls /* onViewChange={onViewChange} */
+                                                            />
+                                                        </div>
+                                                    )}
                                                 </div>
 
                                                 <Feed
@@ -529,39 +550,39 @@ height: `${spacerHeight}px`,
                                                     onSnapshot={(_snap) => {
                                                         setRepliesFocused(true);
                                                     }}
+                                                    provider={PrivateStreamScope.useStream}
                                                     disableLoadMore={
                                                         showInlineEditor
                                                     } /* when showing inline editor we want to scroll up and down to perhaps read content so we disable the load more. TODO add a button so we still can trigger load more */
                                                 />
-                                                {feedRoot &&
-                                                    view?.id === "chat" && (
-                                                        <AnimatedStickyToolbar>
-                                                            <CloseableAppPane>
-                                                                <ToolbarCreateNew
-                                                                    className="rounded-t-lg px-2 "
-                                                                    parent={
-                                                                        feedRoot
-                                                                    }
-                                                                    inlineEditorActive={
-                                                                        showInlineEditor
-                                                                    }
-                                                                    setInlineEditorActive={
-                                                                        setShowInlineEditor
-                                                                    }
-                                                                />
-                                                            </CloseableAppPane>
-                                                        </AnimatedStickyToolbar>
-                                                    )}
+                                                {feedRoot && isChat && (
+                                                    <AnimatedStickyToolbar>
+                                                        <CloseableAppPane>
+                                                            <ToolbarCreateNew
+                                                                className="rounded-t-lg px-2 "
+                                                                parent={
+                                                                    feedRoot
+                                                                }
+                                                                inlineEditorActive={
+                                                                    showInlineEditor
+                                                                }
+                                                                setInlineEditorActive={
+                                                                    setShowInlineEditor
+                                                                }
+                                                            />
+                                                        </CloseableAppPane>
+                                                    </AnimatedStickyToolbar>
+                                                )}
                                             </div>
                                         </div>
                                         {/* Render the gradient overlay only when unfocused.
         This overlay is absolutely positioned over the container and does not receive pointer events. */}
-                                        {!repliesFocused && (
+                                        {!repliesFocused && isChat && (
                                             <div
                                                 /*   style={{
                                                   background: "linear-gradient(bottom top, transparent, rgba(255, 255, 255, 0.8))",
                                               }} */
-                                                className="absolute  top-10 inset-0 z-3 cursor-pointer flex flex-col justify-start items-center overflow-container-guide "
+                                                className="absolute  top-0 inset-0 z-3 cursor-pointer flex flex-col justify-start items-center overflow-container-guide "
                                                 onClick={(e) => {
                                                     if (repliesFocused) {
                                                         return;

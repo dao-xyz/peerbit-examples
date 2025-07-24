@@ -10,9 +10,7 @@ import {
     getTextElementsQuery,
     getImagesQuery,
     LOWEST_QUALITY,
-    Purpose,
-    Navigation,
-    Narrative,
+    ChildVisualization,
     getNarrativePostsQuery,
 } from "../content.js";
 import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
@@ -41,6 +39,62 @@ describe("canvas", () => {
         expect(elements).to.have.length(1);
         expect(elements[0].__indexed.content).to.eq(content);
     };
+
+    it("can delete", async () => {
+
+        await session.stop();
+
+        let directory = "./tmp/can reload subpath only/" + +new Date();
+        session = await TestSession.connected(1, { directory });
+
+
+        const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+        const root = await session.peers[0].open(
+            new Canvas({
+                publicKey: randomRootKey,
+                seed: new Uint8Array(),
+            }),
+            {
+                args: {
+                    replicate: true
+                }
+            }
+        );
+        const [a, _b, _c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
+
+        const checkData = async (empty?: boolean) => {
+            const allReplies = await root.replies.index.iterate().all();
+            expect(allReplies).to.have.length(empty ? 0 : 3);
+
+            const allElements = await root.elements.index.iterate().all();
+            expect(allElements).to.have.length(empty ? 0 : 3);
+        }
+        await checkData();
+        await Canvas.delete(a, session.peers[0]);
+
+        await checkData(true);
+
+        await session.peers[0].stop(); // close the peer to make sure the data is deleted
+
+        console.log("re-opening session");
+
+        session = await TestSession.connected(1, { directory });
+        const peer = session.peers[0];
+        const rootAgain = await peer.open(root.clone(), {
+            existing: "reuse",
+            args: {
+                replicate: true
+            }
+        })
+        expect(rootAgain).to.exist;
+
+        const allRepliesAfterReload = await rootAgain.replies.index
+            .iterate({ query: {} })
+            .all();
+
+        expect(allRepliesAfterReload).to.have.length(0);
+    })
+
 
     it("can make path", async () => {
         const randomRootKey = (await Ed25519Keypair.create()).publicKey;
@@ -103,7 +157,10 @@ describe("canvas", () => {
                 expect(title.length > 0).to.be.true;
             }
         });
+
+
     });
+
 
     describe("loadPath", () => {
         it("can load path with length", async () => {
@@ -143,15 +200,14 @@ describe("canvas", () => {
             );
             const [first, second] = replies;
 
+            const type = await root.getExperience();
+            expect(type).to.not.exist;
+
             await checkContent(first, "About");
             await checkContent(second, "Help");
 
-            const type = await root.getType();
-            expect(type).to.not.exist;
-
-            const feedType = await first.getType();
-            expect(feedType).to.exist;
-            expect(feedType?.type).to.be.instanceOf(Navigation);
+            expect(await first.getExperience()).to.eq(ChildVisualization.TREE);
+            expect(await second.getExperience()).to.eq(ChildVisualization.TREE);
 
             // creating again should resolve in the same address
             const root2 = await createRoot(session.peers[1], {
@@ -171,28 +227,28 @@ describe("canvas", () => {
         });
     });
 
-    describe("getViewContext", () => {
+    describe("getStandaloneParent", () => {
         it("view context from root", async () => {
             const root = await createRoot(session.peers[0], {
                 persisted: true,
             });
-            expect((await root.getType())?.type).to.be.undefined;
+            expect(await root.getExperience()).to.be.undefined;
             const [feed] = await root.getCreateCanvasByPath(["Feed"]);
-            expect((await feed.getType())?.type).to.be.instanceOf(Navigation);
 
             const path = await feed.getCreateCanvasByPath(["a"]);
             const a = path[path.length - 1];
-            const rootFromA = await a.getViewContext();
+            await feed.unlink(a.id); // make child into standaly
+            const rootFromA = await a.getStandaloneParent();
             expect(rootFromA![0].idString).to.eq(a.idString);
 
-            const rootFromFeed = await feed.getViewContext();
+            const rootFromFeed = await feed.getStandaloneParent();
             expect(rootFromFeed![0].idString).to.eq(root.idString);
 
-            const rootFromRoot = await root.getViewContext();
+            const rootFromRoot = await root.getStandaloneParent();
             expect(rootFromRoot![0].idString).to.eq(root.idString);
         });
 
-        it("root as navigation", async () => {
+        it("root as feed", async () => {
             const randomRootKey = (await Ed25519Keypair.create()).publicKey;
             const root = await session.peers[0].open(
                 new Canvas({
@@ -202,23 +258,9 @@ describe("canvas", () => {
             );
 
             const [a] = await root.getCreateCanvasByPath(["a"]);
-            await root.setType(
-                new Purpose({
-                    canvasId: root.id,
-                    type: new Navigation(),
-                })
-            );
 
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Navigation(),
-                })
-            );
-
-            expect(await root.getType()).to.exist;
-            expect(await a.getType()).to.exist;
-            const rootFromC = await a.getViewContext();
+            expect(await a.hasParentLinks()).to.be.true;
+            const rootFromC = await a.getStandaloneParent();
             expect(rootFromC?.map((x) => x.idString)).to.deep.eq([
                 root.idString,
                 a.idString,
@@ -236,33 +278,9 @@ describe("canvas", () => {
 
             const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
 
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Narrative(),
-                })
-            );
-
-            await b.setType(
-                new Purpose({
-                    canvasId: b.id,
-                    type: new Navigation(),
-                })
-            );
-
-            await c.setType(
-                new Purpose({
-                    canvasId: c.id,
-                    type: new Navigation(),
-                })
-            );
-
-            expect(await a.getType()).to.exist;
-            expect(await b.getType()).to.exist;
-            expect(await c.getType()).to.exist;
-
-            const rootFromC = await c.getViewContext();
+            const rootFromC = await c.getStandaloneParent();
             expect(rootFromC?.map((x) => x.idString)).to.deep.eq([
+                root.idString,
                 a.idString,
                 b.idString,
                 c.idString,
@@ -278,93 +296,72 @@ describe("canvas", () => {
                 })
             );
 
-            const rootFromRoot = await root.getViewContext();
+            const rootFromRoot = await root.getStandaloneParent();
             expect(rootFromRoot?.map((x) => x.idString)).to.deep.eq([
                 root.idString,
             ]);
         });
     });
 
-    describe("getFeedContext", () => {
-        it("feed context from root", async () => {
-            const root = await createRoot(session.peers[0], {
-                persisted: true,
-            });
-            const [feed] = await root.getCreateCanvasByPath(["Feed"]);
-            const path = await feed.getCreateCanvasByPath(["a"]);
-            const a = path[path.length - 1];
-            const feedFromA = await a.getFeedContext();
-            expect(feedFromA!.idString).to.eq(a.idString);
-
-            const feedFromRoot = await root.getFeedContext();
-            expect(feedFromRoot!.idString).to.eq(feed.idString);
-        });
-
-        it("narrative at root", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                    seed: new Uint8Array(),
-                })
-            );
-
-            const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
-
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Narrative(),
-                })
-            );
-
-            await b.setType(
-                new Purpose({
-                    canvasId: b.id,
-                    type: new Navigation(),
-                })
-            );
-            expect(await a.getType()).to.exist;
-            expect(await b.getType()).to.exist;
-            const feedFromA = await a.getFeedContext();
-            expect(feedFromA?.idString).to.deep.eq(a.idString);
-        });
-
-        it("narrative at middle", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                    seed: new Uint8Array(),
-                })
-            );
-
-            const [a, b, _c] = await root.getCreateCanvasByPath([
-                "a",
-                "b",
-                "c",
-            ]);
-
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Navigation(),
-                })
-            );
-
-            await b.setType(
-                new Purpose({
-                    canvasId: b.id,
-                    type: new Narrative(),
-                })
-            );
-
-            expect(await a.getType()).to.exist;
-            expect(await b.getType()).to.exist;
-            const feedFromA = await a.getFeedContext();
-            expect(feedFromA?.idString).to.deep.eq(b.idString);
-        });
-    });
+    /*  describe("getFeedContext", () => {
+         it("feed context from root", async () => {
+             const root = await createRoot(session.peers[0], {
+                 persisted: true,
+             });
+             const [feed] = await root.getCreateCanvasByPath(["Feed"]);
+             const path = await feed.getCreateCanvasByPath(["a"]);
+             const a = path[path.length - 1];
+             const feedFromA = await a.getFeedContext();
+             expect(feedFromA!.idString).to.eq(a.idString);
+     
+             const feedFromRoot = await root.getFeedContext();
+             expect(feedFromRoot!.idString).to.eq(feed.idString);
+         });
+     
+         it("narrative at root", async () => {
+             const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+             const root = await session.peers[0].open(
+                 new Canvas({
+                     publicKey: randomRootKey,
+                     seed: new Uint8Array(),
+                 })
+             );
+     
+             const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
+     
+             await a.setMode("narrative");
+             await b.setExperience(ChildVisualization.DOCUMENT);
+     
+             expect(await a.getType()).to.exist;
+             expect(await b.getType()).to.exist;
+             const feedFromA = await a.getFeedContext();
+             expect(feedFromA?.idString).to.deep.eq(a.idString);
+         });
+     
+         it("narrative at middle", async () => {
+             const randomRootKey = (await Ed25519Keypair.create()).publicKey;
+             const root = await session.peers[0].open(
+                 new Canvas({
+                     publicKey: randomRootKey,
+                     seed: new Uint8Array(),
+                 })
+             );
+     
+             const [a, b, _c] = await root.getCreateCanvasByPath([
+                 "a",
+                 "b",
+                 "c",
+             ]);
+     
+             await a.setExperience(ChildVisualization.DOCUMENT);
+             await b.setMode("narrative");
+     
+             expect(await a.getType()).to.exist;
+             expect(await b.getType()).to.exist;
+             const feedFromA = await a.getFeedContext();
+             expect(feedFromA?.idString).to.deep.eq(b.idString);
+         });
+     }); */
 
     it("index once", async () => {
         const randomRootKey = (await Ed25519Keypair.create()).publicKey;
@@ -397,7 +394,11 @@ describe("canvas", () => {
                 seed: new Uint8Array(),
             })
         );
-        const [a, b] = await root1.getCreateCanvasByPath(["a", "b"]);
+        const [a, b] = await root1.getCreateCanvasByPath(["a", "b"], {
+            layout: null,
+        }); // no layout, means the last post will be of a n
+
+        await delay(5e3);
 
         expect(Number(a.__indexed.replies)).to.eq(1); // a has one reply (b)
         expect(Number(b.__indexed.replies)).to.eq(0); // b has no replies
@@ -411,35 +412,26 @@ describe("canvas", () => {
                 seed: new Uint8Array(),
             })
         );
-        let [a, b, c] = await root1.getCreateCanvasByPath(["a", "b", "c"]);
+        let [a, b, c] = await root1.getCreateCanvasByPath(["a", "b", "c"], {
+            layout: null,
+        }); // no layout, means the last post will be of a narrative type
 
-        expect(Number(a.__indexed.replies)).to.eq(2);
+        expect(Number(a.__indexed.replies)).to.eq(1);
         expect(Number(b.__indexed.replies)).to.eq(1);
         expect(Number(c.__indexed.replies)).to.eq(0);
 
         // await delay(2e3)
 
-        await b.setType(
-            new Purpose({
-                canvasId: b.id,
-                type: new Navigation({}),
-            })
-        );
-
+        await a.unlink(b.id); // make b into narrative post
         await delay(5e3);
-        const iterator = root1.replies.index.iterate({
-            query: getNarrativePostsQuery(),
-        });
-        const all = await iterator.all();
-        expect(all).to.have.length(2);
 
         let [aMod, bMod, cMod] = await root1.getCreateCanvasByPath([
             "a",
             "b",
             "c",
-        ]);
+        ]); // no layout, means the last post will be of a narrative type
 
-        expect(Number(aMod.__indexed.replies)).to.eq(1);
+        expect(Number(aMod.__indexed.replies)).to.eq(2);
         expect(Number(bMod.__indexed.replies)).to.eq(1);
         expect(Number(cMod.__indexed.replies)).to.eq(0);
     });
@@ -447,7 +439,7 @@ describe("canvas", () => {
     /*
     //  TODO for keep: 'self' property is used and a remote not is modifying the same document, updates will not be propagate
     // this will lead to issues when working with indexed data and fetching stuff "local first"
-    
+     
     it("will not re-index parents if not replicating", async () => {
          const randomRootKey = (await Ed25519Keypair.create()).publicKey;
          const root1 = await session.peers[0].open(
@@ -457,46 +449,46 @@ describe("canvas", () => {
              })
          );
          const [a1] = await root1.getCreateCanvasByPath(["a"]);
- 
+     
          const root2 = await session.peers[1].open(root1.clone(), {
              args: {
                  replicate: false,
              },
          });
- 
+     
          await root2.replies.log.waitForReplicators({ waitForNewPeers: true });
- 
+     
          let putIndexCalls = root2.replies.index.putWithContext.bind(
              root2.replies.index
          );
- 
+     
          let putCount = 0;
          await root2.load();
          root2.replies.index.putWithContext = async (a, b, c) => {
              putCount++;
              return putIndexCalls(a, b, c);
          };
- 
+     
          const [a2, b2] = await root2.getCreateCanvasByPath(["a", "b"]);
          await waitForResolved(async () => expect(Number(await a1.countReplies({ onlyImmediate: true }))).to.eq(1))
- 
+     
          expect(putCount).to.eq(1);
- 
+     
          const checkReplies = async (root: Canvas) => {
              const a = await root.getCreateCanvasByPath(["a"])
              expect(a).to.have.length(1);
              const asIndexed = a[0] as WithIndexedContext<Canvas, IndexableCanvas>;
- 
+     
              expect(asIndexed.__indexed).to.exist; // root + a
              expect(Number(await a1.countReplies({ onlyImmediate: true }))).to.eq(1);
              expect(Number(asIndexed.__indexed.replies)).to.eq(1); // a has one reply (b)
          }
- 
+     
          await checkReplies(root1);
          await checkReplies(root2);
- 
- 
- 
+     
+     
+     
      }); */
     it("same path", async () => {
         const randomRootKey = (await Ed25519Keypair.create()).publicKey;
@@ -600,6 +592,9 @@ describe("canvas", () => {
             expect(a).to.exist;
             expect(b).to.exist;
 
+            await root.unlink(a.id); // make a into narrative post
+            await a.unlink(b.id); // make b into narrative post
+
             // index updates are not immediate, so we do checks until it's updated
             await waitForResolved(async () => {
                 const countedAllRepliesFromRoot = await root.countReplies();
@@ -679,10 +674,23 @@ describe("canvas", () => {
                     seed: new Uint8Array(),
                 })
             );
-            await root.getCreateCanvasByPath(["b", "b"]);
-            await root.getCreateCanvasByPath(["a", "b"]);
-            await root.getCreateCanvasByPath(["c"]);
-            await root.getCreateCanvasByPath(["a", "c"]);
+            const p1 = await root.getCreateCanvasByPath(["b", "b"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+            const p2 = await root.getCreateCanvasByPath(["a", "b"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+            const p3 = await root.getCreateCanvasByPath(["c"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+            const p4 = await root.getCreateCanvasByPath(["a", "c"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+
+            await root.unlink(p1[0].id); // make b into narrative post
+            await root.unlink(p2[0].id); // make a into narrative post
+            await root.unlink(p3[0].id); // make c into narrative post
+            await root.unlink(p4[0].id); // make a into narrative post
 
             const sortedByReplies = await root.replies.index.search({
                 query: getImmediateRepliesQuery(root),
@@ -713,7 +721,9 @@ describe("canvas", () => {
             for (const [key, count] of Object.entries(childrenCount)) {
                 for (let i = 0; i < count; i++) {
                     // console.log("key: " + key + "key", "i", i)
-                    await rootA.getCreateCanvasByPath([key, i.toString()]);
+                    await rootA.getCreateCanvasByPath([key, i.toString()], {
+                        layout: null,
+                    }); // no layout, means the last post will be of a narrative type
                 }
             }
 
@@ -773,7 +783,9 @@ describe("canvas", () => {
             for (const [key, count] of Object.entries(childrenCount)) {
                 for (let i = 0; i < count; i++) {
                     // console.log("key: " + key + "key", "i", i)
-                    await rootA.getCreateCanvasByPath([key, i.toString()]);
+                    await rootA.getCreateCanvasByPath([key, i.toString()], {
+                        layout: null,
+                    }); // no layout, means the last post will be of a narrative type
                 }
             }
 
@@ -884,10 +896,23 @@ describe("canvas", () => {
             );
             let replicator = await session.peers[1].open(root.clone());
 
-            await root.getCreateCanvasByPath(["b", "b"]);
-            await root.getCreateCanvasByPath(["a", "b"]);
-            await root.getCreateCanvasByPath(["c"]);
-            await root.getCreateCanvasByPath(["a", "c"]);
+            const p1 = await root.getCreateCanvasByPath(["b", "b"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+            const p2 = await root.getCreateCanvasByPath(["a", "b"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+            const p3 = await root.getCreateCanvasByPath(["c"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+            const p4 = await root.getCreateCanvasByPath(["a", "c"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
+
+            await root.unlink(p1[0].id); // make b into narrative post
+            await root.unlink(p2[0].id); // make a into narrative post
+            await root.unlink(p3[0].id); // make c into narrative post
+            await root.unlink(p4[0].id); // make a into narrative post
 
             await waitForResolved(() =>
                 expect(replicator.replies.log.log.length).to.eq(6)
@@ -949,7 +974,9 @@ describe("canvas", () => {
                     },
                 },
             });
-            await replicator.getCreateCanvasByPath(["a", "b"]);
+            await replicator.getCreateCanvasByPath(["a", "b"], {
+                layout: null,
+            }); // no layout, means the last post will be of a narrative type
 
             const all = await viewer.replies.index.search({
                 sort: new Sort({
@@ -1169,7 +1196,7 @@ describe("canvas", () => {
     });
 
     describe("visualization", () => {
-        it("can set visualization", () => {});
+        it("can set visualization", () => { });
     });
     /*  it("determinstic with seed", async () => {
          let seed = new Uint8Array([0, 1, 2]);

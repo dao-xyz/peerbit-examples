@@ -6,8 +6,7 @@ import {
     usePendingCanvas,
 } from "./PendingCanvasContext";
 import { AutoReplyProvider } from "../AutoReplyContext";
-import { useView } from "../view/ViewContext";
-import { Canvas } from "@giga-app/interface";
+import { Canvas, ChildVisualization, Layout } from "@giga-app/interface";
 
 interface ToolbarContextType {
     appSelectOpen: boolean;
@@ -21,7 +20,8 @@ type ToolbarProviderProps = {
     children: ReactNode;
     pendingCanvas?: Canvas;
     placeholder?: string;
-    type?: "navigation" | "narrative";
+    type?: ChildVisualization;
+    layout?: Layout;
     classNameContent?: string;
     parent: Canvas;
 };
@@ -51,7 +51,7 @@ const CanvasWrapperComponent = ({
     classNameContent,
     parent,
 }: ToolbarProviderProps) => {
-    const { pendingCanvas, savePending: onSavePending } = usePendingCanvas();
+    const { pendingCanvas, publish: onSavePending } = usePendingCanvas();
     return (
         <CanvasWrapper
             canvas={pendingCanvas}
@@ -77,10 +77,12 @@ export const CanvasEditorProvider = ({
     classNameContent,
     parent,
     type,
+    layout,
 }: ToolbarProviderProps) => {
     return (
         <PendingCanvasProvider
-            type={type}
+            layout={layout}
+            experience={type}
             pendingCanvas={pendingCanvas}
             parent={parent}
         >

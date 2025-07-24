@@ -9,6 +9,7 @@ import { MissingProfile } from "./profile/MissingProfile";
 import { ConnectDevices } from "./identity/ConnectDevices";
 import { NavigationEffects } from "./NavigationEffects";
 import { useRecordLocation } from "./useNavHistory";
+import { Drafts } from "./canvas/draft/Drafts";
 
 const textDecoder = new TextDecoder();
 export const getStreamPath = (node: PublicSignKey) =>
@@ -41,6 +42,7 @@ export const getCanvasAddressByPath = (path: string) => path.split("/")[2];
 
 export const USER_BY_KEY_NAME = "/k/:key";
 export const NEW_SPACE = "/new";
+export const DRAFTS = "/drafts";
 
 export function BaseRoutes() {
     useRecordLocation();
@@ -52,6 +54,7 @@ export function BaseRoutes() {
                 <Route path={CONNECT_DEVICES} element={<ConnectDevices />} />
                 <Route path={MISSING_PROFILE} element={<MissingProfile />} />
                 <Route path={NEW_ROOT} element={<CreateRoot />} />
+                <Route path={DRAFTS} element={<Drafts />} />
                 <Route path="/path/*" element={<Home />} />
                 <Route path="/*" element={<Home />} />
             </Routes>

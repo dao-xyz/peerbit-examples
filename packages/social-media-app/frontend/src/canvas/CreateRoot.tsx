@@ -15,7 +15,7 @@ import { IoArrowForward } from "react-icons/io5";
 
 export const CreateRoot = () => {
     const { setRoot } = useCanvases();
-    const [isLoading, setIsLoading] = useState(false);
+    const [isLoading] = useState(false);
     const { peer } = usePeer();
     const [base64, setBase64] = useState<string | undefined>(undefined);
     const [importError, setImportError] = useState(false);

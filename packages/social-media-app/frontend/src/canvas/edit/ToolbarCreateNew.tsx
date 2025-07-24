@@ -7,18 +7,21 @@ import { SaveButton } from "./SaveCanvasButton";
 import { BsCamera, BsSend } from "react-icons/bs";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
-import { Canvas as CanvasDB, SimpleWebManifest } from "@giga-app/interface";
+import {
+    Canvas as CanvasDB,
+    ChildVisualization,
+    SimpleWebManifest,
+} from "@giga-app/interface";
 import { useAutoReply } from "../AutoReplyContext";
-import { BsArrowsAngleExpand } from "react-icons/bs";
 import { useEditTools } from "./ToolbarContext";
 import { TbArrowsDiagonalMinimize2 } from "react-icons/tb";
-import { useFeed } from "../feed/FeedContext";
 import { ProfileButton } from "../../profile/ProfileButton";
 import { usePeer } from "@peerbit/react";
-import * as Toggle from "@radix-ui/react-toggle";
 import { useAIReply } from "../../ai/AIReployContext";
 import { PrivacySwitch } from "./PrivacySwitch";
 import { AiToggle } from "./AskAIToggle";
+import { BiExpandAlt } from "react-icons/bi";
+import { useVisualizationContext } from "../custom/CustomizationProvider";
 
 export const ToolbarCreateNew = (props: {
     showProfile?: boolean;
@@ -40,7 +43,7 @@ export const ToolbarCreateNew = (props: {
 
     const { isReady } = useAIReply();
     const { replyTo, disable: disableAutoReply } = useAutoReply();
-    const { view } = useFeed();
+    const { visualization } = useVisualizationContext();
     const { search } = useApps();
     const [resolvedApp, setResolvedApp] = useState<null | SimpleWebManifest>(
         null
@@ -51,7 +54,7 @@ export const ToolbarCreateNew = (props: {
         if (
             !savedOnce &&
             /*  !isSavingCanvas && !isSavingElements &&  */ pendingRects.length ===
-                0 &&
+            0 &&
             canvas
         ) {
             insertDefault({ once: true });
@@ -89,9 +92,8 @@ export const ToolbarCreateNew = (props: {
             className="btn btn-icon p-0 m-0 h-full"
         >
             <FaPlus
-                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300  ${
-                    appSelectOpen ? "rotate-45" : "rotate-0"
-                }`}
+                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300  ${appSelectOpen ? "rotate-45" : "rotate-0"
+                    }`}
             />
         </button>
     );
@@ -143,9 +145,10 @@ export const ToolbarCreateNew = (props: {
             </div> */
         );
     }
+    const isChat =
+        visualization?.childrenVisualization === ChildVisualization.CHAT;
     const colorStyle =
-        "dark:bg-neutral-700 " +
-        (view?.id === "chat" ? "bg-neutral-200" : "bg-neutral-50");
+        "dark:bg-neutral-700 " + (isChat ? "bg-neutral-200" : "bg-neutral-50");
 
     return (
         <>
@@ -274,10 +277,10 @@ export const ToolbarCreateNew = (props: {
                         className="btn btn-icon btn-icon-md "
                         onClick={() => props.setInlineEditorActive(true)}
                     >
-                        <BsArrowsAngleExpand />
+                        <BiExpandAlt size={20} />
                     </button>
 
-                    {view?.id === "chat" &&
+                    {isChat &&
                         replyTo &&
                         replyTo.idString !== props.parent.idString && (
                             <button

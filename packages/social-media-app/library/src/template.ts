@@ -1,14 +1,24 @@
-/* template.ts ------------------------------------------------------------ */
 import { field, fixedArray, variant } from "@dao-xyz/borsh";
 import { randomBytes, sha256Sync } from "@peerbit/crypto";
-import { Canvas, Navigation, Purpose } from "./content.js";
+import { Canvas, ChildVisualization, Layout } from "./content.js";
 import { Program, ProgramClient } from "@peerbit/program";
 import { Documents, id } from "@peerbit/document";
+import { concat } from "uint8arrays";
+
+const generateId = (...keys: (Uint8Array | string)[]): Uint8Array => {
+    const seed = keys.map((key) => {
+        if (typeof key === "string") {
+            return new TextEncoder().encode(key);
+        } else {
+            return key;
+        }
+    });
+    return sha256Sync(concat(seed));
+};
 
 /** A serialisable template that can be cloned into any Canvas tree. */
 @variant(0)
 export class Template {
-    /* --- Meta data (for catalogues, search, etc.) ----------------------- */
     @id({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
@@ -46,7 +56,8 @@ export class Template {
         }
 
         // Recursively copy the prototype subtree ------------------------
-        return await this.prototype.cloneInto(parent);
+        this.prototype = await parent.openWithSameSettings(this.prototype)
+        return this.prototype.cloneInto(parent);
     }
 }
 
@@ -117,11 +128,13 @@ export async function createAlbumTemplate(properties: {
 
     /* Root (Album) ------------------------------------------------------ */
     let albumRoot = new Canvas({
-        id: sha256Sync(new TextEncoder().encode("album")),
+        id: generateId("album"),
         publicKey: peer.identity.publicKey,
     });
 
     albumRoot = await peer.open(albumRoot, { existing: "reuse" });
+    await albumRoot.setExperience(ChildVisualization.FEED);
+
     let infoText =
         properties?.description == null
             ? properties.name ?? "Album"
@@ -129,27 +142,23 @@ export async function createAlbumTemplate(properties: {
     await albumRoot.addTextElement({ text: infoText });
 
     /* Child: “Photos” --------------------------------------------------- */
-    const photos = new Canvas({
+    let photos = new Canvas({
+        id: generateId(albumRoot.id, "photos"),
         publicKey: peer.identity.publicKey,
         parent: albumRoot,
     });
-    await peer.open(photos, { existing: "reuse" });
-    await albumRoot.createReply(photos, "navigation");
+    photos = await peer.open(photos, { existing: "reuse" });
+    await albumRoot.createReply(photos, { layout: new Layout({ x: 0 }), type: ChildVisualization.TREE });
     await photos.addTextElement({ text: "Photos" });
-    await photos.setType(
-        new Purpose({
-            canvasId: photos.id,
-            type: new Navigation({}),
-        })
-    );
 
     /* Child: “Comments” ------------------------------------------------- */
-    const comments = new Canvas({
+    let comments = new Canvas({
+        id: generateId(albumRoot.id, "comments"),
         publicKey: peer.identity.publicKey,
         parent: albumRoot,
     });
-    await peer.open(comments, { existing: "reuse" });
-    await albumRoot.createReply(comments, "navigation");
+    comments = await peer.open(comments, { existing: "reuse" });
+    await albumRoot.createReply(comments, { layout: new Layout({ x: 1 }), type: ChildVisualization.TREE });
     await comments.addTextElement({ text: "Comments" });
 
     /* Wrap everything into a shareable Template object ----------------- */
@@ -175,6 +184,7 @@ export async function createProfileTemplate(props: {
         publicKey: peer.identity.publicKey,
     });
     root = await peer.open(root, { existing: "reuse" });
+    await root.setExperience(ChildVisualization.EXPLORE);
 
     let header = props.name ?? "Profile";
     if (props.description) {
@@ -189,7 +199,7 @@ export async function createProfileTemplate(props: {
     });
     await peer.open(posts, { existing: "reuse" });
     await posts.addTextElement({ text: "Posts" });
-    await root.createReply(posts, "narrative"); // set narrative type
+    await root.createReply(posts, { layout: new Layout({ x: 0 }), type: ChildVisualization.FEED }); // set narrative type
 
     /* Child: “Photos” (navigation) --------------------------------------- */
     const photos = new Canvas({
@@ -198,13 +208,7 @@ export async function createProfileTemplate(props: {
     });
     await peer.open(photos, { existing: "reuse" });
     await photos.addTextElement({ text: "Photos" });
-    await root.createReply(photos, "navigation");
-    await photos.setType(
-        new Purpose({
-            canvasId: photos.id,
-            type: new Navigation({}),
-        })
-    );
+    await root.createReply(photos, { layout: new Layout({ x: 1 }), type: ChildVisualization.TREE });
 
     /* Child: “About” (navigation) ---------------------------------------- */
     const about = new Canvas({
@@ -213,13 +217,7 @@ export async function createProfileTemplate(props: {
     });
     await peer.open(about, { existing: "reuse" });
     await about.addTextElement({ text: "About" });
-    await root.createReply(about, "navigation");
-    await about.setType(
-        new Purpose({
-            canvasId: about.id,
-            type: new Navigation({}),
-        })
-    );
+    await root.createReply(about, { layout: new Layout({ x: 2 }), type: ChildVisualization.TREE });
 
     return new Template({
         id: sha256Sync(new TextEncoder().encode("profile")),
@@ -242,6 +240,7 @@ export async function createCommunityTemplate(props: {
         publicKey: peer.identity.publicKey,
     });
     root = await peer.open(root, { existing: "reuse" });
+    await root.setExperience(ChildVisualization.EXPLORE);
 
     let header = props.name ?? "Community";
     if (props.description) {
@@ -251,12 +250,13 @@ export async function createCommunityTemplate(props: {
 
     /* Posts (narrative feed) --------------------------------------------- */
     const posts = new Canvas({
+        id: generateId(root.id, "posts"),
         publicKey: peer.identity.publicKey,
         parent: root,
     });
     await peer.open(posts, { existing: "reuse" });
     await posts.addTextElement({ text: "Posts" });
-    await root.createReply(posts, "narrative");
+    await root.createReply(posts, { layout: new Layout({ x: 0 }), type: ChildVisualization.FEED });
 
     /* Members (navigation) ------------------------------------------------ */
     const members = new Canvas({
@@ -265,28 +265,17 @@ export async function createCommunityTemplate(props: {
     });
     await peer.open(members, { existing: "reuse" });
     await members.addTextElement({ text: "Members" });
-    await root.createReply(members, "navigation");
-    await members.setType(
-        new Purpose({
-            canvasId: members.id,
-            type: new Navigation({}),
-        })
-    );
+    await root.createReply(members, { layout: new Layout({ x: 1 }), type: ChildVisualization.FEED });
 
     /* Photos (navigation) ------------------------------------------------- */
     const photos = new Canvas({
+        id: generateId(root.id, "photos"),
         publicKey: peer.identity.publicKey,
         parent: root,
     });
     await peer.open(photos, { existing: "reuse" });
     await photos.addTextElement({ text: "Photos" });
-    await root.createReply(photos, "navigation");
-    await photos.setType(
-        new Purpose({
-            canvasId: photos.id,
-            type: new Navigation({}),
-        })
-    );
+    await root.createReply(photos, { layout: new Layout({ x: 2 }), type: ChildVisualization.FEED });
 
     return new Template({
         id: sha256Sync(new TextEncoder().encode("community")),
@@ -309,6 +298,7 @@ export async function createPlaylistTemplate(props: {
         publicKey: peer.identity.publicKey,
     });
     root = await peer.open(root, { existing: "reuse" });
+    await root.setExperience(ChildVisualization.FEED);
 
     let header = props.name ?? "Playlist";
     if (props.description) {
@@ -318,38 +308,51 @@ export async function createPlaylistTemplate(props: {
 
     /* Tracks (navigation – list of songs) -------------------------------- */
     const tracks = new Canvas({
+        id: generateId(root.id, "tracks"),
         publicKey: peer.identity.publicKey,
         parent: root,
     });
     await peer.open(tracks, { existing: "reuse" });
     await tracks.addTextElement({ text: "Tracks" });
-    await root.createReply(tracks, "navigation");
-    await tracks.setType(
-        new Purpose({
-            canvasId: tracks.id,
-            type: new Navigation({}),
-        })
-    );
+    await root.createReply(tracks, { layout: new Layout({ x: 0 }), type: ChildVisualization.FEED });
 
     /* Comments (navigation) ---------------------------------------------- */
     const comments = new Canvas({
+        id: generateId(root.id, "comments"),
         publicKey: peer.identity.publicKey,
         parent: root,
     });
     await peer.open(comments, { existing: "reuse" });
     await comments.addTextElement({ text: "Comments" });
-    await root.createReply(comments, "navigation");
-    await comments.setType(
-        new Purpose({
-            canvasId: comments.id,
-            type: new Navigation({}),
-        })
-    );
+    await root.createReply(comments, { layout: new Layout({ x: 1 }), type: ChildVisualization.FEED });
 
     return new Template({
         id: sha256Sync(new TextEncoder().encode("playlist")),
         name: "Music playlist",
         description: "Playlist root with Tracks and Comments sections",
+        prototype: root,
+    });
+}
+
+/* ----------------------------------------------------------------------- */
+/* 3. Music‑playlist template -------------------------------------------- */
+export async function createChatTemplate(props: {
+    peer: ProgramClient;
+    name?: string; // playlist title
+    description?: string;
+}): Promise<Template> {
+    const { peer } = props;
+    let root = new Canvas({
+        id: sha256Sync(new TextEncoder().encode("chat")),
+        publicKey: peer.identity.publicKey,
+    });
+    root = await peer.open(root, { existing: "reuse" });
+    await root.setExperience(ChildVisualization.CHAT);
+
+    return new Template({
+        id: sha256Sync(new TextEncoder().encode("chat")),
+        name: "Chat",
+        description: "Start a chat with your friends",
         prototype: root,
     });
 }

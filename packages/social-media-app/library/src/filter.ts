@@ -1,13 +1,7 @@
 import { variant, field, vec, option } from "@dao-xyz/borsh";
 import { Canvas, CanvasAddressReference } from "./content.js";
 import { Program } from "@peerbit/program";
-import {
-    And,
-    Documents,
-    Or,
-    SearchRequest,
-    StringMatch,
-} from "@peerbit/document";
+import { Documents, Or, SearchRequest, StringMatch } from "@peerbit/document";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
@@ -24,7 +18,7 @@ export class PinnedPosts extends Filter {
     }
 }
 
-export interface ViewModel {
+export interface FilterModel {
     id: string; // Key to identify the view.
     name: string; // Human-readable name for the view.
     index?: number; // where this view is in the list of views, useful for sorting or ordering.
@@ -35,7 +29,6 @@ export interface ViewModel {
 export interface ViewSettings {
     // These are placeholders, and you can expand them as necessary.
     layout: "grid" | "list" | "single";
-    focus: "first" | "last";
     paginationLimit?: number; // Define how many replies to show per page.
     showAuthorInfo?: boolean; // Whether or not to show author information.
     classNameContainer?: string; // Optional class name for the container.
@@ -43,7 +36,7 @@ export interface ViewSettings {
 }
 
 @variant(0)
-export class View {
+export class StreamSetting {
     @field({ type: "string" })
     id: string; // gallery, best, latest, etc
 
@@ -79,7 +72,7 @@ export class View {
         this.index = properties.index;
     }
 
-    toViewModel(): ViewModel {
+    toFilterModel(): FilterModel {
         return {
             id: this.id,
             name: this.id,
@@ -104,7 +97,6 @@ export class View {
             settings: {
                 // TODO
                 layout: "list",
-                focus: "first",
                 paginationLimit: 10,
                 showAuthorInfo: true,
             },
@@ -112,43 +104,43 @@ export class View {
     }
 }
 
-export class IndexableView {
+export class IndexableSettings {
     @field({ type: "string" })
     id: string; // gallery, best, latest, etc
 
     @field({ type: option("u32") })
     index: number | undefined;
 
-    constructor(properties: View) {
+    constructor(properties: StreamSetting) {
         this.id = properties.id;
         this.index = properties.index;
     }
 }
 
 @variant("views")
-export class Views extends Program {
+export class StreamSettings extends Program {
     @field({ type: Documents })
-    views: Documents<View, IndexableView>;
+    settings: Documents<StreamSetting, IndexableSettings>;
 
     constructor(properties: { canvasId: Uint8Array }) {
         super();
         const documentId = concat([
             properties.canvasId,
-            new TextEncoder().encode("views"),
+            new TextEncoder().encode("stream-settings"),
         ]);
-        this.views = new Documents({ id: sha256Sync(documentId) });
+        this.settings = new Documents({ id: sha256Sync(documentId) });
     }
 
     async open(): Promise<void> {
-        await this.views.open({
-            type: View,
+        await this.settings.open({
+            type: StreamSetting,
             keep: "self",
             replicate: { factor: 1 }, // TODO choose better
             canPerform: async (operation) => {
                 return true;
             },
             index: {
-                type: IndexableView,
+                type: IndexableSettings,
                 prefetch: {
                     strict: false,
                 },

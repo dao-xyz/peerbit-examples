@@ -1,28 +1,19 @@
 import { FaChevronDown } from "react-icons/fa6";
-import {
-    Fragment,
-    ReactNode,
-    useEffect,
-    useMemo,
-    useRef,
-    useState,
-} from "react";
-import { Canvas, LOWEST_QUALITY, View, ViewModel } from "@giga-app/interface";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { Canvas, FilterModel } from "@giga-app/interface";
 import * as Popover from "@radix-ui/react-popover";
 import * as ToggleGroup from "@radix-ui/react-toggle-group";
 import { useCanvases } from "../useCanvas";
 import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes";
-import { CanvasWrapper } from "../CanvasWrapper";
-import { CanvasPreview } from "../preview/Preview";
 import { RiSearchEyeLine } from "react-icons/ri";
 
 import clsx from "clsx";
-import { useFeed } from "../feed/FeedContext";
+import { useStream } from "../feed/StreamContext";
 import { HeaderLogo } from "../../Logo";
 import { TiChevronRight, TiChevronLeft } from "react-icons/ti";
 import { useBackToParent } from "../useBackToParent";
-import { renderPath, renderPathElement, smartPath } from "./utils";
+import { smartPath } from "./utils";
 
 const DEFAULT_VIEW = "best"; // Default view ID for the "Best" chip
 const DEBOUNCE = 300; // ms
@@ -33,14 +24,14 @@ export const CanvasPathInput: React.FC<{
 }> = ({ onFocusChange, className }) => {
     /* ── global state ─────────────────────────────────────────────── */
     const {
-        view: currentView,
+        filterModel,
         dynamicViews,
         defaultViews,
         timeFilter,
         typeFilter,
         setQueryParams,
         query,
-    } = useFeed();
+    } = useStream();
 
     /* ── breadcrumb state ─────────────────────────────────────────── */
     const { path, root } = useCanvases();
@@ -56,42 +47,43 @@ export const CanvasPathInput: React.FC<{
 
     /* ── chips for filters+view ───────────────────────────────────── */
     const chips = [
-        ...(currentView.id !== "best"
+        ...(filterModel && filterModel.id !== "best" && filterModel.id !== "chat"
             ? [
-                  {
-                      key: "view",
-                      label: currentView.name,
-                      icon: <RiSearchEyeLine size={12} />,
-                      remove: () => setQueryParams({ view: DEFAULT_VIEW }),
-                  },
-              ]
+                {
+                    key: "view",
+                    label: filterModel.name,
+                    icon: <RiSearchEyeLine size={12} />,
+                    remove: () => setQueryParams({ view: DEFAULT_VIEW }),
+                },
+            ]
             : []),
         ...(timeFilter.key !== "all"
             ? [
-                  {
-                      key: "time",
-                      label: timeFilter.name,
-                      remove: () => setQueryParams({ time: "all" }),
-                  },
-              ]
+                {
+                    key: "time",
+                    label: timeFilter.name,
+                    remove: () => setQueryParams({ time: "all" }),
+                },
+            ]
             : []),
         ...(typeFilter.key !== "all"
             ? [
-                  {
-                      key: "type",
-                      label: typeFilter.name,
-                      remove: () => setQueryParams({ type: "all" }),
-                  },
-              ]
+                {
+                    key: "type",
+                    label: typeFilter.name,
+                    remove: () => setQueryParams({ type: "all" }),
+                },
+            ]
             : []),
     ];
 
     /* ── view-name lookup for auto-conversion  ─────────────────────── */
-    const viewLookup = useMemo(() => {
-        const m = new Map<string, View | ViewModel>();
-        [...dynamicViews.map((v) => v.toViewModel()), ...defaultViews].forEach(
-            (v) => m.set(v.name.toLowerCase(), v)
-        );
+    const streamSettingsLookup = useMemo(() => {
+        const m = new Map<string, FilterModel>();
+        [
+            ...dynamicViews.map((v) => v.toFilterModel()),
+            ...defaultViews,
+        ].forEach((v) => m.set(v.name.toLowerCase(), v));
         return m;
     }, [dynamicViews, defaultViews]);
 
@@ -119,7 +111,8 @@ export const CanvasPathInput: React.FC<{
         const val = e.target.value;
         const words = val.split(/\s+/);
         const last = words.at(-1)!.toLowerCase();
-        const match = currentView?.id === DEFAULT_VIEW && viewLookup.get(last);
+        const match =
+            filterModel?.id === DEFAULT_VIEW && streamSettingsLookup.get(last);
         if (match && match.id !== DEFAULT_VIEW) {
             words.pop();
             clearTimeout(tRef.current);
@@ -135,7 +128,7 @@ export const CanvasPathInput: React.FC<{
         if (e.key !== "Backspace" || e.currentTarget.value) return;
         if (typeFilter.key !== "all") setQueryParams({ type: "all" });
         else if (timeFilter.key !== "all") setQueryParams({ time: "all" });
-        else if (currentView?.id !== DEFAULT_VIEW)
+        else if (filterModel?.id !== DEFAULT_VIEW)
             setQueryParams({ view: DEFAULT_VIEW });
         else if (path.length > 1) {
             popRoom();
@@ -158,7 +151,7 @@ export const CanvasPathInput: React.FC<{
     return (
         <div
             className={clsx(
-                "flex flex-wrap items-center gap-1",
+                "flex flex-wrap items-center gap-1 my-1",
                 "dark:border-neutral-600 border-neutral-300 w-full",
                 className
                 /* focused ? "flex-grow" : "flex-grow-0 max-w-[280px]" */
@@ -189,6 +182,8 @@ export const CanvasPathInput: React.FC<{
                 />
             ))}
 
+            {/*  <ExperienceDropdownButton /> */}
+
             {/* caret */}
             <input
                 ref={inputRef}
@@ -200,101 +195,14 @@ export const CanvasPathInput: React.FC<{
                 placeholder="Search…"
                 className={clsx(
                     "ml-1 flex-grow  bg-transparent outline-none text-xs md:text-sm",
-                    focused ? "min-w-[40px]" : "max-w-[60px] w-fit"
+                    focused ? "min-w-[40px]" : "w-fit" /* max-w-[60px] */
                 )}
             />
         </div>
     );
 };
 
-interface ResponsiveFilterProps {
-    label: string; // e.g. "Time" / "Type"
-    value: string; // current value
-    options: { val: string; label: string }[];
-    onChange: (val: string) => void;
-    pillClassName?: string;
-}
 
-/** A pill style used both inline and inside the popover */
-const pillStyle =
-    "px-2 py-1 text-xs rounded border border-neutral-400 dark:border-neutral-600 " +
-    "data-[state=on]:bg-primary-500 data-[state=on]:text-white";
-
-export const ResponsiveFilter = ({
-    label,
-    value,
-    options,
-    onChange,
-    pillClassName = pillStyle,
-}: ResponsiveFilterProps) => {
-    /* -------- narrow screen: trigger button -------- */
-    const currentLabel =
-        options.find((o) => o.val === value)?.label ??
-        options.find((o) => o.val === "all")?.label ??
-        value;
-
-    return (
-        <div className="">
-            {/* md-up: inline pills (is this wanted?) */}
-            {/*  <ToggleGroup.Root
-                type="single"
-                value={value}
-                onValueChange={(v) => v && onChange(v)}
-                className="hidden md:flex gap-1  "
-            >
-                {options.map((o) => (
-                    <ToggleGroup.Item
-                        key={o.val}
-                        value={o.val}
-                        className={pillClassName}
-                    >
-                        {o.label}
-                    </ToggleGroup.Item>
-                ))}
-            </ToggleGroup.Root> */}
-
-            {/* sub-md: popover */}
-            <Popover.Root>
-                <Popover.Trigger asChild>
-                    <button className="px-3 btn py-1 flex items-center gap-1 text-xs rounded whitespace-nowrap">
-                        {" "}
-                        {/* md:hidden  for responsive */}
-                        {label}: {currentLabel}
-                        <FaChevronDown className="text-[10px]" />
-                    </button>
-                </Popover.Trigger>
-
-                <Popover.Content
-                    side="bottom"
-                    align="start"
-                    sideOffset={4}
-                    className="bg-white dark:bg-neutral-800 p-2 rounded shadow-md  space-y-1"
-                >
-                    <ToggleGroup.Root
-                        type="single"
-                        value={value}
-                        onValueChange={(v) => v && onChange(v)}
-                        className="flex flex-wrap gap-1 max-w-[220px]"
-                    >
-                        {options.map((o) => (
-                            <ToggleGroup.Item
-                                key={o.val}
-                                value={o.val}
-                                className={pillClassName + " whitespace-nowrap"}
-                            >
-                                {o.label}
-                            </ToggleGroup.Item>
-                        ))}
-                    </ToggleGroup.Root>
-                </Popover.Content>
-            </Popover.Root>
-        </div>
-    );
-};
-
-/*********************************************************************/
-/*  1.  Tag component                                               */
-/*********************************************************************/
 interface ChipProps {
     label: string;
     onClick: () => void;

@@ -11,7 +11,7 @@ import { AbortError } from "@peerbit/time";
 import { NoPeersError } from "@peerbit/shared-log";
 import { v4 as uuid } from "uuid";
 import { WithIndexedContext } from "@peerbit/document/dist/src/search";
-import { on } from "events";
+
 /* ────────────── helper types ────────────── */
 type QueryLike = {
     query?: indexerTypes.Query[] | indexerTypes.QueryLike;
@@ -43,13 +43,13 @@ export const useQuery = <
         prefetch?: boolean;
         onChange?: {
             merge?:
-                | boolean
-                | ((
-                      c: DocumentsChange<T, I>
-                  ) =>
-                      | DocumentsChange<T, I>
-                      | Promise<DocumentsChange<T, I>>
-                      | undefined);
+            | boolean
+            | ((
+                c: DocumentsChange<T, I>
+            ) =>
+                | DocumentsChange<T, I>
+                | Promise<DocumentsChange<T, I>>
+                | undefined);
             update?: (
                 prev: RT[],
                 change: DocumentsChange<T, I>
@@ -140,22 +140,22 @@ export const useQuery = <
                 options.remote == null || options.remote === false
                     ? false
                     : {
-                          ...(typeof options.remote === "object"
-                              ? options.remote
-                              : {}),
-                          joining:
-                              typeof options.remote === "object" &&
-                              options.remote.joining?.waitFor !== undefined
-                                  ? {
-                                        waitFor:
-                                            options.remote.joining?.waitFor ??
-                                            5e3,
-                                        onMissedResults: ({ amount }) => {
-                                            loadMore(amount, true);
-                                        },
-                                    }
-                                  : undefined,
-                      };
+                        ...(typeof options.remote === "object"
+                            ? options.remote
+                            : {}),
+                        joining:
+                            typeof options.remote === "object" &&
+                                options.remote.joining?.waitFor !== undefined
+                                ? {
+                                    waitFor:
+                                        options.remote.joining?.waitFor ??
+                                        5e3,
+                                    onMissedResults: ({ amount }) => {
+                                        loadMore(amount, true);
+                                    },
+                                }
+                                : undefined,
+                    };
             const ref = {
                 id,
                 iterator: db.index.iterate(options.query ?? {}, {
@@ -239,10 +239,12 @@ export const useQuery = <
                 updateAll(options?.reverse ? merged.reverse() : merged);
             };
 
+            log("Add change listener", newIteratorRef.id);
             db.events.addEventListener("change", handleChange);
         }
 
         return () => {
+            log("Cleanup iterator", newIteratorRef.id);
             handleChange &&
                 db.events.removeEventListener("change", handleChange);
             reset(newIteratorRef);
@@ -299,7 +301,7 @@ export const useQuery = <
 
                 const warmup =
                     typeof options?.remote === "object" &&
-                    typeof options?.remote.warmup === "number"
+                        typeof options?.remote.warmup === "number"
                         ? options?.remote.warmup
                         : undefined;
 

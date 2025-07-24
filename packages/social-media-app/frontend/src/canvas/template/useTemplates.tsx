@@ -1,18 +1,16 @@
 /**********************************************************************
  * useTemplates.tsx
  *********************************************************************/
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { JSX, useCallback, useEffect, useMemo, useState } from "react";
 import { usePeer, useProgram, useQuery } from "@peerbit/react";
-import { sha256Sync, randomBytes } from "@peerbit/crypto";
+import { sha256Sync } from "@peerbit/crypto";
 import {
     Template,
     Templates, // the Program class from template.ts
     IndexableTemplate,
     createAlbumTemplate,
-    createProfileTemplate,
-    createCommunityTemplate,
-    createPlaylistTemplate,
 } from "@giga-app/interface"; // ← adjust path if needed
+
 
 import { Canvas } from "@giga-app/interface";
 
@@ -37,25 +35,28 @@ export type UseTemplatesReturn = {
     search(query: string): Promise<Template[]>;
 };
 
+const TEMPLATES_DB = new Templates(TEMPLATES_ID)
+
+
+
 /* ------------------------------------------------------------------ */
 export function useTemplates(): UseTemplatesReturn {
-    const { peer } = usePeer();
+    const { peer, persisted } = usePeer();
 
     const [bootstrapped, setBootstrapped] = useState(false);
 
     /* 1️⃣  Open (or create) the Templates program once ---------------- */
-    const useProgramResult = useProgram(new Templates(TEMPLATES_ID), {
+    const useProgramResult = useProgram(TEMPLATES_DB, {
         existing: "reuse",
+        args: {
+            replicate: persisted,
+        }
     });
     const prog = useProgramResult?.program as Templates | undefined;
 
     /* 2️⃣  Ensure default templates exist (runs only once) ------------ */
     useEffect(() => {
-        if (!prog || bootstrapped) return;
-
-        prog.templates.events.addEventListener("change", (ev) => {
-            return console.log("TEMPLATES CHANGE", ev);
-        });
+        if (!prog || prog.closed !== false || bootstrapped) return;
 
         (async () => {
             const ensure = async (tpl: Template) => {
@@ -74,23 +75,23 @@ export function useTemplates(): UseTemplatesReturn {
                     );
                 }
             };
-            console.log("CREATE TEMPLATES");
-            /* await ensure(
-                 await createAlbumTemplate({ peer, name: "Photo album" })
-             );
-               await ensure(
+            console.log("CREATE TEMPLATES", persisted, prog.templates.address);
+            await ensure(
+                await createAlbumTemplate({ peer, name: "Photo album" })
+            );
+            /*   await ensure(
                   await createProfileTemplate({ peer, name: "Personal profile" })
               );
               await ensure(
                   await createCommunityTemplate({ peer, name: "Community" })
-              );
-              await ensure(
+              ); */
+            /*   await ensure(
                   await createPlaylistTemplate({ peer, name: "Music playlist" })
-              );
-   */
+              ); */
+
             setBootstrapped(true);
         })();
-    }, [prog, bootstrapped, peer]);
+    }, [prog?.closed, bootstrapped, peer]);
 
     /* 3️⃣  Live collection of templates -------------------------------- */
     const { items: templates, isLoading: queryLoading } = useQuery<
@@ -99,14 +100,16 @@ export function useTemplates(): UseTemplatesReturn {
     >(prog?.templates, {
         id: prog?.templates.address,
         query: useMemo(() => {
-            return {};
-        }, []),
+            return useProgramResult?.loading ? undefined : {};
+        }, [useProgramResult?.loading]),
         local: true,
+        debug: false,
+        batchSize: 1e3,
         remote: { eager: true, joining: { waitFor: 5e3 } },
         onChange: {
             merge: true,
         },
-        prefetch: false,
+        prefetch: true,
     });
 
     /* 4️⃣  Utility helpers -------------------------------------------- */
@@ -123,6 +126,7 @@ export function useTemplates(): UseTemplatesReturn {
     const insert = useCallback(async (tpl: Template, into: Canvas) => {
         if (!tpl || !into) throw new Error("Missing args");
         console.log("Insert template", tpl, "into", into.address.toString());
+
         return tpl.insertInto(into);
     }, []);
 
@@ -136,7 +140,7 @@ export function useTemplates(): UseTemplatesReturn {
                     (t.description ?? "").toLowerCase().includes(s)
             );
         },
-        [useProgramResult?.program]
+        [useProgramResult?.program, templates]
     );
 
     /* 5️⃣  Return API -------------------------------------------------- */

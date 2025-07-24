@@ -1,5 +1,4 @@
 import React, { useState } from "react";
-import { useView } from "../view/ViewContext";
 import { Header } from "../header/Header";
 import { CanvasPreview } from "./Preview";
 import { IoColorPaletteOutline, IoSave, IoSaveOutline } from "react-icons/io5";
@@ -11,7 +10,7 @@ import { FiEdit } from "react-icons/fi";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { MdAutoFixHigh } from "react-icons/md";
 import { LuOrigami } from "react-icons/lu";
-import { CanvasEditorProvider, useEditTools } from "../edit/ToolbarContext";
+import { CanvasEditorProvider } from "../edit/ToolbarContext";
 import { InlineEditor } from "../edit/InlineEditor";
 import { CloseableAppPane } from "../edit/CloseableAppPane";
 import { ToolbarEdit } from "../edit/ToolbarEdit";
@@ -20,12 +19,13 @@ import { CanvasWrapper } from "../CanvasWrapper";
 import { HIGH_QUALITY } from "@giga-app/interface";
 import { EditModeProvider, useEditModeContext } from "../edit/EditModeProvider";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
+import { useCanvases } from "../useCanvas";
 
 const DetailedViewInner: React.FC<{
     ref?: React.Ref<HTMLDivElement>;
     onEditModeChange?: (value: boolean) => void;
 }> = ({ ref, onEditModeChange }) => {
-    const { viewRoot } = useView();
+    const { viewRoot } = useCanvases();
     const { setDisabled: setBottomToolbarDisabled } =
         useToolbarVisibilityContext();
     const { peer } = usePeer();
@@ -143,11 +143,10 @@ const DetailedViewInner: React.FC<{
                                             <DropdownMenu.Item
                                                 key={v.value}
                                                 /*  onClick={() => select(v)} */
-                                                className={` flex flex-row items-center gap-2 cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
-                                                    currentType === v
-                                                        ? "underline font-semibold"
-                                                        : "text-neutral-600 hover:text-gray-700"
-                                                }`}
+                                                className={` flex flex-row items-center gap-2 cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${currentType === v
+                                                    ? "underline font-semibold"
+                                                    : "text-neutral-600 hover:text-gray-700"
+                                                    }`}
                                             >
                                                 {v.icon}
                                                 {v.label}
@@ -196,7 +195,7 @@ export const DetailedView: React.FC<{
     ref?: React.Ref<HTMLDivElement>;
     onEditModeChange?: (value: boolean) => void;
 }> = ({ ref, onEditModeChange }) => {
-    const { viewRoot } = useView();
+    const { viewRoot } = useCanvases();
     return (
         <EditModeProvider>
             <CanvasWrapper canvas={viewRoot} quality={HIGH_QUALITY}>

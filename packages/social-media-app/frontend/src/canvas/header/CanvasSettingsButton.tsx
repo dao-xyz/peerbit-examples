@@ -4,7 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { HiDotsHorizontal } from "react-icons/hi";
 import { usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
-import { useFeed } from "../feed/FeedContext";
+import { useStream } from "../feed/StreamContext";
 import {
     Canvas,
     getOwnedElementsQuery,
@@ -32,7 +32,7 @@ export const CanvasSettingsButton = ({
     /* ─────────────────── hooks & deps ─────────────────── */
     const { peer } = usePeer();
     const { create } = useProfiles();
-    const { dynamicViews, pinToView } = useFeed();
+    const { dynamicViews, pinToView } = useStream();
 
     /* ─────────────────── “More info” state ─────────────────── */
     const [infoOpen, setInfoOpen] = useState(false);

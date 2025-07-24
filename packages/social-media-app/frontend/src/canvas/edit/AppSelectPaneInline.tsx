@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, JSX } from "react";
 import { AiOutlineSearch } from "react-icons/ai";
 import { SimpleWebManifest, Template } from "@giga-app/interface";
 import { useCanvas } from "../CanvasWrapper";
@@ -6,24 +6,37 @@ import { DebugGeneratePostButton } from "./DebugGeneratePostButton";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
 import { useTemplates } from "../template/useTemplates";
+import { BiPhotoAlbum } from "react-icons/bi";
+import { CgProfile } from "react-icons/cg";
+import { HiOutlineUserGroup } from "react-icons/hi2";
+import { PrivateCanvasScope } from "../useCanvas";
+import { usePendingCanvas } from "./PendingCanvasContext";
 
-interface AppSelectPaneInlineProps {
-    onSelected: (app: SimpleWebManifest) => void;
-    className?: string;
-}
+export const TEMPATE_ICON_MAP: Record<string, JSX.Element> = {
+    "Photo album": <BiPhotoAlbum />,
+    "Personal profile": <CgProfile />,
+    "Community": <HiOutlineUserGroup />
+};
 
 const TemplateButton: React.FC<{
     tpl: Template;
     onClick: () => void;
-}> = ({ tpl, onClick }) => (
-    <button
-        className="btn btn-md border px-3 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700"
+}> = ({ tpl, onClick }) => {
+
+    let icon = TEMPATE_ICON_MAP[tpl.name]
+    return <button
+        className="btn btn-md  hover:bg-gray-100 dark:hover:bg-gray-700"
         onClick={onClick}
         title={tpl.description}
     >
+        {icon && (
+            <span className="mr-2">{icon}</span>
+        )}
         {tpl.name}
     </button>
-);
+}
+
+
 
 interface Props {
     onSelected: (app: SimpleWebManifest) => void;
@@ -37,7 +50,9 @@ export const AppSelectPaneInline: React.FC<Props> = ({
     /* ---------- data sources --------------------------- */
     const { apps, search: searchApps } = useApps();
     const { templates, search: searchTpls, insert: insertTpl } = useTemplates();
-    const { insertDefault, canvas: currentCanvas } = useCanvas(); // ← make sure `useCanvas` exposes the active canvas
+    const { insertDefault } = useCanvas();   // ← make sure `useCanvas` exposes the active canvas
+    const { viewRoot: privateViewRoot } = PrivateCanvasScope.useCanvases()
+    const { saveDraft } = usePendingCanvas()
 
     /* ---------- local state ---------------------------- */
     const [query, setQuery] = useState("");
@@ -48,33 +63,28 @@ export const AppSelectPaneInline: React.FC<Props> = ({
     useEffect(() => {
         (async () => {
             setAppsFiltered(await searchApps(query));
+            console.log("Search query", query)
             setTemplatesFiltered(await searchTpls(query));
         })();
-    }, [query, searchApps, searchTpls]);
+    }, [query, searchApps, searchTpls, templates]);
+
+
 
     /* split native / web apps --------------------------- */
-    const nativeApps = useMemo(
-        () => appsFiltered.filter((x) => x.isNative),
-        [appsFiltered]
-    );
-    const nonNativeApps = useMemo(
-        () => appsFiltered.filter((x) => !x.isNative),
-        [appsFiltered]
-    );
+    const nativeApps = useMemo(() => appsFiltered.filter((x) => x.isNative), [appsFiltered]);
+    const nonNativeApps = useMemo(() => appsFiltered.filter((x) => !x.isNative), [appsFiltered]);
 
     /* handlers ------------------------------------------ */
-    const onAppSelected = (
-        app: SimpleWebManifest,
-        insertDefaultValue: boolean
-    ) => {
+    const onAppSelected = (app: SimpleWebManifest, insertDefaultValue: boolean) => {
         setQuery("");
         insertDefaultValue && insertDefault({ app, increment: true });
         _onSelected(app);
     };
 
     const onTemplateSelected = async (tpl: Template) => {
-        if (!currentCanvas) return;
-        await insertTpl(tpl, currentCanvas);
+        if (!privateViewRoot) return;
+        await insertTpl(tpl, privateViewRoot);
+        await saveDraft();
         setQuery("");
     };
 
@@ -96,6 +106,7 @@ export const AppSelectPaneInline: React.FC<Props> = ({
 
             {/* Gallery view */}
             <div className="flex flex-col h-full gap-4 overflow-y-auto">
+
                 {/* ============ TEMPLATES ============ */}
                 {templatesFiltered.length > 0 && (
                     <>

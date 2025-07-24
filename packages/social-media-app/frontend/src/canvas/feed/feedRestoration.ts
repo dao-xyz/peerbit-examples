@@ -12,7 +12,7 @@ import type { Canvas as CanvasDB } from "@giga-app/interface";
 
 /* 1 ────────────────────────────────────────────────────────────────────────── */
 export interface FeedSnapshot {
-    view: string; // view key
+    queryParams?: string; // query params of the current location
     rootId: string; // idString of the canvas you were inside
     anchorId: string; // first reply visible when you left
     offsetY: number; // pixels between viewport‑top and anchor‑top
@@ -28,12 +28,11 @@ export const consumeSnapshot = (key: string) => cache.delete(key);
 interface LeaveArgs {
     replies: { reply: WithContext<CanvasDB> }[]; // processedReplies
     replyRefs: (HTMLDivElement | null)[]; // ↕ same length
-    view: string;
     feedRoot?: CanvasDB;
 }
 export function useLeaveSnapshot(args: LeaveArgs) {
     const location = useLocation();
-    const { replies, replyRefs, view, feedRoot } = args;
+    const { replies, replyRefs, feedRoot } = args;
     return (from: CanvasDB) => {
         if (!feedRoot) return;
 
@@ -44,7 +43,7 @@ export function useLeaveSnapshot(args: LeaveArgs) {
         const nodeTop = replyRefs[idx]!.getBoundingClientRect().top; // << screen-relative
 
         saveSnapshot(location.key, {
-            view,
+            queryParams: location.search,
             rootId: feedRoot.idString,
             anchorId: from.idString,
             offsetY: nodeTop, // screen relative
@@ -86,8 +85,17 @@ export function useRestoreFeed(a: RestoreArgs) {
     useLayoutEffect(() => {
         const next = getSnapshot(key);
         const current = snapRef.current;
+        const setParams = (snap: FeedSnapshot) => {
+            if (snap.queryParams) {
+                const url = new URL(window.location.href);
+                url.search = snap.queryParams;
+                window.history.replaceState({}, "", url.toString());
+            }
+        };
         if (current !== next && next) {
-            a.setView(next.view);
+            // set query params again
+            setParams(next);
+
             a.onSnapshot(next);
         }
         setRestoring(!!next);
@@ -96,7 +104,7 @@ export function useRestoreFeed(a: RestoreArgs) {
 
         if (snapRef.current && !doneRef.current) {
             log(tag, "restore view/root", snapRef.current);
-            a.setView(snapRef.current.view);
+            setParams(snapRef.current);
             a.setViewRootById(snapRef.current.rootId);
         }
     }, [key]);
