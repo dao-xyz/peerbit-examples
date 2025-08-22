@@ -17,7 +17,7 @@ export const BodyStyler: React.FC = () => {
 
         // Add the appropriate class based on the view.
 
-        if (visualization?.childrenVisualization === ChildVisualization.CHAT) {
+        if (visualization?.view === ChildVisualization.CHAT) {
             document.body.classList.add("dark:bg-neutral-800");
             document.body.classList.add("bg-neutral-50");
         } else {
@@ -33,7 +33,7 @@ export const BodyStyler: React.FC = () => {
                 "dark:bg-neutral-950"
             );
         };
-    }, [draft, visualization, visualization?.childrenVisualization]);
+    }, [draft, visualization, visualization?.view]);
 
     return null; // This component doesn't need to render anything.
 };

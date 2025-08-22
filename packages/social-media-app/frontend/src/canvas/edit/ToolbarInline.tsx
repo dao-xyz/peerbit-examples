@@ -5,12 +5,12 @@ import { BsCamera, BsSend } from "react-icons/bs";
 import { useCanvas } from "../CanvasWrapper";
 import { SaveButton } from "./SaveCanvasButton";
 import { TbArrowsDiagonalMinimize2 } from "react-icons/tb";
+import { usePendingCanvas } from "./PendingCanvasContext";
 
 export const ToolbarInline = (properties?: {
     className?: string;
     close?: () => void;
 }) => {
-    const { isEmpty } = useCanvas();
     const { appSelectOpen, setAppSelectOpen } = useEditTools();
     const onToggleAppSelect = (open) => {
         if (open != null) {
@@ -19,7 +19,6 @@ export const ToolbarInline = (properties?: {
             setAppSelectOpen((appSelectOpen) => !appSelectOpen);
         }
     };
-    const { savePending } = useCanvas();
 
     const AddButton = () => (
         <button

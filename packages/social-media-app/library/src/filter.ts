@@ -1,18 +1,18 @@
 import { variant, field, vec, option } from "@dao-xyz/borsh";
-import { Canvas, CanvasAddressReference } from "./content.js";
+import { Canvas, AddressReference, IndexableCanvas } from "./content.js";
 import { Program } from "@peerbit/program";
-import { Documents, Or, SearchRequest, StringMatch } from "@peerbit/document";
+import { ByteMatchQuery, Documents, Or, SearchRequest, StringMatch, WithIndexedContext } from "@peerbit/document";
 import { sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
-abstract class Filter {}
+abstract class Filter { }
 
 @variant(0)
 export class PinnedPosts extends Filter {
-    @field({ type: vec(CanvasAddressReference) })
-    pinned: CanvasAddressReference[];
+    @field({ type: vec(Uint8Array) })
+    pinned: Uint8Array[];
 
-    constructor(properties: { pinned: CanvasAddressReference[] }) {
+    constructor(properties: { pinned: Uint8Array[] }) {
         super();
         this.pinned = properties.pinned;
     }
@@ -22,7 +22,7 @@ export interface FilterModel {
     id: string; // Key to identify the view.
     name: string; // Human-readable name for the view.
     index?: number; // where this view is in the list of views, useful for sorting or ordering.
-    query?: (from: Canvas) => SearchRequest; // The query associated with this view.
+    query?: (from: WithIndexedContext<Canvas, IndexableCanvas>) => SearchRequest; // The query associated with this view.
     settings: ViewSettings; // Extra settings for customization.
 }
 // Define the structure for each View Model.
@@ -43,14 +43,14 @@ export class StreamSetting {
     @field({ type: option("u32") })
     index?: number; // Index of the view, useful for sorting or ordering.
 
-    @field({ type: CanvasAddressReference })
-    canvas: CanvasAddressReference;
+    @field({ type: Uint8Array })
+    canvas: Uint8Array;
 
     @field({ type: option(Filter) })
     filter?: Filter;
 
-    @field({ type: option(CanvasAddressReference) })
-    description?: CanvasAddressReference;
+    @field({ type: option(AddressReference) })
+    description?: AddressReference;
 
     /* @field({ type: option(Settings) })
     settings: Settings;
@@ -60,8 +60,8 @@ export class StreamSetting {
  */
     constructor(properties: {
         id: string;
-        canvas: CanvasAddressReference;
-        description?: CanvasAddressReference;
+        canvas: Uint8Array;
+        description?: AddressReference;
         filter?: Filter;
         index?: number;
     }) {
@@ -80,19 +80,19 @@ export class StreamSetting {
             query:
                 this.filter && this.filter instanceof PinnedPosts
                     ? (from: Canvas) => {
-                          let pinned = this.filter as PinnedPosts;
-                          return new SearchRequest({
-                              query: new Or(
-                                  pinned.pinned.map(
-                                      (p) =>
-                                          new StringMatch({
-                                              key: "address",
-                                              value: p.address,
-                                          })
-                                  )
-                              ),
-                          });
-                      }
+                        let pinned = this.filter as PinnedPosts;
+                        return new SearchRequest({
+                            query: new Or(
+                                pinned.pinned.map(
+                                    (p) =>
+                                        new ByteMatchQuery({
+                                            key: "id",
+                                            value: p,
+                                        })
+                                )
+                            ),
+                        });
+                    }
                     : undefined,
             settings: {
                 // TODO

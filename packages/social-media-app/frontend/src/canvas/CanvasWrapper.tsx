@@ -5,6 +5,8 @@ import React, {
     useContext,
     createContext,
     useMemo,
+    useImperativeHandle,
+    forwardRef,
 } from "react";
 import { usePeer, useProgram, useQuery } from "@peerbit/react";
 import {
@@ -22,6 +24,8 @@ import {
     LOWEST_QUALITY,
     Quality,
     IndexableElement,
+    Scope,
+    IndexableCanvas,
 } from "@giga-app/interface";
 import { randomBytes, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
@@ -36,8 +40,22 @@ import {
 import { useReplyProgress } from "./main/useReplyProgress.js";
 import { useAIReply } from "../ai/AIReployContext.js";
 import { waitFor } from "@peerbit/time";
-import { DocumentsChange } from "@peerbit/document";
+import { DocumentsChange, WithIndexedContext } from "@peerbit/document";
 import { useStream } from "./feed/StreamContext.js";
+import { useRegisterCanvasHandle } from "./edit/CanvasHandleRegistry.js";
+import { PrivateScope, PublicScope } from "./useScope.js";
+import { useInitializeCanvas } from "./useInitializedCanvas.js";
+
+export interface CanvasHandle {
+    /** Flush pending rects to the DB (same semantics as before) */
+    savePending: (scope: Scope) => Promise<Element[] | undefined>;
+    /** Everything else you may want to reach from the outside */
+    insertDefault: CanvasContextType["insertDefault"];
+    insertImage: CanvasContextType["insertImage"];
+    mutate: CanvasContextType["mutate"];
+    savedOnce: boolean | undefined;
+    isEmpty: boolean | undefined
+}
 
 // ---------------------------------------------------------------------
 //  Context definitions
@@ -52,20 +70,20 @@ export interface CanvasContextType {
     rects: Element[]; // ► now the deduplicated, user-visible list
     insertDefault: (options?: {
         app?: SimpleWebManifest;
+        scope?: Scope;
         increment?: boolean;
         pending?: boolean;
         once?: boolean;
         y?: number | "optimize" | "max";
     }) => Promise<Element | Element[]>;
     removePending: (id: Uint8Array) => void;
-    savePending: () => Promise<Element[] | undefined>;
-    savedOnce: boolean;
-    canvas: CanvasDB;
+
+    canvas: WithIndexedContext<CanvasDB, IndexableCanvas>
     onContentChange: (element: Element) => void;
     isEmpty: boolean;
     insertImage: (
         file: File,
-        options?: { pending?: boolean; y?: number | "optimize" | "max" }
+        options?: { scope?: Scope, pending?: boolean; y?: number | "optimize" | "max" }
     ) => Promise<void>;
     mutate: (
         fn: (
@@ -104,8 +122,9 @@ export const useCanvas = () => {
 };
 
 interface CanvasWrapperProps {
+    key?: string;
     children: React.ReactNode;
-    canvas: CanvasDB;
+    canvas: CanvasDB | WithIndexedContext<CanvasDB, IndexableCanvas>;
     draft?: boolean;
     onSave?: () => void | Promise<void>;
     multiCanvas?: boolean;
@@ -114,41 +133,42 @@ interface CanvasWrapperProps {
     onLoad?: () => void;
     placeholder?: string;
     classNameContent?: string | ((el: Element<ElementContent>) => string);
+    debug?: boolean; // for debugging purposes, not used in production
 }
 
-export const CanvasWrapper = ({
-    children,
-    canvas: canvasDB,
-    draft,
-    onSave,
-    multiCanvas,
-    onContentChange,
-    quality,
-    onLoad,
-    placeholder,
-    classNameContent,
-}: CanvasWrapperProps) => {
+const _CanvasWrapper = (
+    {
+        children,
+        canvas: canvasDBMaybeIndexed,
+        multiCanvas,
+        onContentChange,
+        quality,
+        placeholder,
+        classNameContent,
+        key,
+        debug,
+    }: CanvasWrapperProps,
+    ref: React.Ref<CanvasHandle>
+) => {
     // -------------------------------------------------- basic hooks ----
-    const { peer, persisted } = usePeer();
-    const { program: canvas } = useProgram(canvasDB, {
-        existing: "reuse",
-        id: canvasDB?.idString,
-        keepOpenOnUnmount: true,
-        args: { replicate: persisted },
-    });
+    const { peer } = usePeer();
+
+    const privateScope = PrivateScope.useScope().scope;
+    const publicScope = PublicScope.useScope().scope;
 
     const { getCuratedNativeApp: getNativeApp } = useApps();
     const { showError } = useErrorDialog();
     const { announceReply } = useReplyProgress();
-    const { request } = useAIReply();
     const { typeFilter } = useStream();
 
+    const canvasDB = useInitializeCanvas(canvasDBMaybeIndexed);
+
     // -------------------------------------------------- local state ----
-    const [pendingRects, setPendingRects] = useState<Element[]>([]);
+    const [pendingRects, setPendingRects] = useState<(Element & { placeholder?: boolean })[]>([]);
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
-    const [isEmpty, setIsEmpty] = useState(true);
     const [isSaving, setIsSaving] = useState(false);
-    const [savedOnce, setSavedOnce] = useState(false);
+    const [savedOnce, setSavedOnce] = useState<boolean | undefined>(undefined);
+    const [isEmpty, setIsEmpty] = useState<boolean | undefined>(undefined);
     const [requestAIReply, setRequestAIReply] = useState(false);
     const [text, setText] = useState<string>("");
     const insertedDefault = useRef(false);
@@ -160,10 +180,10 @@ export const CanvasWrapper = ({
     // -------------------------------------------------- query ---------
     const query = useMemo(() => {
         insertedDefault.current = false;
-        if (!canvas || canvas.closed) return null;
+        if (!canvasDB?.initialized) return null;
         return {
             query: [
-                ...getOwnedElementsQuery(canvas),
+                ...getOwnedElementsQuery(canvasDB),
                 ...getQualityLessThanOrEqualQuery(quality ?? LOWEST_QUALITY),
             ],
             sort: [
@@ -174,15 +194,15 @@ export const CanvasWrapper = ({
                 new Sort({ key: ["location", "y"] }),
             ],
         };
-    }, [canvas?.closed, canvas?.idString, quality, typeFilter.key]);
+    }, [canvasDB?.idString, canvasDB?.initialized, quality, typeFilter.key]);
 
     const { items: rects, isLoading } = useQuery(
-        canvas?.loadedElements ? canvas.origin?.elements : null,
+        [privateScope.elements, publicScope.elements],
         {
             debounce: 123,
             local: true,
             prefetch: true,
-            debug: false,
+            debug,
             remote: {
                 eager: true,
                 joining: { waitFor: 5e3 },
@@ -193,11 +213,12 @@ export const CanvasWrapper = ({
                         Element<ElementContent>,
                         IndexableElement
                     > = {
-                        added: change.added.filter((x) => canvas.isInScope(x)),
-                        removed: change.removed.filter((x) =>
-                            canvas.isInScope(x)
-                        ),
+                        added: change.added.filter((x) => canvasDB.isOwning(x)),
+                        removed: []/*  TODO change.removed.filter((x) =>
+                            canvas.isOwning(x)
+                        ), */
                     };
+
                     return filtered;
                 },
             },
@@ -205,6 +226,46 @@ export const CanvasWrapper = ({
         }
     );
 
+    // effect to determin if the canvas is empty
+    useEffect(() => {
+        if (rects.length > 0) {
+            setIsEmpty(false);
+        }
+        else if (pendingRects.length > 0) {
+            setIsEmpty(false);
+        }
+        else {
+            setIsEmpty(true);
+        }
+    }, [rects, pendingRects])
+
+    // Remove an empty pending rect if rects already contain something, and the rect was inserted automatically to make a placeholder
+    useEffect(() => {
+        if (rects.length > 0 && pendingRects.length > 0) {
+            const emptyPending = pendingRects.find(
+                (r) =>
+                    r.content instanceof StaticContent &&
+                    r.content.content.isEmpty && r.placeholder == true
+            );
+            if (emptyPending) {
+                console.log("Remove pending!")
+                setPendingRects((prev) =>
+                    prev.filter((p) => {
+                        if (!p.placeholder) {
+                            return true;
+                        }
+                        if (p.placeholder && p.content instanceof StaticContent && p.content.content.isEmpty) {
+                            return false;
+                        }
+                        return true
+                    })
+                );
+            }
+        }
+    }, [rects, pendingRects])
+
+
+    // View calculations
     // ------------------------------------------------------------------
     // 1.  Deduplicated union for rendering (prevents flash)
     // ------------------------------------------------------------------
@@ -213,8 +274,11 @@ export const CanvasWrapper = ({
         const stillPending = pendingRects.filter(
             (p) => !idsInQuery.has(p.idString)
         );
+
         return [...rects, ...stillPending];
     }, [rects, pendingRects]);
+
+
 
     // ------------------------------------------------------------------
     // 2.  Incremental pruning of pendingRects
@@ -360,7 +424,7 @@ export const CanvasWrapper = ({
         fn: (element: Element<ElementContent>, ix: number) => boolean,
         options?: { filter: (rect: Element) => boolean }
     ): boolean => {
-        if (!canvas?.publicKey.equals(peer?.identity.publicKey)) return false;
+        if (!canvasDB?.publicKey.equals(peer?.identity.publicKey)) return false;
 
         let mutated = false;
         let updated = [...pendingRects];
@@ -397,20 +461,22 @@ export const CanvasWrapper = ({
         content: ElementContent,
         options?: {
             id?: Uint8Array;
-            pending?: boolean;
+            scope?: Scope,
+            pending?: boolean | { placeholder: boolean };
             y?: number | "optimize" | "max";
         }
     ): Promise<Element>;
     async function addRect(
         contents: ElementContent[],
-        options?: { pending?: boolean; y?: number | "optimize" | "max" }
+        options?: { scope?: Scope, pending?: boolean | { placeholder: boolean }; y?: number | "optimize" | "max" }
     ): Promise<Element[]>;
 
     async function addRect(
         contents: ElementContent | ElementContent[],
         options: {
+            scope?: Scope,
             id?: Uint8Array;
-            pending?: boolean;
+            pending?: boolean | { placeholder: boolean };
             y?: number | "optimize" | "max";
         } = { pending: false }
     ): Promise<Element | Element[]> {
@@ -420,11 +486,11 @@ export const CanvasWrapper = ({
             throw new Error("Cannot set id when adding multiple");
 
         const yStrategy = options.y ?? "optimize";
-        await waitFor(() => canvas).catch(() => new Error("Canvas not ready"));
-        await canvas.load();
+        await waitFor(() => publicScope).catch(() => new Error("Canvas not ready"));
+        /*  await canvas.load(); */
 
-        const current = await canvas.elements.index.search({
-            query: getOwnedElementsQuery(canvas),
+        const current = await publicScope.elements.index.search({
+            query: getOwnedElementsQuery(canvasDB),
         });
         const all = [...current, ...pendingRects];
 
@@ -456,7 +522,7 @@ export const CanvasWrapper = ({
                     h: 1,
                 }),
                 content,
-                canvasId: canvas.id,
+                canvasId: canvasDB.id,
             });
             if (options.pending) {
                 setPendingRects((prev) => {
@@ -468,15 +534,17 @@ export const CanvasWrapper = ({
                             already.content instanceof StaticContent &&
                             already.content.content.isEmpty
                         ) {
+                            already.placeholder = true
                             already.content = element.content;
                             return [...prev];
                         }
                         return prev;
                     }
+                    (element as unknown as { placeholder: boolean }).placeholder = true;
                     return [...prev, element];
                 });
             } else {
-                canvas.createElement(element);
+                await canvasDB.createElement(element);
             }
             result.push(element);
         }
@@ -502,8 +570,11 @@ export const CanvasWrapper = ({
         increment?: boolean;
         pending?: boolean;
         once?: boolean;
+        placeHolderForEmpty?: boolean;
+        scope?: Scope
         y?: number | "optimize" | "max";
     }) => {
+        /*  console.trace("insert default") */
         if (options?.once) {
             if (
                 pendingRects.length > 0 ||
@@ -530,11 +601,12 @@ export const CanvasWrapper = ({
         }
         const defaultId = sha256Sync(
             concat([
-                canvas.id,
+                canvasDB.id,
                 peer.identity.publicKey.bytes,
                 new Uint8Array([pendingCounter.current]),
             ])
         );
+
         let appContent: ElementContent;
         if (options?.app) {
             if (options.app.isNative) {
@@ -567,6 +639,7 @@ export const CanvasWrapper = ({
             id: defaultId,
             pending: true,
             y: options?.y,
+            scope: options?.scope || privateScope
         });
     };
 
@@ -575,9 +648,8 @@ export const CanvasWrapper = ({
         setPendingRects((prev) => prev.filter((el) => !equals(id, el.id)));
         if (pending) reduceYInPending(pending.location.y);
     };
-
-    const savePending = async () => {
-        if (!pendingRects.length) return;
+    const savePending = async (scope: Scope) => {
+        if (!pendingRects.length) { return; }
         setIsSaving(true);
         setSavedOnce(true);
         try {
@@ -586,18 +658,14 @@ export const CanvasWrapper = ({
                     !(x.content instanceof StaticContent) ||
                     x.content.content.isEmpty === false
             );
-            if (toSave.length === 0) return;
+            if (toSave.length === 0) { return; }
 
             pendingCounter.current += toSave.length;
             for (const el of toSave) {
-                el.parent = canvas; // see original comment
+                el.parent = canvasDB; // see original comment
             }
-
-            await Promise.all(toSave.map((x) => canvas.elements.put(x)));
-
-            if (draft && onSave) await onSave();
-            if (requestAIReply) request(canvas).catch(console.error);
-            setIsEmpty(true);
+            await Promise.all(toSave.map((x) => { x.placeholder = false; return scope.elements.put(x) }));
+            /* if (requestAIReply) request(canvas).catch(console.error); */
             return toSave;
         } catch (error) {
             showError({ message: "Failed to save", error, severity: "error" });
@@ -611,7 +679,7 @@ export const CanvasWrapper = ({
     // ------------------------------------------------------------------
     const reset = () => {
         setPendingRects([]);
-        setSavedOnce(false);
+        setSavedOnce(undefined);
     };
 
     useEffect(() => {
@@ -622,12 +690,12 @@ export const CanvasWrapper = ({
     }, []);
 
     useEffect(() => {
-        if (!peer || !canvas || canvas.closed) return;
-        if (canvas.idString === setupForCanvasIdDone.current) return;
-        setupForCanvasIdDone.current = canvas.idString;
+        if (!peer || !canvasDB || !canvasDB.initialized) return;
+        if (canvasDB.idString === setupForCanvasIdDone.current) return;
+        setupForCanvasIdDone.current = canvasDB.idString;
         reset();
-        if (canvas.closed) throw new Error("Expecting canvas to be open");
-    }, [peer?.identity.publicKey.hashcode(), canvas?.idString]);
+        if (!canvasDB.initialized) throw new Error("Expecting canvas to be open");
+    }, [peer?.identity.publicKey.hashcode(), canvasDB?.idString, publicScope?.idString]);
 
     // ------------------------------------------------------------------
     //  Content-change hook (unchanged except still uses pendingRects)
@@ -641,7 +709,7 @@ export const CanvasWrapper = ({
             setText(el.content.content.text);
         }
         if (rectIsStaticMarkdownText(el)) {
-            const parent = await canvas.loadParent();
+            const parent = await canvasDB.loadParent();
             announceReply(parent);
         }
         if (!el.content.isEmpty) {
@@ -654,6 +722,30 @@ export const CanvasWrapper = ({
         contentChangeSubscribers.current.forEach((cb) => cb(el));
     };
 
+    useImperativeHandle(
+        ref,
+        () => ({
+            isEmpty,
+            savedOnce,
+            savePending,
+            insertDefault,
+            insertImage,
+            mutate,
+        }),
+        [savePending, isEmpty, insertDefault, insertImage, mutate]
+    );
+
+    /* tell any ancestor provider about this handle */
+    const register = useRegisterCanvasHandle();
+    useEffect(
+        () =>
+            register?.(
+                // safe even if no provider above us
+                { savedOnce, isEmpty, savePending, insertDefault, insertImage, mutate }
+            ),
+        [register, savePending, insertDefault, insertImage, mutate]
+    );
+
     // ------------------------------------------------------------------
     //  Provide context
     // ------------------------------------------------------------------
@@ -665,9 +757,7 @@ export const CanvasWrapper = ({
         rects: visibleRects, // ◄ expose deduplicated list
         insertDefault,
         removePending,
-        savePending,
-        savedOnce,
-        canvas,
+        canvas: canvasDB,
         onContentChange: _onContentChange,
         isEmpty,
         insertImage,
@@ -690,3 +780,7 @@ export const CanvasWrapper = ({
         </CanvasContext.Provider>
     );
 };
+
+export const CanvasWrapper = forwardRef<CanvasHandle, CanvasWrapperProps>(
+    _CanvasWrapper
+);

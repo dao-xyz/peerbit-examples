@@ -137,13 +137,13 @@ export const Reply = ({
 
         leaveSnapshot(canvas);
         let viewAfterNavigation = "chat";
-        canvas = canvas.closed
-            ? await viewRoot.openWithSameSettings(canvas)
-            : canvas;
-        await canvas.load();
+        /*  canvas = canvas.closed
+             ? await viewRoot.nearestScope.openWithSameSettings(canvas)
+             : canvas;
+         await canvas.load(); */
+        await viewRoot.nearestScope.openWithSameSettings(canvas)
 
-
-        navigate(getCanvasPath(canvas, viewAfterNavigation), {});
+        navigate(getCanvasPath(canvas, { view: viewAfterNavigation }), {});
         onClick && onClick();
     };
 
@@ -161,9 +161,9 @@ export const Reply = ({
             : "") +
         " " +
         (classNameHighlight ?? "");
-    const styleFromFromMode = isChat
+    let styleFromFromMode = isChat
         ? ""
-        : "bg-neutral-50 dark:bg-neutral-800/60 shadow  rounded-lg p-2";
+        : "bg-neutral-50 dark:bg-neutral-800/60 shadow  rounded-lg p-2 " + (hideHeader ? "" : "pt-1");
 
     return (
         <div

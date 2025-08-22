@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Canvas } from "../Canvas";
+import { usePendingCanvas } from "./PendingCanvasContext";
 
 type InlineEditorProps = {
     className?: string; // Optional class name for the container
@@ -20,11 +21,12 @@ export const InlineEditor = ({ className }: InlineEditorProps) => {
          });
      }, [ref]);
   */
+    const { publish } = usePendingCanvas()
     return (
         <div className={` flex flex-col h-full ${className}`} ref={ref}>
             {" "}
             {/* mb-12 does not work here */}
-            <Canvas className="px-4" fitWidth draft={true} inFullScreen />
+            <Canvas requestPublish={publish} className="px-4" fitWidth draft={true} inFullScreen />
         </div>
     );
 };

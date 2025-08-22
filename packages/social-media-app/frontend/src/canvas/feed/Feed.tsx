@@ -1,30 +1,29 @@
-import React, {
-    Fragment,
-} from "react";
+import React, { Fragment } from "react";
 import * as Toast from "@radix-ui/react-toast";
 import { Reply } from "./Reply";
 import { ScrollSettings } from "../main/useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
 import { Spinner } from "../../utils/Spinner";
-import {
-    LeaveSnapshotContext,
-    FeedSnapshot,
-} from "./feedRestoration";
+import { LeaveSnapshotContext, FeedSnapshot } from "./feedRestoration";
 
 import { useFeedHooks } from "./useFeedHooks";
 import { useStream } from "./StreamContext";
 
 const SPINNER_HEIGHT = 40;
 
-export const Feed = (props: {
-    scrollSettings: ScrollSettings;
-    parentRef: React.RefObject<HTMLDivElement>;
-    viewRef: HTMLElement;
-    onSnapshot: (snap: FeedSnapshot) => void;
-    disableLoadMore?: boolean; // if true, will not load more items
-    provider: typeof useStream
-
-}) => {
+export const Feed = (
+    props:
+        | {
+            type: "settings";
+            scrollSettings: ScrollSettings;
+            parentRef: React.RefObject<HTMLDivElement>;
+            viewRef: HTMLElement;
+            onSnapshot: (snap: FeedSnapshot) => void;
+            disableLoadMore?: boolean; // if true, will not load more items
+            provider: typeof useStream;
+        }
+        | { type: "feed"; feed: ReturnType<typeof useFeedHooks> }
+) => {
     const {
         contentRef,
         visualization,
@@ -43,7 +42,11 @@ export const Feed = (props: {
         typedOnce,
         handleLoad,
         indexIsReadyToRender,
-    } = useFeedHooks(props);
+    } = props.type === "feed" ? props.feed : useFeedHooks(props);
+
+    console.log({
+        processedReplies
+    })
 
     /* --------------------------- RENDER ------------------------------ */
     return (

@@ -33,7 +33,7 @@ export const useFeedHooks = (props: {
     viewRef: HTMLElement;
     onSnapshot: (snap: FeedSnapshot) => void;
     disableLoadMore?: boolean; // if true, will not load more items
-    provider: typeof useStream
+    provider: typeof useStream;
 }) => {
     const {
         loadMore: _loadMore,
@@ -158,7 +158,6 @@ export const useFeedHooks = (props: {
             clearTimeout(loadTimeoutRef.current);
         }
 
-        console.log(processedReplies)
         loadTimeoutRef.current = setTimeout(() => {
             console.log("REVEAL AFTER TIMEOUT");
             reveal();
@@ -201,25 +200,25 @@ export const useFeedHooks = (props: {
 
     const visualization = useVisualizationContext().visualization;
 
-    const prevView = useRef(visualization?.childrenVisualization);
+    const prevView = useRef(visualization?.view);
     const prevRoot = useRef(feedRoot);
 
     useLayoutEffect(() => {
         // needs to be useLayoutEffect, else we might trigger unwanted scrolls
         if (
-            prevView.current !== visualization?.childrenVisualization ||
+            prevView.current !== visualization?.view ||
             prevRoot.current !== feedRoot
         ) {
             resetLazyState();
-            prevView.current = visualization?.childrenVisualization;
+            prevView.current = visualization?.view;
             prevRoot.current = feedRoot;
         }
-    }, [visualization?.childrenVisualization, feedRoot]);
+    }, [visualization?.view, feedRoot]);
 
     const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
 
     const scrollUpForMore =
-        visualization?.childrenVisualization === ChildVisualization.CHAT;
+        visualization?.view === ChildVisualization.CHAT;
 
     useEffect(() => {
         document.documentElement.style.setProperty(
@@ -396,7 +395,7 @@ export const useFeedHooks = (props: {
         setViewRootById: (id) => {
             if (feedRoot?.idString !== id) {
                 const found = path.find((c) => c.idString === id);
-                found && found.load();
+                return found
             }
         },
         onSnapshot: props.onSnapshot,
@@ -419,6 +418,10 @@ export const useFeedHooks = (props: {
         return processedReplies.filter((_, i) => indexIsReadyToRender(i));
     }, [processedReplies, indexIsReadyToRender]);
 
+    console.log({
+        processedReplies,
+        visibleReplies
+    })
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: visibleReplies,
         repliesContainerRef,
@@ -467,7 +470,7 @@ export const useFeedHooks = (props: {
         }
     }, [isAtBottom, processedReplies]);
     const isChat =
-        visualization?.childrenVisualization === ChildVisualization.CHAT;
+        visualization?.view === ChildVisualization.CHAT;
 
     return {
         repliesContainerRef,

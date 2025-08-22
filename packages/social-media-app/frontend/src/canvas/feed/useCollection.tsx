@@ -1,84 +1,67 @@
 import { useMemo } from "react";
-import { usePeer, useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/react";
 import {
     Canvas,
     IndexableCanvas,
+    ReplyKind,
+    Scope,
+    ViewKind,
     getImmediateRepliesQuery,
-    getNarrativePostsQuery,
-    getNavigationalPostQuery,
+    getReplyKindQuery,
 } from "@giga-app/interface";
-import { type WithIndexedContext } from "@peerbit/document";
+import { Documents, type WithIndexedContext } from "@peerbit/document";
 
-// Helper: ensure canvas address calculation before transform.
-const calculateAddress = async (
-    p: WithIndexedContext<Canvas, IndexableCanvas>
-) => {
-    await p.calculateAddress();
-    return p;
-};
 
 export const useAllPosts = (properties: {
-    canvas?: Canvas;
+    scope: Scope;
+    parent?: WithIndexedContext<Canvas, IndexableCanvas>;
+    replies?: Documents<Canvas, IndexableCanvas>;
     type?: "navigational" | "narrative";
+    debug?: boolean;
 }) => {
-    const { peer } = usePeer();
+
+    const replies = properties.scope?.replies;
+    const parent = properties.parent;
+
     const {
         items: posts,
         isLoading,
         empty,
         id: iteratorId,
-    } = useQuery(
-        properties?.canvas?.loadedReplies
-            ? properties?.canvas.replies
-            : undefined,
-        {
-            query: useMemo(() => {
-                if (!properties.canvas) {
-                    return undefined;
-                }
-                return {
-                    query: [
-                        ...getImmediateRepliesQuery(properties.canvas),
-                        ...(properties.type != null
-                            ? [
-                                properties.type === "navigational"
-                                    ? getNavigationalPostQuery()
-                                    : getNarrativePostsQuery(),
-                            ]
-                            : []),
-                    ],
-                };
-            }, [properties.canvas, properties.type]),
-            transform: calculateAddress,
-            batchSize: 100,
-            debug: false, // { id: "replies" },
-            local: true,
-            remote: {
-                joining: {
-                    waitFor: 5e3,
-                },
-            },
+    } = useQuery(replies, {
+        query: useMemo(() => {
+            if (!parent) {
+                return undefined;
+            }
+            return {
+                query: [
+                    ...getImmediateRepliesQuery(parent),
+                    ...(properties.type != null
+                        ? [
+                            properties.type === "navigational"
+                                ? getReplyKindQuery(ViewKind)
+                                : getReplyKindQuery(ReplyKind),
+                        ]
+                        : []),
+                ],
+            };
+        }, [properties.scope, properties.type, properties.replies, parent]),
 
-            prefetch: true,
-            onChange: {
-                merge: async (e) => {
-                    for (const change of e.added) {
-                        const hash = change.__context.head;
-                        const entry =
-                            await properties!.canvas!.replies.log.log.get(hash);
-                        for (const signer of await entry.getSignatures()) {
-                            if (
-                                signer.publicKey.equals(peer.identity.publicKey)
-                            ) {
-                                return e; // merge the change since it was made by me
-                            }
-                        }
-                    }
-                    return undefined;
-                },
+
+        batchSize: 100,
+        debug: properties?.debug ?? false, // { id: "replies" },
+        local: true,
+        remote: {
+            joining: {
+                waitFor: 5e3,
             },
-        }
-    );
+        },
+
+        prefetch: true,
+        onChange: {
+            merge: true
+        },
+    });
     return {
         isLoading,
         iteratorId,

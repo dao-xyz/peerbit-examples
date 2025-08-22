@@ -1,8 +1,5 @@
-import { FaChevronDown } from "react-icons/fa6";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Canvas, FilterModel } from "@giga-app/interface";
-import * as Popover from "@radix-ui/react-popover";
-import * as ToggleGroup from "@radix-ui/react-toggle-group";
 import { useCanvases } from "../useCanvas";
 import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes";
@@ -34,7 +31,7 @@ export const CanvasPathInput: React.FC<{
     } = useStream();
 
     /* ── breadcrumb state ─────────────────────────────────────────── */
-    const { path, root } = useCanvases();
+    const { path } = useCanvases();
     const navigate = useNavigate();
     const popRoom = async () => {
         if (path.length <= 1) {
@@ -47,7 +44,9 @@ export const CanvasPathInput: React.FC<{
 
     /* ── chips for filters+view ───────────────────────────────────── */
     const chips = [
-        ...(filterModel && filterModel.id !== "best" && filterModel.id !== "chat"
+        ...(filterModel &&
+            filterModel.id !== "best" &&
+            filterModel.id !== "chat"
             ? [
                 {
                     key: "view",
@@ -201,7 +200,6 @@ export const CanvasPathInput: React.FC<{
         </div>
     );
 };
-
 
 interface ChipProps {
     label: string;

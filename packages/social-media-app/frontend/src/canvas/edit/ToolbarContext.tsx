@@ -1,6 +1,11 @@
 // ToolbarContext.tsx
-import React, { useState, createContext, ReactNode, useContext } from "react";
-import { CanvasWrapper } from "../CanvasWrapper";
+import React, {
+    useState,
+    createContext,
+    ReactNode,
+    useContext,
+} from "react";
+import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import {
     PendingCanvasProvider,
     usePendingCanvas,
@@ -23,16 +28,19 @@ type ToolbarProviderProps = {
     type?: ChildVisualization;
     layout?: Layout;
     classNameContent?: string;
-    parent: Canvas;
+    autoSave?: boolean; // Optional prop to control auto-saving behavior
+    autoReply?: boolean; // Optional prop to control auto-reply functionality
+    onDraftCreated?: (draft: Canvas) => void; // Callback when a draft is created
 };
 
 const ToolbarProviderContextComponent = ({
     children,
-}: ToolbarProviderProps) => {
+}: { children: ReactNode; }) => {
     // This inner component is used to ensure the context is always available
     // even if fullscreenEditorActive is not provided.
 
     const [appSelectOpen, setAppSelectOpen] = useState(false);
+
     return (
         <ToolbarContext.Provider
             value={{
@@ -40,31 +48,8 @@ const ToolbarProviderContextComponent = ({
                 setAppSelectOpen,
             }}
         >
-            <AutoReplyProvider>{children}</AutoReplyProvider>
+            {children}
         </ToolbarContext.Provider>
-    );
-};
-
-const CanvasWrapperComponent = ({
-    children,
-    placeholder,
-    classNameContent,
-    parent,
-}: ToolbarProviderProps) => {
-    const { pendingCanvas, publish: onSavePending } = usePendingCanvas();
-    return (
-        <CanvasWrapper
-            canvas={pendingCanvas}
-            draft={true}
-            multiCanvas
-            onSave={onSavePending}
-            placeholder={placeholder}
-            classNameContent={classNameContent}
-        >
-            <ToolbarProviderContextComponent parent={parent}>
-                {children}
-            </ToolbarProviderContextComponent>
-        </CanvasWrapper>
     );
 };
 
@@ -75,25 +60,65 @@ export const CanvasEditorProvider = ({
     pendingCanvas,
     placeholder,
     classNameContent,
-    parent,
-    type,
-    layout,
-}: ToolbarProviderProps) => {
+    autoSave,
+    replyTo,
+    autoReply,
+    onDraftCreated,
+}: ToolbarProviderProps & { replyTo?: Canvas }) => {
     return (
         <PendingCanvasProvider
-            layout={layout}
-            experience={type}
             pendingCanvas={pendingCanvas}
-            parent={parent}
+            onDraftCreated={onDraftCreated}
+            replyTo={autoReply ? undefined : replyTo}
         >
             <CanvasWrapperComponent
                 classNameContent={classNameContent}
                 placeholder={placeholder}
-                parent={parent}
+                autoSave={autoSave}
+                autoReply={autoReply}
             >
                 {children}
             </CanvasWrapperComponent>
         </PendingCanvasProvider>
+    );
+};
+
+const CanvasWrapperComponent = ({
+    children,
+    placeholder,
+    classNameContent,
+    autoSave,
+    autoReply
+}: ToolbarProviderProps) => {
+    const { pendingCanvas, saveDraftDebounced } = usePendingCanvas();
+
+
+    return (
+        <CanvasWrapper
+            canvas={pendingCanvas}
+            draft={true}
+            multiCanvas
+            /* onSave={publish} */
+            placeholder={placeholder}
+            classNameContent={classNameContent}
+            onContentChange={(e) => {
+                if (!autoSave) {
+                    return;
+                }
+                for (const change of e) {
+                    if (!change.content.isEmpty) {
+                        saveDraftDebounced();
+                        return;
+                    }
+                }
+            }}
+        >
+            <ToolbarProviderContextComponent >
+                <AutoReplyProvider disabled={!autoReply}>
+                    {children}
+                </AutoReplyProvider>
+            </ToolbarProviderContextComponent>
+        </CanvasWrapper>
     );
 };
 

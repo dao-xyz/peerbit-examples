@@ -21,6 +21,7 @@ import { usePeer } from "@peerbit/react";
 import { FaCheck } from "react-icons/fa";
 import { Spinner } from "../../utils/Spinner";
 import debounce from "lodash.debounce";
+import { equals } from "uint8arrays"
 
 export type MarkdownContentProps = {
     element: Element<StaticContent<StaticMarkdownText>>;
@@ -63,7 +64,7 @@ export const MarkdownContent = ({
     const [loadingSuggestedReply, setLoadingSuggestedReply] = useState(false);
     const [suggestReply, setSuggestedReply] = useState<string | null>(null);
 
-    const suggestedReplyForParent = useRef<string | null>(null);
+    const suggestedReplyForParent = useRef<Uint8Array | null>(null);
 
     const debouncedPropChange = useRef(
         debounce(
@@ -91,7 +92,7 @@ export const MarkdownContent = ({
     const caretIsAtEnd = () =>
         textareaRef.current &&
         textareaRef.current.selectionStart ===
-            textareaRef.current.value.length &&
+        textareaRef.current.value.length &&
         textareaRef.current.selectionEnd === textareaRef.current.value.length;
 
     // Helper: push the scroll container (or window) so the caret line is visible
@@ -118,39 +119,39 @@ export const MarkdownContent = ({
             !isReady ||
             !isEditing ||
             !canvas ||
-            !canvas.path ||
+            !canvas.__indexed.path ||
             text.length > 0
         ) {
             return;
         }
-        let parent = canvas.path[canvas.path.length - 1];
+        let parent = canvas.__indexed.path[canvas.__indexed.path.length - 1];
 
         let suggestTimeout: ReturnType<typeof setTimeout> | null = null;
         if (parent) {
-            if (suggestedReplyForParent.current !== parent.address) {
-                suggestedReplyForParent.current = parent.address;
-                let suggestStartRef = parent.address;
+            if (!equals(suggestedReplyForParent.current, parent)) {
+                suggestedReplyForParent.current = parent;
+                /*  let suggestStartRef = parent.id; */
                 suggestTimeout = setTimeout(async () => {
                     setLoadingSuggestedReply(true);
                     setSuggestedReply(null);
                     try {
-                        const loadedParent = await parent.load(peer);
-                        if (loadedParent.publicKey.equals(canvas.publicKey)) {
-                            return; // no self reply
-                        }
-                        // console.log("SUGGEST!");
-                        /*  suggest(loadedParent, 2e4).then((reply) => {
-                             if (
-                                 suggestStartRef !==
-                                 canvas.path[canvas.path.length - 1].address
-                             ) {
-                                 console.log(
-                                     "SUGGESTED reply parent change, skipping"
-                                 );
-                                 return; // the parent has changed, ignore the suggestion
-                             }
-                             setSuggestedReply(reply);
-                         }); */
+                        /*  const loadedParent = await parent.load(peer);
+                         if (loadedParent.publicKey.equals(canvas.publicKey)) {
+                             return; // no self reply
+                         }
+                         // console.log("SUGGEST!");
+                          suggest(loadedParent, 2e4).then((reply) => {
+                              if (
+                                  suggestStartRef !==
+                                  canvas.path[canvas.path.length - 1].address
+                              ) {
+                                  console.log(
+                                      "SUGGESTED reply parent change, skipping"
+                                  );
+                                  return; // the parent has changed, ignore the suggestion
+                              }
+                              setSuggestedReply(reply);
+                          }); */
                     } finally {
                         setLoadingSuggestedReply(false);
                     }
@@ -162,7 +163,7 @@ export const MarkdownContent = ({
             suggestTimeout && clearTimeout(suggestTimeout);
         };
     }, [
-        canvas?.path,
+        canvas?.__indexed.path,
         isEditing,
         isReady,
         text,
@@ -197,9 +198,9 @@ export const MarkdownContent = ({
                 if (
                     lastDims.current &&
                     Math.abs(lastDims.current.width - newDims.width) <
-                        threshold &&
+                    threshold &&
                     Math.abs(lastDims.current.height - newDims.height) <
-                        threshold
+                    threshold
                 ) {
                     continue;
                 }
@@ -358,12 +359,14 @@ export const MarkdownContent = ({
         !inFullscreen && editable && isEditing
             ? { maxHeight: "200px", overflowY: "auto" as const }
             : {};
+
+    const displayText = isEditing ? text : content.text;
+
     return (
         <div
             ref={containerRef}
-            className={`${commonClasses} w-full text-left  ${
-                editable ? "cursor-text" : ""
-            }`}
+            className={`${commonClasses} w-full text-left  ${editable ? "cursor-text" : ""
+                }`}
             style={containerStyle}
             onClick={handleClick}
         >
@@ -371,14 +374,13 @@ export const MarkdownContent = ({
                 <div className="flex flex-row items-start">
                     <textarea
                         ref={textareaRef}
-                        value={text}
+                        value={displayText}
                         onChange={handleTextChange}
                         onBlur={handleBlur}
                         onKeyDown={handleKeyDown}
                         onInput={autoResize}
-                        className={`${commonClasses} ${padding} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800 ${
-                            !inFullscreen ? "textarea-truncate" : ""
-                        }`}
+                        className={`${commonClasses} ${padding} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800 ${!inFullscreen ? "textarea-truncate" : ""
+                            }`}
                         rows={1}
                         placeholder={
                             suggestReply || placeholder || "Type here..."
@@ -405,17 +407,14 @@ export const MarkdownContent = ({
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={`${
-                        previewLines ? "line-clamp-[var(--preview-lines)]" : ""
-                    } ${
-                        previewLines > 0 ? "break-all whitespace-pre-wrap" : ""
-                    } ${editable ? "" : ""} ${editable ? "min-h-10" : ""} ${
-                        classNameContent
+                    className={`${previewLines ? "line-clamp-[var(--preview-lines)]" : ""
+                        } ${previewLines > 0 ? "break-all whitespace-pre-wrap" : ""
+                        } ${editable ? "" : ""} ${editable ? "min-h-10" : ""} ${classNameContent
                             ? typeof classNameContent === "function"
                                 ? classNameContent(element)
                                 : classNameContent
                             : ""
-                    }`}
+                        }`}
                 >
                     <Markdown
                         disallowedElements={
@@ -466,7 +465,7 @@ export const MarkdownContent = ({
                             },
                         }}
                     >
-                        {text}
+                        {displayText}
                     </Markdown>
                 </div>
             )}

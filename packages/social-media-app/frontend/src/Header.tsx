@@ -15,13 +15,12 @@ import { useCssVarHeight } from "./utils/useCssVarHeight";
 import { ExperienceDropdownButton } from "./canvas/custom/ExperienceDropdown";
 import { useVisualizationContext } from "./canvas/custom/CustomizationProvider";
 import { ChildVisualization } from "@giga-app/interface";
-import { PublishStatusButton } from "./canvas/PublishStatusButton";
 import { useCanvases } from "./canvas/useCanvas";
 import { FaRegUser } from "react-icons/fa";
 import { VscCommentDraft } from "react-icons/vsc";
 import { MdSwitchAccount } from "react-icons/md";
 import { TbPlugConnected } from "react-icons/tb";
-
+import { ToggleEditModeButton } from "./canvas/edit/ToggleEditModeButton";
 
 // Define props interface
 interface HeaderProps {
@@ -33,7 +32,7 @@ export const Header = (props: HeaderProps) => {
     // Read initial theme from localStorage or default to "light"
     const { toggleTheme, theme } = useThemeContext();
     const { peer } = usePeer();
-    const { path } = useCanvases();
+    const { path, viewRoot } = useCanvases();
     const navigate = useNavigate();
 
     const ref = useCssVarHeight<HTMLDivElement>({ cssVar: "--header-h" });
@@ -42,6 +41,9 @@ export const Header = (props: HeaderProps) => {
 
     // show profile button if we are at the root of the path, or screen is wider than sm
     const showProfileButton = path.length <= 1 || window.innerWidth >= 640;
+
+    /* owner? ---------------------------------------------------------------- */
+    const isOwner = peer?.identity.publicKey.equals(viewRoot?.publicKey);
 
     const { onScrollToTop, scrollToTop, focused } = useFocusProvider();
 
@@ -52,28 +54,32 @@ export const Header = (props: HeaderProps) => {
         >
             {!props.fullscreen && (
                 <div
-                    className={`flex flex-row max-w-[876px] items-start w-full px-1  z-50    rounded-b-lg bg-neutral-50 dark:bg-neutral-900`}
+                    className={`flex flex-row max-w-[876px] items-start w-full px-1  z-50    bg-neutral-50 dark:bg-neutral-900`}
                 >
                     <CanvasPathInput
                         className="mt-1 py-1 px-1" /* className={"transition-padding ease-in-out duration-500 " + (headerIsVisible ? "p-1" : "p-0")}  */
                     />
-                    {visualization?.childrenVisualization === ChildVisualization.CHAT && focused && (
-                        <button
-                            className="btn  btn-sm  h-8 flex flex-row p-1 gap-1"
-                            onClick={scrollToTop}
-                        >
-                            <span className="flex flex-row text-nowrap text-sm">
-                                Go to top
-                            </span>
-                            <MdKeyboardDoubleArrowUp size={20} />
-                        </button>
-                    )}
+                    {visualization?.view ===
+                        ChildVisualization.CHAT &&
+                        focused && (
+                            <button
+                                className="btn  btn-sm  h-8 flex flex-row p-1 gap-1"
+                                onClick={scrollToTop}
+                            >
+                                <span className="flex flex-row text-nowrap text-sm">
+                                    Go to top
+                                </span>
+                                <MdKeyboardDoubleArrowUp size={20} />
+                            </button>
+                        )}
                     <div className="flex flex-row  gap-1 my-1">
                         <ExperienceDropdownButton />
-                        <PublishStatusButton />
+                        {isOwner && <ToggleEditModeButton />}
 
                         {/*  TODO do we really need to set the z-index to 2 here? */}
-                        {(visualization?.childrenVisualization !== ChildVisualization.CHAT || !focused) &&
+                        {(visualization?.view !==
+                            ChildVisualization.CHAT ||
+                            !focused) &&
                             showProfileButton && (
                                 <div className="  z-4 col-start-10 flex items-center ">
                                     {" "}
@@ -137,7 +143,9 @@ export const Header = (props: HeaderProps) => {
                                                 >
                                                     <div className="flex items-center gap-2">
                                                         <MdSwitchAccount />
-                                                        <span>Change identity</span>
+                                                        <span>
+                                                            Change identity
+                                                        </span>
                                                     </div>
                                                 </DropdownMenu.Item>
                                                 <DropdownMenu.Item
@@ -151,7 +159,9 @@ export const Header = (props: HeaderProps) => {
                                                 >
                                                     <div className="flex items-center gap-2">
                                                         <TbPlugConnected />
-                                                        <span>Connect devices</span>
+                                                        <span>
+                                                            Connect devices
+                                                        </span>
                                                     </div>
                                                 </DropdownMenu.Item>
 

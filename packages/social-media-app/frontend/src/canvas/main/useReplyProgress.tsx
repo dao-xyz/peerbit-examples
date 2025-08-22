@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useCallback } from "react";
-import { PublicSignKey } from "@peerbit/crypto";
+import { equals, PublicSignKey } from "@peerbit/crypto";
 import {
     Canvas,
     CanvasMessage,
@@ -30,7 +30,7 @@ export interface ReplyProgressContextType {
     // Registers a canvas's program (which exposes a messages EventTarget) to listen for reply progress events.
     registerCanvas: (canvas: Canvas) => void;
     // Returns the list of peer PublicSignKeys currently replying for the given canvas.
-    getReplying: (address: string) => PublicSignKey[];
+    getReplying: (idString: string) => PublicSignKey[];
     // Announces that this peer is replying to the given canvas.
     announceReply: (canvas: Canvas) => Promise<void>;
 }
@@ -71,13 +71,13 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
     const unregisterCanvas = useCallback((canvas: Canvas) => {
         setGlobalMap((prev) => {
             const newMap = new Map(prev);
-            const entry = newMap.get(canvas.address);
+            const entry = newMap.get(canvas.idString);
             if (entry) {
                 if (entry.counter <= 1) {
-                    newMap.delete(canvas.address);
+                    newMap.delete(canvas.idString);
                 } else {
                     entry.counter--;
-                    newMap.set(canvas.address, entry);
+                    newMap.set(canvas.idString, entry);
                 }
             }
             return newMap;
@@ -95,7 +95,7 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
                     entry = {
                         counter: 0,
                         peerToReply: new Map(),
-                        unregister: () => {},
+                        unregister: () => { },
                     };
                 }
                 const peerHash = publicKey.hashcode();
@@ -140,22 +140,22 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
             // Either create a new entry or increment the counter.
             setGlobalMap((prev) => {
                 const newMap = new Map(prev);
-                let entry = newMap.get(canvas.address);
+                let entry = newMap.get(canvas.idString);
                 if (entry) {
                     entry.counter++;
-                    newMap.set(canvas.address, entry);
+                    newMap.set(canvas.idString, entry);
                 } else {
-                    entry = createGlobalReplyEntry(canvas.address);
-                    newMap.set(canvas.address, entry);
+                    entry = createGlobalReplyEntry(canvas.idString);
+                    newMap.set(canvas.idString, entry);
                 }
                 return newMap;
             });
 
             // Create an array with the main canvas and (if different) its origin.
             const canvasesToSubscribe: Canvas[] = [canvas];
-            if (canvas.origin && canvas.origin.address !== canvas.address) {
-                canvasesToSubscribe.push(canvas.origin);
-            }
+            /*  if (canvas.origin && canvas.origin.address !== canvas.address) {
+                 canvasesToSubscribe.push(canvas.origin);
+             } */
 
             // Shared event listener for request events.
             const listener = (e: { detail: RequestEvent<CanvasMessage> }) => {
@@ -163,14 +163,11 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
                     e.detail &&
                     e.detail.request instanceof ReplyingInProgresss
                 ) {
-                    const refAddress = e.detail.request.reference.address;
+                    const refAddress = e.detail.request.reference;
                     // Listen for events coming from either the main canvas or its origin.
 
-                    if (
-                        refAddress === canvas.address ||
-                        (canvas.origin && refAddress === canvas.origin.address)
-                    ) {
-                        updateReplyProgress(canvas.address, e.detail.from);
+                    if (equals(refAddress, canvas.id)) {
+                        updateReplyProgress(canvas.idString, e.detail.from);
                     }
                 }
             };
@@ -205,8 +202,8 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
 
     // Retrieve the list of replying peers for a given canvas ID.
     const getReplying = useCallback(
-        (canvasId: string): PublicSignKey[] => {
-            const entry = globalMap.get(canvasId);
+        (canvasIdString: string): PublicSignKey[] => {
+            const entry = globalMap.get(canvasIdString);
             if (!entry) return [];
             return Array.from(entry.peerToReply.values()).map(
                 (v) => v.publicKey

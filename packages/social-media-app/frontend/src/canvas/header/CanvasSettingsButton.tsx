@@ -25,9 +25,11 @@ import { CreateNewViewMenuItem } from "../feed/CreateNewViewMenuItem";
 export const CanvasSettingsButton = ({
     canvas,
     onOpen,
+    className
 }: {
     canvas: Canvas | WithIndexedContext<Canvas, IndexableCanvas>;
     onOpen?: () => void;
+    className?: string; // optional className for styling
 }) => {
     /* ─────────────────── hooks & deps ─────────────────── */
     const { peer } = usePeer();
@@ -66,7 +68,7 @@ export const CanvasSettingsButton = ({
             {/* ───── trigger (⋯) ───── */}
             <DropdownMenu.Root>
                 <DropdownMenu.Trigger asChild>
-                    <button className="btn btn-icon btn-icon-sm">
+                    <button className={"btn btn-icon btn-icon-sm " + className}>
                         <HiDotsHorizontal size={20} />
                     </button>
                 </DropdownMenu.Trigger>

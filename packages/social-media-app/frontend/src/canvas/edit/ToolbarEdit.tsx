@@ -3,6 +3,7 @@ import { useEditTools } from "./ToolbarContext";
 import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
 import { BsCamera } from "react-icons/bs";
 import { useCanvas } from "../CanvasWrapper";
+import { usePendingCanvas } from "./PendingCanvasContext";
 
 export const ToolbarEdit = (properties?: {
     className?: string;
@@ -16,9 +17,10 @@ export const ToolbarEdit = (properties?: {
             setAppSelectOpen((appSelectOpen) => !appSelectOpen);
         }
     };
-    const { savePending } = useCanvas();
+    const { publish } = usePendingCanvas();
+
     const save = () => {
-        return savePending().then(() => properties?.onSave?.());
+        return publish();
     };
 
     const AddButton = () => (

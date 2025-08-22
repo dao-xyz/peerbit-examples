@@ -13,17 +13,18 @@ import {
     Canvas,
     StreamSettings,
     StreamSetting,
-    CanvasAddressReference,
     IndexableCanvas,
     PinnedPosts,
     getTimeQuery,
     getCanvasWithContentQuery,
     getCanvasWithContentTypesQuery,
-    getNarrativePostsQuery,
     ChildVisualization,
+    AddressReference,
+    getReplyKindQuery,
+    ReplyKind,
 } from "@giga-app/interface";
-import { PrivateCanvasScope, useCanvases } from "../useCanvas";
-import type { WithContext } from "@peerbit/document";
+import { useCanvases } from "../useCanvas";
+import type { Index, WithContext } from "@peerbit/document";
 import { useSearchParams } from "react-router";
 import { ALL_DEFAULT_FILTERS } from "./defaultViews.js";
 import { type WithIndexedContext } from "@peerbit/document";
@@ -39,6 +40,7 @@ import {
 } from "./filters.js";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
+import { equals } from "uint8arrays";
 
 /**
  * Debounce any primitive or reference value *together* so React effects that depend on multiple
@@ -70,21 +72,25 @@ function useCombinedDebounced<A, B>(a: A, b: B, delay: number): { a: A; b: B } {
 export type LineType = "start" | "end" | "end-and-start" | "none" | "middle";
 export const STREAM_QUERY_PARAM_KEY = "r"; // the query parameter key for the stream view
 // Helper: retrieves parent's address from a canvas message.
-function getParentAddress(msg: WithContext<Canvas>): string | undefined {
-    return msg.path.length ? msg.path[msg.path.length - 1].address : undefined;
+function getParentId(msg: WithIndexedContext<Canvas, IndexableCanvas>): Uint8Array | undefined {
+    return msg.__indexed.path.length ? msg.__indexed.path[msg.__indexed.path.length - 1] : undefined;
 }
 
 // Helper: ensure canvas address calculation before transform.
-const calculateAddress = async (
+/* const calculateAddress = async (
     p: WithIndexedContext<Canvas, IndexableCanvas>
 ) => {
     await p.calculateAddress();
     return p;
 };
-
-function useStreamContextHook(options?: { private?: boolean }) {
-    const { path: canvases, loading, leaf } = options?.private ? PrivateCanvasScope.useCanvases() : useCanvases();
-    const [feedRoot, setFeedRoot] = useState<CanvasDB | undefined>(undefined);
+ */
+function useStreamContextHook(/* options?: { private?: boolean } */) {
+    const {
+        path: canvases,
+        loading,
+        leaf,
+    } = /* options?.private ? PrivateCanvasScope.useCanvases() : */ useCanvases();
+    const [feedRoot, setFeedRoot] = useState<WithIndexedContext<CanvasDB, IndexableCanvas> | undefined>(undefined);
     const visualization = useVisualizationContext().visualization;
 
     useEffect(() => {
@@ -111,7 +117,9 @@ function useStreamContextHook(options?: { private?: boolean }) {
 
     // Instead of separate view state, derive view from URL:
     const [searchParams, setSearchParams] = useSearchParams();
-    const settingsQuery: string = (searchParams.get(STREAM_QUERY_PARAM_KEY) as string);
+    const settingsQuery: string = searchParams.get(
+        STREAM_QUERY_PARAM_KEY
+    ) as string;
 
     const timeFilter: TimeFilter = TIME_FILTERS.get(
         (searchParams.get("t") as TimeFilterType) || DEFAULT_TIME_FILTER
@@ -146,7 +154,8 @@ function useStreamContextHook(options?: { private?: boolean }) {
             query?: string; // ''     ⇢ delete 'q'
         }) =>
             mutateParams((p) => {
-                if (opts.view !== undefined) p.set(STREAM_QUERY_PARAM_KEY, opts.view);
+                if (opts.view !== undefined)
+                    p.set(STREAM_QUERY_PARAM_KEY, opts.view);
                 if (opts.time !== undefined)
                     opts.time === "all" ? p.delete("t") : p.set("t", opts.time);
                 if (opts.type !== undefined)
@@ -208,11 +217,11 @@ function useStreamContextHook(options?: { private?: boolean }) {
 
     const createSettings = async (
         name: string,
-        description?: CanvasAddressReference /* filter */
+        description?: AddressReference /* filter */
     ) => {
         const setting = new StreamSetting({
             id: name,
-            canvas: new CanvasAddressReference({ canvas: feedRoot }),
+            canvas: feedRoot.id,
             description: description,
         });
         await streamSettings.program.settings.put(setting);
@@ -229,12 +238,14 @@ function useStreamContextHook(options?: { private?: boolean }) {
         }
         const pinnedPosts = view.filter as PinnedPosts;
         // Check if the canvas is already pinned
-        if (pinnedPosts.pinned.some((p) => p.address === canvas.address)) {
+        if (pinnedPosts.pinned.some((p) => equals(p, canvas.id))) {
             return; // Already pinned, no action needed
         }
 
         // Pin the canvas to the view
-        pinnedPosts.pinned.push(new CanvasAddressReference({ canvas }));
+        pinnedPosts.pinned.push(
+            canvas.id
+        );
         await streamSettings.program.settings.put(view);
     };
 
@@ -242,9 +253,9 @@ function useStreamContextHook(options?: { private?: boolean }) {
 
     // Set the query based on view and viewRoot.
     const filterModel = useMemo(() => {
-        if (visualization?.childrenVisualization === ChildVisualization.CHAT) {
+        if (visualization?.view === ChildVisualization.CHAT) {
             headerVisibility.setDisabled(true); // scrolling direction is different in chat so we disable hiding of headers by sroll
-            return ALL_DEFAULT_FILTERS.find(x => x.id === "chat");
+            return ALL_DEFAULT_FILTERS.find((x) => x.id === "chat");
         } else {
             headerVisibility.setDisabled(false);
             let viewToFind = debouncedView || "best"; // default to "best" if no view is set
@@ -254,7 +265,6 @@ function useStreamContextHook(options?: { private?: boolean }) {
                     ?.toFilterModel() ||
                 ALL_DEFAULT_FILTERS.find((x) => x.id == viewToFind);
             return newView;
-
         }
     }, [debouncedView, dynamicViewItems, visualization]);
 
@@ -295,12 +305,13 @@ function useStreamContextHook(options?: { private?: boolean }) {
         }
 
         // add narrative type filter
-        queryObject.query.push(getNarrativePostsQuery());
+        queryObject.query.push(getReplyKindQuery(ReplyKind));
         if (query?.length > 0) {
             queryObject.query.push(getCanvasWithContentQuery(query));
         }
         return queryObject;
     }, [feedRoot, filterModel, timeFilter, typeFilter?.key, query]);
+
 
     // For lazy loading, we use a paginated hook.
     const [batchSize, setBatchSize] = useState(3); // Default batch size
@@ -310,65 +321,61 @@ function useStreamContextHook(options?: { private?: boolean }) {
         isLoading,
         empty,
         id: iteratorId,
-    } = useQuery(
-        feedRoot && feedRoot.loadedReplies ? feedRoot.replies : undefined,
-        {
-            query: canvasQuery,
-            reverse:
-                visualization?.childrenVisualization === ChildVisualization.CHAT
-                    ? true
-                    : false,
-            transform: calculateAddress,
-            batchSize,
-            debug: false /* { id: "replies" }, */,
-            local: true,
-            remote: {
-                joining: {
-                    waitFor: 5e3,
-                },
+    } = useQuery(feedRoot?.nearestScope.replies, {
+        query: useMemo(() => { return {} }, []),// canvasQuery,
+        reverse:
+            visualization?.view === ChildVisualization.CHAT
+                ? true
+                : false,
+        batchSize,
+        debug: false /* { id: "replies" }, */,
+        local: true,
+        remote: {
+            joining: {
+                waitFor: 5e3,
             },
-            onChange: {
-                merge: async (e) => {
-                    for (const change of e.added) {
-                        const hash = change.__context.head;
-                        const entry = await feedRoot!.replies.log.log.get(hash);
-                        for (const signer of await entry.getSignatures()) {
-                            if (
-                                signer.publicKey.equals(peer.identity.publicKey)
-                            ) {
-                                return e; // merge the change since it was made by me
-                            }
+        },
+        onChange: {
+            merge: async (e) => {
+                for (const change of e.added) {
+                    const hash = change.__context.head;
+                    const entry = await feedRoot!.replies.log.log.get(hash);
+                    for (const signer of await entry.getSignatures()) {
+                        if (signer.publicKey.equals(peer.identity.publicKey)) {
+                            return e; // merge the change since it was made by me
                         }
                     }
-                    return undefined;
-                },
-                update: async (prev, filtered) => {
-                    const merged = await feedRoot.replies.index.updateResults(
-                        prev,
-                        filtered,
-                        canvasQuery,
-                        true
-                    );
-                    if (
-                        visualization?.childrenVisualization !==
-                        ChildVisualization.CHAT
-                    ) {
-                        // put added at the top
-                        for (const added of filtered.added) {
-                            const index = merged.findIndex(
-                                (item) => item.idString === added.idString
-                            );
-                            if (index !== -1) {
-                                merged.splice(index, 1);
-                                merged.unshift(added);
-                            }
+                }
+                return undefined;
+            },
+            update: async (prev, filtered) => {
+                const merged = await feedRoot.replies.index.updateResults(
+                    prev,
+                    filtered,
+                    canvasQuery,
+                    true
+                );
+                if (
+                    visualization?.view !==
+                    ChildVisualization.CHAT
+                ) {
+                    // put added at the top
+                    for (const added of filtered.added) {
+                        const index = merged.findIndex(
+                            (item) => item.idString === added.idString
+                        );
+                        if (index !== -1) {
+                            merged.splice(index, 1);
+                            merged.unshift(added);
                         }
                     }
-                    return merged;
-                },
+                }
+                return merged;
             },
-        }
-    );
+        },
+    });
+
+
 
     const lastReply = useMemo(() => {
         if (sortedReplies && sortedReplies.length > 0) {
@@ -383,15 +390,15 @@ function useStreamContextHook(options?: { private?: boolean }) {
         next,
         context,
     }: {
-        current: WithContext<Canvas>;
-        next?: WithContext<Canvas>;
+        current: WithIndexedContext<Canvas, IndexableCanvas>;
+        next?: WithIndexedContext<Canvas, IndexableCanvas>;
         context: CanvasDB;
     }): LineType {
-        const currentParent = getParentAddress(current);
-        const nextParent = next ? getParentAddress(next) : undefined;
-        const directChild = !!(next && nextParent === current.address);
+        const currentParent = getParentId(current);
+        const nextParent = next ? getParentId(next) : undefined;
+        const directChild = !!(next && equals(nextParent, current.id));
 
-        if (currentParent === context.address) {
+        if (equals(currentParent, context.id)) {
             return directChild ? "start" : "none";
         } else {
             return directChild ? "middle" : "end";
@@ -403,21 +410,23 @@ function useStreamContextHook(options?: { private?: boolean }) {
         current,
         next,
     }: {
-        replies: WithContext<Canvas>[];
-        current: WithContext<Canvas>;
-        next?: Canvas;
+        replies: WithIndexedContext<Canvas, IndexableCanvas>[];
+        current: WithIndexedContext<Canvas, IndexableCanvas>;
+        next?: WithIndexedContext<Canvas, IndexableCanvas>;
     }): WithContext<Canvas>[] {
-        if (!next || next.path.length === 0) return [];
+        if (!next || next.__indexed.path.length === 0) return [];
+
         const lastElements = {
-            next: next.path[next.path.length - 1],
-            current: current.path?.length
-                ? current.path[current.path.length - 1]
+            next: next.__indexed.path[next.__indexed.path.length - 1],
+            current: current.__indexed.path?.length
+                ? current.__indexed.path[current.__indexed.path.length - 1]
                 : undefined,
         };
-        return lastElements.next.address !== lastElements.current?.address &&
-            current.address !== lastElements.next.address
+
+        return !equals(lastElements.next, lastElements.current) &&
+            !equals(current.id, lastElements.next)
             ? replies.filter(
-                (reply) => reply.address === lastElements.next.address
+                (reply) => equals(reply.id, lastElements.next)
             )
             : [];
     }
@@ -474,7 +483,7 @@ function useStreamContextHook(options?: { private?: boolean }) {
 
     const processedReplies: ReturnType<typeof insertQuotes> | undefined =
         useMemo(() => {
-            if (!feedRoot || feedRoot.closed) {
+            if (!feedRoot || feedRoot.initialized) {
                 return undefined;
             }
             if (
@@ -493,12 +502,13 @@ function useStreamContextHook(options?: { private?: boolean }) {
                     id: reply.idString,
                 }))
                 : [];
-        }, [sortedReplies, debouncedView, feedRoot?.closed, feedRoot]);
+        }, [sortedReplies, debouncedView, feedRoot, feedRoot?.initialized]);
+    console.log("LOAD FEED FROM ", feedRoot?.nearestScope.replies.log.log.length, sortedReplies.length, processedReplies?.length, feedRoot?.idString)
 
     return {
         feedRoot,
         pinToView,
-        defaultViews: ALL_DEFAULT_FILTERS.filter(x => x.id !== "chat"), // chat is not a default view, it is a special view used when the mode is "chat". TODO do this code less ugly
+        defaultViews: ALL_DEFAULT_FILTERS.filter((x) => x.id !== "chat"), // chat is not a default view, it is a special view used when the mode is "chat". TODO do this code less ugly
         dynamicViews: dynamicViewItems,
         createSettings,
         filterModel,
@@ -526,38 +536,69 @@ function useStreamContextHook(options?: { private?: boolean }) {
         setQuery,
     };
 }
+const makeInitialStreamValue = (): StreamContextType => {
+    return {
+        feedRoot: undefined,
+        pinToView: async () => { },
+        defaultViews: [],
+        dynamicViews: [],
+        createSettings: async () => undefined as any,
+        filterModel: undefined,
+        setView: () => { },
+        loadMore: async () => { },
+        isLoading: true,
+
+        loading: true,
+        setBatchSize: () => { },
+        batchSize: 3,
+        iteratorId: undefined,
+        lastReply: undefined,
+        sortedReplies: [],
+        processedReplies: [],
+
+        timeFilter: TIME_FILTERS.get(DEFAULT_TIME_FILTER)!,
+        typeFilter: TYPE_FILTERS.get(DEFAULT_TYPE_FILTER)!,
+        setTimeFilter: () => { },
+        setTypeFilter: () => { },
+        setQueryParams: () => { },
+
+        hasMore: () => false,
+
+        query: "",
+        setQuery: () => { },
+    } as unknown as StreamContextType
+};
+
 
 // Define the context type.
 export type StreamContextType = ReturnType<typeof useStreamContextHook>;
 
-// Create the context.
-const StreamContext = createContext<StreamContextType | undefined>(undefined);
-
 // Provider component wrapping children.
-const createStreamProvider = (properties?: { private: boolean }) => {
+const createStreamProvider = (properties?: { private?: boolean }) => {
+    /* ① */ const StreamContext = createContext<StreamContextType | undefined>(
+    makeInitialStreamValue()
+);
 
-    const StreamProvider: React.FC<{ children: ReactNode }> = (options) => {
-        const view = useStreamContextHook({ private: properties?.private });
+    const StreamProvider: React.FC<{ children: ReactNode }> = ({
+        children,
+    }) => {
+        const value = useStreamContextHook(/* { private: properties?.private } */);
         return (
-            <StreamContext.Provider value={view}>
-                {options.children}
+            <StreamContext.Provider value={value}>
+                {children}
             </StreamContext.Provider>
         );
     };
 
-    // Custom hook for consumers.
     const useStream = (): StreamContextType => {
-        const context = useContext(StreamContext);
-        if (!context) {
-            throw new Error("useStream must be used within a FeedContext");
-        }
-        return context;
+        const ctx = useContext(StreamContext);
+        if (!ctx)
+            throw new Error("useStream must be used within a StreamProvider");
+        return ctx;
     };
 
     return { StreamProvider, useStream };
-
-}
+};
 
 export const PublicStreamScope = createStreamProvider();
-export const PrivateStreamScope = createStreamProvider({ private: true });
 export const useStream = PublicStreamScope.useStream;

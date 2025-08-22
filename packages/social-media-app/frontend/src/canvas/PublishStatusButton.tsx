@@ -1,18 +1,21 @@
-import { useState } from "react";
-import { HiOutlineNewspaper } from "react-icons/hi2";   // “unpublished”
-import { MdOutlineCheckCircle } from "react-icons/md";  // “published”
+import { MdOutlineCheckCircle } from "react-icons/md"; // “published”
 import clsx from "clsx"; // if you don’t already use clsx, swap for template-literal
 import { BsSend } from "react-icons/bs";
+import { Canvas } from "@giga-app/interface";
+import { useState } from "react";
 
 interface PublishStatusButtonProps {
-    /** start in the “published” state? default: false */
-    initialPublished?: boolean;
     className?: string;
+    canvas: Canvas;
+
 }
 
-export const PublishStatusButton = ({ initialPublished = false, className }: PublishStatusButtonProps) => {
-    const [published, setPublished] = useState(initialPublished);
+export const PublishStatusButton = ({
+    className,
+    canvas
+}: PublishStatusButtonProps) => {
 
+    const [published, setPublished] = useState<boolean>(false);
     const handleToggle = () => {
         if (!published) {
             // TODO - plug in your real “publish” action here
@@ -24,25 +27,24 @@ export const PublishStatusButton = ({ initialPublished = false, className }: Pub
         <button
             onClick={handleToggle}
             className={clsx(
-                "btn flex items-center gap-1 px-2 rounded text-xs  transition-colors",
+                "btn btn-sm flex items-center gap-1 px-2 rounded  transition-colors",
                 published
                     ? "text-green-500 hover:text-green-600 "
-                    : "bg-yellow-400 hover:bg-yellow-500  text-black ",
+                    : "   " /* bg-yellow-400 hover:bg-yellow-500 text-black */,
                 className
             )}
             title={published ? "Published" : "Unpublished – click to publish"}
         >
             {published ? (
-                <>
-                    Published
+                <div className="flex items-center gap-1">
+                    <span>Published</span>
                     <MdOutlineCheckCircle size={16} />
-                </>
+                </div>
             ) : (
-                <>
-                    Publish
+                <div className="flex items-center gap-1">
+                    <span>Publish</span>
                     <BsSend size={16} />
-
-                </>
+                </div>
             )}
         </button>
     );

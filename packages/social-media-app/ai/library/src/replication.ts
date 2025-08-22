@@ -6,23 +6,23 @@ export interface LifeCycle {
 }
 
 export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
-    let canvas: Canvas | undefined = undefined;
+    let out: Awaited<ReturnType<typeof createRoot>> | undefined = undefined;
 
     return {
         start: async () => {
-            if (canvas) {
+            if (out) {
                 return;
             }
-            canvas = await createRoot(client, { persisted: true });
+            const created = await createRoot(client, { persisted: true });
+
+            out = created;
             console.log(
-                "Starting replicator at canvas root: " + canvas.address
+                "Starting replicator at canvas root: " + out.canvas.idString,
+                "capsule: " + out.scope.address
             );
         },
         stop: async () => {
-            if (!canvas) {
-                return;
-            }
-            await canvas.close();
+            await out?.scope.close(); // TODO close everthing?
         },
     };
 };

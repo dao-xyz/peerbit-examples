@@ -1,16 +1,28 @@
-import { usePeer } from "@peerbit/react";
-import { PrivateCanvasScope } from "../useCanvas"
+import { PublicCanvasScope } from "../useCanvas";
 import { useAllPosts } from "../feed/useCollection";
 import { Canvas } from "@giga-app/interface";
+import { PrivateScope } from "../useScope";
 
 export const useDrafts = () => {
-    const { peer } = usePeer()
-    const privateRoot = PrivateCanvasScope.useCanvases().root;
-    const allPosts = useAllPosts({ canvas: privateRoot, type: 'narrative' });
+    const publicRoot = PublicCanvasScope.useCanvases().viewRoot;
+    const privateRoot = PrivateScope.useScope().scope;
+    const allPosts = useAllPosts({
+        scope: privateRoot,
+        parent: publicRoot,
+        type: undefined,
+    });
+
+
+    const deleteDraft = async (draft: Canvas) => {
+        await privateRoot.remove(draft);
+    };
+    const deleteAllDrafts = async () => {
+        return Promise.all(allPosts.posts.map((draft) => deleteDraft(draft)));
+    };
+
     return {
         drafts: allPosts.posts,
-        deleteDraft: async (draft: Canvas) => {
-            await Canvas.delete(draft, peer);
-        }
-    }
-}
+        deleteDraft,
+        deleteAllDrafts,
+    };
+};

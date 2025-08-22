@@ -51,10 +51,10 @@ export const CustomizedBackground: React.FC<{
     /* build style when viz or theme changes */
     const style = useMemo(() => {
         let visualizationToUse = draft || visualization;
-        if (!visualizationToUse) return
+        if (!visualizationToUse) return;
         const v = visualizationToUse as BasicVisualization;
         const bgWrap = v.background as ModedBackground;
-        if (!bgWrap) return
+        if (!bgWrap) return;
         const chosen = isDark ? bgWrap.dark ?? bgWrap.light : bgWrap.light;
         return styleFrom(chosen);
     }, [

@@ -1,12 +1,14 @@
 import { forwardRef, useEffect, useState } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
-import { LOWEST_QUALITY, Profile as ProfileData } from "@giga-app/interface";
-import { useProfiles } from "./useProfiles";
+import { Canvas, IndexableCanvas, LOWEST_QUALITY, Profile as ProfileData } from "@giga-app/interface";
+import { IndexedProfileRow, useProfiles } from "./useProfiles";
 import { CanvasPreview } from "../canvas/preview/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";
 import { debounceLeadingTrailing } from "@peerbit/react";
+import { WithIndexedContext } from "@peerbit/document";
+import { useInitializeCanvas } from "../canvas/useInitializedCanvas";
 
 function pxToRem(px: number) {
     // Convert pixels to rem using the root font-size
@@ -32,11 +34,13 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
         ref
     ) {
         const { profiles, navigateTo, getProfile } = useProfiles();
-        const [profile, setProfile] = useState<ProfileData | undefined>();
+        const [profile, setProfile] = useState<IndexedProfileRow | undefined>();
         const { identities } = useIdentities();
         const sizeDefined = size ?? 32;
         const sizeInRem = pxToRem(sizeDefined);
         const [loading, setLoading] = useState(true);
+
+        const canvas = useInitializeCanvas(profile?.profile);
 
         useEffect(() => {
             if (
@@ -89,7 +93,7 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
                     >
                         <CanvasWrapper
                             quality={LOWEST_QUALITY}
-                            canvas={profile.profile}
+                            canvas={canvas}
                         >
                             <CanvasPreview onClick={onClick} variant="tiny" />
                         </CanvasWrapper>
@@ -115,9 +119,9 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
                     onClick
                         ? onClick
                         : (e) => {
-                              e.stopPropagation();
-                              navigateTo(profile);
-                          }
+                            e.stopPropagation();
+                            navigateTo(profile);
+                        }
                 }
             >
                 {content}

@@ -1,4 +1,3 @@
-import { TbBubbleText } from "react-icons/tb";
 import { ProfileButton } from "../../profile/ProfileButton";
 import { Canvas } from "@giga-app/interface";
 import { useReplyProgress } from "../main/useReplyProgress";
@@ -9,14 +8,14 @@ export const ReplyingInProgress = (properties: { canvas: Canvas }) => {
     const { getReplying, registerCanvas } = useReplyProgress();
 
     useEffect(() => {
-        if (!canvas || canvas.closed) {
+        if (!canvas?.initialized) {
             return;
         }
         registerCanvas(canvas);
-    }, [canvas?.idString, canvas?.closed]);
+    }, [canvas?.idString, canvas?.initialized]);
 
     const replyingPeers =
-        canvas && !canvas.closed ? getReplying(canvas.address) : [];
+        canvas?.initialized ? getReplying(canvas.idString) : [];
 
     // If no canvas or no replying peers, don't render anything.
     if (!canvas || replyingPeers.length === 0) return null;

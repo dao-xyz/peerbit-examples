@@ -45,21 +45,20 @@ const loadingTexts = [
 export const LOADING_TEXT =
     loadingTexts[Math.floor(Math.random() * loadingTexts.length)];
 
-
 export const WaitingForFeed = (options?: { loading: boolean }) => {
     const { loading } = options || { loading: false };
-    return <div className="h-full flex flex-col justify-center">
-        <div className="flex flex-col gap-4 items-center m-2">
-            {loading ? (
-                <div className="flex flex-row gap-2">
-                    {LOADING_TEXT}
-                    <Spinner />
-                </div>
-            ) : (
-                <div className="flex flex-row gap-2">
-                    Space not found
-                </div>
-            )}
+    return (
+        <div className="h-full flex flex-col justify-center">
+            <div className="flex flex-col gap-4 items-center m-2">
+                {loading ? (
+                    <div className="flex flex-row gap-2">
+                        {LOADING_TEXT}
+                        <Spinner />
+                    </div>
+                ) : (
+                    <div className="flex flex-row gap-2">Space not found</div>
+                )}
+            </div>
         </div>
-    </div>
-}
+    );
+};

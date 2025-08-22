@@ -32,7 +32,8 @@ export const ALL_DEFAULT_FILTERS: FilterModel[] = [
             paginationLimit: 10,
             showAuthorInfo: true,
         },
-    }, {
+    },
+    {
         query: (canvas) =>
             new SearchRequest({
                 query: getRepliesQuery(canvas),

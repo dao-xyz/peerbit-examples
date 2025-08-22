@@ -30,36 +30,34 @@ const useVisualization = (properies: { canvas: Canvas }) => {
     >();
 
     const query = useMemo(() => {
-        return !canvas || canvas.closed
+        return !canvas
             ? null
             : {
                 query: getOwnedByCanvasQuery(canvas),
             };
-    }, [canvas?.closed, canvas?.idString]);
+    }, [canvas?.idString]);
 
     /* 1. fetch the current saved visualization ------------------- */
-    const { items, isLoading } = useQuery(
-        canvas?.loadedElements ? canvas?.visualizations ?? null : null,
-        {
-            query,
-            onChange: {
-                merge: (ch) => ({
-                    added: ch.added.filter((v) =>
-                        equals(v.canvasId, canvas.id)
-                    ),
-                    removed: ch.removed.filter((v) =>
-                        equals(v.canvasId, canvas.id)
-                    ),
-                }),
-            },
-            resolve: true,
-            local: true,
-            remote: {
-                eager: true,
-            },
-            prefetch: true,
-        }
-    );
+    const { items, isLoading } = useQuery(canvas?.nearestScope.visualizations, {
+        query,
+        onChange: {
+            merge: (ch) => ({
+                added: ch.added.filter((v) => equals(v.canvasId, canvas.id)),
+                removed: ch.removed.filter((v) =>
+                    equals(v.canvasId, canvas.id)
+                ),
+            }),
+        },
+        resolve: true,
+        local: true,
+        remote: {
+            eager: true,
+            joining: {
+                waitFor: 5e3
+            }
+        },
+        prefetch: true,
+    });
 
     useEffect(() => {
         if (items && items.length > 0) {
@@ -82,8 +80,6 @@ const useVisualization = (properies: { canvas: Canvas }) => {
         isLoading,
     };
 };
-
-
 
 /* ─── context type ───────────────────────────────────────────── */
 interface VisualizationCtx {
@@ -108,15 +104,15 @@ export const useVisualizationContext = () => useContext(Ctx);
 
 const CHILDREN_VISUALIZATION_PARAM_MAP = {
     feed: ChildVisualization.FEED,
-    tree: ChildVisualization.TREE,
+    tree: ChildVisualization.OUTLINE,
     explore: ChildVisualization.EXPLORE,
     chat: ChildVisualization.CHAT,
-}
+};
 
 const CHILDREN_VISUALIZATION_PARAM_MAP_REVERSE = Object.fromEntries(
     Object.entries(CHILDREN_VISUALIZATION_PARAM_MAP).map(([key, value]) => [
         value,
-        key
+        key,
     ])
 );
 
@@ -136,12 +132,18 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     const [draft, setDraft] = useState<BasicVisualization | undefined>();
 
     const [searchParams, setSearchParams] = useSearchParams();
-    const childrenVisualizationFromParam: ChildVisualization = CHILDREN_VISUALIZATION_PARAM_MAP[(searchParams.get(VIEW_PARAM_QUERY_KEY) as string || "feed")];
+    const childrenVisualizationFromParam: ChildVisualization =
+        CHILDREN_VISUALIZATION_PARAM_MAP[
+        (searchParams.get(VIEW_PARAM_QUERY_KEY) as string) || "feed"
+        ];
 
-    const setChildrenVisualizationParam = (childrenVisualization: ChildVisualization) => {
+    const setChildrenVisualizationParam = (
+        childrenVisualization: ChildVisualization
+    ) => {
         const newParams = new URLSearchParams(searchParams);
         if (childrenVisualization != null) {
-            const newView = CHILDREN_VISUALIZATION_PARAM_MAP_REVERSE[childrenVisualization]
+            const newView =
+                CHILDREN_VISUALIZATION_PARAM_MAP_REVERSE[childrenVisualization];
             newParams.set(VIEW_PARAM_QUERY_KEY, newView);
             if (childrenVisualization === ChildVisualization.CHAT) {
                 // if we are in chat mode, remove the filter param
@@ -149,7 +151,6 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             }
         } else {
             newParams.delete(VIEW_PARAM_QUERY_KEY);
-
         }
 
         console.log("SET PARAMS", childrenVisualization, newParams.toString());
@@ -159,12 +160,13 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     useEffect(() => {
         // if we have a draft, update the children visualization param
         if (draft) {
-            setChildrenVisualizationParam(draft.childrenVisualization);
+            setChildrenVisualizationParam(draft.view);
         } else if (visualization) {
-            setChildrenVisualizationParam((visualization as BasicVisualization).childrenVisualization);
+            setChildrenVisualizationParam(
+                (visualization as BasicVisualization).view
+            );
         }
     }, [visualization, draft]);
-
 
     const resetThemeVars = () => {
         const root = document.documentElement;
@@ -246,7 +248,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
                 id: d.id,
                 previewHeight: d.previewHeight,
                 showAuthorInfo: d.showAuthorInfo,
-                childrenVisualization: d.childrenVisualization,
+                view: d.view,
             })
         );
     };
@@ -282,7 +284,9 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             setDraft(
                 new BasicVisualization({
                     canvasId: canvas.id,
-                    childrenVisualization: childrenVisualizationFromParam ?? ChildVisualization.FEED,
+                    view:
+                        childrenVisualizationFromParam ??
+                        ChildVisualization.FEED,
                 })
             );
         }

@@ -51,11 +51,12 @@ export const Canvas = (
         appearance?: "chat-view-images" | "chat-view-text";
         children?: ReactNode;
         bgBlur?: boolean;
+        requestPublish?: () => void | Promise<void>;
     } & ({ draft: true; inFullScreen?: boolean } | { draft?: false }) & {
-            className?: string;
-        } & {
-            onLoad?: () => void;
-        }
+        className?: string;
+    } & {
+        onLoad?: () => void;
+    }
 ) => {
     const asThumbnail = !!properties.scaled;
     const {
@@ -84,8 +85,8 @@ export const Canvas = (
             properties.appearance === "chat-view-images"
                 ? rectIsStaticImage(rect) || rectIsStaticPartialImage(rect)
                 : properties.appearance === "chat-view-text"
-                ? rectIsStaticMarkdownText(rect)
-                : true
+                    ? rectIsStaticMarkdownText(rect)
+                    : true
         );
         if (properties.appearance === "chat-view-images") {
             allRects = onlyLowestQuality(allRects);
@@ -115,20 +116,17 @@ export const Canvas = (
             return (
                 <div
                     key={ix}
-                    className={`${
-                        properties.appearance === "chat-view-images"
+                    className={`${properties.appearance === "chat-view-images"
                             ? "bg-white rounded-md w-20 h-20 max-w-20 max-h-20 border-[1px] border-neutral-800 overflow-hidden"
                             : ""
-                    } ${properties.fitHeight ? "h-full" : ""} ${
-                        properties.fitWidth ? "w-full" : ""
-                    }`}
+                        } ${properties.fitHeight ? "h-full" : ""} ${properties.fitWidth ? "w-full" : ""
+                        }`}
                 >
                     <div
-                        className={`relative flex flex-col overflow-hidden ${
-                            rectIsStaticMarkdownText(rect)
+                        className={`relative flex flex-col overflow-hidden ${rectIsStaticMarkdownText(rect)
                                 ? ""
                                 : "max-h-[60vh] h-full"
-                        }`}
+                            }`}
                     >
                         {filteredRects.length === 0 && isLoading && (
                             <div className="absolute right-2 flex justify-center align-middle">
@@ -138,6 +136,7 @@ export const Canvas = (
                         {filteredRects.length > 0 && (
                             <>
                                 <Frame
+                                    requestPublish={properties.requestPublish}
                                     thumbnail={asThumbnail}
                                     active={active.has(rect.id)}
                                     className="z-1"
@@ -159,13 +158,13 @@ export const Canvas = (
                                     delete={deleteFn}
                                     editMode={
                                         properties.appearance ===
-                                        "chat-view-images"
+                                            "chat-view-images"
                                             ? false
                                             : editMode
                                     }
                                     showEditControls={
                                         properties.appearance !==
-                                            "chat-view-images" &&
+                                        "chat-view-images" &&
                                         editMode &&
                                         filteredRects.length > 1
                                     }
@@ -173,12 +172,12 @@ export const Canvas = (
                                     onLoad={() => handleLoad(rect)}
                                     fit={
                                         properties.appearance ===
-                                        "chat-view-images"
+                                            "chat-view-images"
                                             ? "cover"
                                             : properties.appearance ===
-                                              "chat-view-text"
-                                            ? undefined
-                                            : "contain"
+                                                "chat-view-text"
+                                                ? undefined
+                                                : "contain"
                                     }
                                     inFullscreen={
                                         properties.draft &&
@@ -194,7 +193,7 @@ export const Canvas = (
                                                         (element, ix) => {
                                                             const prev =
                                                                 filteredRects[
-                                                                    ix - 1
+                                                                ix - 1
                                                                 ];
                                                             element.location.y -= 1;
                                                             return mutate(
@@ -239,7 +238,7 @@ export const Canvas = (
                                                         (element, ix) => {
                                                             const next =
                                                                 filteredRects[
-                                                                    ix + 1
+                                                                ix + 1
                                                                 ];
                                                             element.location.y += 1;
                                                             return mutate(
@@ -288,12 +287,12 @@ export const Canvas = (
                                                 <Frame
                                                     thumbnail={false}
                                                     active={false}
-                                                    setActive={() => {}}
-                                                    delete={() => {}}
+                                                    setActive={() => { }}
+                                                    delete={() => { }}
                                                     editMode={false}
                                                     showEditControls={false}
                                                     element={rect}
-                                                    onLoad={() => {}}
+                                                    onLoad={() => { }}
                                                     fit="cover"
                                                 />
                                             </div>
@@ -307,23 +306,20 @@ export const Canvas = (
         });
     };
 
-    let sizingClassNames = ` ${properties.fitHeight ? "h-full" : ""} ${
-        properties.fitWidth ? "w-full" : ""
-    } ${
-        properties.draft
+    let sizingClassNames = ` ${properties.fitHeight ? "h-full" : ""} ${properties.fitWidth ? "w-full" : ""
+        } ${properties.draft
             ? properties.inFullScreen
                 ? "" /*  "min-h-[calc(100vh-10rem)]" */
                 : ""
             : ""
-    }`;
+        }`;
     return (
         (filteredRects.length > 0 && (
             <div
-                className={`flex ${
-                    properties.appearance === "chat-view-images"
+                className={`flex ${properties.appearance === "chat-view-images"
                         ? "gap-4 p-4"
                         : "flex-col gap-4"
-                } ${sizingClassNames} ${properties.className ?? ""}`}
+                    } ${sizingClassNames} ${properties.className ?? ""}`}
             >
                 {renderRects(filteredRects)}
                 {filteredRects.length > 0 ? properties.children : null}

@@ -5,6 +5,7 @@ import { useAllPosts } from "../feed/useCollection";
 import {
     Canvas,
     ChildVisualization,
+    IndexableCanvas,
     LOWEST_QUALITY,
 } from "@giga-app/interface";
 import { FaChevronRight, FaList, FaPlus } from "react-icons/fa";
@@ -21,12 +22,13 @@ import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes";
 import { CanvasSettingsButton } from "../header/CanvasSettingsButton";
 import { usePeer } from "@peerbit/react";
-
+import { usePendingCanvas } from "../edit/PendingCanvasContext";
+import { WithIndexedContext } from "@peerbit/document"
 export const TabsOrList = (properties?: {
     className?: string;
-    canvas?: Canvas;
+    canvas?: WithIndexedContext<Canvas, IndexableCanvas>;
     view: "tabs" | "rows";
-    setView?: ((view: "tabs" | "rows") => void);
+    setView?: (view: "tabs" | "rows") => void;
     onBackToTop?: () => void;
 }) => {
     const { view, setView } = properties;
@@ -35,7 +37,8 @@ export const TabsOrList = (properties?: {
         setView?.(newView);
     };
     const { posts } = useAllPosts({
-        canvas: properties?.canvas,
+        scope: properties?.canvas.nearestScope,
+        parent: properties?.canvas,
         type: "navigational",
     });
     const { peer } = usePeer();
@@ -82,16 +85,21 @@ export const TabsOrList = (properties?: {
                                         <FaPlus className="w-4 h-4" />
                                     </button>
                                 )}
-                                {setView && <button
-                                    className="btn btn-icon btn-sm  h-full flex flex-row  align-middle justify-center items-center gap-1 text-sm "
-                                    onClick={toggleView}
-                                >
-                                    {view === "tabs" ? (
-                                        <FaList className="w-4 h-4" />
-                                    ) : (
-                                        <PiTabs className="w-5 h-5" size={24} />
-                                    )}
-                                </button>}
+                                {setView && (
+                                    <button
+                                        className="btn btn-icon btn-sm  h-full flex flex-row  align-middle justify-center items-center gap-1 text-sm "
+                                        onClick={toggleView}
+                                    >
+                                        {view === "tabs" ? (
+                                            <FaList className="w-4 h-4" />
+                                        ) : (
+                                            <PiTabs
+                                                className="w-5 h-5"
+                                                size={24}
+                                            />
+                                        )}
+                                    </button>
+                                )}
                                 {properties?.onBackToTop && (
                                     <button
                                         className="btn btn-icon btn-sm h-full flex flex-row gap-1"
@@ -197,8 +205,8 @@ export const Rows = (properties: {
                 </div>
             ))}
             <CanvasEditorProvider
-                type={ChildVisualization.TREE}
-                parent={properties.canvas}
+                type={ChildVisualization.OUTLINE}
+                replyTo={properties.canvas}
                 placeholder="Give your new space a name..."
             >
                 <NewSection />
@@ -208,12 +216,13 @@ export const Rows = (properties: {
 };
 
 const NewSection = () => {
-    const { isEmpty, insertDefault, canvas, pendingRects, savedOnce } =
+    const { isEmpty, insertDefault, canvas, pendingRects } =
         useCanvas();
+    const { savedOnce } = usePendingCanvas();
 
     useEffect(() => {
         if (
-            !savedOnce &&
+            savedOnce === false &&
             /*  !isSavingCanvas && !isSavingElements &&  */ pendingRects.length ===
             0 &&
             canvas

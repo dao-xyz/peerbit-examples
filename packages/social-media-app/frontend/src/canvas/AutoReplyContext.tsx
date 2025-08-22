@@ -26,17 +26,27 @@ const AutoReplyContext = createContext<AutoReplyContextType | undefined>(
 
 export const AutoReplyProvider: React.FC<{
     children: ReactNode;
-}> = ({ children }) => {
+    disabled?: boolean; // Optional prop to control auto-reply functionality
+}> = ({ children, disabled }) => {
+
+
     const { setReplyTo: setReplyToCanvas, pendingCanvas } = usePendingCanvas();
     const { subscribeContentChange, mutate, pendingRects } = useCanvas();
     const typedOnce = useRef(false);
     const { processedReplies, feedRoot } = useStream();
     const [replyTo, _setReplyTo] = useState<Canvas | undefined>(feedRoot);
     const lastPendingCanvasId = useRef<string | undefined>(undefined);
-    const enabled = useRef(true);
+    const enabled = useRef(disabled !== undefined ? !disabled : true);
+    useEffect(() => {
+        enabled.current = disabled !== undefined ? !disabled : true;
+    }
+        , [disabled]);
     const visualization = useVisualizationContext();
 
     const setReplyTo = async (canvas: Canvas | undefined) => {
+        if (!enabled.current) {
+            return;
+        }
         let canvasOrRoot = canvas || feedRoot;
         _setReplyTo(canvasOrRoot);
         await setReplyToCanvas(canvasOrRoot);
@@ -51,7 +61,7 @@ export const AutoReplyProvider: React.FC<{
      * If the pending canvas has updated their path, we need to update all pending rects too
      */
     useEffect(() => {
-        if (!pendingCanvas || pendingCanvas.closed) {
+        if (!pendingCanvas?.initialized) {
             return;
         }
         typedOnce.current = false; // reset typedOnce when pending canvas changes
@@ -60,7 +70,7 @@ export const AutoReplyProvider: React.FC<{
             element.canvasId = pendingCanvas.id;
             return true;
         });
-    }, [pendingCanvas?.closed === false ? pendingCanvas?.address : undefined]); // important is to observe address changes, not just path changes because address depends on the path
+    }, [pendingCanvas?.initialized, pendingCanvas?.idString]); // important is to observe address changes, not just path changes because address depends on the path
 
     /*  useEffect(() => { TODO when do we neeed this?
          // reset replyTo when pending canvas changes
@@ -78,7 +88,7 @@ export const AutoReplyProvider: React.FC<{
      }, [pendingCanvas?.idString]);
   */
     const isChat =
-        visualization.visualization?.childrenVisualization ===
+        visualization.visualization?.view ===
         ChildVisualization.CHAT;
     const autoReplyFunctionality = () => {
         if (!processedReplies) {
@@ -132,7 +142,7 @@ export const AutoReplyProvider: React.FC<{
         if (isChat) {
             if (processedReplies?.length > 0) {
                 let last = processedReplies[processedReplies.length - 1]?.reply;
-                if (isChat && last && replyTo.address !== last.address) {
+                if (isChat && last && replyTo.idString !== last.idString) {
                     setReplyTo(last);
                 }
             }

@@ -1,41 +1,31 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Header } from "../header/Header";
 import { CanvasPreview } from "./Preview";
-import { IoColorPaletteOutline, IoSave, IoSaveOutline } from "react-icons/io5";
-import { MdPublic } from "react-icons/md";
-import { usePeer } from "@peerbit/react";
-import { CustomizationSettings } from "../custom/CustomizationSettings";
-import * as Toggle from "@radix-ui/react-toggle";
-import { FiEdit } from "react-icons/fi";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { MdAutoFixHigh } from "react-icons/md";
 import { LuOrigami } from "react-icons/lu";
 import { CanvasEditorProvider } from "../edit/ToolbarContext";
 import { InlineEditor } from "../edit/InlineEditor";
 import { CloseableAppPane } from "../edit/CloseableAppPane";
 import { ToolbarEdit } from "../edit/ToolbarEdit";
-import { useToolbarVisibilityContext } from "../edit/ToolbarVisibilityProvider";
 import { CanvasWrapper } from "../CanvasWrapper";
 import { HIGH_QUALITY } from "@giga-app/interface";
 import { EditModeProvider, useEditModeContext } from "../edit/EditModeProvider";
-import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { useCanvases } from "../useCanvas";
 
-const DetailedViewInner: React.FC<{
-    ref?: React.Ref<HTMLDivElement>;
-    onEditModeChange?: (value: boolean) => void;
-}> = ({ ref, onEditModeChange }) => {
+const DetailedViewInner: React.FC<{}> = ({ }) => {
     const { viewRoot } = useCanvases();
-    const { setDisabled: setBottomToolbarDisabled } =
-        useToolbarVisibilityContext();
-    const { peer } = usePeer();
-    const { createDraft, cancelDraft } = useVisualizationContext();
-    const isOwner = viewRoot?.publicKey.equals(peer.identity.publicKey);
     const { editMode, setEditMode } = useEditModeContext();
 
-    /* local UI state (show / hide panel) */
+    /*  
+     const { peer } = usePeer();
+ 
     const [openCustomizer, _setOpenCustomizer] = useState(false);
 
+
+    const { createDraft, cancelDraft } = useVisualizationContext();
+    const isOwner = viewRoot?.publicKey.equals(peer.identity.publicKey);
+    const { setDisabled: setBottomToolbarDisabled } =
+        useToolbarVisibilityContext();
     const toggleOpenCustomizer = () => {
         let value = !openCustomizer;
         if (value) {
@@ -56,22 +46,17 @@ const DetailedViewInner: React.FC<{
         onEditModeChange?.(value);
         setEditMode(value);
     };
+  */
 
-    const postTypes: { label: string; value: string; icon: React.ReactNode }[] =
-        [
-            { label: "Automatic", value: "magic", icon: <MdAutoFixHigh /> },
-            { label: "Original", value: "original", icon: <LuOrigami /> },
-        ];
 
-    const [currentType, setCurrentType] = useState(postTypes[0]);
     const shouldShowMetaInfo =
-        viewRoot?.path.length >
+        viewRoot?.__indexed.path.length >
         0; /* !visualization || visualization.replies !== ReplyVisualization.NAVIGATION */
     return (
-        <div className="mx-auto w-full" ref={ref}>
+        <div className="mx-auto w-full">
             {editMode ? (
                 <CanvasEditorProvider
-                    parent={viewRoot}
+                    replyTo={viewRoot}
                     pendingCanvas={viewRoot}
                 >
                     <InlineEditor className="pb-12 " />
@@ -92,22 +77,9 @@ const DetailedViewInner: React.FC<{
                         showPath={false}
                     />
 
-                    <div className="ml-auto pr-2 flex gap-1">
+                    {/* <div className="ml-auto pr-2 flex gap-1">
                         {isOwner && (
                             <>
-                                {/* {editMode && (
-                                    <button
-                                        onClick={async () => {
-                                            await savePending();
-                                            toggleEditMode(false);
-                                        }}
-                                        className="btn btn-icon btn-toggle btn-toggle-flat border-none  gap-2"
-                                        aria-label="Save Edit"
-                                    >
-                                        <IoSaveOutline size={20} />
-                                        <span className="hidden sm:block">Save</span>
-                                    </button>
-                                )} */}
                                 <Toggle.Root
                                     onPressedChange={toggleEditMode}
                                     pressed={editMode}
@@ -142,7 +114,6 @@ const DetailedViewInner: React.FC<{
                                         {postTypes.map((v) => (
                                             <DropdownMenu.Item
                                                 key={v.value}
-                                                /*  onClick={() => select(v)} */
                                                 className={` flex flex-row items-center gap-2 cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${currentType === v
                                                     ? "underline font-semibold"
                                                     : "text-neutral-600 hover:text-gray-700"
@@ -177,29 +148,19 @@ const DetailedViewInner: React.FC<{
                             <MdPublic size={20} />
                             <span className="hidden sm:block">Public</span>
                         </button>
-                    </div>
-                </div>
-            )}
-
-            {/* inline, mobile-friendly customisation panel ------------------- */}
-            {openCustomizer && isOwner && (
-                <div className="w-full p-4">
-                    <CustomizationSettings onClose={toggleOpenCustomizer} />
+                    </div> */}
                 </div>
             )}
         </div>
     );
 };
 
-export const DetailedView: React.FC<{
-    ref?: React.Ref<HTMLDivElement>;
-    onEditModeChange?: (value: boolean) => void;
-}> = ({ ref, onEditModeChange }) => {
+export const DetailedView: React.FC<{}> = ({ }) => {
     const { viewRoot } = useCanvases();
     return (
         <EditModeProvider>
             <CanvasWrapper canvas={viewRoot} quality={HIGH_QUALITY}>
-                <DetailedViewInner onEditModeChange={onEditModeChange} />
+                <DetailedViewInner />
             </CanvasWrapper>
         </EditModeProvider>
     );

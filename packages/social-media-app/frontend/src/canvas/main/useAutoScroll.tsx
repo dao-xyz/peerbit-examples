@@ -28,8 +28,8 @@ const IS_AT_BOTTOM_THRESHOLD = 30;
 export type ScrollSettings = {
     scrollUsingWindow?: boolean;
     scrollDirection:
-    | "up"
-    | "down" /*  we pass direction here because scrollUsingWindow should be updated at the same time as directional changes! */;
+        | "up"
+        | "down" /*  we pass direction here because scrollUsingWindow should be updated at the same time as directional changes! */;
 };
 
 export const useAutoScroll = (properties: {

@@ -1,22 +1,25 @@
 /**********************************************************************
  * useTemplates.tsx
  *********************************************************************/
-import { JSX, useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { usePeer, useProgram, useQuery } from "@peerbit/react";
 import { sha256Sync } from "@peerbit/crypto";
 import {
     Template,
-    Templates, // the Program class from template.ts
+    Templates,               // Templates Program (stores Template docs)
     IndexableTemplate,
     createAlbumTemplate,
-} from "@giga-app/interface"; // ← adjust path if needed
-
-
-import { Canvas } from "@giga-app/interface";
+    createProfileTemplate,
+    createCommunityTemplate,
+    createPlaylistTemplate,
+    createArticleTemplate,
+    Scope,
+    Canvas,                    // Canvas model (for insertInto)
+} from "@giga-app/interface";
 
 /* ------------------------------------------------------------------ */
-/* A deterministic ID for the Templates program                       */
-const TEMPLATES_ID = sha256Sync(new TextEncoder().encode("giga‑templates"));
+/* Deterministic ID/seed for the Templates scope & program            */
+const TEMPLATES_ID = sha256Sync(new TextEncoder().encode("giga-templates"));
 
 /* ------------------------------------------------------------------ */
 export type UseTemplatesReturn = {
@@ -27,108 +30,122 @@ export type UseTemplatesReturn = {
     /** Insert template subtree under the given parent canvas. */
     insert(template: Template, into: Canvas): Promise<Canvas>;
     /** Add or overwrite a template. */
-    put(template: Template): Promise<any>;
+    put(template: Template): Promise<void>;
     /** Delete by id. */
-    del(id: Uint8Array): Promise<any>;
+    del(id: Uint8Array): Promise<void>;
 
-    /** Case‑insensitive in‑memory search over name + description. */
+    /** Case-insensitive in-memory search over name + description. */
     search(query: string): Promise<Template[]>;
 };
 
-const TEMPLATES_DB = new Templates(TEMPLATES_ID)
-
-
+/* Single instance of the Templates program (address derived from TEMPLATES_ID) */
+const TEMPLATES_DB = new Templates(TEMPLATES_ID);
 
 /* ------------------------------------------------------------------ */
 export function useTemplates(): UseTemplatesReturn {
     const { peer, persisted } = usePeer();
 
+    /** 1) Open the Templates *program* (documents db that stores Template objects) */
+    const templatesProgram = useProgram(TEMPLATES_DB, {
+        existing: "reuse",
+        args: { replicate: persisted },
+    });
+    const prog = templatesProgram.program as Templates | undefined;
+
+    /** 2) Open a dedicated *Scope* where the template prototypes live (their canvases) */
+    const templatesScopeInst = useMemo(
+        () =>
+            peer
+                ? new Scope({
+                    // Your Scope ctor expects { publicKey, seed }
+                    publicKey: peer.identity.publicKey,
+                    seed: TEMPLATES_ID,
+                })
+                : undefined,
+        [peer?.identity.publicKey.hashcode()]
+    );
+
+    const templatesScope = useProgram(templatesScopeInst, {
+        existing: "reuse",
+        args: { replicate: persisted },
+    });
+
+    /** 3) Bootstrap default templates once */
     const [bootstrapped, setBootstrapped] = useState(false);
 
-    /* 1️⃣  Open (or create) the Templates program once ---------------- */
-    const useProgramResult = useProgram(TEMPLATES_DB, {
-        existing: "reuse",
-        args: {
-            replicate: persisted,
-        }
-    });
-    const prog = useProgramResult?.program as Templates | undefined;
-
-    /* 2️⃣  Ensure default templates exist (runs only once) ------------ */
     useEffect(() => {
-        if (!prog || prog.closed !== false || bootstrapped) return;
+        if (!peer) return;
+        if (!prog || templatesProgram.loading) return;                  // program not ready
+        if (!templatesScope.program || templatesScope.loading) return;  // scope not ready
+        if (bootstrapped) return;
 
         (async () => {
             const ensure = async (tpl: Template) => {
-                if (
-                    !(await prog.templates.index.get(tpl.id, {
-                        local: true,
-                        remote: { eager: true },
-                    }))
-                ) {
-                    console.log("PUT TEMPLATE", tpl, prog.templates.address);
+                if (prog.templates.closed) return;
+                const exists = await prog.templates.index.get(tpl.id, {
+                    local: true,
+                    remote: { eager: true },
+                });
+                if (!exists) {
                     await prog.templates.put(tpl);
-                } else {
-                    console.log(
-                        "GOT TEMPLATE",
-                        (await prog.templates.index.iterate().all()).length
-                    );
                 }
             };
-            console.log("CREATE TEMPLATES", persisted, prog.templates.address);
-            await ensure(
-                await createAlbumTemplate({ peer, name: "Photo album" })
-            );
-            /*   await ensure(
-                  await createProfileTemplate({ peer, name: "Personal profile" })
-              );
-              await ensure(
-                  await createCommunityTemplate({ peer, name: "Community" })
-              ); */
-            /*   await ensure(
-                  await createPlaylistTemplate({ peer, name: "Music playlist" })
-              ); */
+
+            // Create default templates with their prototype canvases in templatesScope
+            const scope = templatesScope.program;
+            await ensure(await createAlbumTemplate({ peer, scope, name: "Photo album" }));
+            await ensure(await createProfileTemplate({ peer, scope, name: "Personal profile" }));
+            await ensure(await createCommunityTemplate({ peer, scope, name: "Community" }));
+            await ensure(await createArticleTemplate({ peer, scope, name: "Article" }));
+            await ensure(await createPlaylistTemplate({ peer, scope, name: "Music playlist" }));
 
             setBootstrapped(true);
-        })();
-    }, [prog?.closed, bootstrapped, peer]);
+        })().catch(console.error);
+    }, [
+        peer?.identity.publicKey.hashcode(),
+        prog,
+        templatesProgram.loading,
+        templatesScope.program,
+        templatesScope.loading,
+        bootstrapped,
+    ]);
 
-    /* 3️⃣  Live collection of templates -------------------------------- */
+    /** 4) Live query of templates */
     const { items: templates, isLoading: queryLoading } = useQuery<
         Template,
         IndexableTemplate
     >(prog?.templates, {
         id: prog?.templates.address,
-        query: useMemo(() => {
-            return useProgramResult?.loading ? undefined : {};
-        }, [useProgramResult?.loading]),
+        query: useMemo(() => (templatesProgram.loading ? undefined : {}), [
+            templatesProgram.loading,
+        ]),
         local: true,
-        debug: false,
-        batchSize: 1e3,
-        remote: { eager: true, joining: { waitFor: 5e3 } },
-        onChange: {
-            merge: true,
-        },
         prefetch: true,
+        batchSize: 1000,
+        remote: { eager: true, joining: { waitFor: 5_000 } },
+        onChange: { merge: true },
     });
 
-    /* 4️⃣  Utility helpers -------------------------------------------- */
-    const put = useCallback(
-        async (tpl: Template) => prog?.templates.put(tpl),
-        [prog]
+    /** 5) Mutators and helpers */
+    const put = useCallback(async (tpl: Template) => {
+        if (!prog) throw new Error("Templates program not ready");
+        await prog.templates.put(tpl);
+    }, [prog]);
+
+    const del = useCallback(async (id: Uint8Array) => {
+        if (!prog) throw new Error("Templates program not ready");
+        await prog.templates.del(id);
+    }, [prog]);
+
+    const insert = useCallback(
+        async (tpl: Template, into: Canvas) => {
+            if (!tpl) throw new Error("Missing template");
+            if (!into) throw new Error("Missing target canvas");
+            // Template.prototype.insertInto(parent: Canvas): Promise<Canvas>
+            return tpl.insertInto(into);
+        },
+        []
     );
-
-    const del = useCallback(
-        async (id: Uint8Array) => prog?.templates.del(id),
-        [prog]
-    );
-
-    const insert = useCallback(async (tpl: Template, into: Canvas) => {
-        if (!tpl || !into) throw new Error("Missing args");
-        console.log("Insert template", tpl, "into", into.address.toString());
-
-        return tpl.insertInto(into);
-    }, []);
 
     const search = useCallback(
         async (q: string): Promise<Template[]> => {
@@ -140,19 +157,21 @@ export function useTemplates(): UseTemplatesReturn {
                     (t.description ?? "").toLowerCase().includes(s)
             );
         },
-        [useProgramResult?.program, templates]
+        [templates]
     );
 
-    /* 5️⃣  Return API -------------------------------------------------- */
+    /** 6) Return API */
+    const loading = queryLoading || templatesProgram.loading || templatesScope.loading || !bootstrapped || !prog;
+
     return useMemo<UseTemplatesReturn>(
         () => ({
             templates,
-            loading: queryLoading || !bootstrapped || !prog,
+            loading,
             insert,
             put,
             del,
             search,
         }),
-        [templates, queryLoading, bootstrapped, prog, insert, put, del]
+        [templates, loading, insert, put, del, search]
     );
 }

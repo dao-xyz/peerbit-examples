@@ -9,34 +9,34 @@ import { useTemplates } from "../template/useTemplates";
 import { BiPhotoAlbum } from "react-icons/bi";
 import { CgProfile } from "react-icons/cg";
 import { HiOutlineUserGroup } from "react-icons/hi2";
-import { PrivateCanvasScope } from "../useCanvas";
 import { usePendingCanvas } from "./PendingCanvasContext";
+import { GrArticle } from "react-icons/gr";
+import { PrivateScope } from "../useScope";
+import { useCanvases } from "../useCanvas";
 
 export const TEMPATE_ICON_MAP: Record<string, JSX.Element> = {
     "Photo album": <BiPhotoAlbum />,
     "Personal profile": <CgProfile />,
-    "Community": <HiOutlineUserGroup />
+    Community: <HiOutlineUserGroup />,
+    Article: <GrArticle />,
 };
 
 const TemplateButton: React.FC<{
     tpl: Template;
     onClick: () => void;
 }> = ({ tpl, onClick }) => {
-
-    let icon = TEMPATE_ICON_MAP[tpl.name]
-    return <button
-        className="btn btn-md  hover:bg-gray-100 dark:hover:bg-gray-700"
-        onClick={onClick}
-        title={tpl.description}
-    >
-        {icon && (
-            <span className="mr-2">{icon}</span>
-        )}
-        {tpl.name}
-    </button>
-}
-
-
+    let icon = TEMPATE_ICON_MAP[tpl.name];
+    return (
+        <button
+            className="btn btn-sm  "
+            onClick={onClick}
+            title={tpl.description}
+        >
+            {icon && <span className="mr-2">{icon}</span>}
+            {tpl.name}
+        </button>
+    );
+};
 
 interface Props {
     onSelected: (app: SimpleWebManifest) => void;
@@ -50,9 +50,10 @@ export const AppSelectPaneInline: React.FC<Props> = ({
     /* ---------- data sources --------------------------- */
     const { apps, search: searchApps } = useApps();
     const { templates, search: searchTpls, insert: insertTpl } = useTemplates();
-    const { insertDefault } = useCanvas();   // ← make sure `useCanvas` exposes the active canvas
-    const { viewRoot: privateViewRoot } = PrivateCanvasScope.useCanvases()
-    const { saveDraft } = usePendingCanvas()
+    const { insertDefault } = useCanvas(); // ← make sure `useCanvas` exposes the active canvas
+    const { saveDraft } = usePendingCanvas();
+    const privateScope = PrivateScope.useScope().scope
+    const { leaf } = useCanvases();
 
     /* ---------- local state ---------------------------- */
     const [query, setQuery] = useState("");
@@ -63,27 +64,33 @@ export const AppSelectPaneInline: React.FC<Props> = ({
     useEffect(() => {
         (async () => {
             setAppsFiltered(await searchApps(query));
-            console.log("Search query", query)
             setTemplatesFiltered(await searchTpls(query));
         })();
     }, [query, searchApps, searchTpls, templates]);
 
-
-
     /* split native / web apps --------------------------- */
-    const nativeApps = useMemo(() => appsFiltered.filter((x) => x.isNative), [appsFiltered]);
-    const nonNativeApps = useMemo(() => appsFiltered.filter((x) => !x.isNative), [appsFiltered]);
+    const nativeApps = useMemo(
+        () => appsFiltered.filter((x) => x.isNative),
+        [appsFiltered]
+    );
+    const nonNativeApps = useMemo(
+        () => appsFiltered.filter((x) => !x.isNative),
+        [appsFiltered]
+    );
 
     /* handlers ------------------------------------------ */
-    const onAppSelected = (app: SimpleWebManifest, insertDefaultValue: boolean) => {
+    const onAppSelected = (
+        app: SimpleWebManifest,
+        insertDefaultValue: boolean
+    ) => {
         setQuery("");
         insertDefaultValue && insertDefault({ app, increment: true });
         _onSelected(app);
     };
 
     const onTemplateSelected = async (tpl: Template) => {
-        if (!privateViewRoot) return;
-        await insertTpl(tpl, privateViewRoot);
+        if (!privateScope) return;
+        await insertTpl(tpl, leaf); // TODO insert into private scope
         await saveDraft();
         setQuery("");
     };
@@ -106,7 +113,6 @@ export const AppSelectPaneInline: React.FC<Props> = ({
 
             {/* Gallery view */}
             <div className="flex flex-col h-full gap-4 overflow-y-auto">
-
                 {/* ============ TEMPLATES ============ */}
                 {templatesFiltered.length > 0 && (
                     <>

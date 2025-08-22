@@ -1,9 +1,11 @@
-import { Canvas } from "@giga-app/interface";
+import { Canvas, IndexableCanvas } from "@giga-app/interface";
 import { useEffect, useState } from "react";
 import { useCanvases } from "../useCanvas";
+import { WithIndexedContext } from "@peerbit/document";
+import { equals } from "uint8arrays";
 
 export const useRelativePath = (properties: {
-    canvas: Canvas;
+    canvas: WithIndexedContext<Canvas, IndexableCanvas>;
     disabled?: boolean;
 }) => {
     const { leaf } = useCanvases();
@@ -16,17 +18,17 @@ export const useRelativePath = (properties: {
         }
         // get the path of the canvas that is unique to the viewRoot
 
-        if (!properties.canvas || properties.canvas.closed !== false || !leaf)
+        if (!properties.canvas || properties.canvas.initialized || !leaf)
             return setPath([] as Canvas[]);
         // filter the path to only include elements that are not in the viewRoot path
-        const indexWhereTheRootEnds = properties.canvas.path.findIndex(
-            (p) => p.address === leaf.address
+        const indexWhereTheRootEnds = properties.canvas.__indexed.path.findIndex(
+            (p) => equals(p, leaf.id)
         );
         if (indexWhereTheRootEnds === -1) {
             return setPath([] as Canvas[]);
         }
         const pathPromise = properties.canvas.loadPath({
-            length: properties.canvas.path.length - indexWhereTheRootEnds - 1,
+            length: properties.canvas.__indexed.path.length - indexWhereTheRootEnds - 1,
         });
         pathPromise
             .then((path) => {
@@ -38,7 +40,7 @@ export const useRelativePath = (properties: {
             });
     }, [
         properties.canvas,
-        properties?.canvas?.closed,
+        properties?.canvas?.initialized,
         leaf,
         properties.disabled,
     ]);

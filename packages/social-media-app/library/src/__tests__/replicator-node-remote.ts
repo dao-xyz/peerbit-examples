@@ -26,9 +26,14 @@ console.log(
 );
 const client = await Peerbit.create();
 await client.bootstrap();
-const root = await createRoot(client, { persisted: true });
+const { canvas: root, scope: capsule } = await createRoot(client, { persisted: true });
 
-console.log("Connected to root: " + root.address);
+console.log(
+    "Connected to capsule: " +
+    capsule.address +
+    " with root canvas " +
+    root.idString
+);
 await root.replies.log.waitForReplicators();
 const iterator = root.replies.index.iterate({
     query: getOwnedElementsQuery(root),

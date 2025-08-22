@@ -3,7 +3,6 @@ import { VscDebug } from "react-icons/vsc";
 import { useCanvases } from "../useCanvas";
 import {
     Canvas,
-    CanvasAddressReference,
     Element,
     ElementContent,
     IFrameContent,
@@ -33,8 +32,7 @@ export const DebugGeneratePostButton = () => {
     ) => {
         const definedUrl =
             url ||
-            `https://picsum.photos/${options?.width ?? 200}/${
-                options?.height ?? 300
+            `https://picsum.photos/${options?.width ?? 200}/${options?.height ?? 300
             }`;
         const response = await fetch(definedUrl);
         // Convert the response to an ArrayBuffer then to a Uint8Array.
@@ -69,17 +67,11 @@ export const DebugGeneratePostButton = () => {
             const typeArray = Array.isArray(type) ? type : [type];
             // Create a post (canvas) that references its parent.
             const canvas = new Canvas({
-                path: path.map(
-                    (x) =>
-                        new CanvasAddressReference({
-                            canvas: x,
-                        })
-                ),
                 publicKey: publicKeyTuse,
             });
 
             // Open the canvas so we can insert elements.
-            const openCanvas = await leaf.openWithSameSettings(canvas);
+            const openCanvas = await leaf.nearestScope.openWithSameSettings(canvas);
 
             for (const [ix, type] of typeArray.entries()) {
                 let mockContent: ElementContent;
@@ -107,9 +99,7 @@ export const DebugGeneratePostButton = () => {
                     });
                 }
 
-                await openCanvas.load();
-
-                openCanvas.elements.put(
+                await openCanvas.elements.put(
                     new Element({
                         content: mockContent,
                         location: new Layout({
@@ -127,7 +117,7 @@ export const DebugGeneratePostButton = () => {
             }
 
             // Last step – add this post as a reply to the parent.
-            leaf.createReply(openCanvas);
+            await leaf.upsertReply(openCanvas);
         }
     };
 

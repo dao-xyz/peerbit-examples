@@ -1,18 +1,17 @@
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useVisualizationContext } from "./CustomizationProvider";
-import { JSX, useEffect, useMemo, useState } from "react";
+import { JSX, useMemo } from "react";
 import { BasicVisualization, ChildVisualization } from "@giga-app/interface";
 import { MdAdd, MdOutlineExplore } from "react-icons/md";
 import { HiOutlineNewspaper } from "react-icons/hi";
 import { MdOutlineAccountTree } from "react-icons/md";
 import { IoChatbubblesOutline } from "react-icons/io5";
-import { Spinner } from "../../utils/Spinner";
 
 let getExperienceName = (childrenVisualization: ChildVisualization) => {
     if (childrenVisualization === ChildVisualization.FEED) {
         return "Feed";
     }
-    if (childrenVisualization === ChildVisualization.TREE) {
+    if (childrenVisualization === ChildVisualization.OUTLINE) {
         return "Tree";
     }
     if (childrenVisualization === ChildVisualization.EXPLORE) {
@@ -29,7 +28,7 @@ let getExperienceIcon = (
     if (childrenVisualization === ChildVisualization.FEED) {
         return <HiOutlineNewspaper size={24} />;
     }
-    if (childrenVisualization === ChildVisualization.TREE) {
+    if (childrenVisualization === ChildVisualization.OUTLINE) {
         return <MdOutlineAccountTree size={24} />;
     }
     if (childrenVisualization === ChildVisualization.EXPLORE) {
@@ -44,7 +43,7 @@ let getExperienceIcon = (
 let experiences = [
     ChildVisualization.FEED,
     ChildVisualization.CHAT,
-    ChildVisualization.TREE,
+    ChildVisualization.OUTLINE,
     ChildVisualization.EXPLORE,
 ];
 
@@ -54,17 +53,17 @@ export const ExperienceDropdownButton = (properties?: {
     const { visualization, updateDraft } = useVisualizationContext();
 
     let experienceName = useMemo(() => {
-        if (visualization?.childrenVisualization == null) {
-            return undefined
+        if (visualization?.view == null) {
+            return undefined;
         }
-        return getExperienceName(visualization.childrenVisualization);
+        return getExperienceName(visualization.view);
     }, [visualization]);
 
     let experienceIcon = useMemo(() => {
         if (visualization == null) {
             return <></>;
         }
-        return getExperienceIcon(visualization.childrenVisualization);
+        return getExperienceIcon(visualization.view);
     }, [visualization]);
 
     return (
@@ -77,12 +76,18 @@ export const ExperienceDropdownButton = (properties?: {
                     }
                 >
                     {experienceIcon}
-                    {experienceName ? <span
-                        className="text-xl    font-ganja"
-                        style={{ lineHeight: 0 }}
-                    >
-                        {experienceName}
-                    </span> : <></>/*  <Spinner /> */}
+                    {
+                        experienceName ? (
+                            <span
+                                className="text-xl    font-ganja"
+                                style={{ lineHeight: 0 }}
+                            >
+                                {experienceName}
+                            </span>
+                        ) : (
+                            <></>
+                        ) /*  <Spinner /> */
+                    }
                 </button>
             </DropdownMenu.Trigger>
             <DropdownMenu.Content
@@ -98,7 +103,7 @@ export const ExperienceDropdownButton = (properties?: {
                             updateDraft(
                                 new BasicVisualization({
                                     ...visualization,
-                                    childrenVisualization: exp,
+                                    view: exp,
                                 })
                             );
                         }}

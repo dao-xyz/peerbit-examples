@@ -22,6 +22,13 @@ const client = await Peerbit.create();
 console.log("Client created: ", client.identity.publicKey.hashcode());
 const localPeerId = await (await fetch("http://localhost:8082/peer/id")).text();
 await client.dial("/ip4/127.0.0.1/tcp/8002/ws/p2p/" + localPeerId);
-const root = await createRoot(client, { persisted: true });
+const { scope: capsule, canvas: root } = await createRoot(client, {
+    persisted: true,
+});
 
-console.log("Connected to root: " + root.address);
+console.log(
+    "Connected to capsule: " +
+    capsule.address +
+    " with root canvas " +
+    root.idString
+);
