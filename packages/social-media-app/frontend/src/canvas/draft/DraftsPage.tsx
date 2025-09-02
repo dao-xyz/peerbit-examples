@@ -1,6 +1,6 @@
 import { Canvas, LOWEST_QUALITY } from "@giga-app/interface";
 import { CanvasWrapper } from "../CanvasWrapper";
-import { CanvasPreview } from "../preview/Preview";
+import { CanvasPreview } from "../render/preview/Preview";
 import { useDrafts } from "./useDrafts";
 import { MdClear } from "react-icons/md";
 import { useState } from "react";

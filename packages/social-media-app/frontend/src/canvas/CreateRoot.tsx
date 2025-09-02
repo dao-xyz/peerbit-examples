@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useCanvases } from "./useCanvas";
 import { Spinner } from "../utils/Spinner";
-import { Canvas } from "./Canvas";
+import { Canvas } from "./render/detailed/Canvas";
 import { CanvasWrapper } from "./CanvasWrapper";
 import { SaveButton } from "./edit/SaveCanvasButton";
 import { usePeer } from "@peerbit/react";
@@ -23,8 +23,8 @@ import { WithIndexedContext } from "@peerbit/document";
 export const CreateRoot = () => {
     const { setRoot } = useCanvases();
     const { peer } = usePeer();
-    const publicScope = PublicScope.useScope().scope;
-    const privateScope = PrivateScope.useScope().scope;
+    const publicScope = PublicScope.useScope();
+    const privateScope = PrivateScope.useScope();
 
     const mounted = useMemo(
         () => [publicScope, privateScope].filter(Boolean) as Scope[],
@@ -142,7 +142,7 @@ export const CreateRoot = () => {
                             <LuSprout size={40} className="text-green-500" />
                         </div>
 
-                        <CanvasWrapper canvas={draftIndexed as any} draft multiCanvas onSave={savePending}>
+                        <CanvasWrapper canvas={draftIndexed} draft multiCanvas onSave={savePending}>
                             <div className="flex flex-row gap-4">
                                 <Canvas fitWidth draft />
                                 <SaveButton icon={IoArrowForward} />

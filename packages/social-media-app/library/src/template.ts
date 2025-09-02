@@ -5,11 +5,12 @@ import {
     Canvas,
     Scope,
     ChildVisualization,
+    resolveChild,
 } from "./content.js";
 import { Program, ProgramClient } from "@peerbit/program";
 import { Documents, id } from "@peerbit/document";
 import { concat } from "uint8arrays";
-import { ViewKind } from "./link.js";
+import { LinkKind, ViewKind } from "./link.js";
 
 /* ----------------------------------------------------------------------------
  * helpers
@@ -67,52 +68,53 @@ export class Template {
     }
 
     /**
-     * Materialize the template under `parent` (deep copy into parent's scope).
-     */
+ * Deep-copy this.template.prototype under `parent` (new ids, parent’s scope).
+ * Uses Scope.publish(..., { type: "fork", updateHome: "set" }) so payload/experience
+ * are copied by the publish pipeline, not manually here.
+ */
     async insertInto(parent: Canvas): Promise<Canvas> {
         const parentScope = parent.nearestScope;
 
-        const cloneSubtree = async (src: Canvas, dstParent: Canvas | undefined): Promise<Canvas> => {
-            if (!src.initialized) {
-                src = await parentScope.openWithSameSettings(src);
-            }
 
-            // fresh node living in the parent's scope
-            const draft = new Canvas({
-                publicKey: parentScope.node.identity.publicKey,
-                selfScope: new AddressReference({ address: parentScope.address }),
+        const clone = async (
+            src: Canvas,
+            dstParent: Canvas,
+            kind?: LinkKind,
+            view?: ChildVisualization
+        ): Promise<Canvas> => {
+            // Open source with its own home settings (publish does copies from srcHome→dest)
+            const srcOpen = src.initialized ? src : await dstParent.nearestScope.openWithSameSettings(src);
+
+            // Materialize a fork in the parent scope; preserve edge metadata if provided
+            const [, dst] = await parentScope.publish(srcOpen, {
+                type: "fork",
+                id: "new",           // new id for each node in the cloned tree
+                updateHome: 'set', // keep srcOpen's selfScope as is (copied by publish)
+                visibility: "both",
+                targetScope: parentScope,
+                parent: dstParent,   // link under the parent we just created
+                kind,    // preserves ViewKind(orderKey) for ordering
+                view,    // if you store view on the edge, keep it; otherwise omit
+                // no need to pass publish.view for node’s own experience:
+                // copyVisualizationBetweenScopes already copies the node view/experience
             });
 
-            const [_, created] = await parentScope.getOrCreateReply(dstParent, draft);
-
-            // copy text context
-            const text = await getContextText(src);
-            if (text) await created.addTextElement(text);
-
-            // copy child visualization
-            const exp = await src.getExperience();
-            if (exp !== undefined) await created.setExperience(exp, { scope: parentScope });
-
-            // preserve child ordering if ViewKind keys exist
-            const ordered =
-                (await src.getOrderedChildren?.().catch(() => undefined)) ??
-                (await src.getChildren());
-
-            let lastKey: string | undefined = undefined;
-            for (const child of ordered) {
-                const cloned = await cloneSubtree(child, created);
-                const viewKey = await src.getChildOrderKey?.(child.id);
-                if (viewKey !== undefined) {
-                    const nextKey = lastKey ? `${lastKey}~` : "0";
-                    await created.upsertViewPlacement(cloned, nextKey);
-                    lastKey = nextKey;
+            // Recreate children using their original link metadata
+            const links = await srcOpen.getChildrenLinks(); // { child, kind?, view? }[]
+            for (const link of links) {
+                let child = await resolveChild(link, src.nearestScope);
+                if (!child) {
+                    throw new Error("Failed to resolve child during template cloning");
                 }
+                const loaded = await src.nearestScope.openWithSameSettings(child);
+                const vizualization = await loaded.getVisualization();
+                await clone(loaded, dst, link.kind, vizualization?.view);
             }
 
-            return created;
+            return dst;
         };
 
-        return cloneSubtree(this.prototype, parent);
+        return clone(this.prototype, parent);
     }
 }
 
@@ -178,7 +180,7 @@ export async function createAlbumTemplate(properties: {
 }): Promise<Template> {
     const { peer, scope } = properties;
 
-    const [_, albumRoot] = await scope.getOrCreateReply(
+    const [created, albumRoot] = await scope.getOrCreateReply(
         undefined,
         new Canvas({
             id: generateId("album"),
@@ -186,6 +188,17 @@ export async function createAlbumTemplate(properties: {
             selfScope: new AddressReference({ address: scope.address }),
         })
     );
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("album")),
+        name: "Photo album",
+        description: "Photos and Comments children",
+        prototype: albumRoot,
+    })
+
+    if (!created) {
+        return template;
+    }
+
 
     await albumRoot.setExperience(ChildVisualization.FEED);
 
@@ -225,12 +238,7 @@ export async function createAlbumTemplate(properties: {
         await comments.addTextElement("Comments");
     }
 
-    return new Template({
-        id: sha256Sync(new TextEncoder().encode("album")),
-        name: "Photo album",
-        description: "Photos and Comments children",
-        prototype: albumRoot,
-    });
+    return template;
 }
 
 export async function createProfileTemplate(props: {
@@ -241,7 +249,7 @@ export async function createProfileTemplate(props: {
 }): Promise<Template> {
     const { peer, scope } = props;
 
-    const [_, root] = await scope.getOrCreateReply(
+    const [created, root] = await scope.getOrCreateReply(
         undefined,
         new Canvas({
             id: sha256Sync(new TextEncoder().encode("profile")),
@@ -249,6 +257,18 @@ export async function createProfileTemplate(props: {
             selfScope: new AddressReference({ address: scope.address }),
         })
     );
+
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("profile")),
+        name: "Personal profile",
+        description: "Profile root with Posts, Photos and About sections",
+        prototype: root,
+    })
+
+    if (!created) {
+        return template;
+    }
+
     await root.setExperience(ChildVisualization.EXPLORE);
 
     let header = props.name ?? "Profile";
@@ -300,12 +320,7 @@ export async function createProfileTemplate(props: {
         await about.addTextElement("About");
     }
 
-    return new Template({
-        id: sha256Sync(new TextEncoder().encode("profile")),
-        name: "Personal profile",
-        description: "Profile root with Posts, Photos and About sections",
-        prototype: root,
-    });
+    return template;
 }
 
 export async function createCommunityTemplate(props: {
@@ -316,7 +331,7 @@ export async function createCommunityTemplate(props: {
 }): Promise<Template> {
     const { peer, scope } = props;
 
-    const [_, root] = await scope.getOrCreateReply(
+    const [created, root] = await scope.getOrCreateReply(
         undefined,
         new Canvas({
             id: sha256Sync(new TextEncoder().encode("community")),
@@ -324,6 +339,18 @@ export async function createCommunityTemplate(props: {
             selfScope: new AddressReference({ address: scope.address }),
         })
     );
+
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("community")),
+        name: "Community",
+        description: "A community Posts, Members and Photos sections",
+        prototype: root,
+    })
+
+    if (!created) {
+        return template;
+    }
+
     await root.setExperience(ChildVisualization.EXPLORE);
 
     let header = props.name ?? "Community";
@@ -375,12 +402,7 @@ export async function createCommunityTemplate(props: {
         await photos.addTextElement("Photos");
     }
 
-    return new Template({
-        id: sha256Sync(new TextEncoder().encode("community")),
-        name: "Community",
-        description: "A community Posts, Members and Photos sections",
-        prototype: root,
-    });
+    return template;
 }
 
 export async function createPlaylistTemplate(props: {
@@ -391,7 +413,7 @@ export async function createPlaylistTemplate(props: {
 }): Promise<Template> {
     const { peer, scope } = props;
 
-    const [_, root] = await scope.getOrCreateReply(
+    const [created, root] = await scope.getOrCreateReply(
         undefined,
         new Canvas({
             id: sha256Sync(new TextEncoder().encode("playlist")),
@@ -399,6 +421,20 @@ export async function createPlaylistTemplate(props: {
             selfScope: new AddressReference({ address: scope.address }),
         })
     );
+
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("playlist")),
+        name: "Music playlist",
+        description: "Playlist root with Tracks and Comments sections",
+        prototype: root,
+    });
+
+    if (!created) {
+        return template;
+    }
+
+
+
     await root.setExperience(ChildVisualization.FEED);
 
     let header = props.name ?? "Playlist";
@@ -435,12 +471,7 @@ export async function createPlaylistTemplate(props: {
         await comments.addTextElement("Comments");
     }
 
-    return new Template({
-        id: sha256Sync(new TextEncoder().encode("playlist")),
-        name: "Music playlist",
-        description: "Playlist root with Tracks and Comments sections",
-        prototype: root,
-    });
+    return template
 }
 
 export async function createChatTemplate(props: {
@@ -451,7 +482,7 @@ export async function createChatTemplate(props: {
 }): Promise<Template> {
     const { peer, scope } = props;
 
-    const [_, root] = await scope.getOrCreateReply(
+    const [created, root] = await scope.getOrCreateReply(
         undefined,
         new Canvas({
             id: sha256Sync(new TextEncoder().encode("chat")),
@@ -459,6 +490,18 @@ export async function createChatTemplate(props: {
             selfScope: new AddressReference({ address: scope.address }),
         })
     );
+
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("chat")),
+        name: "Chat",
+        description: "Start a chat with your friends",
+        prototype: root,
+    })
+
+    if (!created) {
+        return template;
+    }
+
     await root.setExperience(ChildVisualization.CHAT);
 
     if (props?.name || props?.description) {
@@ -467,12 +510,7 @@ export async function createChatTemplate(props: {
         await root.addTextElement(header);
     }
 
-    return new Template({
-        id: sha256Sync(new TextEncoder().encode("chat")),
-        name: "Chat",
-        description: "Start a chat with your friends",
-        prototype: root,
-    });
+    return template;
 }
 
 export async function createArticleTemplate(props: {
@@ -483,7 +521,7 @@ export async function createArticleTemplate(props: {
 }): Promise<Template> {
     const { peer, scope } = props;
 
-    const [__, root] = await scope.getOrCreateReply(
+    const [created, root] = await scope.getOrCreateReply(
         undefined,
         new Canvas({
             id: sha256Sync(new TextEncoder().encode("article")),
@@ -491,9 +529,20 @@ export async function createArticleTemplate(props: {
             selfScope: new AddressReference({ address: scope.address }),
         })
     );
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("article")),
+        name: "My new article",
+        description: "Article with comments sections",
+        prototype: root,
+    })
+
+    if (!created) {
+        return template;
+    }
+
     await root.setExperience(ChildVisualization.FEED);
 
-    let header = props.name ?? "My new article";
+    let header = props.name ?? "Article";
     if (props.description) header = `# ${header}\n\n${props.description}`;
     await root.addTextElement(header);
 
@@ -509,7 +558,7 @@ export async function createArticleTemplate(props: {
             "0",
             ChildVisualization.OUTLINE
         );
-        await body.addTextElement("My new article");
+        await body.addTextElement("Article");
     }
 
     // Comments
@@ -527,10 +576,5 @@ export async function createArticleTemplate(props: {
         await comments.addTextElement("Comments");
     }
 
-    return new Template({
-        id: sha256Sync(new TextEncoder().encode("article")),
-        name: "Article",
-        description: "Article with comments sections",
-        prototype: root,
-    });
+    return template;
 }

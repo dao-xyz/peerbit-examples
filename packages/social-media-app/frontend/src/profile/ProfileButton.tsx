@@ -2,7 +2,7 @@ import { forwardRef, useEffect, useState } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
 import { Canvas, IndexableCanvas, LOWEST_QUALITY, Profile as ProfileData } from "@giga-app/interface";
 import { IndexedProfileRow, useProfiles } from "./useProfiles";
-import { CanvasPreview } from "../canvas/preview/Preview";
+import { CanvasPreview } from "../canvas/render/preview/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";

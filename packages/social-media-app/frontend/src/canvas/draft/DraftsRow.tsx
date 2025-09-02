@@ -2,7 +2,7 @@ import { Canvas, IndexableCanvas, LOWEST_QUALITY } from "@giga-app/interface";
 import { MdClear } from "react-icons/md";
 import { VscCommentDraft } from "react-icons/vsc";
 import { CanvasWrapper } from "../CanvasWrapper";
-import { CanvasPreview } from "../preview/Preview";
+import { CanvasPreview } from "../render/preview/Preview";
 import { IoEnterOutline } from "react-icons/io5";
 import { useDrafts } from "./useDrafts";
 import { useNavigate } from "react-router";

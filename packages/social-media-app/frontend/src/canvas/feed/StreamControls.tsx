@@ -19,6 +19,7 @@ import { useStream } from "./StreamContext";
 import { TabsOrList } from "../navigation/Collections";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
 import { useCanvases } from "../useCanvas";
+import { ExperienceDropdownButton } from "../custom/ExperienceDropdown";
 
 interface SubHeaderProps {
     collapsable?: boolean; // if true, the header can be collapsed
@@ -259,12 +260,11 @@ export const ViewSelectorSubheader = ({
                                                 className={`w-full flex flex-row px-2 py-2`}
                                             >
                                                 <button
-                                                    className={`btn  px-2 justify-start flex-grow  underline text-sm whitespace-nowrap transition  ${
-                                                        currentFilterModel?.id ===
+                                                    className={`btn  px-2 justify-start flex-grow  underline text-sm whitespace-nowrap transition  ${currentFilterModel?.id ===
                                                         v.id
-                                                            ? " font-semibold"
-                                                            : "text-neutral-600 hover:text-neutral-700 dark:text-neutral-400 hover:dark:text-neutral-300"
-                                                    }`}
+                                                        ? " font-semibold"
+                                                        : "text-neutral-600 hover:text-neutral-700 dark:text-neutral-400 hover:dark:text-neutral-300"
+                                                        }`}
                                                 >
                                                     {v.id}
                                                 </button>
@@ -289,12 +289,11 @@ export const ViewSelectorSubheader = ({
                                             <DropdownMenu.Item
                                                 key={v.id}
                                                 onClick={() => select(v)}
-                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
-                                                    currentFilterModel?.id ===
+                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${currentFilterModel?.id ===
                                                     v.id
-                                                        ? "underline font-semibold"
-                                                        : "text-neutral-600 hover:text-neutral-700"
-                                                }`}
+                                                    ? "underline font-semibold"
+                                                    : "text-neutral-600 hover:text-neutral-700"
+                                                    }`}
                                             >
                                                 {v.name}
                                             </DropdownMenu.Item>
@@ -352,7 +351,12 @@ export const BottomControls = (props: {
     onViewChange?: (view: FilterModel) => void;
 }) => {
     return (
-        <div className="flex flex-row h-full px-2 ">
+        <div className="flex flex-row h-full ">
+            <ExperienceDropdownButton className="rounded-bl-xl" />
+            <div className="flex items-center">
+                <div className="h-6 border-l border-gray-300" />
+            </div>
+
             <ViewSelectorSubheader onViewChange={props?.onViewChange} />
             {/*  <People /> */}
             {
@@ -429,11 +433,11 @@ export const SubHeader = ({
                     onBackToTop={onBackToTop}
                 /> */}
                 <TabsOrList
-                    className={`${
-                        visible
-                            ? "bg-white dark:bg-neutral-700"
-                            : "bg-neutral-50 dark:bg-neutral-900 transition-colors  duration-800 ease-in-out"
-                    } shadow-md `}
+                    hideOnEmpty
+                    className={`${visible
+                        ? "bg-white dark:bg-neutral-700"
+                        : "bg-neutral-50 dark:bg-neutral-900 transition-colors  duration-800 ease-in-out"
+                        } shadow-md `}
                     canvas={viewRoot}
                     view={navType}
                     setView={setNavType}

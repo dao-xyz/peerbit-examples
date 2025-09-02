@@ -1,177 +1,87 @@
-import React, {
-    createContext,
-    useContext,
-    useState,
-    useEffect,
-    ReactNode,
-    useRef,
-} from "react";
-
-import { Canvas, ChildVisualization } from "@giga-app/interface";
-import { usePendingCanvas } from "./edit/PendingCanvasContext";
+import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import { ChildVisualization } from "@giga-app/interface";
 import { useCanvas } from "./CanvasWrapper";
 import { useStream } from "./feed/StreamContext";
 import { useVisualizationContext } from "./custom/CustomizationProvider";
+import { useDraftSession } from "./edit/draft/DraftSession";
 
 interface AutoReplyContextType {
     typedOnce: boolean;
-    replyTo?: Canvas | undefined;
-    setReplyTo: (canvas: Canvas | undefined) => void;
+    replyTo?: any;
+    setReplyTo: (c: any | undefined) => void;
     disable: () => void;
 }
 
-const AutoReplyContext = createContext<AutoReplyContextType | undefined>(
-    undefined
-);
+const AutoReplyContext = createContext<AutoReplyContextType | undefined>(undefined);
 
-export const AutoReplyProvider: React.FC<{
-    children: ReactNode;
-    disabled?: boolean; // Optional prop to control auto-reply functionality
-}> = ({ children, disabled }) => {
-
-
-    const { setReplyTo: setReplyToCanvas, pendingCanvas } = usePendingCanvas();
-    const { subscribeContentChange, mutate, pendingRects } = useCanvas();
-    const typedOnce = useRef(false);
+export const AutoReplyProvider: React.FC<{ children: React.ReactNode; disabled?: boolean; }> = ({ children, disabled }) => {
+    const { subscribeContentChange, pendingRects, } = useCanvas();
     const { processedReplies, feedRoot } = useStream();
-    const [replyTo, _setReplyTo] = useState<Canvas | undefined>(feedRoot);
-    const lastPendingCanvasId = useRef<string | undefined>(undefined);
-    const enabled = useRef(disabled !== undefined ? !disabled : true);
-    useEffect(() => {
-        enabled.current = disabled !== undefined ? !disabled : true;
-    }
-        , [disabled]);
-    const visualization = useVisualizationContext();
+    const { visualization } = useVisualizationContext();
+    const session = useDraftSession();
 
-    const setReplyTo = async (canvas: Canvas | undefined) => {
-        if (!enabled.current) {
-            return;
-        }
-        let canvasOrRoot = canvas || feedRoot;
-        _setReplyTo(canvasOrRoot);
-        await setReplyToCanvas(canvasOrRoot);
-        lastPendingCanvasId.current = pendingCanvas?.idString;
+    const [replyTo, _setReplyTo] = useState(feedRoot);
+    const typedOnce = useRef(false);
+    const enabled = useRef(disabled !== undefined ? !disabled : true);
+
+    useEffect(() => { enabled.current = disabled !== undefined ? !disabled : true; }, [disabled]);
+
+    const isChat = visualization?.view === ChildVisualization.CHAT;
+
+    const setReplyTo = async (canvas?: any) => {
+        if (!enabled.current) return;
+        const target = canvas ?? feedRoot;
+        _setReplyTo(target);
+        session.setReplyTarget(target);
     };
 
-    useEffect(() => {
-        setReplyTo(feedRoot);
-    }, [feedRoot]); // reset replyTo when viewRoot changes
+    useEffect(() => { setReplyTo(feedRoot); /* reset when root changes */ }, [feedRoot?.idString]); // eslint-disable-line
 
-    /**
-     * If the pending canvas has updated their path, we need to update all pending rects too
-     */
-    useEffect(() => {
-        if (!pendingCanvas?.initialized) {
-            return;
-        }
-        typedOnce.current = false; // reset typedOnce when pending canvas changes
-
-        mutate((element) => {
-            element.canvasId = pendingCanvas.id;
-            return true;
-        });
-    }, [pendingCanvas?.initialized, pendingCanvas?.idString]); // important is to observe address changes, not just path changes because address depends on the path
-
-    /*  useEffect(() => { TODO when do we neeed this?
-         // reset replyTo when pending canvas changes
-         console.log(pendingCanvas?.idString)
-         if (
-             pendingCanvas &&
-             pendingCanvas.idString !== lastPendingCanvasId.current
-         ) {
-             lastPendingCanvasId.current = pendingCanvas?.idString;
-             console.log("SET REPLY TO VIEWROOT", viewRoot);
-             setReplyTo(replyTo ?? viewRoot);
- 
-             enabled.current = true; // we can enable auto reply again, because we are going into a new canvas draft
-         }
-     }, [pendingCanvas?.idString]);
-  */
-    const isChat =
-        visualization.visualization?.view ===
-        ChildVisualization.CHAT;
-    const autoReplyFunctionality = () => {
-        if (!processedReplies) {
-            return;
-        }
-        let last = processedReplies[processedReplies.length - 1]?.reply;
-        if (
-            isChat &&
-            last &&
-            (replyTo == null ||
-                (replyTo.idString === feedRoot.idString &&
-                    last.idString !== feedRoot.idString))
-        ) {
-            console.log("AUTO REPLY TO", last);
+    const autoPickReplyTarget = () => {
+        if (!processedReplies?.length) return;
+        const last = processedReplies[processedReplies.length - 1]?.reply;
+        const current = session.getReplyTarget();
+        if (isChat && last && (!current || (current.idString === feedRoot?.idString && last.idString !== feedRoot?.idString))) {
             setReplyTo(last);
         }
     };
 
-    const contentChangeCallback = (_elements) => {
-        if (!enabled.current) {
-            console.log("Auto reply disabled");
-            return;
-        }
-
-        typedOnce.current = true;
-
-        for (const element of pendingRects) {
-            if (!element.content.isEmpty) {
-                autoReplyFunctionality();
-                return;
-            }
-        }
-        setReplyTo(null); // clear replyTo when content changes to null
-    };
-
     useEffect(() => {
-        const unsubscribe = subscribeContentChange(contentChangeCallback);
-        return () => {
-            unsubscribe();
+        const cb = () => {
+            if (!enabled.current) return;
+            typedOnce.current = true;
+            for (const el of pendingRects) {
+                if (!el.content.isEmpty) { autoPickReplyTarget(); return; }
+            }
+            setReplyTo(undefined);
         };
-    }, [subscribeContentChange, contentChangeCallback, pendingCanvas]);
+        const unsubscribe = subscribeContentChange(cb);
+        return () => unsubscribe();
+    }, [subscribeContentChange, pendingRects, isChat, processedReplies]); // eslint-disable-line
 
     useEffect(() => {
-        // this behaviour we only want if we have not typed anything
-        /*    
-        if (typedOnce.current) {
-            return;
-        }
-        */
-        // auto reply to the last processed reply
         if (isChat) {
-            if (processedReplies?.length > 0) {
-                let last = processedReplies[processedReplies.length - 1]?.reply;
-                if (isChat && last && replyTo.idString !== last.idString) {
-                    setReplyTo(last);
-                }
-            }
+            const last = processedReplies?.[processedReplies.length - 1]?.reply;
+            if (last && replyTo?.idString !== last.idString) setReplyTo(last);
         } else {
-            setReplyTo(feedRoot); // clear replyTo when not in chat view
+            setReplyTo(feedRoot);
         }
-    }, [isChat, processedReplies]);
+    }, [isChat, processedReplies]); // eslint-disable-line
 
     return (
-        <AutoReplyContext.Provider
-            value={{
-                typedOnce: typedOnce.current,
-                replyTo,
-                setReplyTo,
-                disable: () => {
-                    enabled.current = false;
-                    setReplyTo(null);
-                },
-            }}
-        >
+        <AutoReplyContext.Provider value={{
+            typedOnce: typedOnce.current,
+            replyTo,
+            setReplyTo,
+            disable: () => { enabled.current = false; setReplyTo(undefined); },
+        }}>
             {children}
         </AutoReplyContext.Provider>
     );
 };
 
 export const useAutoReply = (): AutoReplyContextType => {
-    const context = useContext(AutoReplyContext);
-    if (!context) {
-        throw new Error("useAutoReply must be used within a AutoReplyProvider");
-    }
-    return context;
+    const ctx = useContext(AutoReplyContext);
+    if (!ctx) throw new Error("useAutoReply must be used within a AutoReplyProvider");
+    return ctx;
 };

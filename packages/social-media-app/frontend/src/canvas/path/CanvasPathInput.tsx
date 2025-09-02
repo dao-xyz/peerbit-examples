@@ -16,9 +16,11 @@ const DEFAULT_VIEW = "best"; // Default view ID for the "Best" chip
 const DEBOUNCE = 300; // ms
 
 export const CanvasPathInput: React.FC<{
+    editable?: boolean;
+    includeSelf?: boolean; // skip the last element in the path (current canvas)
     onFocusChange?: (state: boolean) => void;
     className?: string;
-}> = ({ onFocusChange, className }) => {
+}> = ({ includeSelf, editable, onFocusChange, className }) => {
     /* ── global state ─────────────────────────────────────────────── */
     const {
         filterModel,
@@ -52,7 +54,7 @@ export const CanvasPathInput: React.FC<{
                     key: "view",
                     label: filterModel.name,
                     icon: <RiSearchEyeLine size={12} />,
-                    remove: () => setQueryParams({ view: DEFAULT_VIEW }),
+                    remove: () => setQueryParams({ settings: DEFAULT_VIEW }),
                 },
             ]
             : []),
@@ -117,7 +119,7 @@ export const CanvasPathInput: React.FC<{
             clearTimeout(tRef.current);
             const rest = words.join(" ").trimStart();
             setText(rest);
-            setQueryParams({ view: match.id, query: rest });
+            setQueryParams({ settings: match.id, query: rest });
         } else {
             setText(val);
             push(val);
@@ -128,7 +130,7 @@ export const CanvasPathInput: React.FC<{
         if (typeFilter.key !== "all") setQueryParams({ type: "all" });
         else if (timeFilter.key !== "all") setQueryParams({ time: "all" });
         else if (filterModel?.id !== DEFAULT_VIEW)
-            setQueryParams({ view: DEFAULT_VIEW });
+            setQueryParams({ settings: DEFAULT_VIEW });
         else if (path.length > 1) {
             popRoom();
         }
@@ -143,7 +145,7 @@ export const CanvasPathInput: React.FC<{
         navigate(getCanvasPath(canvas));
 
     const renderPathSelection = useMemo(() => {
-        return smartPath(focused, pathElement, path.slice(1), navigateToCanvas);
+        return smartPath(focused, pathElement, path.slice(1, includeSelf ? path.length : path.length - 1), navigateToCanvas);
     }, [focused, path]);
 
     /* ── render ───────────────────────────────────────────────────── */
@@ -184,19 +186,20 @@ export const CanvasPathInput: React.FC<{
             {/*  <ExperienceDropdownButton /> */}
 
             {/* caret */}
-            <input
-                ref={inputRef}
-                value={text}
-                onChange={onChange}
-                onKeyDown={onBack}
-                onFocus={() => setF(true)}
-                onBlur={() => setF(false)}
-                placeholder="Search…"
-                className={clsx(
-                    "ml-1 flex-grow  bg-transparent outline-none text-xs md:text-sm",
-                    focused ? "min-w-[40px]" : "w-fit" /* max-w-[60px] */
-                )}
-            />
+            {editable && (
+                <input
+                    ref={inputRef}
+                    value={text}
+                    onChange={onChange}
+                    onKeyDown={onBack}
+                    onFocus={() => setF(true)}
+                    onBlur={() => setF(false)}
+                    placeholder="Search..."
+                    className={clsx(
+                        "ml-1 flex-grow  bg-transparent outline-none text-xs md:text-sm",
+                        focused ? "min-w-[40px]" : "w-fit"
+                    )}
+                />)}
         </div>
     );
 };

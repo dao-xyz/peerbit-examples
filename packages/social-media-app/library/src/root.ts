@@ -58,7 +58,7 @@ export const createRoot = async (
 ): Promise<{ scope: Scope; canvas: Canvas }> => {
     const rootScope = await peer.open(options?.scope || createRootScope(), {
         existing: "reuse",
-        args: { replicate: options?.persisted },
+        args: { replicate: options?.persisted ? { factor: 1 } : false },
     });
 
     // Create (or reuse) the root canvas inside rootScope.

@@ -1,7 +1,7 @@
 import { Canvas, LOWEST_QUALITY } from "@giga-app/interface";
 import { Fragment } from "react/jsx-runtime";
 import { CanvasWrapper } from "../CanvasWrapper";
-import { CanvasPreview } from "../preview/Preview";
+import { CanvasPreview } from "../render/preview/Preview";
 import { JSX } from "react";
 
 const pathClass = "flex h-6 items-center cursor-pointer btn-bouncy ";

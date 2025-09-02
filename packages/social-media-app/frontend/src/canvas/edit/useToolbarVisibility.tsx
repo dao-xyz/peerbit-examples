@@ -37,7 +37,7 @@ export const useToolbarVisibility = (
     /* ------------------------------------------------------------------ */
     useEffect(() => {
         if (disabled) {
-            hide();
+            show(); // todo hide ?
             return;
         }
 
@@ -79,6 +79,7 @@ export const useToolbarVisibility = (
             debouncedScroll.cancel();
         };
     }, [debouncedScroll]);
+
 
     return {
         visible,

@@ -1,7 +1,8 @@
 import { BsSend } from "react-icons/bs";
 import { useCanvas } from "../CanvasWrapper";
 import { ComponentType } from "react";
-import { usePendingCanvas } from "./PendingCanvasContext";
+import { useDraftManager } from "./draft/DraftManager";
+import { useDraftSession } from "./draft/DraftSession";
 
 interface SaveButtonProps {
     icon?: ComponentType<{ size?: number }>;
@@ -14,7 +15,7 @@ export const SaveButton = ({
     className,
     onClick,
 }: SaveButtonProps) => {
-    const { publish } = usePendingCanvas();
+    const { publish } = useDraftSession();
     const { isEmpty } = useCanvas();
     return (
         <button

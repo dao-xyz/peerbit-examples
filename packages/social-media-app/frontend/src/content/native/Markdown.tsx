@@ -409,7 +409,7 @@ export const MarkdownContent = ({
                     style={{ ["--preview-lines" as any]: previewLines }}
                     className={`${previewLines ? "line-clamp-[var(--preview-lines)]" : ""
                         } ${previewLines > 0 ? "break-all whitespace-pre-wrap" : ""
-                        } ${editable ? "" : ""} ${editable ? "min-h-10" : ""} ${classNameContent
+                        } ${editable ? "" : ""} ${editable ? "p-1 min-h-10" : ""} ${classNameContent
                             ? typeof classNameContent === "function"
                                 ? classNameContent(element)
                                 : classNameContent

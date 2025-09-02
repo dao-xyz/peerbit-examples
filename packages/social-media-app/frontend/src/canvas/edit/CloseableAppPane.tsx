@@ -1,7 +1,7 @@
 import React, { useRef, useEffect } from "react";
 import { AppSelectPaneInline } from "./AppSelectPaneInline"; // And this one
 import { SimpleWebManifest } from "@giga-app/interface"; // Make sure this import works for you
-import { useEditTools } from "./ToolbarContext";
+import { useEditTools } from "./CanvasEditorProvider";
 
 export const CloseableAppPane = (props: {
     className?: string;
@@ -47,14 +47,14 @@ export const CloseableAppPane = (props: {
                     style={
                         appSelectOpen
                             ? {
-                                  height: "100%",
-                                  pointerEvents: "auto",
-                              }
+                                height: "100%",
+                                pointerEvents: "auto",
+                            }
                             : {
-                                  display: "none",
-                                  height: "0px",
-                                  pointerEvents: "none",
-                              }
+                                display: "none",
+                                height: "0px",
+                                pointerEvents: "none",
+                            }
                     }
                 >
                     <AppSelectPaneInline

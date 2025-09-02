@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
-import { CanvasPreview } from "../preview/Preview";
+import { CanvasPreview } from "../render/preview/Preview";
 import { useAllPosts } from "../feed/useCollection";
 import {
     Canvas,
-    ChildVisualization,
     IndexableCanvas,
     LOWEST_QUALITY,
 } from "@giga-app/interface";
@@ -12,7 +11,7 @@ import { FaChevronRight, FaList, FaPlus } from "react-icons/fa";
 import { PiTabs } from "react-icons/pi";
 import { BiSolidChevronsUp } from "react-icons/bi";
 
-import { CanvasEditorProvider } from "../edit/ToolbarContext";
+import { CanvasEditorProvider } from "../edit/CanvasEditorProvider";
 import { InlineEditor } from "../edit/InlineEditor";
 import { CloseableAppPane } from "../edit/CloseableAppPane";
 import { ToolbarEdit } from "../edit/ToolbarEdit";
@@ -22,14 +21,15 @@ import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes";
 import { CanvasSettingsButton } from "../header/CanvasSettingsButton";
 import { usePeer } from "@peerbit/react";
-import { usePendingCanvas } from "../edit/PendingCanvasContext";
 import { WithIndexedContext } from "@peerbit/document"
+
 export const TabsOrList = (properties?: {
     className?: string;
     canvas?: WithIndexedContext<Canvas, IndexableCanvas>;
     view: "tabs" | "rows";
     setView?: (view: "tabs" | "rows") => void;
     onBackToTop?: () => void;
+    hideOnEmpty?: boolean;
 }) => {
     const { view, setView } = properties;
     const toggleView = () => {
@@ -43,11 +43,18 @@ export const TabsOrList = (properties?: {
     });
     const { peer } = usePeer();
     const showToolbar = useMemo(() => {
+
+        if (properties?.hideOnEmpty && posts.length === 0) {
+            return false;
+        }
+
+
+
         const canEdit = properties.canvas?.publicKey.equals(
             peer?.identity.publicKey
         );
         return canEdit || posts.length > 0;
-    }, [peer, properties?.canvas, posts.length]);
+    }, [peer, properties?.canvas, posts.length, properties?.hideOnEmpty]);
 
     return (
         <>
@@ -173,76 +180,63 @@ export const Tabs = (properties: {
     );
 };
 
+/* ... TabsOrList and Tabs unchanged from previous reply ... */
+
 export const Rows = (properties: {
-    canvas?: Canvas;
+    canvas?: WithIndexedContext<Canvas, IndexableCanvas>;
     toggleView: () => void;
-    posts: Canvas[];
+    posts: WithIndexedContext<Canvas, IndexableCanvas>[];
 }) => {
     const { posts } = properties;
     const navigate = useNavigate();
 
-    /* --------------------------- Render as rows ------------------------------ */
+    // shared draft key for this editor block
+    const canvasId = properties.canvas?.idString ?? "root";
 
     return (
         <div className="flex flex-col gap-2">
-            {posts.map((post, index) => (
+            {posts.map((post) => (
                 <div
+                    key={post.idString}
                     onClick={() => {
                         navigate(getCanvasPath(post));
                         properties?.toggleView?.();
                     }}
-                    key={index}
-                    className="btn shadow-sm  flex flex-row gap-2 border-1 mx-2 px-2 py-1 border-neutral-200 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800 bg-neutral-100 dark:bg-neutral-900"
+                    className="btn shadow-sm flex flex-row gap-2 border-1 mx-2 px-2 py-1 border-neutral-200 dark:border-neutral-700 hover:bg-neutral-50 dark:hover:bg-neutral-800 bg-neutral-100 dark:bg-neutral-900"
                 >
                     <CanvasWrapper canvas={post} quality={LOWEST_QUALITY}>
-                        <CanvasPreview
-                            className="w-full"
-                            variant="row"
-                        ></CanvasPreview>
+                        <CanvasPreview className="w-full" variant="row" />
                     </CanvasWrapper>
                     <CanvasSettingsButton canvas={post} />
                     <FaChevronRight size={14} />
                 </div>
             ))}
+
             <CanvasEditorProvider
-                type={ChildVisualization.OUTLINE}
                 replyTo={properties.canvas}
+                /*  type={ChildVisualization.OUTLINE} */
                 placeholder="Give your new space a name..."
             >
-                <NewSection />
+                <NewSection canvasId={canvasId} />
             </CanvasEditorProvider>
         </div>
     );
 };
 
-const NewSection = () => {
-    const { isEmpty, insertDefault, canvas, pendingRects } =
-        useCanvas();
-    const { savedOnce } = usePendingCanvas();
+const NewSection: React.FC<{ canvasId: string }> = ({ canvasId }) => {
+    const { isEmpty, insertDefault, canvas, pendingRects } = useCanvas();
 
     useEffect(() => {
-        if (
-            savedOnce === false &&
-            /*  !isSavingCanvas && !isSavingElements &&  */ pendingRects.length ===
-            0 &&
-            canvas
-        ) {
+        if (isEmpty && pendingRects.length === 0 && canvas) {
             insertDefault();
         }
-    }, [
-        isEmpty,
-        savedOnce,
-        /* isSavingCanvas, isSavingElements, */ canvas?.idString,
-        pendingRects,
-    ]);
+    }, [isEmpty, pendingRects.length, canvas?.idString, insertDefault]);
 
     return (
         <div className="flex flex-col gap-2">
-            <InlineEditor />
+            <InlineEditor /> {/* <-- pass the id */}
             <CloseableAppPane>
-                {!isEmpty && (
-                    <ToolbarEdit className="bg-transparent dark:bg-transparent" />
-                )}
+                {!isEmpty && <ToolbarEdit canvasId={canvasId} className="bg-transparent dark:bg-transparent" />}
             </CloseableAppPane>
         </div>
     );

@@ -12,6 +12,8 @@ import {
     Scope,
     StaticContent,
 } from "./content.js";
+import { ReplicationOptions } from "@peerbit/shared-log";
+
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat, equals } from "uint8arrays";
 import { Documents, WithIndexedContext } from "@peerbit/document";
@@ -110,7 +112,7 @@ export class Profiles extends Program<ProfileArgs> {
     static async openPublicScopeFor(
         client: ProgramClient,
         publicKey: PublicSignKey,
-        opts?: { replicate?: boolean }
+        opts?: { replicate?: ReplicationOptions }
     ): Promise<Scope> {
         const scope = new Scope({
             id: Profiles.scopeIdFor(publicKey),
@@ -118,7 +120,7 @@ export class Profiles extends Program<ProfileArgs> {
         });
         return client.open(scope, {
             existing: "reuse",
-            args: { replicate: opts?.replicate ?? true },
+            args: { replicate: opts?.replicate ?? { factor: 1 } },
         });
     }
 
@@ -238,7 +240,7 @@ export async function ensureProfile(
     const publicScope = await Profiles.openPublicScopeFor(
         client,
         client.identity.publicKey,
-        { replicate: true }
+        { replicate: { factor: 1 } }
     );
 
     const draft = new Canvas({

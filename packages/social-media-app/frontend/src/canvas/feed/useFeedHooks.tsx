@@ -37,7 +37,7 @@ export const useFeedHooks = (props: {
 }) => {
     const {
         loadMore: _loadMore,
-        isLoading: isLoadingView,
+        loading: isLoadingView,
         feedRoot,
         setView,
         processedReplies,
@@ -418,10 +418,7 @@ export const useFeedHooks = (props: {
         return processedReplies.filter((_, i) => indexIsReadyToRender(i));
     }, [processedReplies, indexIsReadyToRender]);
 
-    console.log({
-        processedReplies,
-        visibleReplies
-    })
+
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: visibleReplies,
         repliesContainerRef,

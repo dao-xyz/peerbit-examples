@@ -8,7 +8,6 @@ import { useState } from "react";
 import { PublishStatusButton } from "../PublishStatusButton";
 import { useEditModeContext } from "./EditModeProvider";
 import { CustomizationSettings } from "../custom/CustomizationSettings";
-import { usePendingCanvas } from "./PendingCanvasContext";
 
 export const TopEditBar = (properties?: {
     className?: string;
@@ -19,7 +18,6 @@ export const TopEditBar = (properties?: {
     const { peer } = usePeer();
     const { createDraft, cancelDraft } = useVisualizationContext();
     const isOwner = viewRoot?.publicKey.equals(peer.identity.publicKey);
-    const { } = usePendingCanvas()
 
     /* local UI state (show / hide panel) */
     const [openCustomizer, _setOpenCustomizer] = useState(false);
@@ -35,7 +33,6 @@ export const TopEditBar = (properties?: {
     };
 
     const { editMode } = useEditModeContext();
-    const { hasUnpublishedChanges, pendingCanvas } = usePendingCanvas();
 
     if (!editMode) {
         return <></>;

@@ -16,12 +16,16 @@ export const useRelativePath = (properties: {
         if (properties.disabled) {
             return;
         }
+
+
         // get the path of the canvas that is unique to the viewRoot
 
-        if (!properties.canvas || properties.canvas.initialized || !leaf)
+        if (!properties.canvas || !properties.canvas.initialized || !leaf) {
             return setPath([] as Canvas[]);
+        }
+
         // filter the path to only include elements that are not in the viewRoot path
-        const indexWhereTheRootEnds = properties.canvas.__indexed.path.findIndex(
+        const indexWhereTheRootEnds = properties.canvas.__indexed?.path.findIndex(
             (p) => equals(p, leaf.id)
         );
         if (indexWhereTheRootEnds === -1) {

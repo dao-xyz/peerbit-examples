@@ -85,8 +85,8 @@ export class ViewKind extends LinkKind {
         this.orderKey = p.orderKey;
     }
 }
-// 2b) Board/grid view
-@variant(2)
+// 2b) Board/grid view TODO
+/* @variant(2)
 export class BoardViewKind extends LinkKind {
     @field({ type: 'u8' })
     tag: number;
@@ -99,4 +99,4 @@ export class BoardViewKind extends LinkKind {
         this.tag = 2;
         this.layout = p.layout;
     }
-}
+} */

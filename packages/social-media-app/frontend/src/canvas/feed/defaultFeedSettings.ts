@@ -9,7 +9,7 @@ import { Sort, SortDirection } from "@peerbit/indexer-interface";
 
 export type DefaultViewType = "new" | "old" | "best" | "chat" | "gallery";
 
-export const ALL_DEFAULT_FILTERS: FilterModel[] = [
+export const ALL_DEFAULT_FEED_SETTINGS: FilterModel[] = [
     {
         query: (canvas) =>
             new SearchRequest({

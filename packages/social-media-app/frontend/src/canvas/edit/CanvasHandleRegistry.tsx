@@ -1,12 +1,9 @@
+// CanvasHandleRegistry.tsx
 import React, { createContext, useContext } from "react";
 import { CanvasHandle } from "../CanvasWrapper";
 
-/** Whoever owns the provider gets every new handle */
-export const CanvasHandleRegistryContext = createContext<
-    (handle: CanvasHandle) => void
->(() => {
-    /* noop by default */
-});
 
-export const useRegisterCanvasHandle = () =>
-    useContext(CanvasHandleRegistryContext);
+export type Registrar = (h: CanvasHandle, meta: { canvasId: string }) => () => void;
+
+export const CanvasHandleRegistryContext = createContext<Registrar | null>(null);
+export const useRegisterCanvasHandle = () => useContext(CanvasHandleRegistryContext) ?? (() => () => { });

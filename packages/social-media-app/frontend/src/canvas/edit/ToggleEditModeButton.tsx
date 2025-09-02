@@ -1,7 +1,6 @@
 import * as Toggle from "@radix-ui/react-toggle";
 import { useEditModeContext } from "./EditModeProvider";
 import { FiEdit } from "react-icons/fi";
-import { usePendingCanvas } from "./PendingCanvasContext";
 
 export const ToggleEditModeButton: React.FC = () => {
     const { editMode, setEditMode } = useEditModeContext();

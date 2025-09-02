@@ -5,12 +5,14 @@ import {
     getRepliesQuery,
     getImmediateRepliesQueryByDepth,
     AddressReference,
+    getChildrenLinksQuery,
 } from "../content.js";
 import { expect } from "chai";
 import { Ed25519Keypair, randomBytes, sha256Sync } from "@peerbit/crypto";
 import { createAlbumTemplate, Template, Templates } from "../template.js";
 import { ensurePath } from "./utils.js";
 import { deserialize, serialize } from "@dao-xyz/borsh";
+import { ViewKind } from "../link.js";
 
 /* ----------------------- test-local helpers ----------------------- */
 
@@ -296,21 +298,56 @@ describe("templates", () => {
         });
     });
 
-    describe("store", () => {
-        it("deduplicate", async () => {
-            const templates = await session.peers[0].open(new Templates(randomBytes(32)));
+    describe("templates", () => {
+        it('canCreateAlbumTemplate', async () => {
 
+            const scope = await createOpenRootScope(session);
             const album = await createAlbumTemplate({
                 peer: session.peers[0],
                 description: "Create a photo album",
                 name: "Photo Album",
-                scope: await createOpenRootScope(session),
+                scope
+            });
+
+            const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: scope,
+                id: randomBytes(32)
+            }));
+
+            const inserted = await album.insertInto(root);
+
+            const childrenLinks = await album.prototype.links.index.iterate({
+                query: getChildrenLinksQuery(inserted.id)
+
+            }).all()
+
+            expect(childrenLinks.length).to.equal(2);
+            expect(childrenLinks[0].kind).to.instanceOf(ViewKind);
+            expect(childrenLinks[1].kind).to.instanceOf(ViewKind);
+        })
+    })
+
+    describe("store", () => {
+        it("deduplicate", async () => {
+            const templates = await session.peers[0].open(new Templates(randomBytes(32)));
+            const scope = await createOpenRootScope(session);
+            const album = await createAlbumTemplate({
+                peer: session.peers[0],
+                description: "Create a photo album",
+                name: "Photo Album",
+                scope
             });
 
             await templates.templates.put(album);
 
             const allTemplates = await templates.templates.index.iterate({ query: {} }).all();
             expect(allTemplates.length).to.equal(1);
+            const linkCount = await scope.links.index.getSize();
+
+            const repliesCount = await scope.replies.index.getSize();
+            const elementsCount = await scope.elements.index.getSize();
+
 
             // album template has two children
             let children = await allTemplates[0].prototype.replies.index
@@ -318,13 +355,14 @@ describe("templates", () => {
                 .all();
             expect(children.length).to.equal(2);
 
+
             // re-insert same template → still 1
             await templates.templates.put(
                 await createAlbumTemplate({
                     peer: session.peers[0],
                     description: "Create a photo album",
                     name: "Photo Album",
-                    scope: await createOpenRootScope(session),
+                    scope
                 })
             );
 
@@ -336,6 +374,14 @@ describe("templates", () => {
                 .iterate({ query: getRepliesQuery(after[0].prototype) })
                 .all();
             expect(children.length).to.equal(2);
+
+            // links should be the same as before
+            expect(await scope.links.index.getSize()).to.equal(linkCount);
+            expect(await scope.replies.index.getSize()).to.equal(repliesCount);
+            expect(await scope.elements.index.getSize()).to.equal(elementsCount);
+
+
+
         });
     });
 });

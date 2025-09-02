@@ -10,8 +10,8 @@ type UsePublishArgs = {
 };
 
 export const usePublish = ({ canvas, canvasHandleRef }: UsePublishArgs) => {
-    const privateScope = PrivateScope.useScope().scope as Scope | undefined;
-    const publicScope = PublicScope.useScope().scope as Scope | undefined;
+    const privateScope = PrivateScope.useScope() as Scope | undefined;
+    const publicScope = PublicScope.useScope() as Scope | undefined;
 
     const isSaving = useRef(false);
 

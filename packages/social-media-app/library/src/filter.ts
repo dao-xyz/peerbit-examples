@@ -2,7 +2,7 @@ import { variant, field, vec, option } from "@dao-xyz/borsh";
 import { Canvas, AddressReference, IndexableCanvas } from "./content.js";
 import { Program } from "@peerbit/program";
 import { ByteMatchQuery, Documents, Or, SearchRequest, StringMatch, WithIndexedContext } from "@peerbit/document";
-import { sha256Sync } from "@peerbit/crypto";
+import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
 abstract class Filter { }
@@ -43,8 +43,8 @@ export class StreamSetting {
     @field({ type: option("u32") })
     index?: number; // Index of the view, useful for sorting or ordering.
 
-    @field({ type: Uint8Array })
-    canvas: Uint8Array;
+    @field({ type: option(Uint8Array) })
+    canvas?: Uint8Array;
 
     @field({ type: option(Filter) })
     filter?: Filter;
@@ -60,7 +60,7 @@ export class StreamSetting {
  */
     constructor(properties: {
         id: string;
-        canvas: Uint8Array;
+        canvas?: Uint8Array;
         description?: AddressReference;
         filter?: Filter;
         index?: number;
@@ -117,17 +117,23 @@ export class IndexableSettings {
     }
 }
 
-@variant("views")
+@variant("filter-stream-settings")
 export class StreamSettings extends Program {
+
+    @field({ type: PublicSignKey })
+    publicKey: PublicSignKey;
+
     @field({ type: Documents })
     settings: Documents<StreamSetting, IndexableSettings>;
 
-    constructor(properties: { canvasId: Uint8Array }) {
+    constructor(properties: { publicKey: PublicSignKey, canvasId?: Uint8Array }) {
         super();
         const documentId = concat([
-            properties.canvasId,
+            properties.publicKey.bytes,
+            properties.canvasId ? properties.canvasId : [],
             new TextEncoder().encode("stream-settings"),
         ]);
+        this.publicKey = properties.publicKey;
         this.settings = new Documents({ id: sha256Sync(documentId) });
     }
 

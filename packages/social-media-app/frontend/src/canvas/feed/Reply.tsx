@@ -8,9 +8,9 @@ import {
     IndexableCanvas,
     MEDIUM_QUALITY,
 } from "@giga-app/interface";
-import { Canvas } from "../Canvas.js";
+import { Canvas } from "../render/detailed/Canvas.js";
 import { usePeer } from "@peerbit/react";
-import { CanvasPreview } from "../preview/Preview.js";
+import { CanvasPreview } from "../render/preview/Preview.js";
 import { WithIndexedContext } from "@peerbit/document";
 import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes.js";

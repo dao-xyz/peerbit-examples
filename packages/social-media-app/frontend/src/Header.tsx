@@ -12,7 +12,6 @@ import { CanvasPathInput } from "./canvas/path/CanvasPathInput";
 import { MdKeyboardDoubleArrowUp } from "react-icons/md";
 import { useFocusProvider } from "./FocusProvider";
 import { useCssVarHeight } from "./utils/useCssVarHeight";
-import { ExperienceDropdownButton } from "./canvas/custom/ExperienceDropdown";
 import { useVisualizationContext } from "./canvas/custom/CustomizationProvider";
 import { ChildVisualization } from "@giga-app/interface";
 import { useCanvases } from "./canvas/useCanvas";
@@ -45,7 +44,7 @@ export const Header = (props: HeaderProps) => {
     /* owner? ---------------------------------------------------------------- */
     const isOwner = peer?.identity.publicKey.equals(viewRoot?.publicKey);
 
-    const { onScrollToTop, scrollToTop, focused } = useFocusProvider();
+    const { scrollToTop, focused } = useFocusProvider();
 
     return (
         <div
@@ -73,7 +72,6 @@ export const Header = (props: HeaderProps) => {
                             </button>
                         )}
                     <div className="flex flex-row  gap-1 my-1">
-                        <ExperienceDropdownButton />
                         {isOwner && <ToggleEditModeButton />}
 
                         {/*  TODO do we really need to set the z-index to 2 here? */}

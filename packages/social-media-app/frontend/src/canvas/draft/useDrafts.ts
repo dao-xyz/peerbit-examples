@@ -1,11 +1,11 @@
-import { PublicCanvasScope } from "../useCanvas";
+import { useCanvases } from "../useCanvas";
 import { useAllPosts } from "../feed/useCollection";
 import { Canvas } from "@giga-app/interface";
 import { PrivateScope } from "../useScope";
 
 export const useDrafts = () => {
-    const publicRoot = PublicCanvasScope.useCanvases().viewRoot;
-    const privateRoot = PrivateScope.useScope().scope;
+    const publicRoot = useCanvases().viewRoot;
+    const privateRoot = PrivateScope.useScope();
     const allPosts = useAllPosts({
         scope: privateRoot,
         parent: publicRoot,

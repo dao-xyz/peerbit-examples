@@ -62,6 +62,23 @@ export const getCanvasPath = (
     return `/c/${idB64Url}${q ? `?${q}` : ""}`;
 };
 
+export const getCanvasIdFromPath = (path: string) => {
+    const parts = path.split("?")[0].split("/").filter(Boolean);
+    const idx = parts.indexOf("c");
+    const string = idx >= 0 ? parts[idx + 1] : undefined;
+    return getCanvasIdFromPart(string);
+}
+
+export const getCanvasIdFromPart = (path: string | undefined): Uint8Array | undefined => {
+    if (!path) return undefined;
+    try {
+        return fromBase64URL(path);
+    } catch (error) {
+        console.error("Invalid canvas ID in path:", path, error);
+        return undefined;
+    }
+}
+
 export const getCanvasIdParam = (path: string) => {
     const parts = path.split("?")[0].split("/").filter(Boolean);
     const idx = parts.indexOf("c");

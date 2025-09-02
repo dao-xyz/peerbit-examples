@@ -24,13 +24,15 @@ import { CustomizedBackground } from "./canvas/custom/applyVisualization";
 import { CustomizationProvider } from "./canvas/custom/CustomizationProvider";
 import clsx from "clsx";
 import { FocusProvider } from "./FocusProvider";
-import { PublicCanvasScope } from "./canvas/useCanvas";
+import { CanvasProvider } from "./canvas/useCanvas";
 import {
-    PublicStreamScope,
+    StreamProvider,
 } from "./canvas/feed/StreamContext";
 import { EditModeProvider } from "./canvas/edit/EditModeProvider";
 import { ToolbarVisibilityProvider } from "./canvas/edit/ToolbarVisibilityProvider";
-import { PrivateScope, PublicScope } from "./canvas/useScope";
+import { PrivateScope, PublicScope, ScopeRegistryProvider } from "./canvas/useScope";
+import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
+import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 
 const HEADER_EXPANDED_HEIGHT = 12;
 const heightStyle: { [expanded: string]: string } = {
@@ -83,41 +85,45 @@ export const Content = () => {
     return (
         <CustomizationProvider>
             <CustomizedBackground className=" h-full">
-                <PublicStreamScope.StreamProvider>
-                    <ToolbarVisibilityProvider>
-                        <EditModeProvider>
-                            {" "}
-                            {/* influences whether canvases are editable or not */}
-                            <FocusProvider>
-                                {/* Main header with transform animation */}
-                                <div
-                                    ref={headerRef}
-                                    className={clsx(
-                                        "sticky top-0 inset-x-0  z-30",
-                                        heightStyle[String(headerVisible)]
-                                    )} /* transition-transform duration-800 ease-in-out */
-                                    style={
-                                        {
-                                            /*  transform: headerVisible
-                                             ? "translateY(0)"
-                                             : `translateY(-${headerHeight}px)`, */
-                                            /* transition: "max-height 0.3s ease-in-out", */
-                                            /*     transform: "translateY(0)",
-                                            backfaceVisibility: "hidden", */
-                                        }
-                                    }
-                                >
-                                    <Header fullscreen={inIframe()} />
-                                </div>
+                <StreamSettingsProvider>
+                    <StreamProvider>
+                        <DraftManagerProvider debug>
+                            <ToolbarVisibilityProvider>
+                                <EditModeProvider>
+                                    {" "}
+                                    {/* influences whether canvases are editable or not */}
+                                    <FocusProvider>
+                                        {/* Main header with transform animation */}
+                                        <div
+                                            ref={headerRef}
+                                            className={clsx(
+                                                "sticky top-0 inset-x-0  z-30",
+                                                heightStyle[String(headerVisible)]
+                                            )} /* transition-transform duration-800 ease-in-out */
+                                            style={
+                                                {
+                                                    /*  transform: headerVisible
+                                                     ? "translateY(0)"
+                                                     : `translateY(-${headerHeight}px)`, */
+                                                    /* transition: "max-height 0.3s ease-in-out", */
+                                                    /*     transform: "translateY(0)",
+                                                    backfaceVisibility: "hidden", */
+                                                }
+                                            }
+                                        >
+                                            <Header fullscreen={inIframe()} />
+                                        </div>
 
-                                {/* Add padding so content isn’t hidden by the fixed header */}
-                                <BaseRoutes />
-                            </FocusProvider>
-                        </EditModeProvider>
-                    </ToolbarVisibilityProvider>
+                                        {/* Add padding so content isn’t hidden by the fixed header */}
+                                        <BaseRoutes />
+                                    </FocusProvider>
+                                </EditModeProvider>
+                            </ToolbarVisibilityProvider>
+                        </DraftManagerProvider>
+                        {/* This is the main content area, which will be scrolled */}
 
-                    {/* This is the main content area, which will be scrolled */}
-                </PublicStreamScope.StreamProvider>
+                    </StreamProvider>
+                </StreamSettingsProvider>
             </CustomizedBackground>
         </CustomizationProvider>
     );
@@ -151,21 +157,19 @@ export const App = () => {
                             <AppProvider>
                                 <HeaderVisibilityProvider>
                                     <BlurOnOutsidePointerProvider>
-                                        <PrivateScope.ScopeProvider>
-                                            <PublicScope.ScopeProvider>
-                                                <PublicCanvasScope.CanvasProvider>
-                                                    <ReplyProgressProvider>
-                                                        <ProfileProvider>
-                                                            <AIReplyProvider>
-                                                                <HostRegistryProvider>
-                                                                    <Content />
-                                                                </HostRegistryProvider>
-                                                            </AIReplyProvider>
-                                                        </ProfileProvider>
-                                                    </ReplyProgressProvider>
-                                                </PublicCanvasScope.CanvasProvider>
-                                            </PublicScope.ScopeProvider>
-                                        </PrivateScope.ScopeProvider>
+                                        <ScopeRegistryProvider>
+                                            <CanvasProvider>
+                                                <ReplyProgressProvider>
+                                                    <ProfileProvider>
+                                                        <AIReplyProvider>
+                                                            <HostRegistryProvider>
+                                                                <Content />
+                                                            </HostRegistryProvider>
+                                                        </AIReplyProvider>
+                                                    </ProfileProvider>
+                                                </ReplyProgressProvider>
+                                            </CanvasProvider>
+                                        </ScopeRegistryProvider>
                                     </BlurOnOutsidePointerProvider>
                                 </HeaderVisibilityProvider>
                             </AppProvider>

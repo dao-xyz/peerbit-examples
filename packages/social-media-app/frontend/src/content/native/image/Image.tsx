@@ -68,12 +68,16 @@ export const ImageContent = memo(function ImageContent({
     /* ------------------------------------------------------------------- */
     const lastHashRef = useRef<string | null>(null);
 
+
+    const imageRef = useRef<HTMLImageElement | null>(null);
+
+    // 2) keep track of the current object URL so we can revoke the *previous* one only
+    const currentUrlRef = useRef<string | null>(null);
+
     useEffect(() => {
         if (!content.data || !content.mimeType) return;
 
         const hash = sha256Base64Sync(content.data);
-
-        /* ❶ skip if we already kicked off a load for this hash */
         if (lastHashRef.current === hash) return;
         lastHashRef.current = hash;
 
@@ -82,11 +86,19 @@ export const ImageContent = memo(function ImageContent({
 
         const img = new Image();
         img.onload = () => {
-            onResize({ width: img.width, height: img.height });
-            setImgUrl(`${objectUrl}#${hash}`);
-        };
+            onResize?.({ width: img.width, height: img.height });
 
+            // set the URL that the real <img> will use
+            setImgUrl(objectUrl);
+
+            // revoke the *previous* URL (now that we're switching to a new one)
+            if (currentUrlRef.current && currentUrlRef.current !== objectUrl) {
+                URL.revokeObjectURL(currentUrlRef.current);
+            }
+            currentUrlRef.current = objectUrl;
+        };
         img.src = objectUrl;
+
 
         /*  This kind of rendering might lead to better colors (TODO investigate)
         img.onload = () => {
@@ -113,13 +125,19 @@ export const ImageContent = memo(function ImageContent({
         img.src = originalUrl;
         */
 
-        /* ❷ cleanup: clear the ref only if *this* load is being abandoned */
+        // cleanup only on unmount
         return () => {
-            URL.revokeObjectURL(objectUrl);
-            if (imgUrl) URL.revokeObjectURL(imgUrl);
+            img.onload = null;
+            // if we unmount, revoke what we're currently holding
+            if (currentUrlRef.current) {
+                URL.revokeObjectURL(currentUrlRef.current);
+                currentUrlRef.current = null;
+            }
             if (lastHashRef.current === hash) lastHashRef.current = null;
         };
-    }, [content.data, content.mimeType, onResize]);
+        // IMPORTANT: don't depend on `onResize` here
+    }, [content.data, content.mimeType]); // removed onResize
+
 
     /* ------------------------------------------------------------------- */
     /* File‑drop / picker handlers                                         */
@@ -194,7 +212,6 @@ export const ImageContent = memo(function ImageContent({
             overlayOpacityHidden
         );
 
-    let imageRef = useRef<HTMLImageElement | undefined>(undefined);
 
     const closeIfClickedLetterboxInsideImg = (
         e: React.MouseEvent<HTMLImageElement, MouseEvent>

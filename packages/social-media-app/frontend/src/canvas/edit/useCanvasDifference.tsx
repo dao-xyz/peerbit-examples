@@ -6,8 +6,8 @@ import { PrivateScope, PublicScope } from "../useScope";
 export const useCanvasPrivateToPublicDifference = (properties: { canvas: Canvas, private?: Scope, public?: Scope }) => {
     const { peer } = usePeer();
 
-    const privateScope = properties?.private || PrivateScope.useScope().scope;
-    const publicScope = properties?.public || PublicScope.useScope().scope;
+    const privateScope = properties?.private || PrivateScope.useScope();
+    const publicScope = properties?.public || PublicScope.useScope();
 
     const [diff, setDiff] = useState<boolean>(false);
 

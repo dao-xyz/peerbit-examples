@@ -44,9 +44,7 @@ export const Feed = (
         indexIsReadyToRender,
     } = props.type === "feed" ? props.feed : useFeedHooks(props);
 
-    console.log({
-        processedReplies
-    })
+
 
     /* --------------------------- RENDER ------------------------------ */
     return (

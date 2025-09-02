@@ -321,14 +321,19 @@ describe("canvas (updated)", () => {
         })
     });
 
-    it("cross-scope: create in temp scope, then link under root scope", async () => {
+    it("cross-scope: create in temp scope, then migrate+link under root scope", async () => {
         const rootScope = await createOpenRootScope(session);
-        const [_, root] = await rootScope.getOrCreateReply(undefined, new Canvas({
-            publicKey: session.peers[0].identity.publicKey, selfScope: rootScope
-        }));
 
+        // Create a top-level parent in rootScope
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
+            new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: rootScope })
+        );
+
+        // Temp/private scope
         const tempScope = await createOpenRootScope(session);
 
+        // Draft lives in temp, add content there
         const draft = new Canvas({
             publicKey: session.peers[0].identity.publicKey,
             selfScope: tempScope,
@@ -336,29 +341,51 @@ describe("canvas (updated)", () => {
         await tempScope.getOrCreateReply(undefined, draft);
         await draft.addTextElement("hello");
 
-
-        // SYNC (migrate) the draft into rootScope and link under `root`
+        // Publish: sync (same id), migrate home → rootScope, and link under `root`
         const [createdNew, moved] = await root.upsertReply(draft, {
             type: "sync",
             targetScope: rootScope,
-            updateHome: "set",     // make rootScope the new selfScope/home
-            // visibility: "both", // default; mirror link also appears in parent scope
-            // kind: new ReplyKind(),
-            // type: ChildVisualization.FEED,
+            updateHome: "set", // migrate the node's home to rootScope
+            // visibility defaults to "both"
         });
 
+        expect(createdNew).to.be.true;
+        expect(sha256Base64Sync(moved.id)).to.eq(sha256Base64Sync(draft.id)); // id preserved
+        expect(moved.selfScope.address).to.eq(rootScope.address); // home updated
 
-        expect(createdNew).to.be.true; // new reply created
-        expect(sha256Base64Sync(moved.id)).to.eq(sha256Base64Sync(draft.id)); // same id
-
-        // Index flush in the parent scope
+        // Ensure indexes have flushed/settled in root
         await rootScope.reIndexDebouncer.flush();
+
+        // Node should exist in rootScope.replies
         await waitForResolved(async () => {
-            const maybe = await rootScope.replies.index.get(draft.id, { resolve: false, local: true, remote: { strategy: "fallback", timeout: 3_000 } });
+            const maybe = await rootScope.replies.index.get(draft.id, {
+                resolve: false,
+                local: true,
+                remote: { strategy: "fallback", timeout: 3_000 },
+            });
             expect(!!maybe).to.be.true;
         });
 
-        expect(await moved.getText({ scope: tempScope })).to.eq("hello");
+        // Content should now be readable from rootScope (new home)
+        expect(await moved.getText({ scope: rootScope })).to.eq("hello");
+
+        // And content should be cleaned up from the old home (tempScope)
+        const oldRows = await tempScope.elements.index
+            .iterate({ query: getOwnedElementsQuery(moved) }, { resolve: false })
+            .all();
+        expect(oldRows.length).to.eq(0);
+
+        // Old replies row should also be gone in tempScope
+        const tempRow = await tempScope.replies.index.get(draft.id, {
+            resolve: false,
+            local: true,
+            remote: { strategy: "fallback", timeout: 3_000 },
+        });
+        expect(tempRow).to.be.undefined;
+
+        // Optional: verify link exists under `root` (child present)
+        const kids = await root.getChildren();
+        expect(kids.map(k => k.idString)).to.include(moved.idString);
     });
 
     it("reply counting: indexed vs BFS (immediate=false) agree", async () => {
@@ -475,6 +502,53 @@ describe("privacy / scope mixing", () => {
         });
     });
 
+    it("can remove concurrently ", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
+
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
+            new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: rootScope,
+            })
+        );
+        const privateChild = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
+        });
+
+        const [created1, c1] = await root.upsertReply(privateChild, { type: "sync", updateHome: "set", visibility: "both" });
+
+
+        const privateChild2 = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
+        });
+
+        const [created2, c2] = await root.upsertReply(privateChild2, { type: "sync", updateHome: "set", visibility: "both" });
+
+        expect(created1).to.be.true;
+        expect(created2).to.be.true;
+
+        const before = await root.getChildren({ scopes: [rootScope, privateScope] });
+
+        expect(before.map(c => c.idString)).to.include(privateChild.idString);
+        expect(before.map(c => c.idString)).to.include(privateChild2.idString);
+
+        await Promise.all([
+            privateScope.remove(c1),
+            privateScope.remove(c2)
+        ]);
+
+        await waitForResolved(async () => {
+            const after = await root.getChildren({ scopes: [rootScope, privateScope] });
+            expect(after.map(c => c.idString)).to.not.include(privateChild.idString);
+            expect(after.map(c => c.idString)).to.not.include(privateChild2.idString);
+
+        });
+    })
+
     it("counts respect scopes (indexed vs BFS)", async () => {
         const rootScope = await createOpenRootScope(session);
         const privateScope = await createOpenRootScope(session);
@@ -546,6 +620,76 @@ describe("privacy / scope mixing", () => {
         const peer1Private = await session.peers[1].open(privateScope.clone(), { args: { replicate: true } });
         const childrenPeer1WithPrivate = await root.getChildren({ scopes: [peer1Root, peer1Private] });
         expect(childrenPeer1WithPrivate.map(c => c.idString)).to.include(privateChild.idString);
+    });
+
+    it("nested draft under a public reply migrates to public and is visible with content", async () => {
+        const rootScope = await createOpenRootScope(session);     // public scope
+        const privateScope = await createOpenRootScope(session);  // private scope
+
+        // root in public scope
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
+            new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: rootScope,
+            })
+        );
+
+        // public reply 1 under root (also in public)
+        const [__, publicReply1] = await rootScope.getOrCreateReply(
+            root,
+            new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: rootScope,
+            })
+        );
+
+        // draft1 in PRIVATE scope as a reply to publicReply1
+        const draft1 = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
+        });
+        await privateScope.getOrCreateReply(publicReply1, draft1);
+        await draft1.addTextElement("hello-from-draft-1");
+
+        // "Publish": convert/migrate draft1 to PUBLIC and keep it as a reply to publicReply1
+        // Expectation: same id, selfScope becomes rootScope, content readable from rootScope
+        await publicReply1.upsertReply(draft1, {
+            type: "sync",
+            targetScope: rootScope,
+            updateHome: "set",
+            visibility: "both",
+        });
+
+        // Let indexes settle in public
+        await rootScope.reIndexDebouncer.flush();
+
+        // It should appear as a child of publicReply1 from the PUBLIC scope
+        await waitForResolved(async () => {
+            const kidsPublic = await publicReply1.getChildren({ scopes: [rootScope] });
+            expect(kidsPublic.map(c => c.idString)).to.include(draft1.idString);
+        });
+
+        // Its content should be directly readable from PUBLIC scope
+        await waitForResolved(async () => {
+            const textFromPublic = await draft1.getText({ scope: rootScope });
+            expect(textFromPublic).to.eq("hello-from-draft-1"); // <-- currently fails; will pass after patch
+        });
+
+        // Optional: ensure elements are indexed in PUBLIC scope (and no longer present in PRIVATE)
+        await waitForResolved(async () => {
+            // public has elements
+            const pubElems = await rootScope.elements.index
+                .iterate({ query: getOwnedElementsQuery(draft1) })
+                .all();
+            expect(pubElems.length).to.be.greaterThan(0);
+
+            // private no longer holds the rows for this draft
+            const privElems = await privateScope.elements.index
+                .iterate({ query: getOwnedElementsQuery(draft1) }, { resolve: false })
+                .all();
+            expect(privElems.length).to.eq(0);
+        });
     });
 });
 

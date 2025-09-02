@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
 import { Canvas, IndexableCanvas } from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
@@ -71,7 +71,7 @@ export const Header = ({
                     >
                         <FaRegComment size={16} />
                         {(canvas as WithIndexedContext<Canvas, IndexableCanvas>)
-                            .__indexed.replies ? (
+                            .__indexed?.replies ? (
                             <span className="text-xs">
                                 {Number(
                                     (

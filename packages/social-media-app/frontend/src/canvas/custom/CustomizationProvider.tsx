@@ -20,7 +20,7 @@ import {
     getOwnedByCanvasQuery,
 } from "@giga-app/interface";
 import { equals } from "uint8arrays";
-import { STREAM_QUERY_PARAM_KEY } from "../feed/StreamContext";
+import { STREAM_QUERY_PARAMS } from "../feed/StreamContext";
 import { useCanvases } from "../useCanvas";
 
 const useVisualization = (properies: { canvas: Canvas }) => {
@@ -147,7 +147,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             newParams.set(VIEW_PARAM_QUERY_KEY, newView);
             if (childrenVisualization === ChildVisualization.CHAT) {
                 // if we are in chat mode, remove the filter param
-                newParams.delete(STREAM_QUERY_PARAM_KEY);
+                newParams.delete(STREAM_QUERY_PARAMS.SETTINGS);
             }
         } else {
             newParams.delete(VIEW_PARAM_QUERY_KEY);

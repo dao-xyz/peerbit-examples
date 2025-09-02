@@ -14,7 +14,7 @@ export const AnimatedStickyToolbar = ({
     children,
     onHeightChange,
 }: AnimatedStickyToolbarProps) => {
-    const { visible: toolbarVisible } = useToolbarVisibilityContext();
+    let { visible: toolbarVisible } = useToolbarVisibilityContext();
 
     const [toolbarHeight, _setToolbarHeight] = useState(0);
     const ref = useCssVarHeight<HTMLDivElement>({
@@ -31,9 +31,8 @@ export const AnimatedStickyToolbar = ({
     return (
         // This outer container is sticky and always reserves the toolbar height.
         <div
-            className={`fixed z-20 bottom-0 inset-x-0 ${
-                toolbarVisible ? "" : "pointer-events-none"
-            }`}
+            className={`fixed z-20 bottom-0 inset-x-0 ${toolbarVisible ? "" : "pointer-events-none"
+                }`}
             style={{ height: toolbarHeight || "auto" }}
         >
             {/* The inner toolbar is animated with transform */}
