@@ -1,13 +1,13 @@
 import { ProgramClient } from "@peerbit/program";
-import { createRoot, Canvas } from "@giga-app/interface";
+import { createRoot, Scope } from "@giga-app/interface";
 export interface LifeCycle {
     start: () => Promise<void>;
     stop: () => Promise<void>;
+    root: Scope
 }
 
 export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
     let out: Awaited<ReturnType<typeof createRoot>> | undefined = undefined;
-
     return {
         start: async () => {
             if (out) {
@@ -24,5 +24,12 @@ export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
         stop: async () => {
             await out?.scope.close(); // TODO close everthing?
         },
+        get root() {
+            if (!out) {
+                throw new Error("Not started");
+            }
+
+            return out.scope;
+        }
     };
 };

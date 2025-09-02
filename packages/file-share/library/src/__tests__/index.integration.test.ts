@@ -94,7 +94,7 @@ describe("index", () => {
             // Peer 1 is subscribing to a replication topic (to start helping the network)
             const filestore = await peer.open(new Files());
 
-            const largeFile = crypto.randomBytes(5 * 1e7); // 50 mb
+            const largeFile = crypto.randomBytes(5 * 1e7) as Uint8Array; // 50 mb
             await filestore.add("random large file", largeFile);
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
@@ -127,7 +127,7 @@ describe("index", () => {
             );
 
             let t0 = +new Date();
-            const largeFile = crypto.randomBytes(5 * 1e7); // 50 mb
+            const largeFile = crypto.randomBytes(5 * 1e7) as Uint8Array; // 50 mb
             await filestore.add("random large file", largeFile);
 
             // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)

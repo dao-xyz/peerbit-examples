@@ -292,7 +292,7 @@ export class CanvasAIReply extends Program<Args> {
     public supportedModels: string[] = [];
     private serverConfig: ServerConfig | undefined;
     private stats: RequestStats;
-    private replication: LifeCycle | undefined;
+    origin: LifeCycle | undefined;
 
     constructor(
         properties: { id: Uint8Array } = {
@@ -411,14 +411,14 @@ export class CanvasAIReply extends Program<Args> {
         }
 
         if (args?.replicate || (args?.replicate === undefined && args?.server)) {
-            this.replication = defaultGigaReplicator(this.node);
-            await this.replication.start();
+            this.origin = defaultGigaReplicator(this.node);
+            await this.origin.start();
         }
     }
 
     async close(from?: Program): Promise<boolean> {
         const closed = await super.close(from);
-        if (closed) await this.replication?.stop();
+        if (closed) await this.origin?.stop();
         return closed;
     }
 

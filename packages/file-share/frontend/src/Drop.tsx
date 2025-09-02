@@ -109,14 +109,14 @@ export const Drop = () => {
             updateRole(
                 role === "replicator"
                     ? {
-                          limits: {
-                              cpu:
-                                  limitCPU != null
-                                      ? { max: limitCPU }
-                                      : undefined,
-                              storage: limitStorage ? sizeBytes : undefined,
-                          },
-                      }
+                        limits: {
+                            cpu:
+                                limitCPU != null
+                                    ? { max: limitCPU }
+                                    : undefined,
+                            storage: limitStorage ? sizeBytes : undefined,
+                        },
+                    }
                     : false
             );
         },
@@ -198,10 +198,10 @@ export const Drop = () => {
                 await updateRole(
                     role === "replicator"
                         ? {
-                              limits: {
-                                  cpu: { max: 1, monitor: undefined },
-                              },
-                          }
+                            limits: {
+                                cpu: { max: 1, monitor: undefined },
+                            },
+                        }
                         : false
                 );
             }
@@ -284,7 +284,7 @@ export const Drop = () => {
                 progress(null);
             });
         console.log("FETCH FILE DONE");
-        var blob = new Blob(bytes);
+        var blob = new Blob(bytes as BlobPart[]);
         console.log("DOWNLOAD FILE");
         var link = document.createElement("a");
         link.href = window.URL.createObjectURL(blob);
@@ -586,7 +586,7 @@ export const Drop = () => {
                                                                     setLimitCPU(
                                                                         e
                                                                             ? limitCPU ??
-                                                                                  0
+                                                                            0
                                                                             : undefined
                                                                     );
                                                                 }}
@@ -616,44 +616,44 @@ export const Drop = () => {
                                                             </span>
                                                             {limitCPU !=
                                                                 null && (
-                                                                <div className="flex flex-row gap-2">
-                                                                    <span className="text-sm">
-                                                                        Limited
-                                                                    </span>
-                                                                    <Slider.Root
-                                                                        className="slider-root"
-                                                                        defaultValue={[
-                                                                            0,
-                                                                        ]}
-                                                                        value={[
-                                                                            limitCPU,
-                                                                        ]}
-                                                                        max={1}
-                                                                        min={0}
-                                                                        step={
-                                                                            0.01
-                                                                        }
-                                                                        onValueChange={(
-                                                                            v
-                                                                        ) => {
-                                                                            setLimitCPU(
-                                                                                v[0]
-                                                                            );
-                                                                        }}
-                                                                    >
-                                                                        <Slider.Track className="slider-track">
-                                                                            <Slider.Range className="slider-range" />
-                                                                        </Slider.Track>
-                                                                        <Slider.Thumb
-                                                                            className="slider-thumb"
-                                                                            aria-label="Max utilization"
-                                                                        />
-                                                                    </Slider.Root>
-                                                                    <span className="text-sm">
-                                                                        Unlimited
-                                                                    </span>
-                                                                </div>
-                                                            )}
+                                                                    <div className="flex flex-row gap-2">
+                                                                        <span className="text-sm">
+                                                                            Limited
+                                                                        </span>
+                                                                        <Slider.Root
+                                                                            className="slider-root"
+                                                                            defaultValue={[
+                                                                                0,
+                                                                            ]}
+                                                                            value={[
+                                                                                limitCPU,
+                                                                            ]}
+                                                                            max={1}
+                                                                            min={0}
+                                                                            step={
+                                                                                0.01
+                                                                            }
+                                                                            onValueChange={(
+                                                                                v
+                                                                            ) => {
+                                                                                setLimitCPU(
+                                                                                    v[0]
+                                                                                );
+                                                                            }}
+                                                                        >
+                                                                            <Slider.Track className="slider-track">
+                                                                                <Slider.Range className="slider-range" />
+                                                                            </Slider.Track>
+                                                                            <Slider.Thumb
+                                                                                className="slider-thumb"
+                                                                                aria-label="Max utilization"
+                                                                            />
+                                                                        </Slider.Root>
+                                                                        <span className="text-sm">
+                                                                            Unlimited
+                                                                        </span>
+                                                                    </div>
+                                                                )}
                                                         </div>
                                                     </fieldset>
 
@@ -702,9 +702,8 @@ export const Drop = () => {
                                 <Progress.Indicator
                                     className="progress-indicator"
                                     style={{
-                                        transform: `translateX(-${
-                                            100 - uploadProgress * 100
-                                        }%)`,
+                                        transform: `translateX(-${100 - uploadProgress * 100
+                                            }%)`,
                                     }}
                                 />
                             </Progress.Root>
@@ -729,7 +728,7 @@ export const Drop = () => {
                                                             .catch((error) => {
                                                                 alert(
                                                                     "Failed to delete: " +
-                                                                        error.message
+                                                                    error.message
                                                                 );
                                                             });
                                                     }}

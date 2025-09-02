@@ -11,7 +11,7 @@ export const InlineEditor = ({ className }: InlineEditorProps) => {
     const { publish } = useDraftSession()
     return (
         <div className={`flex flex-col h-full ${className || ""}`} ref={ref}>
-            <Canvas requestPublish={publish} className="px-4" fitWidth draft inFullScreen />
+            <Canvas requestPublish={publish} className="px-4" fitWidth draft /* inFullScreen */ />
         </div>
     );
 };

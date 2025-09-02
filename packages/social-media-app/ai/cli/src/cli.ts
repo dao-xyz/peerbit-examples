@@ -4,7 +4,8 @@ import { CanvasAIReply, ServerConfig } from "@giga-app/llm";
 import path from "path";
 import os from "os";
 import fs from "fs";
-import { Canvas } from "@giga-app/interface";
+import { Canvas, CanvasAddressReference, Scope } from "@giga-app/interface";
+import { fromBase64 } from "@peerbit/crypto"
 
 export const start = async (directory?: string | null) => {
     process.on("uncaughtException", (err) => {
@@ -22,7 +23,7 @@ export const start = async (directory?: string | null) => {
 
     console.log(
         "Starting AI Response CLI" +
-            (directory ? ` in directory ${directory}` : "")
+        (directory ? ` in directory ${directory}` : "")
     );
 
     // Create the Peerbit client with optional persistence.
@@ -71,6 +72,7 @@ export const start = async (directory?: string | null) => {
         }),
     } as ServerConfig;
 
+
     // Open the CanvasAIReply service (server mode) with the proper LLM configuration.
     const service = await client.open<CanvasAIReply>(new CanvasAIReply(), {
         args: {
@@ -93,7 +95,7 @@ export const start = async (directory?: string | null) => {
                         value: "monitor",
                     },
                     {
-                        name: "Generate Reply (enter a Canvas address to generate a reply)",
+                        name: "Generate Reply (enter a Canvas id to generate a reply)",
                         value: "reply",
                     },
                     {
@@ -117,8 +119,8 @@ export const start = async (directory?: string | null) => {
                 console.log("  Requests:        " + stats.requestCount);
                 console.log(
                     "  Average Latency: " +
-                        stats.averageLatency.toFixed(2) +
-                        " ms"
+                    stats.averageLatency.toFixed(2) +
+                    " ms"
                 );
                 console.log("  Errors:          " + stats.errorCount);
             }, 5000);
@@ -135,27 +137,43 @@ export const start = async (directory?: string | null) => {
             clearInterval(monitorInterval);
         } else if (mode === "reply") {
             // Prompt the user for a Canvas address.
-            const { canvasAddress } = await inquirer.prompt([
+            const { canvasId: canvasIdStr } = await inquirer.prompt([
                 {
                     type: "input",
-                    name: "canvasAddress",
+                    name: "canvasId",
                     message: "Enter the Canvas address:",
-                },
+                }
             ]);
-
-            if (canvasAddress.trim().length === 0) {
+            if (canvasIdStr.trim().length === 0) {
                 console.error("Invalid Canvas address");
                 continue;
             }
-            console.log("Opening Canvas at address:", canvasAddress);
-            const canvas = await client.open<Canvas>(canvasAddress, {
-                existing: "reuse",
-            });
-            await canvas.load();
+
+            const canvasID = fromBase64(canvasIdStr.trim());
+
+
+            const { scopeAddress } = await inquirer.prompt([
+                {
+                    type: "input",
+                    name: "scopeAddress",
+                    message: "Enter the scope address (optional):",
+                }
+            ]);
+
+            // either use the provided scope address or default to the canvas address
+            let scope: Scope = service.origin!.root;
+            if (scopeAddress) {
+                scope = await client.open<Scope>(scopeAddress, {
+                    existing: "reuse",
+                    args: service.origin?.root.openingArgs!
+                });
+            }
+
+
 
             console.log("Querying AI, please wait...");
             try {
-                const response = await service.query(canvas, {
+                const response = await service.query(new CanvasAddressReference({ id: canvasID, scope }), {
                     timeout: 10000,
                 });
                 console.log("\nAI Response:");
