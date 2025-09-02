@@ -49,7 +49,6 @@
 1.
 ```sh
 yarn
-yarn lerna bootstrap
 yarn build
 ```
 
