@@ -68,7 +68,6 @@ export const ImageContent = memo(function ImageContent({
     /* ------------------------------------------------------------------- */
     const lastHashRef = useRef<string | null>(null);
 
-
     const imageRef = useRef<HTMLImageElement | null>(null);
 
     // 2) keep track of the current object URL so we can revoke the *previous* one only
@@ -81,7 +80,9 @@ export const ImageContent = memo(function ImageContent({
         if (lastHashRef.current === hash) return;
         lastHashRef.current = hash;
 
-        const blob = new Blob([content.data as BlobPart], { type: content.mimeType });
+        const blob = new Blob([content.data as BlobPart], {
+            type: content.mimeType,
+        });
         const objectUrl = URL.createObjectURL(blob);
 
         const img = new Image();
@@ -98,7 +99,6 @@ export const ImageContent = memo(function ImageContent({
             currentUrlRef.current = objectUrl;
         };
         img.src = objectUrl;
-
 
         /*  This kind of rendering might lead to better colors (TODO investigate)
         img.onload = () => {
@@ -137,7 +137,6 @@ export const ImageContent = memo(function ImageContent({
         };
         // IMPORTANT: don't depend on `onResize` here
     }, [content.data, content.mimeType]); // removed onResize
-
 
     /* ------------------------------------------------------------------- */
     /* File‑drop / picker handlers                                         */
@@ -202,8 +201,8 @@ export const ImageContent = memo(function ImageContent({
         fit === "cover"
             ? "object-cover"
             : fit === "contain"
-                ? "object-contain"
-                : "";
+            ? "object-contain"
+            : "";
     const overlayOpacityHidden = 0.6;
     const overlayOpacity =
         overlayOpacityHidden -
@@ -211,7 +210,6 @@ export const ImageContent = memo(function ImageContent({
             Math.abs(translateY) / window.innerHeight,
             overlayOpacityHidden
         );
-
 
     const closeIfClickedLetterboxInsideImg = (
         e: React.MouseEvent<HTMLImageElement, MouseEvent>
@@ -298,25 +296,27 @@ export const ImageContent = memo(function ImageContent({
     return (
         <div
             ref={containerRef}
-            className={`relative w-full h-full ${editable ? "cursor-pointer  transition-colors duration-150" : ""
-                } ${editable && isDragOver
+            className={`relative w-full h-full ${
+                editable ? "cursor-pointer  transition-colors duration-150" : ""
+            } ${
+                editable && isDragOver
                     ? "border-primary-500 bg-primary-50 dark:bg-primary-900"
                     : ""
-                }`}
+            }`}
             onDragOver={
                 editable
                     ? (e) => {
-                        e.preventDefault();
-                        setIsDragOver(true);
-                    }
+                          e.preventDefault();
+                          setIsDragOver(true);
+                      }
                     : undefined
             }
             onDragLeave={
                 editable
                     ? (e) => {
-                        e.preventDefault();
-                        setIsDragOver(false);
-                    }
+                          e.preventDefault();
+                          setIsDragOver(false);
+                      }
                     : undefined
             }
             onDrop={editable ? onDrop : undefined}

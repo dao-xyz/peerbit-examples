@@ -1,12 +1,7 @@
 // ProfileProvider.tsx
 import React, { JSX, useContext, useMemo, useRef } from "react";
 import { usePeer, useProgram } from "@peerbit/react";
-import {
-    Canvas,
-    Profile,
-    ProfileIndexed,
-    Profiles,
-} from "@giga-app/interface";
+import { Canvas, Profile, ProfileIndexed, Profiles } from "@giga-app/interface";
 import { WithIndexedContext } from "@peerbit/document";
 import { useNavigate } from "react-router";
 import { MISSING_PROFILE } from "../routes";
@@ -39,7 +34,9 @@ export const ProfileProvider = ({ children }: { children: JSX.Element }) => {
 
     // Caches keyed by publicKey.hashcode()
     const profileCache = useRef(new Map<string, IndexedProfileRow>());
-    const pendingRequests = useRef(new Map<string, Promise<IndexedProfileRow>>());
+    const pendingRequests = useRef(
+        new Map<string, Promise<IndexedProfileRow>>()
+    );
 
     // Navigate to a profile's canvas id (from the indexed row)
     const navigateTo = (row: IndexedProfileRow | undefined) => {

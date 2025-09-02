@@ -64,7 +64,8 @@ export const CanvasAndReplies = () => {
         if (!postRef.current || !repliesScrollRef.current) return;
         const checkHeight = () => {
             if (!repliesScrollRef.current) return;
-            const repliesRect = repliesScrollRef.current.getBoundingClientRect();
+            const repliesRect =
+                repliesScrollRef.current.getBoundingClientRect();
             const snap = getSnapToRepliesViewThreshold(0);
             if (repliesRect.top < snap) {
                 setSpacerHeight(SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT);
@@ -78,7 +79,6 @@ export const CanvasAndReplies = () => {
         obs.observe(postRef.current);
         return () => obs.disconnect();
     }, [postRef.current, repliesScrollRef.current]);
-
 
     /* 
 
@@ -153,11 +153,14 @@ export const CanvasAndReplies = () => {
         useFocusProvider();
 
     useEffect(() => {
-        _setRepliesFocused(hasSnap || shouldFocusRepliesByDefault(visualization));
+        _setRepliesFocused(
+            hasSnap || shouldFocusRepliesByDefault(visualization)
+        );
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
-    const { setDisabled: setToolbarVisibilityDisabled } = useHeaderVisibilityContext();
+    const { setDisabled: setToolbarVisibilityDisabled } =
+        useHeaderVisibilityContext();
     const collapsable = useMemo(
         () => !shouldFocusRepliesByDefault(visualization),
         [visualization]
@@ -175,9 +178,8 @@ export const CanvasAndReplies = () => {
         setToolbarVisibilityDisabled(!!hidePost);
     }, [hidePost, setToolbarVisibilityDisabled]);
 
-    const [scrollSettings, setScrollSettings] = useState<ScrollSettings>(
-        undefined
-    );
+    const [scrollSettings, setScrollSettings] =
+        useState<ScrollSettings>(undefined);
 
     const setRepliesFocused = (focused: boolean) => {
         _setRepliesFocused(focused);
@@ -206,7 +208,8 @@ export const CanvasAndReplies = () => {
     }, [feedRoot?.idString]);
 
     useEffect(() => {
-        if (!repliesScrollRef.current || !postRef.current || repliesFocused) return;
+        if (!repliesScrollRef.current || !postRef.current || repliesFocused)
+            return;
 
         const handleScroll = () => {
             if (!scrollToSnapEnabled.current) return;
@@ -218,7 +221,10 @@ export const CanvasAndReplies = () => {
             let down = false;
 
             if (lastTop > 0) {
-                if (lastTop > rect.top && lastHeightTopRef.current >= rect.height) {
+                if (
+                    lastTop > rect.top &&
+                    lastHeightTopRef.current >= rect.height
+                ) {
                     down = true;
                 } else if (lastTop < rect.top) {
                     down = false;
@@ -242,10 +248,9 @@ export const CanvasAndReplies = () => {
     const activeIds = useActiveDraftIds();
 
     const draftsFiltered = useMemo(() => {
-        // if your draft objects are WithIndexedContext<Canvas,...>, they have 
-        return drafts.filter(d => !activeIds.has(d.idString));
+        // if your draft objects are WithIndexedContext<Canvas,...>, they have
+        return drafts.filter((d) => !activeIds.has(d.idString));
     }, [drafts, activeIds]);
-
 
     if (!viewRoot) {
         return <WaitingForFeed loading={loading} />;
@@ -263,29 +268,35 @@ export const CanvasAndReplies = () => {
 
                 <div
                     ref={scrollContainerRef}
-                    className={`${repliesFocused ? "h-fit" : "h-full"
-                        } flex flex-col relative grow shrink-0`}
+                    className={`${
+                        repliesFocused ? "h-fit" : "h-full"
+                    } flex flex-col relative grow shrink-0`}
                     style={{
                         paddingBottom: !showInlineEditor
                             ? `calc(var(--toolbar-h, 0px) + ${EXTRA_PADDING_BOTTOM}px)`
                             : "2rem",
                         height: repliesFocused
                             ? "fit-content"
-                            : `calc(100vh - var(--toolbar-h, 0px) + ${spacerHeight +
-                            EXTRA_PADDING_BOTTOM +
-                            SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT
-                            }px)`,
+                            : `calc(100vh - var(--toolbar-h, 0px) + ${
+                                  spacerHeight +
+                                  EXTRA_PADDING_BOTTOM +
+                                  SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT
+                              }px)`,
                     }}
                 >
                     {!hidePost && (
                         <div
                             ref={postRef}
-                            className={`transition-all duration-300 ${collapsed ? "blur-3xl opacity-0" : "blur-0 opacity-100"
-                                }`}
+                            className={`transition-all duration-300 ${
+                                collapsed
+                                    ? "blur-3xl opacity-0"
+                                    : "blur-0 opacity-100"
+                            }`}
                         >
                             <div className="z-5 flex-shrink-0">
                                 <div className="max-w-[876px] mx-auto w-full bg-neutral-50 dark:bg-neutral-900 shadow-md">
-                                    {!viewRoot || viewRoot?.__indexed.path.length === 0 ? (
+                                    {!viewRoot ||
+                                    viewRoot?.__indexed.path.length === 0 ? (
                                         <></>
                                     ) : (
                                         <DetailedView />
@@ -307,17 +318,22 @@ export const CanvasAndReplies = () => {
                     {navType !== "rows" && (
                         <div className="relative flex-1 h-full">
                             <div
-                                className={`${!repliesFocused ? "absolute inset-0 w-full cursor-pointer" : "relative"
-                                    }`}
+                                className={`${
+                                    !repliesFocused
+                                        ? "absolute inset-0 w-full cursor-pointer"
+                                        : "relative"
+                                }`}
                             >
                                 <div
                                     id="replies-container"
-                                    className={`box flex flex-col items-center  ${!repliesFocused ? "absolute inset-0 overflow-y-auto hide-scrollbar" : ""
-                                        }`}
+                                    className={`box flex flex-col items-center  ${
+                                        !repliesFocused
+                                            ? "absolute inset-0 overflow-y-auto hide-scrollbar"
+                                            : ""
+                                    }`}
                                     ref={repliesScrollRef}
                                 >
                                     <div className="flex flex-col w-full gap-2 max-w-[876px] items-center ">
-
                                         {/* INNER provider: single shared draft for all composers */}
                                         <CanvasEditorProvider
                                             replyTo={feedRoot}
@@ -326,28 +342,43 @@ export const CanvasAndReplies = () => {
                                             debug
                                         >
                                             {/* Top composer (non-chat) */}
-                                            {feedRoot && !isChat && !showInlineEditor && (
-                                                <div className="px-2 pt-2 w-full">
-                                                    {draftsFiltered.length > 0 && (
-                                                        <div className="flex flex-col w-full ">
-                                                            <DraftsRow drafts={draftsFiltered} />
-                                                            <hr className="my-4 text-neutral-300 dark:text-neutral-700" />
+                                            {feedRoot &&
+                                                !isChat &&
+                                                !showInlineEditor && (
+                                                    <div className="px-2 pt-2 w-full">
+                                                        {draftsFiltered.length >
+                                                            0 && (
+                                                            <div className="flex flex-col w-full ">
+                                                                <DraftsRow
+                                                                    drafts={
+                                                                        draftsFiltered
+                                                                    }
+                                                                />
+                                                                <hr className="my-4 text-neutral-300 dark:text-neutral-700" />
+                                                            </div>
+                                                        )}
+                                                        <div className="w-full">
+                                                            <EditModeProvider
+                                                                editable
+                                                            >
+                                                                <ToolbarCreateNew
+                                                                    showProfile
+                                                                    className="rounded-lg bg-neutral-50 dark:bg-neutral-800/60"
+                                                                    parent={
+                                                                        feedRoot
+                                                                    }
+                                                                    inlineEditorActive={
+                                                                        showInlineEditor
+                                                                    }
+                                                                    setInlineEditorActive={
+                                                                        setShowInlineEditor
+                                                                    }
+                                                                />
+                                                            </EditModeProvider>
+                                                            <CloseableAppPane className="rounded-xl mt-2" />
                                                         </div>
-                                                    )}
-                                                    <div className="w-full">
-                                                        <EditModeProvider editable>
-                                                            <ToolbarCreateNew
-                                                                showProfile
-                                                                className="rounded-lg bg-neutral-50 dark:bg-neutral-800/60"
-                                                                parent={feedRoot}
-                                                                inlineEditorActive={showInlineEditor}
-                                                                setInlineEditorActive={setShowInlineEditor}
-                                                            />
-                                                        </EditModeProvider>
-                                                        <CloseableAppPane className="rounded-xl mt-2" />
                                                     </div>
-                                                </div>
-                                            )}
+                                                )}
 
                                             {/* Expanded inline editor */}
                                             {showInlineEditor && (
@@ -356,8 +387,16 @@ export const CanvasAndReplies = () => {
                                                         <div className="flex flex-col">
                                                             <div className="flex flex-col px-2">
                                                                 <CreatePostTitle className="px-2 mb-0" />
-                                                                <EditModeProvider editable>
-                                                                    <ToolbarInline close={() => setShowInlineEditor(false)} />
+                                                                <EditModeProvider
+                                                                    editable
+                                                                >
+                                                                    <ToolbarInline
+                                                                        close={() =>
+                                                                            setShowInlineEditor(
+                                                                                false
+                                                                            )
+                                                                        }
+                                                                    />
                                                                 </EditModeProvider>
                                                             </div>
                                                             <InlineEditor className="min-h-[calc(70vh-10rem)] pb-12" />
@@ -371,15 +410,21 @@ export const CanvasAndReplies = () => {
                                             {feedRoot && isChat && (
                                                 <AnimatedStickyToolbar>
                                                     <CloseableAppPane>
-
-                                                        <EditModeProvider editable >
+                                                        <EditModeProvider
+                                                            editable
+                                                        >
                                                             <ToolbarCreateNew
                                                                 /* className="rounded-t-lg px-2" */
                                                                 className="rounded-lg bg-neutral-50 dark:bg-neutral-800/60"
-
-                                                                parent={feedRoot}
-                                                                inlineEditorActive={showInlineEditor}
-                                                                setInlineEditorActive={setShowInlineEditor}
+                                                                parent={
+                                                                    feedRoot
+                                                                }
+                                                                inlineEditorActive={
+                                                                    showInlineEditor
+                                                                }
+                                                                setInlineEditorActive={
+                                                                    setShowInlineEditor
+                                                                }
                                                             />
                                                         </EditModeProvider>
                                                     </CloseableAppPane>
@@ -394,7 +439,8 @@ export const CanvasAndReplies = () => {
                                                         ? "calc(var(--header-h,0px) + var(--sticky-header-h,0px))"
                                                         : "10px",
                                                     willChange: "transform",
-                                                    backfaceVisibility: "hidden",
+                                                    backfaceVisibility:
+                                                        "hidden",
                                                     zIndex: 2,
                                                 }}
                                             >
@@ -407,17 +453,22 @@ export const CanvasAndReplies = () => {
 
                                             <Feed
                                                 type="settings"
-                                                viewRef={repliesFocused ? document.body : repliesScrollRef.current}
+                                                viewRef={
+                                                    repliesFocused
+                                                        ? document.body
+                                                        : repliesScrollRef.current
+                                                }
                                                 scrollSettings={scrollSettings}
                                                 parentRef={repliesScrollRef}
-                                                onSnapshot={() => setRepliesFocused(true)}
+                                                onSnapshot={() =>
+                                                    setRepliesFocused(true)
+                                                }
                                                 provider={useStream}
-                                                disableLoadMore={showInlineEditor}
+                                                disableLoadMore={
+                                                    showInlineEditor
+                                                }
                                             />
-
                                         </CanvasEditorProvider>
-
-
                                     </div>
                                 </div>
 

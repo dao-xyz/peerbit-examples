@@ -8,5 +8,5 @@ export * from "./root.js";
 export * from "./filter.js";
 export * from "./colors.js";
 export * from "./template.js";
-export * from "./link.js"
+export * from "./link.js";
 export * from "./references.js";

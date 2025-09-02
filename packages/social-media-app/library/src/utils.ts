@@ -15,16 +15,16 @@ export const debouncedAccumulatorMap = <T>(
             const map = new Map();
             let add = merge
                 ? (props: { key: string; value: T }) => {
-                    let prev = map.get(props.key);
-                    if (prev != null) {
-                        merge(prev, props.value);
-                    } else {
-                        map.set(props.key, props.value);
-                    }
-                }
+                      let prev = map.get(props.key);
+                      if (prev != null) {
+                          merge(prev, props.value);
+                      } else {
+                          map.set(props.key, props.value);
+                      }
+                  }
                 : (props: { key: string; value: T }) => {
-                    map.set(props.key, props.value);
-                };
+                      map.set(props.key, props.value);
+                  };
             return {
                 add,
                 delete: (key: string) => map.delete(key),

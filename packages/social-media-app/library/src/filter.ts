@@ -1,11 +1,18 @@
 import { variant, field, vec, option } from "@dao-xyz/borsh";
 import { Canvas, AddressReference, IndexableCanvas } from "./content.js";
 import { Program } from "@peerbit/program";
-import { ByteMatchQuery, Documents, Or, SearchRequest, StringMatch, WithIndexedContext } from "@peerbit/document";
+import {
+    ByteMatchQuery,
+    Documents,
+    Or,
+    SearchRequest,
+    StringMatch,
+    WithIndexedContext,
+} from "@peerbit/document";
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
-abstract class Filter { }
+abstract class Filter {}
 
 @variant(0)
 export class PinnedPosts extends Filter {
@@ -22,7 +29,9 @@ export interface FilterModel {
     id: string; // Key to identify the view.
     name: string; // Human-readable name for the view.
     index?: number; // where this view is in the list of views, useful for sorting or ordering.
-    query?: (from: WithIndexedContext<Canvas, IndexableCanvas>) => SearchRequest; // The query associated with this view.
+    query?: (
+        from: WithIndexedContext<Canvas, IndexableCanvas>
+    ) => SearchRequest; // The query associated with this view.
     settings: ViewSettings; // Extra settings for customization.
 }
 // Define the structure for each View Model.
@@ -80,19 +89,19 @@ export class StreamSetting {
             query:
                 this.filter && this.filter instanceof PinnedPosts
                     ? (from: Canvas) => {
-                        let pinned = this.filter as PinnedPosts;
-                        return new SearchRequest({
-                            query: new Or(
-                                pinned.pinned.map(
-                                    (p) =>
-                                        new ByteMatchQuery({
-                                            key: "id",
-                                            value: p,
-                                        })
-                                )
-                            ),
-                        });
-                    }
+                          let pinned = this.filter as PinnedPosts;
+                          return new SearchRequest({
+                              query: new Or(
+                                  pinned.pinned.map(
+                                      (p) =>
+                                          new ByteMatchQuery({
+                                              key: "id",
+                                              value: p,
+                                          })
+                                  )
+                              ),
+                          });
+                      }
                     : undefined,
             settings: {
                 // TODO
@@ -119,14 +128,16 @@ export class IndexableSettings {
 
 @variant("filter-stream-settings")
 export class StreamSettings extends Program {
-
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
     @field({ type: Documents })
     settings: Documents<StreamSetting, IndexableSettings>;
 
-    constructor(properties: { publicKey: PublicSignKey, canvasId?: Uint8Array }) {
+    constructor(properties: {
+        publicKey: PublicSignKey;
+        canvasId?: Uint8Array;
+    }) {
         super();
         const documentId = concat([
             properties.publicKey.bytes,

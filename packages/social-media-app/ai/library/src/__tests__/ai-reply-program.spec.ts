@@ -23,16 +23,13 @@ import { ProgramClient } from "@peerbit/program";
 /* ------------------------------------------------------------------ */
 
 async function openUserScope(client: ProgramClient): Promise<Scope> {
-    return client.open(
-        new Scope({ publicKey: client.identity.publicKey }),
-        { existing: "reuse" }
-    );
+    return client.open(new Scope({ publicKey: client.identity.publicKey }), {
+        existing: "reuse",
+    });
 }
 
 /** Create a top-level root Canvas in a new/opened scope for `client`. */
-async function createRootCanvas(
-    client: ProgramClient
-): Promise<Canvas> {
+async function createRootCanvas(client: ProgramClient): Promise<Canvas> {
     const scope = await openUserScope(client);
     const draft = new Canvas({
         publicKey: client.identity.publicKey,
@@ -78,14 +75,19 @@ describe("AIResponseProgram", () => {
     });
 
     it("ollama", async () => {
-        const canvas = await createDefaultCanvas("Hey! what is 1+1", session.peers[0]);
+        const canvas = await createDefaultCanvas(
+            "Hey! what is 1+1",
+            session.peers[0]
+        );
 
         // Server on peer[0]
         const server = await session.peers[0].open(new CanvasAIReply(), {
             args: { server: true, llm: "ollama" },
         });
         // Client on peer[1]
-        const client = await session.peers[1].open<CanvasAIReply>(server.address);
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
         await client.waitForModel({ model: DEEP_SEEK_R1_7b });
 
         const response = await client.query(canvas);
@@ -109,7 +111,9 @@ describe("AIResponseProgram", () => {
         const server = await session.peers[0].open(new CanvasAIReply(), {
             args: { server: true, llm: "ollama", model: DEEP_SEEK_R1_1_5b },
         });
-        const client = await session.peers[1].open<CanvasAIReply>(server.address);
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
         await client.waitForModel({ model: DEEP_SEEK_R1_1_5b });
     });
 
@@ -125,7 +129,9 @@ describe("AIResponseProgram", () => {
         const server = await session.peers[0].open(new CanvasAIReply(), {
             args: { server: true, llm: "ollama" },
         });
-        const client = await session.peers[1].open<CanvasAIReply>(server.address);
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
         await client.waitForModel({ model: DEEP_SEEK_R1_7b });
 
         const response = await client.query(reply2);
@@ -144,14 +150,17 @@ describe("AIResponseProgram", () => {
             args: { server: true, llm: "ollama" },
         });
 
-        const { canvas: clientCanvasRoot } = await createRoot(session.peers[1], {
-            persisted: true,
-        });
+        const { canvas: clientCanvasRoot } = await createRoot(
+            session.peers[1],
+            {
+                persisted: true,
+            }
+        );
 
         await clientCanvasRoot.replies.log.waitForReplicators();
-        expect([...(await clientCanvasRoot.replies.log.getReplicators())]).to.deep.eq([
-            session.peers[0].identity.publicKey.hashcode(),
-        ]);
+        expect([
+            ...(await clientCanvasRoot.replies.log.getReplicators()),
+        ]).to.deep.eq([session.peers[0].identity.publicKey.hashcode()]);
     });
 
     it("has a reasonable timeout", async () => {
@@ -160,7 +169,9 @@ describe("AIResponseProgram", () => {
         const server = await session.peers[0].open(new CanvasAIReply(), {
             args: { server: true, llm: "ollama" },
         });
-        const client = await session.peers[1].open<CanvasAIReply>(server.address);
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
         await client.waitForModel({ model: DEEP_SEEK_R1_7b });
 
         const start = Date.now();
@@ -177,7 +188,9 @@ describe("AIResponseProgram", () => {
         const server = await session.peers[0].open(new CanvasAIReply(), {
             args: { server: true, llm: "ollama" },
         });
-        const client = await session.peers[1].open<CanvasAIReply>(server.address);
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
         await client.waitFor(server.node.identity.publicKey);
 
         const responses = await client.rpc.request(new ModelRequest(), {
@@ -194,12 +207,17 @@ describe("AIResponseProgram", () => {
         const server = await session.peers[0].open(new CanvasAIReply(), {
             args: { server: true, llm: "ollama" },
         });
-        const client = await session.peers[1].open<CanvasAIReply>(server.address);
+        const client = await session.peers[1].open<CanvasAIReply>(
+            server.address
+        );
 
         await client.waitForModel({ model: DEEP_SEEK_R1_7b });
 
         // Server announces their name (root)
-        const canvas = await createDefaultCanvas("My name is A", session.peers[0]);
+        const canvas = await createDefaultCanvas(
+            "My name is A",
+            session.peers[0]
+        );
 
         // Client posts a reply with their name
         const reply1 = await createReplyUnder(canvas, session.peers[1]);
@@ -215,8 +233,12 @@ describe("AIResponseProgram", () => {
         // Make sure indices have some content locally
         const rootScopeFromClient = reply2.nearestScope;
         await waitForResolved(async () => {
-            expect((await rootScopeFromClient.replies.index.getSize()) >= 3).to.eq(true);
-            expect((await rootScopeFromClient.elements.index.getSize()) >= 3).to.eq(true);
+            expect(
+                (await rootScopeFromClient.replies.index.getSize()) >= 3
+            ).to.eq(true);
+            expect(
+                (await rootScopeFromClient.elements.index.getSize()) >= 3
+            ).to.eq(true);
         });
 
         const response = await client.suggest(reply2);

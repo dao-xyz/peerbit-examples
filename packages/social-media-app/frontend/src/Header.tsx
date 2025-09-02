@@ -58,8 +58,7 @@ export const Header = (props: HeaderProps) => {
                     <CanvasPathInput
                         className="mt-1 py-1 px-1" /* className={"transition-padding ease-in-out duration-500 " + (headerIsVisible ? "p-1" : "p-0")}  */
                     />
-                    {visualization?.view ===
-                        ChildVisualization.CHAT &&
+                    {visualization?.view === ChildVisualization.CHAT &&
                         focused && (
                             <button
                                 className="btn  btn-sm  h-8 flex flex-row p-1 gap-1"
@@ -75,8 +74,7 @@ export const Header = (props: HeaderProps) => {
                         {isOwner && <ToggleEditModeButton />}
 
                         {/*  TODO do we really need to set the z-index to 2 here? */}
-                        {(visualization?.view !==
-                            ChildVisualization.CHAT ||
+                        {(visualization?.view !== ChildVisualization.CHAT ||
                             !focused) &&
                             showProfileButton && (
                                 <div className="  z-4 col-start-10 flex items-center ">

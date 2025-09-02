@@ -16,7 +16,10 @@ import { ViewKind } from "../link.js";
 
 /* ----------------------- test-local helpers ----------------------- */
 
-async function createOpenRootScope(session: TestSession, seed?: Uint8Array | number[]) {
+async function createOpenRootScope(
+    session: TestSession,
+    seed?: Uint8Array | number[]
+) {
     const peer = session.peers[0];
     return peer.open(
         new Scope({
@@ -32,7 +35,9 @@ async function immediateChildren(parent: Canvas): Promise<Canvas[]> {
     const idx = await parent.getSelfIndexed();
     if (!idx) return [];
     const kids = await scope.replies.index
-        .iterate({ query: getImmediateRepliesQueryByDepth(parent.id, idx.pathDepth) })
+        .iterate({
+            query: getImmediateRepliesQueryByDepth(parent.id, idx.pathDepth),
+        })
         .all();
     return kids as unknown as Canvas[];
 }
@@ -57,7 +62,7 @@ describe("templates", () => {
             prototype: new Canvas({
                 publicKey: session.peers[0].identity.publicKey,
                 selfScope: new AddressReference({ address: "abc123" }),
-                id: randomBytes(32)
+                id: randomBytes(32),
             }),
             id: randomBytes(32),
         });
@@ -65,12 +70,13 @@ describe("templates", () => {
         const deserialized = deserialize(serialized, Template);
         expect(template.name).to.equal(deserialized.name);
         expect(template.description).to.equal(deserialized.description);
-        expect(template.prototype.idString).to.equal(deserialized.prototype.idString);
+        expect(template.prototype.idString).to.equal(
+            deserialized.prototype.idString
+        );
         expect(template.prototype.selfScope.address).to.equal(
             deserialized.prototype.selfScope.address
         );
-
-    })
+    });
 
     describe("insertInto", () => {
         const checkTemplate = async (properties: {
@@ -81,7 +87,9 @@ describe("templates", () => {
         }) => {
             // children under the insertion point
             const children = await immediateChildren(properties.from);
-            expect(children.length).to.equal(properties.expectedImmediatechildren);
+            expect(children.length).to.equal(
+                properties.expectedImmediatechildren
+            );
 
             // the inserted root exists and has expected title
             const insertedInChildren = children.find(
@@ -89,20 +97,24 @@ describe("templates", () => {
             );
             expect(insertedInChildren).to.exist;
 
-            const insertedIdx = await properties.from.nearestScope.replies.index.get(
-                insertedInChildren!.id,
-                { resolve: false }
-            );
+            const insertedIdx =
+                await properties.from.nearestScope.replies.index.get(
+                    insertedInChildren!.id,
+                    { resolve: false }
+                );
             expect(insertedIdx.context).to.equal(properties.names[0]);
 
             // the inserted root should have exactly one immediate child (next template node)
-            const insertedChildren = await immediateChildren(insertedInChildren!);
+            const insertedChildren = await immediateChildren(
+                insertedInChildren!
+            );
             expect(insertedChildren.length).to.equal(1);
 
-            const insertedChildIdx = await properties.from.nearestScope.replies.index.get(
-                insertedChildren[0].id,
-                { resolve: false }
-            );
+            const insertedChildIdx =
+                await properties.from.nearestScope.replies.index.get(
+                    insertedChildren[0].id,
+                    { resolve: false }
+                );
             expect(insertedChildIdx.context).to.equal(properties.names[1]);
         };
 
@@ -115,15 +127,24 @@ describe("templates", () => {
             // host the template root in its own scope, but *register/link* it in rootScope
             const draft = new Canvas({
                 publicKey: templateRootKey,
-                selfScope: new AddressReference({ address: templateRootScope.address }),
+                selfScope: new AddressReference({
+                    address: templateRootScope.address,
+                }),
                 id: sha256Sync(new Uint8Array([0, 1, 2])),
             });
-            const [__, templateRoot] = await rootScope.getOrCreateReply(undefined, draft);
+            const [__, templateRoot] = await rootScope.getOrCreateReply(
+                undefined,
+                draft
+            );
 
-            expect((await rootScope.replies.index.iterate({}).all()).length).to.eq(0);
+            expect(
+                (await rootScope.replies.index.iterate({}).all()).length
+            ).to.eq(0);
 
             // rootScope should see exactly one top-level (the template root)
-            expect((await templateRootScope.replies.index.iterate({}).all()).length).to.eq(1);
+            expect(
+                (await templateRootScope.replies.index.iterate({}).all()).length
+            ).to.eq(1);
 
             // build a child under the template root (in its home scope)
             const [t1] = await ensurePath(templateRoot, ["t1"]);
@@ -137,7 +158,9 @@ describe("templates", () => {
 
             const publicRoot = new Canvas({
                 publicKey: templateRootKey,
-                selfScope: new AddressReference({ address: publicScope.address }),
+                selfScope: new AddressReference({
+                    address: publicScope.address,
+                }),
                 id: sha256Sync(new Uint8Array([9, 9, 9])),
             });
             await publicScope.getOrCreateReply(undefined, publicRoot);
@@ -147,22 +170,33 @@ describe("templates", () => {
 
             const privateReplyDraft = new Canvas({
                 publicKey: templateRootKey,
-                selfScope: new AddressReference({ address: privateScope.address }),
+                selfScope: new AddressReference({
+                    address: privateScope.address,
+                }),
                 id: sha256Sync(new Uint8Array([1, 2, 3])),
             });
-            const [__, privateReply] = await privateScope.getOrCreateReply(publicRoot, privateReplyDraft);
+            const [__, privateReply] = await privateScope.getOrCreateReply(
+                publicRoot,
+                privateReplyDraft
+            );
 
             // a private reply to the private reply (also in private scope)
             const rrDraft = new Canvas({
                 publicKey: templateRootKey,
-                selfScope: new AddressReference({ address: privateScope.address }),
+                selfScope: new AddressReference({
+                    address: privateScope.address,
+                }),
                 id: sha256Sync(new Uint8Array([4, 5, 6])),
             });
             await privateScope.getOrCreateReply(privateReply, rrDraft);
 
             // basic sanity: private scope has two nodes, public scope has at least the public root
-            expect((await privateScope.replies.index.iterate({}).all()).length).to.be.greaterThan(1);
-            expect((await publicScope.replies.index.iterate({}).all()).length).to.be.greaterThan(0);
+            expect(
+                (await privateScope.replies.index.iterate({}).all()).length
+            ).to.be.greaterThan(1);
+            expect(
+                (await publicScope.replies.index.iterate({}).all()).length
+            ).to.be.greaterThan(0);
         });
 
         it("root", async () => {
@@ -172,7 +206,10 @@ describe("templates", () => {
                 selfScope: new AddressReference({ address: rootScope.address }),
                 id: sha256Sync(new Uint8Array([0])),
             });
-            const [_, root] = await rootScope.getOrCreateReply(undefined, rootDraft);
+            const [_, root] = await rootScope.getOrCreateReply(
+                undefined,
+                rootDraft
+            );
 
             const [_a, b, _c] = await ensurePath(root, ["a", "b", "c"]);
 
@@ -180,10 +217,15 @@ describe("templates", () => {
             const templateRootScope = await createOpenRootScope(session);
             const templateRoot = new Canvas({
                 publicKey: templateRootKey,
-                selfScope: new AddressReference({ address: templateRootScope.address }),
+                selfScope: new AddressReference({
+                    address: templateRootScope.address,
+                }),
                 id: sha256Sync(new Uint8Array([0, 1, 2])),
             });
-            const [__, tRoot] = await rootScope.getOrCreateReply(undefined, templateRoot);
+            const [__, tRoot] = await rootScope.getOrCreateReply(
+                undefined,
+                templateRoot
+            );
 
             const [t1, _t2] = await ensurePath(tRoot, ["t1", "t2"]);
 
@@ -212,7 +254,10 @@ describe("templates", () => {
                 selfScope: new AddressReference({ address: rootScope.address }),
                 id: sha256Sync(new Uint8Array([7])),
             });
-            const [_, root] = await rootScope.getOrCreateReply(undefined, rootDraft);
+            const [_, root] = await rootScope.getOrCreateReply(
+                undefined,
+                rootDraft
+            );
 
             const [a, b, _c] = await ensurePath(root, ["a", "b", "c"]);
 
@@ -220,10 +265,15 @@ describe("templates", () => {
             const templateRootScope = await createOpenRootScope(session);
             const tRootDraft = new Canvas({
                 publicKey: templateRootKey,
-                selfScope: new AddressReference({ address: templateRootScope.address }),
+                selfScope: new AddressReference({
+                    address: templateRootScope.address,
+                }),
                 id: sha256Sync(new Uint8Array([8, 1, 2])),
             });
-            const [__, tRoot] = await rootScope.getOrCreateReply(undefined, tRootDraft);
+            const [__, tRoot] = await rootScope.getOrCreateReply(
+                undefined,
+                tRootDraft
+            );
 
             const [t1, t2, t3] = await ensurePath(tRoot, ["t1", "t2", "t3"]);
 
@@ -257,7 +307,10 @@ describe("templates", () => {
                 selfScope: new AddressReference({ address: rootScope.address }),
                 id: sha256Sync(new Uint8Array([11])),
             });
-            const [_, root] = await rootScope.getOrCreateReply(undefined, rootDraft);
+            const [_, root] = await rootScope.getOrCreateReply(
+                undefined,
+                rootDraft
+            );
 
             const [a] = await ensurePath(root, ["a"]);
 
@@ -265,10 +318,15 @@ describe("templates", () => {
             const templateRootScope = await createOpenRootScope(session);
             const tRootDraft = new Canvas({
                 publicKey: templateRootKey,
-                selfScope: new AddressReference({ address: templateRootScope.address }),
+                selfScope: new AddressReference({
+                    address: templateRootScope.address,
+                }),
                 id: sha256Sync(new Uint8Array([12, 1, 2])),
             });
-            const [__, tRoot] = await rootScope.getOrCreateReply(undefined, tRootDraft);
+            const [__, tRoot] = await rootScope.getOrCreateReply(
+                undefined,
+                tRootDraft
+            );
 
             const [t1, _t2] = await ensurePath(tRoot, ["t1", "t2"]);
 
@@ -299,55 +357,61 @@ describe("templates", () => {
     });
 
     describe("templates", () => {
-        it('canCreateAlbumTemplate', async () => {
-
+        it("canCreateAlbumTemplate", async () => {
             const scope = await createOpenRootScope(session);
             const album = await createAlbumTemplate({
                 peer: session.peers[0],
                 description: "Create a photo album",
                 name: "Photo Album",
-                scope
+                scope,
             });
 
-            const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
-                publicKey: session.peers[0].identity.publicKey,
-                selfScope: scope,
-                id: randomBytes(32)
-            }));
+            const [_, root] = await scope.getOrCreateReply(
+                undefined,
+                new Canvas({
+                    publicKey: session.peers[0].identity.publicKey,
+                    selfScope: scope,
+                    id: randomBytes(32),
+                })
+            );
 
             const inserted = await album.insertInto(root);
 
-            const childrenLinks = await album.prototype.links.index.iterate({
-                query: getChildrenLinksQuery(inserted.id)
-
-            }).all()
+            const childrenLinks = await album.prototype.links.index
+                .iterate({
+                    query: getChildrenLinksQuery(inserted.id),
+                })
+                .all();
 
             expect(childrenLinks.length).to.equal(2);
             expect(childrenLinks[0].kind).to.instanceOf(ViewKind);
             expect(childrenLinks[1].kind).to.instanceOf(ViewKind);
-        })
-    })
+        });
+    });
 
     describe("store", () => {
         it("deduplicate", async () => {
-            const templates = await session.peers[0].open(new Templates(randomBytes(32)));
+            const templates = await session.peers[0].open(
+                new Templates(randomBytes(32))
+            );
             const scope = await createOpenRootScope(session);
             const album = await createAlbumTemplate({
                 peer: session.peers[0],
                 description: "Create a photo album",
                 name: "Photo Album",
-                scope
+                scope,
             });
 
             await templates.templates.put(album);
 
-            const allTemplates = await templates.templates.index.iterate({ query: {} }).all();
+            const allTemplates = await templates.templates.index
+                .iterate({ query: {} })
+                .all();
             expect(allTemplates.length).to.equal(1);
             const linkCount = await scope.links.index.getSize();
 
             const repliesCount = await scope.replies.index.getSize();
             const elementsCount = await scope.elements.index.getSize();
-
 
             // album template has two children
             let children = await allTemplates[0].prototype.replies.index
@@ -355,18 +419,19 @@ describe("templates", () => {
                 .all();
             expect(children.length).to.equal(2);
 
-
             // re-insert same template → still 1
             await templates.templates.put(
                 await createAlbumTemplate({
                     peer: session.peers[0],
                     description: "Create a photo album",
                     name: "Photo Album",
-                    scope
+                    scope,
                 })
             );
 
-            const after = await templates.templates.index.iterate({ query: {} }).all();
+            const after = await templates.templates.index
+                .iterate({ query: {} })
+                .all();
             expect(after.length).to.equal(1);
 
             // still two children
@@ -378,10 +443,9 @@ describe("templates", () => {
             // links should be the same as before
             expect(await scope.links.index.getSize()).to.equal(linkCount);
             expect(await scope.replies.index.getSize()).to.equal(repliesCount);
-            expect(await scope.elements.index.getSize()).to.equal(elementsCount);
-
-
-
+            expect(await scope.elements.index.getSize()).to.equal(
+                elementsCount
+            );
         });
     });
 });

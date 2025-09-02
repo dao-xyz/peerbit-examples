@@ -5,7 +5,7 @@ import path from "path";
 import os from "os";
 import fs from "fs";
 import { Canvas, CanvasAddressReference, Scope } from "@giga-app/interface";
-import { fromBase64 } from "@peerbit/crypto"
+import { fromBase64 } from "@peerbit/crypto";
 
 export const start = async (directory?: string | null) => {
     process.on("uncaughtException", (err) => {
@@ -23,7 +23,7 @@ export const start = async (directory?: string | null) => {
 
     console.log(
         "Starting AI Response CLI" +
-        (directory ? ` in directory ${directory}` : "")
+            (directory ? ` in directory ${directory}` : "")
     );
 
     // Create the Peerbit client with optional persistence.
@@ -72,7 +72,6 @@ export const start = async (directory?: string | null) => {
         }),
     } as ServerConfig;
 
-
     // Open the CanvasAIReply service (server mode) with the proper LLM configuration.
     const service = await client.open<CanvasAIReply>(new CanvasAIReply(), {
         args: {
@@ -119,8 +118,8 @@ export const start = async (directory?: string | null) => {
                 console.log("  Requests:        " + stats.requestCount);
                 console.log(
                     "  Average Latency: " +
-                    stats.averageLatency.toFixed(2) +
-                    " ms"
+                        stats.averageLatency.toFixed(2) +
+                        " ms"
                 );
                 console.log("  Errors:          " + stats.errorCount);
             }, 5000);
@@ -142,7 +141,7 @@ export const start = async (directory?: string | null) => {
                     type: "input",
                     name: "canvasId",
                     message: "Enter the Canvas address:",
-                }
+                },
             ]);
             if (canvasIdStr.trim().length === 0) {
                 console.error("Invalid Canvas address");
@@ -151,13 +150,12 @@ export const start = async (directory?: string | null) => {
 
             const canvasID = fromBase64(canvasIdStr.trim());
 
-
             const { scopeAddress } = await inquirer.prompt([
                 {
                     type: "input",
                     name: "scopeAddress",
                     message: "Enter the scope address (optional):",
-                }
+                },
             ]);
 
             // either use the provided scope address or default to the canvas address
@@ -165,17 +163,18 @@ export const start = async (directory?: string | null) => {
             if (scopeAddress) {
                 scope = await client.open<Scope>(scopeAddress, {
                     existing: "reuse",
-                    args: service.origin?.root.openingArgs!
+                    args: service.origin?.root.openingArgs!,
                 });
             }
 
-
-
             console.log("Querying AI, please wait...");
             try {
-                const response = await service.query(new CanvasAddressReference({ id: canvasID, scope }), {
-                    timeout: 10000,
-                });
+                const response = await service.query(
+                    new CanvasAddressReference({ id: canvasID, scope }),
+                    {
+                        timeout: 10000,
+                    }
+                );
                 console.log("\nAI Response:");
                 console.log(response ? "Done!" : "No response received");
             } catch (error) {

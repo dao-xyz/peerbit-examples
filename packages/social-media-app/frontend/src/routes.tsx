@@ -1,11 +1,7 @@
 // routes.tsx
 import { Routes, Route } from "react-router";
 import { Home } from "./Home";
-import {
-    fromBase64URL,
-    PublicSignKey,
-    toBase64URL,
-} from "@peerbit/crypto";
+import { fromBase64URL, PublicSignKey, toBase64URL } from "@peerbit/crypto";
 import { serialize } from "@dao-xyz/borsh";
 import { Canvas as CanvasDB, Scope } from "@giga-app/interface";
 import { CreateRoot } from "./canvas/CreateRoot";
@@ -67,9 +63,11 @@ export const getCanvasIdFromPath = (path: string) => {
     const idx = parts.indexOf("c");
     const string = idx >= 0 ? parts[idx + 1] : undefined;
     return getCanvasIdFromPart(string);
-}
+};
 
-export const getCanvasIdFromPart = (path: string | undefined): Uint8Array | undefined => {
+export const getCanvasIdFromPart = (
+    path: string | undefined
+): Uint8Array | undefined => {
     if (!path) return undefined;
     try {
         return fromBase64URL(path);
@@ -77,7 +75,7 @@ export const getCanvasIdFromPart = (path: string | undefined): Uint8Array | unde
         console.error("Invalid canvas ID in path:", path, error);
         return undefined;
     }
-}
+};
 
 export const getCanvasIdParam = (path: string) => {
     const parts = path.split("?")[0].split("/").filter(Boolean);
@@ -101,7 +99,9 @@ export const getCanvasIdBytes = (path: string): Uint8Array | undefined => {
 };
 
 export const getScopeAddrsFromSearch = (search: string): string[] => {
-    const params = new URLSearchParams(search.startsWith("?") ? search : `?${search}`);
+    const params = new URLSearchParams(
+        search.startsWith("?") ? search : `?${search}`
+    );
     const raw = params.get("scopes");
     if (!raw) return [];
     return raw

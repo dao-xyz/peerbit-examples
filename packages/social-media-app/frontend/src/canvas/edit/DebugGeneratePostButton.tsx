@@ -32,7 +32,8 @@ export const DebugGeneratePostButton = () => {
     ) => {
         const definedUrl =
             url ||
-            `https://picsum.photos/${options?.width ?? 200}/${options?.height ?? 300
+            `https://picsum.photos/${options?.width ?? 200}/${
+                options?.height ?? 300
             }`;
         const response = await fetch(definedUrl);
         // Convert the response to an ArrayBuffer then to a Uint8Array.
@@ -71,7 +72,9 @@ export const DebugGeneratePostButton = () => {
             });
 
             // Open the canvas so we can insert elements.
-            const openCanvas = await leaf.nearestScope.openWithSameSettings(canvas);
+            const openCanvas = await leaf.nearestScope.openWithSameSettings(
+                canvas
+            );
 
             for (const [ix, type] of typeArray.entries()) {
                 let mockContent: ElementContent;

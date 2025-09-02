@@ -8,7 +8,10 @@ import { CloseableAppPane } from "../../edit/CloseableAppPane";
 import { ToolbarEdit } from "../../edit/ToolbarEdit";
 import { CanvasWrapper } from "../../CanvasWrapper";
 import { HIGH_QUALITY } from "@giga-app/interface";
-import { EditModeProvider, useEditModeContext } from "../../edit/EditModeProvider";
+import {
+    EditModeProvider,
+    useEditModeContext,
+} from "../../edit/EditModeProvider";
 import { useCanvases } from "../../useCanvas";
 
 const DetailedViewInner: React.FC = () => {
@@ -24,7 +27,10 @@ const DetailedViewInner: React.FC = () => {
                 <CanvasEditorProvider canvas={viewRoot}>
                     <InlineEditor className="pb-12" />
                     <CloseableAppPane>
-                        <ToolbarEdit onSave={() => setEditMode(false)} canvasId={canvasId} />
+                        <ToolbarEdit
+                            onSave={() => setEditMode(false)}
+                            canvasId={canvasId}
+                        />
                     </CloseableAppPane>
                 </CanvasEditorProvider>
             ) : (

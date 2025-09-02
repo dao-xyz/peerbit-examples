@@ -63,7 +63,10 @@ export type DraftAPI = {
 const DraftManagerCtx = createContext<DraftAPI | null>(null);
 export const useDraftManager = () => {
     const ctx = useContext(DraftManagerCtx);
-    if (!ctx) throw new Error("useDraftManager must be used within DraftManagerProvider");
+    if (!ctx)
+        throw new Error(
+            "useDraftManager must be used within DraftManagerProvider"
+        );
     return ctx;
 };
 
@@ -77,7 +80,9 @@ export const DraftManagerProvider: React.FC<{
     const privateScope = PrivateScope.useScope();
     const publicScope = PublicScope.useScope();
 
-    const log = (...args: unknown[]) => { if (debug) console.debug("[DraftManager]", ...args); };
+    const log = (...args: unknown[]) => {
+        if (debug) console.debug("[DraftManager]", ...args);
+    };
     const toBucket = (key: CanvasKey) => Canvas.createIdString(key);
     const genKey = (): CanvasKey => randomBytes(32);
 
@@ -89,7 +94,9 @@ export const DraftManagerProvider: React.FC<{
     const publishQueue = useRef(new Map<string, Promise<void>>());
     const listeners = useRef(new Set<() => void>());
     const publishingFlags = useRef(new Set<string>());
-    const retiringActive = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+    const retiringActive = useRef(
+        new Map<string, ReturnType<typeof setTimeout>>()
+    );
 
     /** IDs considered active immediately (before records has the CanvasIx). */
     const ephemeralActive = useRef(new Set<string>());
@@ -97,24 +104,37 @@ export const DraftManagerProvider: React.FC<{
     const retireActiveSlowly = (idString: string) => {
         // Make the (soon-to-be-published) old draft invisible to DraftsRow immediately
         if (!retiringActive.current.has(idString)) {
-            retiringActive.current.set(idString, setTimeout(() => {
-                retiringActive.current.delete(idString);
-                notify();
-            }, RETIRE_TIMEOUT_MS));
+            retiringActive.current.set(
+                idString,
+                setTimeout(() => {
+                    retiringActive.current.delete(idString);
+                    notify();
+                }, RETIRE_TIMEOUT_MS)
+            );
         }
     };
 
+    const notify = () => {
+        for (const fn of Array.from(listeners.current)) fn();
+    };
 
-    const notify = () => { for (const fn of Array.from(listeners.current)) fn(); };
-
-    const primeDebouncer = (bucket: string, api: DraftAPI & { saveRaw: (bucket: string) => Promise<void> }) => {
+    const primeDebouncer = (
+        bucket: string,
+        api: DraftAPI & { saveRaw: (bucket: string) => Promise<void> }
+    ) => {
         if (!debouncers.current.has(bucket)) {
-            debouncers.current.set(bucket, debounce(() => api.saveRaw(bucket), 120));
+            debouncers.current.set(
+                bucket,
+                debounce(() => api.saveRaw(bucket), 120)
+            );
         }
     };
 
     /** Create a persisted draft, but flag it active *before* persistence hits indexes. */
-    const createDraftPersisted = async (options?: { replyTo?: CanvasIx, id?: Uint8Array }): Promise<CanvasIx> => {
+    const createDraftPersisted = async (options?: {
+        replyTo?: CanvasIx;
+        id?: Uint8Array;
+    }): Promise<CanvasIx> => {
         if (!peer) throw new Error("Peer not ready");
         const home: Scope | undefined = privateScope || publicScope;
         if (!home) throw new Error("No available scope");
@@ -132,9 +152,14 @@ export const DraftManagerProvider: React.FC<{
         notify();
 
         try {
-            const [, created] = await home.getOrCreateReply(options?.replyTo, draft, { kind: new ReplyKind() });
+            const [, created] = await home.getOrCreateReply(
+                options?.replyTo,
+                draft,
+                { kind: new ReplyKind() }
+            );
             const createdIx = await created.getSelfIndexedCoerced();
-            if (!createdIx) throw new Error("Failed to index newly created draft");
+            if (!createdIx)
+                throw new Error("Failed to index newly created draft");
             return createdIx;
         } catch (e) {
             // Creation failed → remove optimistic flag
@@ -144,13 +169,20 @@ export const DraftManagerProvider: React.FC<{
         }
     };
 
-    const recoverLatestForParent = async (parent: CanvasIx): Promise<CanvasIx | undefined> => {
+    const recoverLatestForParent = async (
+        parent: CanvasIx
+    ): Promise<CanvasIx | undefined> => {
         try {
             const children: CanvasIx[] = await privateScope.replies.index
                 .iterate({ query: getImmediateRepliesQuery(parent) })
                 .all();
-            const mine = children.filter(c => c.publicKey.equals(peer.identity.publicKey));
-            mine.sort((a, b) => Number(a.__context.modified) - Number(b.__context.modified));
+            const mine = children.filter((c) =>
+                c.publicKey.equals(peer.identity.publicKey)
+            );
+            mine.sort(
+                (a, b) =>
+                    Number(a.__context.modified) - Number(b.__context.modified)
+            );
             const latest = mine.at(-1);
             log("recoverLatestForParent ->", latest?.idString);
             return latest;
@@ -160,12 +192,14 @@ export const DraftManagerProvider: React.FC<{
         }
     };
 
-    const api = useMemo<DraftAPI & { saveRaw: (bucket: string) => Promise<void> }>(() => {
+    const api = useMemo<
+        DraftAPI & { saveRaw: (bucket: string) => Promise<void> }
+    >(() => {
         const API: DraftAPI & { saveRaw: (bucket: string) => Promise<void> } = {
             async ensure(args) {
                 if ("replyTo" in args && args.replyTo) {
-                    return API.ensureForParent(args.replyTo, args.key)
-                };
+                    return API.ensureForParent(args.replyTo, args.key);
+                }
 
                 const rawKey = "key" in args ? args.key : genKey();
                 const bucket = toBucket(rawKey);
@@ -177,7 +211,9 @@ export const DraftManagerProvider: React.FC<{
                 if (inflight) return inflight;
 
                 const p = (async () => {
-                    const created = await createDraftPersisted({ replyTo: args.replyTo });
+                    const created = await createDraftPersisted({
+                        replyTo: args.replyTo,
+                    });
 
                     // race check
                     const current = records.current.get(bucket)?.canvas;
@@ -195,10 +231,14 @@ export const DraftManagerProvider: React.FC<{
                     });
                     // move from ephemeral → definitive
                     ephemeralActive.current.delete(created.idString);
-                    if (args.replyTo) parentIndex.current.set(args.replyTo.idString, bucket);
+                    if (args.replyTo)
+                        parentIndex.current.set(args.replyTo.idString, bucket);
                     primeDebouncer(bucket, API);
                     notify();
-                    log("ensure(id): created", { bucket, draftId: created.idString });
+                    log("ensure(id): created", {
+                        bucket,
+                        draftId: created.idString,
+                    });
                     return created;
                 })().finally(() => {
                     if (inflightEnsureByBucket.current.get(bucket) === p) {
@@ -225,39 +265,62 @@ export const DraftManagerProvider: React.FC<{
                 const p = (async () => {
                     const recovered = await recoverLatestForParent(parent);
                     if (recovered) {
-                        const bucket = existingBucket ?? (key ? toBucket(key) : toBucket(genKey()));
+                        const bucket =
+                            existingBucket ??
+                            (key ? toBucket(key) : toBucket(genKey()));
                         const now = parentIndex.current.get(pid);
                         if (now) {
                             const cur = records.current.get(now)?.canvas;
-                            if (cur && cur.idString !== recovered.idString) return cur;
+                            if (cur && cur.idString !== recovered.idString)
+                                return cur;
                         }
-                        records.current.set(bucket, { canvas: recovered, replyTo: parent, isSaving: false });
+                        records.current.set(bucket, {
+                            canvas: recovered,
+                            replyTo: parent,
+                            isSaving: false,
+                        });
                         // ensure recovered id isn’t stuck in ephemeral (it won’t be, but for symmetry)
 
                         ephemeralActive.current.delete(recovered.idString);
                         parentIndex.current.set(pid, bucket);
                         primeDebouncer(bucket, API);
                         notify();
-                        log("ensure(parent): recovered", { parentId: pid, bucket, draftId: recovered.idString });
+                        log("ensure(parent): recovered", {
+                            parentId: pid,
+                            bucket,
+                            draftId: recovered.idString,
+                        });
                         return recovered;
                     }
 
-                    const bucket = existingBucket ?? (key ? toBucket(key) : toBucket(genKey()));
+                    const bucket =
+                        existingBucket ??
+                        (key ? toBucket(key) : toBucket(genKey()));
                     const now = parentIndex.current.get(pid);
                     if (now) {
                         const ex = records.current.get(now)?.canvas;
                         if (ex) return ex;
                     }
 
-                    const created = await createDraftPersisted({ replyTo: parent });
+                    const created = await createDraftPersisted({
+                        replyTo: parent,
+                    });
 
-                    records.current.set(bucket, { canvas: created, replyTo: parent, isSaving: false });
+                    records.current.set(bucket, {
+                        canvas: created,
+                        replyTo: parent,
+                        isSaving: false,
+                    });
                     // move from ephemeral → definitive
                     ephemeralActive.current.delete(created.idString);
                     parentIndex.current.set(pid, bucket);
                     primeDebouncer(bucket, API);
                     notify();
-                    log("ensure(parent): created", { parentId: pid, bucket, draftId: created.idString });
+                    log("ensure(parent): created", {
+                        parentId: pid,
+                        bucket,
+                        draftId: created.idString,
+                    });
                     return created;
                 })().finally(() => {
                     if (inflightEnsureByParent.current.get(pid) === p) {
@@ -281,8 +344,14 @@ export const DraftManagerProvider: React.FC<{
 
             setReplyTarget(key, replyTo) {
                 const bucket = toBucket(key);
-                const prev = records.current.get(bucket) ?? ({ isSaving: false } as DraftRecord);
-                records.current.set(bucket, { ...prev, replyTo, canvas: prev.canvas });
+                const prev =
+                    records.current.get(bucket) ??
+                    ({ isSaving: false } as DraftRecord);
+                records.current.set(bucket, {
+                    ...prev,
+                    replyTo,
+                    canvas: prev.canvas,
+                });
                 if (replyTo) {
                     parentIndex.current.set(replyTo.idString, bucket);
                 }
@@ -295,7 +364,8 @@ export const DraftManagerProvider: React.FC<{
 
             async publish(key) {
                 const bucket = toBucket(key);
-                const prev = publishQueue.current.get(bucket) ?? Promise.resolve();
+                const prev =
+                    publishQueue.current.get(bucket) ?? Promise.resolve();
 
                 const next = prev
                     .then(async () => {
@@ -306,19 +376,23 @@ export const DraftManagerProvider: React.FC<{
                         notify();
 
                         // Rotate first
-                        const fresh = await createDraftPersisted({ replyTo: rec.replyTo });
+                        const fresh = await createDraftPersisted({
+                            replyTo: rec.replyTo,
+                        });
 
                         const toPublish = rec.canvas;
-                        retireActiveSlowly(toPublish.idString)
+                        retireActiveSlowly(toPublish.idString);
                         records.current.set(bucket, { ...rec, canvas: fresh });
-
 
                         // flush any pending local save
                         debouncers.current.get(bucket)?.flush?.();
 
                         if (rec.replyTo) {
                             await rec.canvas.nearestScope.reIndexDebouncer.flush();
-                            log("publish: syncing draft to parent with elements: " + (await rec.canvas.countOwnedElements()));
+                            log(
+                                "publish: syncing draft to parent with elements: " +
+                                    (await rec.canvas.countOwnedElements())
+                            );
 
                             const parent = rec.replyTo;
                             await parent.upsertReply(toPublish, {
@@ -327,11 +401,10 @@ export const DraftManagerProvider: React.FC<{
                                 updateHome: "set",
                                 visibility: "both",
                                 kind: new ReplyKind(),
-                                debug
+                                debug,
                             });
                             await parent.nearestScope.reIndexDebouncer.flush();
-                        }
-                        else {
+                        } else {
                             log("publish: no parent to sync to");
                         }
 
@@ -341,7 +414,8 @@ export const DraftManagerProvider: React.FC<{
                     })
                     .finally(() => {
                         publishingFlags.current.delete(bucket);
-                        if (publishQueue.current.get(bucket) === next) publishQueue.current.delete(bucket);
+                        if (publishQueue.current.get(bucket) === next)
+                            publishQueue.current.delete(bucket);
                         // 🔔 let subscribers recompute isPublishing=false
                         notify();
                     });
@@ -388,12 +462,19 @@ export const DraftManagerProvider: React.FC<{
 
                     // also if the Canvas is empty remove from its scope
                     if (await rec.canvas.isEmpty()) {
-
-                        log("abandon: removing empty draft", { bucket, draftId: id });
+                        log("abandon: removing empty draft", {
+                            bucket,
+                            draftId: id,
+                        });
                         try {
-                            await rec.canvas.nearestScope?.remove(rec.canvas, { drop: true });
+                            await rec.canvas.nearestScope?.remove(rec.canvas, {
+                                drop: true,
+                            });
                         } catch (error) {
-                            console.error("Failed to remove abandoned draft from scope", error);
+                            console.error(
+                                "Failed to remove abandoned draft from scope",
+                                error
+                            );
                         }
                     }
                 }
@@ -404,18 +485,17 @@ export const DraftManagerProvider: React.FC<{
                 publishQueue.current.delete(bucket);
 
                 // unlink from parentIndex
-                for (const [pid, b] of Array.from(parentIndex.current.entries())) {
+                for (const [pid, b] of Array.from(
+                    parentIndex.current.entries()
+                )) {
                     if (b === bucket) parentIndex.current.delete(pid);
                 }
 
                 // finally drop the record
                 records.current.delete(bucket);
 
-
-
                 notify();
             },
-
 
             listActiveIds() {
                 const all = new Set<string>(ephemeralActive.current);
@@ -431,9 +511,14 @@ export const DraftManagerProvider: React.FC<{
             },
 
             isActiveId(idString: string) {
-                return ephemeralActive.current.has(idString)
-                    || records.current.size > 0 && Array.from(records.current.values()).some(r => r.canvas?.idString === idString)
-                    || retiringActive.current.has(idString);
+                return (
+                    ephemeralActive.current.has(idString) ||
+                    (records.current.size > 0 &&
+                        Array.from(records.current.values()).some(
+                            (r) => r.canvas?.idString === idString
+                        )) ||
+                    retiringActive.current.has(idString)
+                );
             },
 
             subscribe(cb: () => void) {
@@ -452,22 +537,32 @@ export const DraftManagerProvider: React.FC<{
 
             debug: {
                 dump: () => ({
-                    records: Array.from(records.current.entries()).map(([bucket, rec]) => ({
-                        bucket,
-                        draftId: rec.canvas?.idString,
-                        parentId: rec.replyTo?.idString,
-                    })),
+                    records: Array.from(records.current.entries()).map(
+                        ([bucket, rec]) => ({
+                            bucket,
+                            draftId: rec.canvas?.idString,
+                            parentId: rec.replyTo?.idString,
+                        })
+                    ),
                     parentIndex: Array.from(parentIndex.current.entries()),
                     publishQueue: Array.from(publishQueue.current.keys()),
                     publishing: Array.from(publishingFlags.current.keys()),
-                    ephemeralActive: Array.from(ephemeralActive.current.values()),
+                    ephemeralActive: Array.from(
+                        ephemeralActive.current.values()
+                    ),
                 }),
                 clear: (key?: CanvasKey) => {
-                    const buckets = key ? [toBucket(key)] : Array.from(records.current.keys());
+                    const buckets = key
+                        ? [toBucket(key)]
+                        : Array.from(records.current.keys());
                     buckets.forEach((b) => {
                         const rec = records.current.get(b);
                         if (rec?.canvas) {
-                            try { rec.canvas.nearestScope?.remove(rec.canvas, { drop: true }).catch(() => void 0); } catch { }
+                            try {
+                                rec.canvas.nearestScope
+                                    ?.remove(rec.canvas, { drop: true })
+                                    .catch(() => void 0);
+                            } catch {}
                         }
                         records.current.delete(b);
                         debouncers.current.get(b)?.cancel?.();
@@ -477,7 +572,9 @@ export const DraftManagerProvider: React.FC<{
                     if (!key) {
                         parentIndex.current.clear();
                         ephemeralActive.current.clear();
-                        [...retiringActive.current.values()].forEach(clearTimeout);
+                        [...retiringActive.current.values()].forEach(
+                            clearTimeout
+                        );
                         retiringActive.current.clear();
                     }
                     notify();
@@ -487,7 +584,16 @@ export const DraftManagerProvider: React.FC<{
 
         return API;
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [peer?.identity.publicKey.hashcode(), privateScope?.address, publicScope?.address, debug]);
+    }, [
+        peer?.identity.publicKey.hashcode(),
+        privateScope?.address,
+        publicScope?.address,
+        debug,
+    ]);
 
-    return <DraftManagerCtx.Provider value={api}>{children}</DraftManagerCtx.Provider>;
+    return (
+        <DraftManagerCtx.Provider value={api}>
+            {children}
+        </DraftManagerCtx.Provider>
+    );
 };

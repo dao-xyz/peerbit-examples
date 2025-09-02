@@ -5,7 +5,7 @@ export function useSyncedStateRef<T>(initial: T) {
     const ref = useRef<T>(state);
 
     const set = useCallback((next: React.SetStateAction<T>) => {
-        _setState(prev => {
+        _setState((prev) => {
             const v = typeof next === "function" ? (next as any)(prev) : next;
             ref.current = v;
             return v;

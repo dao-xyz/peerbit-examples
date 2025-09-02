@@ -80,7 +80,6 @@ export const useToolbarVisibility = (
         };
     }, [debouncedScroll]);
 
-
     return {
         visible,
         setDisabled,

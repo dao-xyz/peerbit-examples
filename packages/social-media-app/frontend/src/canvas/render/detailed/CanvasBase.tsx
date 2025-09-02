@@ -24,9 +24,9 @@ type BaseProps = SizeProps & {
     bgBlur?: boolean;
     requestPublish?: () => void | Promise<void>;
 } & ({ draft: true; inFullScreen?: boolean } | { draft: false }) & {
-    className?: string;
-    onLoad?: () => void;
-};
+        className?: string;
+        onLoad?: () => void;
+    };
 
 // Configuration the wrappers pass down
 export type ControlContext = {
@@ -89,13 +89,9 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
         }
     };
 
-    const sizingClassNames = ` ${props.fitHeight ? "h-full" : ""} ${props.fitWidth ? "w-full" : ""
-        } ${props.draft
-            ? props.inFullScreen
-                ? ""
-                : ""
-            : ""
-        }`;
+    const sizingClassNames = ` ${props.fitHeight ? "h-full" : ""} ${
+        props.fitWidth ? "w-full" : ""
+    } ${props.draft ? (props.inFullScreen ? "" : "") : ""}`;
 
     const effectiveEditMode = props.config.editModeEnabled(editMode);
     const showControls = props.config.showEditControls(
@@ -109,15 +105,21 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                 removePending(rect.id);
                 try {
                     await canvas?.elements.del(rect.id);
-                } catch { }
+                } catch {}
                 forceUpdate();
             };
 
             return (
-                <div key={rect.idString} className={props.config.itemWrapperClass(rect)}>
+                <div
+                    key={rect.idString}
+                    className={props.config.itemWrapperClass(rect)}
+                >
                     <div
-                        className={`relative flex flex-col overflow-hidden ${rectIsStaticMarkdownText(rect) ? "" : "max-h-[60vh] h-full"
-                            }`}
+                        className={`relative flex flex-col overflow-hidden ${
+                            rectIsStaticMarkdownText(rect)
+                                ? ""
+                                : "max-h-[60vh] h-full"
+                        }`}
                     >
                         {filteredRects.length === 0 && isLoading && (
                             <div className="absolute right-2 flex justify-center align-middle">
@@ -133,10 +135,17 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                                     active={active.has(rect.id)}
                                     className="z-1"
                                     setActive={(v) => {
-                                        if (v) setActive(new Set(active.add(rect.id)));
+                                        if (v)
+                                            setActive(
+                                                new Set(active.add(rect.id))
+                                            );
                                         else
                                             setActive(
-                                                new Set([...active].filter((el) => el !== rect.id))
+                                                new Set(
+                                                    [...active].filter(
+                                                        (el) => el !== rect.id
+                                                    )
+                                                )
                                             );
                                     }}
                                     delete={deleteFn}
@@ -145,7 +154,9 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                                     element={rect}
                                     onLoad={() => handleLoad(rect)}
                                     fit={props.config.frameFit}
-                                    inFullscreen={props.draft && props.inFullScreen}
+                                    inFullscreen={
+                                        props.draft && props.inFullScreen
+                                    }
                                     editControls={
                                         showControls ? (
                                             <div className="mx-1 flex flex-col items-center">
@@ -155,7 +166,10 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                                                     onClick={() =>
                                                         mutate(
                                                             (element) => {
-                                                                const prev = filteredRects[ix - 1];
+                                                                const prev =
+                                                                    filteredRects[
+                                                                        ix - 1
+                                                                    ];
                                                                 element.location.y -= 1;
                                                                 return mutate(
                                                                     (e) => {
@@ -164,12 +178,19 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                                                                         return true;
                                                                     },
                                                                     {
-                                                                        filter: (el) =>
-                                                                            el.idString === prev.idString,
+                                                                        filter: (
+                                                                            el
+                                                                        ) =>
+                                                                            el.idString ===
+                                                                            prev.idString,
                                                                     }
                                                                 );
                                                             },
-                                                            { filter: (el) => el.idString === rect.idString }
+                                                            {
+                                                                filter: (el) =>
+                                                                    el.idString ===
+                                                                    rect.idString,
+                                                            }
                                                         )
                                                     }
                                                 >
@@ -185,11 +206,17 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
 
                                                 <button
                                                     className="mb-2 btn border btn-icon btn-icon-sm"
-                                                    disabled={toRender.length - 1 === ix}
+                                                    disabled={
+                                                        toRender.length - 1 ===
+                                                        ix
+                                                    }
                                                     onClick={() =>
                                                         mutate(
                                                             (element) => {
-                                                                const next = filteredRects[ix + 1];
+                                                                const next =
+                                                                    filteredRects[
+                                                                        ix + 1
+                                                                    ];
                                                                 element.location.y += 1;
                                                                 return mutate(
                                                                     (e) => {
@@ -197,12 +224,19 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                                                                         return true;
                                                                     },
                                                                     {
-                                                                        filter: (el) =>
-                                                                            el.idString === next.idString,
+                                                                        filter: (
+                                                                            el
+                                                                        ) =>
+                                                                            el.idString ===
+                                                                            next.idString,
                                                                     }
                                                                 );
                                                             },
-                                                            { filter: (el) => el.idString === rect.idString }
+                                                            {
+                                                                filter: (el) =>
+                                                                    el.idString ===
+                                                                    rect.idString,
+                                                            }
                                                         )
                                                     }
                                                 >
@@ -220,27 +254,31 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                                     version="1.1"
                                 >
                                     <filter id="gaussianBlurCanvas">
-                                        <feGaussianBlur stdDeviation="25" result="blur" />
+                                        <feGaussianBlur
+                                            stdDeviation="25"
+                                            result="blur"
+                                        />
                                     </filter>
                                 </svg>
 
-                                {!rectIsStaticMarkdownText(rect) && props.bgBlur && (
-                                    <div className="absolute bg-white dark:bg-black w-[150%] h-[150%] left-1/2 top-1/2  -translate-x-1/2 -translate-y-1/2 ">
-                                        <div className="opacity-30 [filter:url('#gaussianBlurCanvas')]">
-                                            <Frame
-                                                thumbnail={false}
-                                                active={false}
-                                                setActive={() => { }}
-                                                delete={() => { }}
-                                                editMode={false}
-                                                showEditControls={false}
-                                                element={rect}
-                                                onLoad={() => { }}
-                                                fit="cover"
-                                            />
+                                {!rectIsStaticMarkdownText(rect) &&
+                                    props.bgBlur && (
+                                        <div className="absolute bg-white dark:bg-black w-[150%] h-[150%] left-1/2 top-1/2  -translate-x-1/2 -translate-y-1/2 ">
+                                            <div className="opacity-30 [filter:url('#gaussianBlurCanvas')]">
+                                                <Frame
+                                                    thumbnail={false}
+                                                    active={false}
+                                                    setActive={() => {}}
+                                                    delete={() => {}}
+                                                    editMode={false}
+                                                    showEditControls={false}
+                                                    element={rect}
+                                                    onLoad={() => {}}
+                                                    fit="cover"
+                                                />
+                                            </div>
                                         </div>
-                                    </div>
-                                )}
+                                    )}
                             </>
                         )}
                     </div>
@@ -250,8 +288,9 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
 
     return filteredRects.length > 0 ? (
         <div
-            className={`flex ${props.config.containerClass} ${sizingClassNames} ${props.className ?? ""
-                }`}
+            className={`flex ${
+                props.config.containerClass
+            } ${sizingClassNames} ${props.className ?? ""}`}
         >
             {renderRects(filteredRects)}
             {filteredRects.length > 0 ? props.children : null}

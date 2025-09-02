@@ -36,6 +36,11 @@ export const createProfile = async (client: ProgramClient) => {
 
     // This handles scope creation, canvas creation, avatar writes, and Profile storage
     const { canvas, profile } = await ensureProfile(client, imageBytes);
-    console.log("Created profile for", client.identity.publicKey.toString(), "with canvas", canvas.idString);
+    console.log(
+        "Created profile for",
+        client.identity.publicKey.toString(),
+        "with canvas",
+        canvas.idString
+    );
     return profile;
 };

@@ -14,14 +14,14 @@ const SPINNER_HEIGHT = 40;
 export const Feed = (
     props:
         | {
-            type: "settings";
-            scrollSettings: ScrollSettings;
-            parentRef: React.RefObject<HTMLDivElement>;
-            viewRef: HTMLElement;
-            onSnapshot: (snap: FeedSnapshot) => void;
-            disableLoadMore?: boolean; // if true, will not load more items
-            provider: typeof useStream;
-        }
+              type: "settings";
+              scrollSettings: ScrollSettings;
+              parentRef: React.RefObject<HTMLDivElement>;
+              viewRef: HTMLElement;
+              onSnapshot: (snap: FeedSnapshot) => void;
+              disableLoadMore?: boolean; // if true, will not load more items
+              provider: typeof useStream;
+          }
         | { type: "feed"; feed: ReturnType<typeof useFeedHooks> }
 ) => {
     const {
@@ -43,8 +43,6 @@ export const Feed = (
         handleLoad,
         indexIsReadyToRender,
     } = props.type === "feed" ? props.feed : useFeedHooks(props);
-
-
 
     /* --------------------------- RENDER ------------------------------ */
     return (
@@ -78,10 +76,11 @@ export const Feed = (
                         )}
  */}
                         <div
-                            className={`${isChat ? "pl-[15px]" : ""
-                                } flex flex-col gap-2 w-full ${
+                            className={`${
+                                isChat ? "pl-[15px]" : ""
+                            } flex flex-col gap-2 w-full ${
                                 /* view.settings.classNameContainer */ ""
-                                }`}
+                            }`}
                         >
                             {processedReplies.map((item, i) => (
                                 <Fragment key={item.id}>
@@ -102,18 +101,19 @@ export const Feed = (
                                         isQuote={item.type === "quote"}
                                         highlightType={
                                             replyTo?.idString ===
-                                                item.reply.idString
+                                            item.reply.idString
                                                 ? typedOnce === true
                                                     ? "selected"
                                                     : "pre-selected"
                                                 : undefined
                                         }
-                                        className={`${indexIsReadyToRender(i)
-                                            ? "visible"
-                                            : "hidden"
-                                            } ${
+                                        className={`${
+                                            indexIsReadyToRender(i)
+                                                ? "visible"
+                                                : "hidden"
+                                        } ${
                                             /* view.settings.classNameReply */ ""
-                                            }`}
+                                        }`}
                                     />
                                 </Fragment>
                             ))}

@@ -21,7 +21,7 @@ import { usePeer } from "@peerbit/react";
 import { FaCheck } from "react-icons/fa";
 import { Spinner } from "../../utils/Spinner";
 import debounce from "lodash.debounce";
-import { equals } from "uint8arrays"
+import { equals } from "uint8arrays";
 
 export type MarkdownContentProps = {
     element: Element<StaticContent<StaticMarkdownText>>;
@@ -92,7 +92,7 @@ export const MarkdownContent = ({
     const caretIsAtEnd = () =>
         textareaRef.current &&
         textareaRef.current.selectionStart ===
-        textareaRef.current.value.length &&
+            textareaRef.current.value.length &&
         textareaRef.current.selectionEnd === textareaRef.current.value.length;
 
     // Helper: push the scroll container (or window) so the caret line is visible
@@ -198,9 +198,9 @@ export const MarkdownContent = ({
                 if (
                     lastDims.current &&
                     Math.abs(lastDims.current.width - newDims.width) <
-                    threshold &&
+                        threshold &&
                     Math.abs(lastDims.current.height - newDims.height) <
-                    threshold
+                        threshold
                 ) {
                     continue;
                 }
@@ -365,8 +365,9 @@ export const MarkdownContent = ({
     return (
         <div
             ref={containerRef}
-            className={`${commonClasses} w-full text-left  ${editable ? "cursor-text" : ""
-                }`}
+            className={`${commonClasses} w-full text-left  ${
+                editable ? "cursor-text" : ""
+            }`}
             style={containerStyle}
             onClick={handleClick}
         >
@@ -379,8 +380,9 @@ export const MarkdownContent = ({
                         onBlur={handleBlur}
                         onKeyDown={handleKeyDown}
                         onInput={autoResize}
-                        className={`${commonClasses} ${padding} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800 ${!inFullscreen ? "textarea-truncate" : ""
-                            }`}
+                        className={`${commonClasses} ${padding} w-full border-none outline-none resize-none block rounded dark:bg-neutral-800 ${
+                            !inFullscreen ? "textarea-truncate" : ""
+                        }`}
                         rows={1}
                         placeholder={
                             suggestReply || placeholder || "Type here..."
@@ -407,14 +409,17 @@ export const MarkdownContent = ({
             ) : (
                 <div
                     style={{ ["--preview-lines" as any]: previewLines }}
-                    className={`${previewLines ? "line-clamp-[var(--preview-lines)]" : ""
-                        } ${previewLines > 0 ? "break-all whitespace-pre-wrap" : ""
-                        } ${editable ? "" : ""} ${editable ? "p-1 min-h-10" : ""} ${classNameContent
+                    className={`${
+                        previewLines ? "line-clamp-[var(--preview-lines)]" : ""
+                    } ${
+                        previewLines > 0 ? "break-all whitespace-pre-wrap" : ""
+                    } ${editable ? "" : ""} ${editable ? "p-1 min-h-10" : ""} ${
+                        classNameContent
                             ? typeof classNameContent === "function"
                                 ? classNameContent(element)
                                 : classNameContent
                             : ""
-                        }`}
+                    }`}
                 >
                     <Markdown
                         disallowedElements={

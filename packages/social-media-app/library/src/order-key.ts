@@ -1,4 +1,5 @@
-const ORDER_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+const ORDER_ALPHABET =
+    "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
 const MID_CHAR = "U"; // ok to keep
 
 function keyAfter(k: string): string {
@@ -22,7 +23,9 @@ function keyBefore(k: string): string {
         const p = A.indexOf(arr[i]);
         if (p > 0) {
             arr[i] = A[p - 1];
-            return arr.slice(0, i + 1).join("") + MAX.repeat(k.length - (i + 1)); // largest < k
+            return (
+                arr.slice(0, i + 1).join("") + MAX.repeat(k.length - (i + 1))
+            ); // largest < k
         }
     }
     // k is the absolute minimum (e.g., "0", "00", ...). If you don't allow empty keys,
@@ -34,14 +37,16 @@ function keyBefore(k: string): string {
 /** Return a key strictly between a and b (lexicographically). */
 export function orderKeyBetween(a?: string, b?: string): string {
     if (a == null && b == null) return MID_CHAR; // first-ever key
-    if (a == null) return keyBefore(b!);         // must be strictly < b
-    if (b == null) return keyAfter(a!);          // must be strictly > a
+    if (a == null) return keyBefore(b!); // must be strictly < b
+    if (b == null) return keyAfter(a!); // must be strictly > a
 
     // ----- strictly between a and b -----
     const A = ORDER_ALPHABET;
-    const MIN = A[0], MAX = A[A.length - 1];
+    const MIN = A[0],
+        MAX = A[A.length - 1];
 
-    if (!(a < b)) throw new Error(`orderKeyBetween requires a < b, got a=${a}, b=${b}`);
+    if (!(a < b))
+        throw new Error(`orderKeyBetween requires a < b, got a=${a}, b=${b}`);
 
     let i = 0;
     while (i < a.length && i < b.length && a[i] === b[i]) i++;

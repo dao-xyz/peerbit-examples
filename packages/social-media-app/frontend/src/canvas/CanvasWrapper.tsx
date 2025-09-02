@@ -64,7 +64,9 @@ export interface CanvasContextType {
     active: Set<Uint8Array>;
     setActive: (value: Set<Uint8Array>) => void;
     pendingRects: Element[];
-    setPendingRects: React.Dispatch<React.SetStateAction<Element<ElementContent>[]>>;
+    setPendingRects: React.Dispatch<
+        React.SetStateAction<Element<ElementContent>[]>
+    >;
     /** Stable function that always saves the latest pendings */
     savePending: (scope: Scope) => Promise<Element[] | undefined>;
     rects: Element[]; // deduped, user-visible list
@@ -84,23 +86,30 @@ export interface CanvasContextType {
     hasTextElement: boolean;
     insertImage: (
         file: File,
-        options?: { scope?: Scope; pending?: boolean; y?: number | "optimize" | "max" }
+        options?: {
+            scope?: Scope;
+            pending?: boolean;
+            y?: number | "optimize" | "max";
+        }
     ) => Promise<void>;
     mutate: (
-        fn: (element: Element<ElementContent>, ix: number) => Promise<boolean> | boolean,
+        fn: (
+            element: Element<ElementContent>,
+            ix: number
+        ) => Promise<boolean> | boolean,
         options?: { filter: (rect: Element) => boolean }
     ) => boolean;
     reduceElementsForViewing: (rects?: Element[]) => Element[];
-    separateAndSortRects: (
-        rects?: Element[]
-    ) => {
+    separateAndSortRects: (rects?: Element[]) => {
         text: Element<StaticContent<StaticMarkdownText>>[];
         other: Element[];
     };
     text: string;
     setRequestAIReply: (v: boolean) => void;
     requestAIReply: boolean;
-    subscribeContentChange: (callback: (element: Element) => void) => () => void;
+    subscribeContentChange: (
+        callback: (element: Element) => void
+    ) => () => void;
     isLoading: boolean;
     isSaving: boolean;
     placeholder?: string;
@@ -108,7 +117,9 @@ export interface CanvasContextType {
     debug?: boolean;
 }
 
-export const CanvasContext = createContext<CanvasContextType | undefined>(undefined);
+export const CanvasContext = createContext<CanvasContextType | undefined>(
+    undefined
+);
 export const useCanvas = () => {
     const ctx = useContext(CanvasContext);
     if (!ctx) throw new Error("useCanvas must be used within a CanvasWrapper");
@@ -150,7 +161,10 @@ const _CanvasWrapper = (
     // -------------------------------------------------- basic hooks ----
     const { peer } = usePeer();
     const debugLog = useMemo(
-        () => (debug ? (...args: any[]) => console.log("[Canvas]", ...args) : () => { }),
+        () =>
+            debug
+                ? (...args: any[]) => console.log("[Canvas]", ...args)
+                : () => {},
         [debug]
     );
 
@@ -165,7 +179,11 @@ const _CanvasWrapper = (
     const canvasDB = useInitializeCanvas(canvasDBMaybeIndexed);
 
     // -------------------------------------------------- local state ----
-    const { ref: pendingRectsRef, state: pendingRects, set: setPendingRects } = useSyncedStateRef<(Element & { placeholder?: boolean })[]>([]);
+    const {
+        ref: pendingRectsRef,
+        state: pendingRects,
+        set: setPendingRects,
+    } = useSyncedStateRef<(Element & { placeholder?: boolean })[]>([]);
     const [active, setActive] = useState<Set<Uint8Array>>(new Set());
     const [isSaving, setIsSaving] = useState(false);
     const [savedOnce, setSavedOnce] = useState<boolean | undefined>(undefined);
@@ -177,7 +195,6 @@ const _CanvasWrapper = (
     const pendingCounter = useRef(0);
     const latestBreakpoint = useRef<"xxs" | "md">("md");
     const setupForCanvasIdDone = useRef<string | undefined>(undefined);
-
 
     const canvasRef = useRef(canvasDB);
     useEffect(() => {
@@ -205,7 +222,6 @@ const _CanvasWrapper = (
     const { items: rects, isLoading } = useQuery(
         [privateScope.elements, publicScope.elements],
         {
-
             query,
             debounce: 123,
             local: true,
@@ -214,17 +230,18 @@ const _CanvasWrapper = (
             remote: {
                 eager: true,
                 joining: { waitFor: 5e3 },
-
             },
             onChange: {
                 merge: (change) => {
-                    const filtered: DocumentsChange<Element<ElementContent>, IndexableElement> = {
+                    const filtered: DocumentsChange<
+                        Element<ElementContent>,
+                        IndexableElement
+                    > = {
                         added: change.added.filter((x) => canvasDB.isOwning(x)),
                         removed: [], // TODO: implement if you need removal merging
                     };
                     return filtered;
                 },
-
             },
         }
     );
@@ -244,37 +261,45 @@ const _CanvasWrapper = (
             return el.content.content instanceof StaticMarkdownText;
         }
         return false;
-    }
+    };
 
     // 2) derived emptiness (no state, no effects)
     const derivedIsEmpty = useMemo(() => {
         // any non-empty pending?
-        if (pendingRects.some(el => !isElementEmpty(el))) return false;
+        if (pendingRects.some((el) => !isElementEmpty(el))) return false;
         // any non-empty committed rects?
-        if (rects.some(el => !isElementEmpty(el))) return false;
+        if (rects.some((el) => !isElementEmpty(el))) return false;
         return true;
     }, [rects, pendingRects]);
 
     // 2b). derived hasTextElement (used to figure out whether to insert a default text box)
     const derivedHasTextElement = useMemo(() => {
         // any text in pending?
-        if (pendingRects.some(el => hasTextElement(el))) return true;
+        if (pendingRects.some((el) => hasTextElement(el))) return true;
         // any text in committed rects?
-        if (rects.some(el => hasTextElement(el))) return true;
+        if (rects.some((el) => hasTextElement(el))) return true;
         return false;
     }, [rects, pendingRects]);
-
-
 
     // Remove an empty pending rect if real rects arrive and the pending was a placeholder
     useEffect(() => {
         if (rects.length > 0 && pendingRects.length > 0) {
             const emptyPending = pendingRects.find(
-                (r) => r.content instanceof StaticContent && r.content.content.isEmpty && r.placeholder === true
+                (r) =>
+                    r.content instanceof StaticContent &&
+                    r.content.content.isEmpty &&
+                    r.placeholder === true
             );
             if (emptyPending) {
                 setPendingRects((prev) =>
-                    prev.filter((p) => !(p.placeholder && p.content instanceof StaticContent && p.content.content.isEmpty))
+                    prev.filter(
+                        (p) =>
+                            !(
+                                p.placeholder &&
+                                p.content instanceof StaticContent &&
+                                p.content.content.isEmpty
+                            )
+                    )
                 );
             }
         }
@@ -283,7 +308,9 @@ const _CanvasWrapper = (
     // View calculations
     const visibleRects = useMemo<Element[]>(() => {
         const idsInQuery = new Set(rects.map((r) => r.idString));
-        const stillPending = pendingRects.filter((p) => !idsInQuery.has(p.idString));
+        const stillPending = pendingRects.filter(
+            (p) => !idsInQuery.has(p.idString)
+        );
         return [...rects, ...stillPending];
     }, [rects, pendingRects]);
 
@@ -292,18 +319,24 @@ const _CanvasWrapper = (
         if (pendingRects.length === 0) return;
         const idsInQuery = new Set(rects.map((r) => r.idString));
         if (idsInQuery.size === 0) return;
-        setPendingRects((prev) => prev.filter((p) => !idsInQuery.has(p.idString)));
+        setPendingRects((prev) =>
+            prev.filter((p) => !idsInQuery.has(p.idString))
+        );
     }, [rects]);
 
     // subscription registry
-    const contentChangeSubscribers = useRef(new Set<(element: Element) => void>());
+    const contentChangeSubscribers = useRef(
+        new Set<(element: Element) => void>()
+    );
     const subscribeContentChange = (cb: (e: Element) => void) => {
         contentChangeSubscribers.current.add(cb);
         return () => contentChangeSubscribers.current.delete(cb);
     };
 
     // utils
-    const reduceElementsForViewing = (elems: Element[] = visibleRects): Element[] => {
+    const reduceElementsForViewing = (
+        elems: Element[] = visibleRects
+    ): Element[] => {
         const groups = new Map<string, Map<number, Element[]>>();
         elems.forEach((rect) => {
             const cid = rect.content.contentIdString;
@@ -322,14 +355,18 @@ const _CanvasWrapper = (
             const candidates = qm.get(bestQ)!;
 
             const full = candidates.filter((r) => !rectIsStaticPartialImage(r));
-            const partial = candidates.filter((r) => rectIsStaticPartialImage(r));
+            const partial = candidates.filter((r) =>
+                rectIsStaticPartialImage(r)
+            );
 
             let best: Element | undefined;
             if (partial.length > 0) {
                 const first = partial[0].content.content as StaticPartialImage;
                 if (first.totalParts === partial.length) {
                     const merged = StaticPartialImage.combine(
-                        partial.map((r) => r.content.content as StaticPartialImage)
+                        partial.map(
+                            (r) => r.content.content as StaticPartialImage
+                        )
                     );
                     const rep = partial[0] as Element<StaticContent>;
                     best = new Element({
@@ -391,7 +428,9 @@ const _CanvasWrapper = (
     };
 
     const reduceYInPending = (fromY: number) => {
-        for (const el of [...pendingRects].sort((a, b) => a.location.y - b.location.y)) {
+        for (const el of [...pendingRects].sort(
+            (a, b) => a.location.y - b.location.y
+        )) {
             if (el.location.y >= fromY) el.location.y--;
         }
     };
@@ -435,12 +474,13 @@ const _CanvasWrapper = (
                 if ((e as any)._changed) _onContentChange(e as Element);
             });
 
-            setPendingRects(updated.map(e => {
-                e._changed = undefined;
-                return e;
-            }));
+            setPendingRects(
+                updated.map((e) => {
+                    e._changed = undefined;
+                    return e;
+                })
+            );
             console.log("mutate: updating pending rects", updated.length);
-
         }
 
         return mutated;
@@ -457,7 +497,11 @@ const _CanvasWrapper = (
     ): Promise<Element>;
     async function addRect(
         contents: ElementContent[],
-        options?: { scope?: Scope; pending?: boolean | { placeholder: boolean }; y?: number | "optimize" | "max" }
+        options?: {
+            scope?: Scope;
+            pending?: boolean | { placeholder: boolean };
+            y?: number | "optimize" | "max";
+        }
     ): Promise<Element[]>;
 
     async function addRect(
@@ -471,10 +515,13 @@ const _CanvasWrapper = (
     ): Promise<Element | Element[]> {
         const firstContent = Array.isArray(contents) ? contents[0] : contents;
         if (!firstContent) throw new Error("Missing content");
-        if (options?.id && Array.isArray(contents)) throw new Error("Cannot set id when adding multiple");
+        if (options?.id && Array.isArray(contents))
+            throw new Error("Cannot set id when adding multiple");
 
         const yStrategy = options.y ?? "optimize";
-        await waitFor(() => publicScope).catch(() => new Error("Canvas not ready"));
+        await waitFor(() => publicScope).catch(
+            () => new Error("Canvas not ready")
+        );
 
         const current = await publicScope.elements.index.search({
             query: getOwnedElementsQuery(canvasDB),
@@ -483,11 +530,14 @@ const _CanvasWrapper = (
 
         let y: number;
         if (typeof yStrategy === "number") y = yStrategy;
-        else if (yStrategy === "optimize") y = getOptimalInsertLocation(firstContent);
+        else if (yStrategy === "optimize")
+            y = getOptimalInsertLocation(firstContent);
         else if (yStrategy === "max") y = getMaxYPlus1(all);
         else throw new Error("Invalid y option");
 
-        for (const el of [...pendingRects].sort((a, b) => a.location.y - b.location.y)) {
+        for (const el of [...pendingRects].sort(
+            (a, b) => a.location.y - b.location.y
+        )) {
             if (el.location.y >= y) el.location.y++;
         }
 
@@ -511,9 +561,14 @@ const _CanvasWrapper = (
             if (options.pending) {
                 debugLog("Adding pending rect", element.idString);
                 setPendingRects((prev) => {
-                    const already = prev.find((x) => x.idString === element.idString);
+                    const already = prev.find(
+                        (x) => x.idString === element.idString
+                    );
                     if (already) {
-                        if (already.content instanceof StaticContent && already.content.content.isEmpty) {
+                        if (
+                            already.content instanceof StaticContent &&
+                            already.content.content.isEmpty
+                        ) {
                             already.placeholder = true;
                             already.content = element.content;
                             return [...prev];
@@ -533,7 +588,10 @@ const _CanvasWrapper = (
         return Array.isArray(contents) ? result : result[0];
     }
 
-    const insertImage = async (file: File, options?: { pending?: boolean; y?: number | "optimize" | "max" }) => {
+    const insertImage = async (
+        file: File,
+        options?: { pending?: boolean; y?: number | "optimize" | "max" }
+    ) => {
         try {
             const images = await readFileAsImage(file);
             const newElements: Element[] = await addRect(images, options);
@@ -543,66 +601,90 @@ const _CanvasWrapper = (
         }
     };
 
-    const insertDefault = useCallback((options?: {
-        app?: SimpleWebManifest;
-        increment?: boolean;
-        pending?: boolean;
-        once?: boolean;
-        placeHolderForEmpty?: boolean;
-        scope?: Scope;
-        y?: number | "optimize" | "max";
-    }) => {
-        if (options?.once) {
-            if (pendingRectsRef.current.length > 0 || rects.length > 0 || insertedDefault.current) return;
-        }
-        insertedDefault.current = true;
-
-        if (options?.increment) {
-            const last = pendingRectsRef.current[pendingRectsRef.current.length - 1];
-            if (!multiCanvas && last && last.content instanceof StaticContent && last.content.content.isEmpty) {
-                // replace last
-            } else {
-                pendingCounter.current++;
+    const insertDefault = useCallback(
+        (options?: {
+            app?: SimpleWebManifest;
+            increment?: boolean;
+            pending?: boolean;
+            once?: boolean;
+            placeHolderForEmpty?: boolean;
+            scope?: Scope;
+            y?: number | "optimize" | "max";
+        }) => {
+            if (options?.once) {
+                if (
+                    pendingRectsRef.current.length > 0 ||
+                    rects.length > 0 ||
+                    insertedDefault.current
+                )
+                    return;
             }
-        }
+            insertedDefault.current = true;
 
-        const defaultId = sha256Sync(
-            concat([canvasDB.id, peer.identity.publicKey.bytes, new Uint8Array([pendingCounter.current])])
-        );
+            if (options?.increment) {
+                const last =
+                    pendingRectsRef.current[pendingRectsRef.current.length - 1];
+                if (
+                    !multiCanvas &&
+                    last &&
+                    last.content instanceof StaticContent &&
+                    last.content.content.isEmpty
+                ) {
+                    // replace last
+                } else {
+                    pendingCounter.current++;
+                }
+            }
 
-        let appContent: ElementContent;
-        if (options?.app) {
-            if (options.app.isNative) {
-                const native = getNativeApp(options.app.url);
-                if (!native) throw new Error("Missing native app for url: " + options.app.url);
-                const v = native.default();
+            const defaultId = sha256Sync(
+                concat([
+                    canvasDB.id,
+                    peer.identity.publicKey.bytes,
+                    new Uint8Array([pendingCounter.current]),
+                ])
+            );
+
+            let appContent: ElementContent;
+            if (options?.app) {
+                if (options.app.isNative) {
+                    const native = getNativeApp(options.app.url);
+                    if (!native)
+                        throw new Error(
+                            "Missing native app for url: " + options.app.url
+                        );
+                    const v = native.default();
+                    appContent = new StaticContent({
+                        content: v,
+                        quality: LOWEST_QUALITY,
+                        contentId: randomBytes(32),
+                    });
+                } else {
+                    appContent = new IFrameContent({
+                        resizer: false,
+                        src: options.app.url,
+                    });
+                }
+            } else {
                 appContent = new StaticContent({
-                    content: v,
+                    content: new StaticMarkdownText({ text: "" }),
                     quality: LOWEST_QUALITY,
-                    contentId: randomBytes(32),
+                    contentId: sha256Sync(new TextEncoder().encode("")),
                 });
-            } else {
-                appContent = new IFrameContent({ resizer: false, src: options.app.url });
             }
-        } else {
-            appContent = new StaticContent({
-                content: new StaticMarkdownText({ text: "" }),
-                quality: LOWEST_QUALITY,
-                contentId: sha256Sync(new TextEncoder().encode("")),
-            });
-        }
 
-        return addRect(appContent, {
-            id: defaultId,
-            pending: true,
-            y: options?.y,
-            scope: options?.scope || privateScope,
-        });
-    }, [canvasDB, peer, multiCanvas, privateScope]);
+            return addRect(appContent, {
+                id: defaultId,
+                pending: true,
+                y: options?.y,
+                scope: options?.scope || privateScope,
+            });
+        },
+        [canvasDB, peer, multiCanvas, privateScope]
+    );
 
     const removePending = (id: Uint8Array) => {
         const pending = pendingRects.find((x) => equals(x.id, id));
-        console.log("remove pending")
+        console.log("remove pending");
         setPendingRects((prev) => prev.filter((el) => !equals(id, el.id)));
         if (pending) {
             reduceYInPending(pending.location.y);
@@ -610,61 +692,79 @@ const _CanvasWrapper = (
     };
 
     // ── stable savePending that reads latest values via refs
-    const savePending = useCallback(async (scope: Scope) => {
-
-        const canvas = canvasRef.current;
-        const pendings = pendingRectsRef.current;
-        debugLog("Saving pending rects", pendings.length, pendingRects.length, "in canvas", canvas.idString);
-        console.log("Saving pending rects", { count: pendings.length, count2: pendingRects.length, canvas: canvas.idString });
-        if (!pendings.length) {
-            console.log("No pending rects to save");
-            debugLog("No pending rects to save");
-            return;
-        }
-        if (savingRef.current) {
-            console.log("Save already in-flight, skipping");
-            debugLog("Save already in-flight, skipping");
-            return;
-        }
-
-        savingRef.current = true;
-        setIsSaving(true);
-        setSavedOnce(true);
-
-        try {
-            const toSave = pendings.filter(
-                (x) => !(x.content instanceof StaticContent) || x.content.content.isEmpty === false
+    const savePending = useCallback(
+        async (scope: Scope) => {
+            const canvas = canvasRef.current;
+            const pendings = pendingRectsRef.current;
+            debugLog(
+                "Saving pending rects",
+                pendings.length,
+                pendingRects.length,
+                "in canvas",
+                canvas.idString
             );
-            console.log("Non-empty rects to save", {
-                total: pendings.length,
-                toSave: toSave.length,
-                canvas: canvas.idString
+            console.log("Saving pending rects", {
+                count: pendings.length,
+                count2: pendingRects.length,
+                canvas: canvas.idString,
             });
-            if (toSave.length === 0) {
-                debugLog("No non-empty rects to save");
+            if (!pendings.length) {
+                console.log("No pending rects to save");
+                debugLog("No pending rects to save");
+                return;
+            }
+            if (savingRef.current) {
+                console.log("Save already in-flight, skipping");
+                debugLog("Save already in-flight, skipping");
                 return;
             }
 
-            pendingCounter.current += toSave.length;
-            for (const el of toSave) {
-                el.parent = canvas;
-                (el as any).placeholder = false;
+            savingRef.current = true;
+            setIsSaving(true);
+            setSavedOnce(true);
+
+            try {
+                const toSave = pendings.filter(
+                    (x) =>
+                        !(x.content instanceof StaticContent) ||
+                        x.content.content.isEmpty === false
+                );
+                console.log("Non-empty rects to save", {
+                    total: pendings.length,
+                    toSave: toSave.length,
+                    canvas: canvas.idString,
+                });
+                if (toSave.length === 0) {
+                    debugLog("No non-empty rects to save");
+                    return;
+                }
+
+                pendingCounter.current += toSave.length;
+                for (const el of toSave) {
+                    el.parent = canvas;
+                    (el as any).placeholder = false;
+                }
+
+                // Optionally: optimistic clear to avoid double-saving on quick subsequent calls
+                // setPendingRects((prev) => prev.filter(p => !toSave.some(s => s.idString === p.idString)));
+
+                await Promise.all(toSave.map((x) => scope.elements.put(x)));
+                debugLog("Saved", toSave.length, "rects");
+                return toSave;
+            } catch (error) {
+                debugLog("Failed to save", error);
+                showError({
+                    message: "Failed to save",
+                    error,
+                    severity: "error",
+                });
+            } finally {
+                savingRef.current = false;
+                setIsSaving(false);
             }
-
-            // Optionally: optimistic clear to avoid double-saving on quick subsequent calls
-            // setPendingRects((prev) => prev.filter(p => !toSave.some(s => s.idString === p.idString)));
-
-            await Promise.all(toSave.map((x) => scope.elements.put(x)));
-            debugLog("Saved", toSave.length, "rects");
-            return toSave;
-        } catch (error) {
-            debugLog("Failed to save", error);
-            showError({ message: "Failed to save", error, severity: "error" });
-        } finally {
-            savingRef.current = false;
-            setIsSaving(false);
-        }
-    }, [debugLog]); // stable, uses refs
+        },
+        [debugLog]
+    ); // stable, uses refs
 
     // ------------------------------------------------------------------
     //  reset & effects
@@ -673,7 +773,7 @@ const _CanvasWrapper = (
         if (savingRef.current) {
             return;
         }
-        debugLog("reset pending rects", pendingRects.length)
+        debugLog("reset pending rects", pendingRects.length);
         setPendingRects([]);
         setSavedOnce(undefined);
     };
@@ -681,7 +781,8 @@ const _CanvasWrapper = (
     useEffect(() => {
         const handleClickOutside = () => setActive(new Set());
         document.addEventListener("mousedown", handleClickOutside);
-        return () => document.removeEventListener("mousedown", handleClickOutside);
+        return () =>
+            document.removeEventListener("mousedown", handleClickOutside);
     }, []);
 
     useEffect(() => {
@@ -689,11 +790,20 @@ const _CanvasWrapper = (
         if (canvasDB.idString === setupForCanvasIdDone.current) return;
         setupForCanvasIdDone.current = canvasDB.idString;
         reset();
-        if (!canvasDB.initialized) throw new Error("Expecting canvas to be open");
-    }, [peer?.identity.publicKey.hashcode(), canvasDB?.idString, publicScope?.idString]);
+        if (!canvasDB.initialized)
+            throw new Error("Expecting canvas to be open");
+    }, [
+        peer?.identity.publicKey.hashcode(),
+        canvasDB?.idString,
+        publicScope?.idString,
+    ]);
 
     const _onContentChange = async (el: Element) => {
-        if (rects.length === 0 && pendingRectsRef.current.length === 1 && rectIsStaticMarkdownText(el)) {
+        if (
+            rects.length === 0 &&
+            pendingRectsRef.current.length === 1 &&
+            rectIsStaticMarkdownText(el)
+        ) {
             setText(el.content.content.text);
         }
         if (rectIsStaticMarkdownText(el)) {
@@ -720,8 +830,13 @@ const _CanvasWrapper = (
     // register handle (optional external consumers)
     const register = useRegisterCanvasHandle();
     useEffect(() => {
-        if (!canvasDB) { return }
-        const unregister = register?.({ savePending, insertDefault, insertImage, mutate }, { canvasId: canvasDB?.idString });
+        if (!canvasDB) {
+            return;
+        }
+        const unregister = register?.(
+            { savePending, insertDefault, insertImage, mutate },
+            { canvasId: canvasDB?.idString }
+        );
         return unregister;
     }, [canvasDB, register, savePending, insertDefault, insertImage, mutate]);
 
@@ -776,7 +891,13 @@ const _CanvasWrapper = (
         ]
     );
 
-    return <CanvasContext.Provider value={contextValue}>{children}</CanvasContext.Provider>;
+    return (
+        <CanvasContext.Provider value={contextValue}>
+            {children}
+        </CanvasContext.Provider>
+    );
 };
 
-export const CanvasWrapper = forwardRef<CanvasHandle, CanvasWrapperProps>(_CanvasWrapper);
+export const CanvasWrapper = forwardRef<CanvasHandle, CanvasWrapperProps>(
+    _CanvasWrapper
+);

@@ -36,7 +36,11 @@ function resolvePrivacy(addr: string, opts?: { private?: boolean }) {
  * Provider
  * ──────────────────────────────────────────────────────────────────────────── */
 
-export function ScopeRegistryProvider({ children }: { children: React.ReactNode }) {
+export function ScopeRegistryProvider({
+    children,
+}: {
+    children: React.ReactNode;
+}) {
     const { peer, persisted } = usePeer();
 
     const scopesRef = React.useRef(new Map<string, Scope>());
@@ -70,11 +74,17 @@ export function ScopeRegistryProvider({ children }: { children: React.ReactNode 
                 } else if (isPrivate) {
                     // deterministic per user (and key) private scope
                     const seedTag = key === "@private" ? "draft" : key;
-                    const seed = concat([peer.identity.publicKey.bytes, new TextEncoder().encode(seedTag)]);
-                    s = await peer.open(new Scope({ publicKey: peer.identity.publicKey, seed }), {
-                        existing: "reuse",
-                        args: { replicate: persisted },
-                    });
+                    const seed = concat([
+                        peer.identity.publicKey.bytes,
+                        new TextEncoder().encode(seedTag),
+                    ]);
+                    s = await peer.open(
+                        new Scope({ publicKey: peer.identity.publicKey, seed }),
+                        {
+                            existing: "reuse",
+                            args: { replicate: persisted },
+                        }
+                    );
                 } else {
                     // custom *public-like* key: reuse the root scope (simple, low-friction default)
                     s = await peer.open(createRootScope(), {
@@ -105,7 +115,11 @@ export function ScopeRegistryProvider({ children }: { children: React.ReactNode 
         [ensure]
     );
 
-    return <ScopeRegistryCtx.Provider value={value}>{children}</ScopeRegistryCtx.Provider>;
+    return (
+        <ScopeRegistryCtx.Provider value={value}>
+            {children}
+        </ScopeRegistryCtx.Provider>
+    );
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -114,14 +128,23 @@ export function ScopeRegistryProvider({ children }: { children: React.ReactNode 
  *   - Scope instance → returned as-is (no registry involvement)
  * ──────────────────────────────────────────────────────────────────────────── */
 
-export function useScope(addressOrScope: "private" | "public" | string | Scope, opts?: { private?: boolean }) {
+export function useScope(
+    addressOrScope: "private" | "public" | string | Scope,
+    opts?: { private?: boolean }
+) {
     const reg = React.useContext(ScopeRegistryCtx);
 
     // If the caller passed a Scope instance, just return it (stable ref via state).
-    const passedScope = typeof addressOrScope === "object" ? (addressOrScope as Scope) : undefined;
+    const passedScope =
+        typeof addressOrScope === "object"
+            ? (addressOrScope as Scope)
+            : undefined;
 
     const key = React.useMemo(
-        () => (passedScope ? `@direct:${passedScope.address}` : normalizeKey(addressOrScope as string)),
+        () =>
+            passedScope
+                ? `@direct:${passedScope.address}`
+                : normalizeKey(addressOrScope as string),
         [passedScope?.address, addressOrScope]
     );
 

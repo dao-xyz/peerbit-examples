@@ -5,7 +5,7 @@ export const useActiveDraftIds = () => {
     const mgr = useDraftManager();
     const [ver, setVer] = useState(0);
 
-    useEffect(() => mgr.subscribe(() => setVer(v => v + 1)), [mgr]);
+    useEffect(() => mgr.subscribe(() => setVer((v) => v + 1)), [mgr]);
 
     // Derive a stable Set<string> of active ids
     return useMemo(() => {

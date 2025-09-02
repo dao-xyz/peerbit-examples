@@ -8,9 +8,9 @@ const config: CanvasBaseConfig = {
     mode: "mixed",
     containerClass: "flex-col gap-4",
     frameFit: "contain",
-    editModeEnabled: (global) => global,                   // edit allowed
+    editModeEnabled: (global) => global, // edit allowed
     showEditControls: (global, n) => global && n > 1,
-    filterRects: (rects: Element<any>[]) => rects,        // no filtering
+    filterRects: (rects: Element<any>[]) => rects, // no filtering
     itemWrapperClass: (_rect) => "",
 };
 

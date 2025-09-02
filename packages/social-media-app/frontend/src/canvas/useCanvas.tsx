@@ -31,13 +31,11 @@ export interface ICanvasContext {
     viewRoot?: WithIndexedContext<Canvas, IndexableCanvas>;
 }
 
-
-
 const initialCtx: ICanvasContext = {
     loading: true,
     path: [],
     /*  createCanvasAtPath: async () => [], */
-    setRoot: () => { },
+    setRoot: () => {},
 };
 
 const Ctx = createContext<ICanvasContext>(initialCtx);
@@ -50,17 +48,19 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const { peer, loading: loadingPeer, persisted } = usePeer();
     const location = useLocation();
 
-    const matchA = useMatch("/c/:id/*")
+    const matchA = useMatch("/c/:id/*");
     const matchB = useMatch("/c/:id");
     const match = matchA || matchB;
 
     const idParam = match?.params?.id; // string | undefined
     const idBytes = getCanvasIdFromPart(idParam);
 
-    const [root, _setRoot] =
-        useState<WithIndexedContext<Canvas, IndexableCanvas> | undefined>();
-    const [path, setPath] =
-        useState<WithIndexedContext<Canvas, IndexableCanvas>[]>([]);
+    const [root, _setRoot] = useState<
+        WithIndexedContext<Canvas, IndexableCanvas> | undefined
+    >();
+    const [path, setPath] = useState<
+        WithIndexedContext<Canvas, IndexableCanvas>[]
+    >([]);
     const [isLoading, setIsLoading] = useState(true);
     const [standalone, setStandalone] = useState<
         WithIndexedContext<Canvas, IndexableCanvas>[] | undefined
@@ -157,18 +157,23 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
 
         let cancelled = false;
         (async () => {
-            const canvases =
-                !idBytes
-                    ? [root]
-                    : await (async () => {
-                        const current = await loadCanvasFromScopes(idBytes, candidateScopes, {
-                            local: true,
-                        });
-                        if (!current) return [root];
-                        const path = await current.loadPath({ includeSelf: true });
-                        console.log("done loading path canvases", path);
-                        return path
-                    })();
+            const canvases = !idBytes
+                ? [root]
+                : await (async () => {
+                      const current = await loadCanvasFromScopes(
+                          idBytes,
+                          candidateScopes,
+                          {
+                              local: true,
+                          }
+                      );
+                      if (!current) return [root];
+                      const path = await current.loadPath({
+                          includeSelf: true,
+                      });
+                      console.log("done loading path canvases", path);
+                      return path;
+                  })();
 
             if (cancelled) return;
             const opened = await openAndIndex(canvases);
@@ -176,7 +181,8 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         })()
             .catch(console.error)
             .finally(() => {
-                if (!cancelled && token === reqToken.current) setIsLoading(false);
+                if (!cancelled && token === reqToken.current)
+                    setIsLoading(false);
             });
 
         return () => {
@@ -185,14 +191,16 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     }, [
         root?.idString,
         idParam, // route id changes
-        candidateScopes
+        candidateScopes,
     ]);
 
     // ensure a root exists (public root by default)
     useEffect(() => {
         if (!peer || !publicScope) {
-
-            console.log("no peer or public scope yet", { peer: !!peer, publicScope: !!publicScope });
+            console.log("no peer or public scope yet", {
+                peer: !!peer,
+                publicScope: !!publicScope,
+            });
             return;
         }
 
@@ -201,8 +209,7 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             if (!root.initialized) {
                 setIsLoading(true);
                 let cancelled = false;
-                root
-                    .load(peer, { args: { replicate: persisted } })
+                root.load(peer, { args: { replicate: persisted } })
                     .then((c) => c.getSelfIndexedCoerced())
                     .then((c) => {
                         if (!cancelled) setRoot(c);

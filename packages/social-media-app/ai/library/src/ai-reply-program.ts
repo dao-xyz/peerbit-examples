@@ -110,7 +110,9 @@ async function getOrderedContextTexts(opts: {
 
             const text = el.content.content.text.replace(/"/g, '\\"');
             const order =
-                el.location && typeof el.location.y === "number" ? el.location.y : undefined;
+                el.location && typeof el.location.y === "number"
+                    ? el.location.y
+                    : undefined;
             const from = el.publicKey.hashcode();
 
             const formatted = `{ from: ${from} message: ${text} }`;
@@ -162,16 +164,21 @@ async function buildAggregatedPrompt(options: {
     const contextTexts = contextTextsArrays.flat();
 
     let aggregated = "Context for generating your reply. Note:\n";
-    aggregated += "- 'from' refers to the author public-key hash of each post.\n\n";
+    aggregated +=
+        "- 'from' refers to the author public-key hash of each post.\n\n";
 
     if (contextTexts.length > 0) {
         aggregated +=
-            "\nRelated Posts (other responses):\n" + contextTexts.join("\n") + "\n";
+            "\nRelated Posts (other responses):\n" +
+            contextTexts.join("\n") +
+            "\n";
     }
 
     aggregated +=
         "\nTarget Post (the post you should reply to):\n" +
-        (targetTexts.length ? targetTexts.join("\n") : "_Missing Target Content_") +
+        (targetTexts.length
+            ? targetTexts.join("\n")
+            : "_Missing Target Content_") +
         "\n";
 
     return aggregated;
@@ -197,8 +204,8 @@ async function processReplyGeneration(options: {
     const contextCanvases = options.context?.length
         ? await resolveCanvases(options.context, options.node)
         : (targetCanvas.__indexed?.path?.length ?? 0) > 0
-            ? [await targetCanvas.loadParent()]
-            : [];
+        ? [await targetCanvas.loadParent()]
+        : [];
 
     const aggregatedContext = await buildAggregatedPrompt({
         targetCanvas,
@@ -227,7 +234,7 @@ async function processReplyGeneration(options: {
                     await targetCanvas.messages.send(
                         new ReplyingInProgresss({ reference: targetCanvas })
                     );
-                } catch { }
+                } catch {}
             }, 1000);
         }
 
@@ -248,7 +255,7 @@ async function processReplyGeneration(options: {
             await targetCanvas.messages.send(
                 new ReplyingNoLongerInProgresss({ reference: targetCanvas })
             );
-        } catch { }
+        } catch {}
     }
 }
 
@@ -297,8 +304,9 @@ export class CanvasAIReply extends Program<Args> {
     constructor(
         properties: { id: Uint8Array } = {
             id: new Uint8Array([
-                38, 8, 228, 136, 247, 41, 32, 68, 122, 69, 86, 130, 235, 190, 83, 104, 253,
-                185, 197, 202, 247, 167, 188, 49, 90, 168, 248, 40, 213, 211, 174, 166,
+                38, 8, 228, 136, 247, 41, 32, 68, 122, 69, 86, 130, 235, 190,
+                83, 104, 253, 185, 197, 202, 247, 167, 188, 49, 90, 168, 248,
+                40, 213, 211, 174, 166,
             ]),
         }
     ) {
@@ -341,7 +349,9 @@ export class CanvasAIReply extends Program<Args> {
 
             if (llm === "ollama") {
                 const ollamaArgs = args as OLLamaArgs;
-                this.supportedModels = ollamaArgs.model ? [ollamaArgs.model] : [DEEP_SEEK_R1_7b];
+                this.supportedModels = ollamaArgs.model
+                    ? [ollamaArgs.model]
+                    : [DEEP_SEEK_R1_7b];
             } else if (llm === "chatgpt") {
                 this.supportedModels = ["gpt-4o"];
                 apiKey = args.apiKey ?? process.env.OPENAI_API_KEY ?? undefined;
@@ -361,35 +371,41 @@ export class CanvasAIReply extends Program<Args> {
             topic: sha256Base64Sync(this.id),
             responseHandler: args?.server
                 ? async (query, context) => {
-                    args?.onRequest?.(query, context);
+                      args?.onRequest?.(query, context);
 
-                    if (query instanceof ChatQuery) {
-                        return this.handleChatQuery(query);
-                    }
-                    if (query instanceof ModelRequest) {
-                        return new ModelResponse({
-                            model: this.supportedModels.join(", "),
-                            info: "Supported models by this peer",
-                        });
-                    }
-                    if (query instanceof SuggestedReplyQuery) {
-                        return this.handleSuggestedReplyQuery({
-                            ...query,
-                            actAs: context.from!,
-                        });
-                    }
-                }
+                      if (query instanceof ChatQuery) {
+                          return this.handleChatQuery(query);
+                      }
+                      if (query instanceof ModelRequest) {
+                          return new ModelResponse({
+                              model: this.supportedModels.join(", "),
+                              info: "Supported models by this peer",
+                          });
+                      }
+                      if (query instanceof SuggestedReplyQuery) {
+                          return this.handleSuggestedReplyQuery({
+                              ...query,
+                              actAs: context.from!,
+                          });
+                      }
+                  }
                 : undefined,
         });
 
         if (!args?.server) {
             const requestModels = async (toPeers?: PublicSignKey[]) => {
                 try {
-                    const responses = await this.rpc.request(new ModelRequest(), {
-                        mode: toPeers
-                            ? new SilentDelivery({ to: toPeers, redundancy: 1 })
-                            : undefined,
-                    });
+                    const responses = await this.rpc.request(
+                        new ModelRequest(),
+                        {
+                            mode: toPeers
+                                ? new SilentDelivery({
+                                      to: toPeers,
+                                      redundancy: 1,
+                                  })
+                                : undefined,
+                        }
+                    );
                     for (const resp of responses) {
                         const modelResp = resp.response as ModelResponse;
                         const fromPk = resp.from!;
@@ -401,7 +417,7 @@ export class CanvasAIReply extends Program<Args> {
                                 peers: new Set([fromPk.hashcode()]),
                             });
                     }
-                } catch { }
+                } catch {}
             };
 
             this.rpc.events.addEventListener("join", async (e: any) => {
@@ -410,7 +426,10 @@ export class CanvasAIReply extends Program<Args> {
             requestModels().catch(ignoreTimeoutandAbort);
         }
 
-        if (args?.replicate || (args?.replicate === undefined && args?.server)) {
+        if (
+            args?.replicate ||
+            (args?.replicate === undefined && args?.server)
+        ) {
             this.origin = defaultGigaReplicator(this.node);
             await this.origin.start();
         }
@@ -539,7 +558,8 @@ export class CanvasAIReply extends Program<Args> {
             if (!("apiKey" in this.serverConfig) || !this.serverConfig.apiKey) {
                 throw new Error("Missing ChatGPT API Key");
             }
-            return (text: string) => queryChatGPT(text, this.serverConfig!.apiKey!);
+            return (text: string) =>
+                queryChatGPT(text, this.serverConfig!.apiKey!);
         }
         // default to ollama
         return (text: string) => queryOllama(text, m);
@@ -593,7 +613,9 @@ export class CanvasAIReply extends Program<Args> {
         try {
             const model = props.model || DEEP_SEEK_R1_7b;
             if (model && !this.supportedModels.includes(model)) {
-                return new SuggestedReplyResponse({ reply: `Missing model ${model}` });
+                return new SuggestedReplyResponse({
+                    reply: `Missing model ${model}`,
+                });
             }
 
             let replyText = "";
@@ -641,7 +663,9 @@ export class CanvasAIReply extends Program<Args> {
             await delay(100);
         }
         throw new Error(
-            `Timeout waiting for ${options?.model ? "model " + options.model : "any model"}`
+            `Timeout waiting for ${
+                options?.model ? "model " + options.model : "any model"
+            }`
         );
     }
 }
@@ -650,7 +674,7 @@ export class CanvasAIReply extends Program<Args> {
  * RPC shapes
  * --------------------------------------------------------------------------*/
 
-abstract class AIRequest { }
+abstract class AIRequest {}
 
 @variant(0)
 export class ChatQuery extends AIRequest {
@@ -717,7 +741,7 @@ export class SuggestedReplyQuery extends AIRequest {
     }
 }
 
-abstract class AIResponse { }
+abstract class AIResponse {}
 
 @variant(0)
 export class ModelResponse extends AIResponse {
@@ -766,12 +790,8 @@ export class SuggestedReplyResponse extends AIResponse {
  *  - (node, text, parent: Canvas|CanvasReference)
  *  - (text, parent: Canvas)  // legacy path
  */
-export async function insertTextIntoCanvas(
-    text: string,
-    target: Canvas,
-
-) {
-    const scope = target.nearestScope;                       // safe after resolve
+export async function insertTextIntoCanvas(text: string, target: Canvas) {
+    const scope = target.nearestScope; // safe after resolve
     return scope.elements.put(
         new Element({
             content: new StaticContent({

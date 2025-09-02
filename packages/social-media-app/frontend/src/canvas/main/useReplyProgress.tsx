@@ -95,7 +95,7 @@ export const ReplyProgressProvider: React.FC<{ children: React.ReactNode }> = ({
                     entry = {
                         counter: 0,
                         peerToReply: new Map(),
-                        unregister: () => { },
+                        unregister: () => {},
                     };
                 }
                 const peerHash = publicKey.hashcode();

@@ -12,7 +12,10 @@ import type { WithIndexedContext } from "@peerbit/document";
 import { randomBytes } from "@peerbit/crypto";
 import { useDraftManager } from "./DraftManager";
 import { PrivateScope } from "../../useScope";
-import { CanvasHandleRegistryContext, Registrar } from "../CanvasHandleRegistry";
+import {
+    CanvasHandleRegistryContext,
+    Registrar,
+} from "../CanvasHandleRegistry";
 
 export type CanvasIx = WithIndexedContext<Canvas, IndexableCanvas>;
 export type CanvasKey = Uint8Array;
@@ -31,7 +34,10 @@ const DraftSessionCtx = createContext<DraftSession | undefined>(undefined);
 
 export const useDraftSession = () => {
     const ctx = useContext(DraftSessionCtx);
-    if (!ctx) throw new Error("useDraftSession must be used within DraftSessionProvider");
+    if (!ctx)
+        throw new Error(
+            "useDraftSession must be used within DraftSessionProvider"
+        );
     return ctx;
 };
 
@@ -49,7 +55,9 @@ export const DraftSessionProvider: React.FC<{
     const [draft, _setDraft] = useState<CanvasIx | undefined>(undefined);
 
     // capture handle for flushing UI edits
-    const handleRef = useRef<{ savePending: (scope: unknown) => Promise<unknown> } | null>(null);
+    const handleRef = useRef<{
+        savePending: (scope: unknown) => Promise<unknown>;
+    } | null>(null);
 
     // drafts live in the private scope
     const privateScope = PrivateScope.useScope();
@@ -60,7 +68,6 @@ export const DraftSessionProvider: React.FC<{
         expectedIdRef.current = d?.idString;
         _setDraft(d);
     };
-
 
     // Helper: abandon a bucket/key safely (supports old manager without .abandon)
     const abandon = (k?: CanvasKey) => {
@@ -132,11 +139,9 @@ export const DraftSessionProvider: React.FC<{
         try {
             await handleRef.current!.savePending(privateScope);
             await mgr.save(k);
-        }
-        catch (error) {
+        } catch (error) {
             console.error("Failed to publish draft", error);
-        }
-        finally {
+        } finally {
             await mgr.publish(k);
             // No need to setDraft here; subscription above handles rotation asap.
         }
@@ -157,30 +162,40 @@ export const DraftSessionProvider: React.FC<{
         return mgr.getReplyTarget(k);
     };
 
-    const isPublishing = keyRef.current ? (mgr.isPublishing?.(keyRef.current) ?? false) : false;
-    const isSaving = keyRef.current ? (mgr.isSaving?.(keyRef.current) ?? false) : false;
+    const isPublishing = keyRef.current
+        ? mgr.isPublishing?.(keyRef.current) ?? false
+        : false;
+    const isSaving = keyRef.current
+        ? mgr.isSaving?.(keyRef.current) ?? false
+        : false;
 
     const value = useMemo(
-        () => ({ draft, publish, saveDebounced, setReplyTarget, getReplyTarget, isPublishing, isSaving }),
+        () => ({
+            draft,
+            publish,
+            saveDebounced,
+            setReplyTarget,
+            getReplyTarget,
+            isPublishing,
+            isSaving,
+        }),
         [draft, isPublishing, handleRef.current, isSaving]
     );
-
 
     const registrar = useCallback<Registrar>((h, meta) => {
         // only accept registration for the *current draft* canvas
         if (meta.canvasId && meta.canvasId === expectedIdRef.current) {
             handleRef.current = h;
-            return () => { if (handleRef.current === h) handleRef.current = null; };
+            return () => {
+                if (handleRef.current === h) handleRef.current = null;
+            };
         }
-        return () => { };
+        return () => {};
     }, []);
-
 
     return (
         <DraftSessionCtx.Provider value={value}>
-            <CanvasHandleRegistryContext.Provider
-                value={registrar}
-            >
+            <CanvasHandleRegistryContext.Provider value={registrar}>
                 {children}
             </CanvasHandleRegistryContext.Provider>
         </DraftSessionCtx.Provider>

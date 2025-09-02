@@ -7,7 +7,7 @@ import {
     ScopeArgs,
 } from "@giga-app/interface";
 import { WithIndexedContext } from "@peerbit/document";
-import { sha256Base64Sync } from "@peerbit/crypto"
+import { sha256Base64Sync } from "@peerbit/crypto";
 
 /** Type guard: checks if the Canvas is already a WithIndexedContext */
 function isIndexedCanvas(
@@ -28,7 +28,7 @@ function stableKey(
     // Indexed canvas → use its id
     if ((input as WithIndexedContext<Canvas, IndexableCanvas>).__indexed?.id) {
         const id: Uint8Array = (input as any).__indexed.id;
-        return `indexed:${(input as Canvas).idString}`
+        return `indexed:${(input as Canvas).idString}`;
     }
 
     // Raw Canvas → idString if available, else base64 of id
@@ -56,8 +56,9 @@ export const useInitializeCanvas = (
     args?: ScopeArgs
 ) => {
     const { peer } = usePeer();
-    const [indexed, setIndexed] =
-        useState<WithIndexedContext<Canvas, IndexableCanvas> | undefined>();
+    const [indexed, setIndexed] = useState<
+        WithIndexedContext<Canvas, IndexableCanvas> | undefined
+    >();
 
     useEffect(() => {
         if (!peer || !canvasLike) {
@@ -71,13 +72,22 @@ export const useInitializeCanvas = (
             // 1) Fast path: already indexed
             if (isIndexedCanvas(canvasLike)) {
                 await canvasLike.load(peer, { args });
-                if (alive) setIndexed(canvasLike as WithIndexedContext<Canvas, IndexableCanvas>);
+                if (alive)
+                    setIndexed(
+                        canvasLike as WithIndexedContext<
+                            Canvas,
+                            IndexableCanvas
+                        >
+                    );
                 return;
             }
 
             // 2) CanvasReference path (has .resolve)
             if (canvasLike instanceof CanvasReference) {
-                const opened = await canvasLike.resolve(peer, { existing: "reuse", args });
+                const opened = await canvasLike.resolve(peer, {
+                    existing: "reuse",
+                    args,
+                });
                 await opened.load(peer, { args });
                 if (alive) setIndexed(opened);
                 return;
@@ -97,9 +107,11 @@ export const useInitializeCanvas = (
             // Coerce to indexed wrapper
             const coerced = await opened.getSelfIndexedCoerced();
             if (alive) setIndexed(coerced);
-
         })().catch((err) => {
-            console.error("useInitializedCanvas: failed to open/index canvas", err);
+            console.error(
+                "useInitializedCanvas: failed to open/index canvas",
+                err
+            );
             if (alive) setIndexed(undefined);
         });
 

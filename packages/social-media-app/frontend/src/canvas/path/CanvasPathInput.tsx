@@ -47,34 +47,34 @@ export const CanvasPathInput: React.FC<{
     /* ── chips for filters+view ───────────────────────────────────── */
     const chips = [
         ...(filterModel &&
-            filterModel.id !== "best" &&
-            filterModel.id !== "chat"
+        filterModel.id !== "best" &&
+        filterModel.id !== "chat"
             ? [
-                {
-                    key: "view",
-                    label: filterModel.name,
-                    icon: <RiSearchEyeLine size={12} />,
-                    remove: () => setQueryParams({ settings: DEFAULT_VIEW }),
-                },
-            ]
+                  {
+                      key: "view",
+                      label: filterModel.name,
+                      icon: <RiSearchEyeLine size={12} />,
+                      remove: () => setQueryParams({ settings: DEFAULT_VIEW }),
+                  },
+              ]
             : []),
         ...(timeFilter.key !== "all"
             ? [
-                {
-                    key: "time",
-                    label: timeFilter.name,
-                    remove: () => setQueryParams({ time: "all" }),
-                },
-            ]
+                  {
+                      key: "time",
+                      label: timeFilter.name,
+                      remove: () => setQueryParams({ time: "all" }),
+                  },
+              ]
             : []),
         ...(typeFilter.key !== "all"
             ? [
-                {
-                    key: "type",
-                    label: typeFilter.name,
-                    remove: () => setQueryParams({ type: "all" }),
-                },
-            ]
+                  {
+                      key: "type",
+                      label: typeFilter.name,
+                      remove: () => setQueryParams({ type: "all" }),
+                  },
+              ]
             : []),
     ];
 
@@ -145,7 +145,12 @@ export const CanvasPathInput: React.FC<{
         navigate(getCanvasPath(canvas));
 
     const renderPathSelection = useMemo(() => {
-        return smartPath(focused, pathElement, path.slice(1, includeSelf ? path.length : path.length - 1), navigateToCanvas);
+        return smartPath(
+            focused,
+            pathElement,
+            path.slice(1, includeSelf ? path.length : path.length - 1),
+            navigateToCanvas
+        );
     }, [focused, path]);
 
     /* ── render ───────────────────────────────────────────────────── */
@@ -199,7 +204,8 @@ export const CanvasPathInput: React.FC<{
                         "ml-1 flex-grow  bg-transparent outline-none text-xs md:text-sm",
                         focused ? "min-w-[40px]" : "w-fit"
                     )}
-                />)}
+                />
+            )}
         </div>
     );
 };

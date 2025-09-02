@@ -14,8 +14,9 @@ export const ReplyingInProgress = (properties: { canvas: Canvas }) => {
         registerCanvas(canvas);
     }, [canvas?.idString, canvas?.initialized]);
 
-    const replyingPeers =
-        canvas?.initialized ? getReplying(canvas.idString) : [];
+    const replyingPeers = canvas?.initialized
+        ? getReplying(canvas.idString)
+        : [];
 
     // If no canvas or no replying peers, don't render anything.
     if (!canvas || replyingPeers.length === 0) return null;

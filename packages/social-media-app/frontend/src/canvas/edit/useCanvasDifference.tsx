@@ -3,7 +3,11 @@ import { usePeer } from "@peerbit/react";
 import { useEffect, useState } from "react";
 import { PrivateScope, PublicScope } from "../useScope";
 
-export const useCanvasPrivateToPublicDifference = (properties: { canvas: Canvas, private?: Scope, public?: Scope }) => {
+export const useCanvasPrivateToPublicDifference = (properties: {
+    canvas: Canvas;
+    private?: Scope;
+    public?: Scope;
+}) => {
     const { peer } = usePeer();
 
     const privateScope = properties?.private || PrivateScope.useScope();
@@ -12,7 +16,12 @@ export const useCanvasPrivateToPublicDifference = (properties: { canvas: Canvas,
     const [diff, setDiff] = useState<boolean>(false);
 
     useEffect(() => {
-        if (!peer || !properties.canvas || privateScope.closed !== false || publicScope.closed !== false) {
+        if (
+            !peer ||
+            !properties.canvas ||
+            privateScope.closed !== false ||
+            publicScope.closed !== false
+        ) {
             return;
         }
 
@@ -21,19 +30,18 @@ export const useCanvasPrivateToPublicDifference = (properties: { canvas: Canvas,
             const diff = await diffCanvases(
                 {
                     canvas: properties.canvas,
-                    scope: privateScope
+                    scope: privateScope,
                 },
                 {
                     canvas: properties.canvas,
-                    scope: publicScope
-                });
+                    scope: publicScope,
+                }
+            );
             setDiff(diff);
-
         };
-        checkChanges()
-
-    }, [properties.canvas, properties?.canvas?.initialized, peer])
+        checkChanges();
+    }, [properties.canvas, properties?.canvas?.initialized, peer]);
     return {
-        diff
+        diff,
     };
-}
+};

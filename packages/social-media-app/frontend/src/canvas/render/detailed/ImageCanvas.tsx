@@ -3,7 +3,6 @@ import { onlyLowestQuality } from "../utils";
 import { CanvasBase, CanvasBaseConfig } from "./CanvasBase";
 import { Element } from "@giga-app/interface";
 
-
 type Props = React.ComponentProps<typeof CanvasBase>;
 
 const filterImages = (rects: Element<any>[]) =>
@@ -15,7 +14,7 @@ const config: CanvasBaseConfig = {
     mode: "images",
     containerClass: "gap-2 p-2", // same as before
     frameFit: "cover",
-    editModeEnabled: () => false,                 // no edit controls in image grid
+    editModeEnabled: () => false, // no edit controls in image grid
     showEditControls: () => false,
     filterRects: filterImages,
     itemWrapperClass: (_rect) =>

@@ -99,12 +99,10 @@ export const Frame = (properties: {
         info?: string;
     } | null>(null);
 
-    const {
-        mutate,
-    } = useCanvas();
+    const { mutate } = useCanvas();
     const publish = () => {
-        return properties.requestPublish()
-    }
+        return properties.requestPublish();
+    };
 
     const open = () => {
         const url = (properties.element.content as IFrameContent).src;
@@ -198,7 +196,7 @@ export const Frame = (properties: {
         );
     };
 
-    const onResize = useCallback(() => { }, []);
+    const onResize = useCallback(() => {}, []);
 
     const renderContent = ({ previewLines }: { previewLines?: number }) => {
         // For iframes, continue to use the iframe as before.
@@ -283,7 +281,7 @@ export const Frame = (properties: {
                         );
 
                         if (options?.save /* && properties.draft */) {
-                            console.log("PUBLISH!")
+                            console.log("PUBLISH!");
                             await publish();
                         }
                     }}
@@ -304,16 +302,19 @@ export const Frame = (properties: {
     return (
         <div
             key={properties.key}
-            className={`flex flex-row w-full h-full max-w-full group ${properties.className || ""}`}
+            className={`flex flex-row w-full h-full max-w-full group ${
+                properties.className || ""
+            }`}
         >
             {renderContent({ previewLines: properties.previewLines })}
 
             {!properties.active && (
                 <div
-                    className={`ml-auto h-full flex ${showCanvasControls
-                        ? "pointer-events-auto"
-                        : "pointer-events-none"
-                        }`}
+                    className={`ml-auto h-full flex ${
+                        showCanvasControls
+                            ? "pointer-events-auto"
+                            : "pointer-events-none"
+                    }`}
                 >
                     <div className="flex flex-col h-full">
                         {showCanvasControls && properties.editControls}

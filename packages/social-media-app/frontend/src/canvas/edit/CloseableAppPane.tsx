@@ -47,14 +47,14 @@ export const CloseableAppPane = (props: {
                     style={
                         appSelectOpen
                             ? {
-                                height: "100%",
-                                pointerEvents: "auto",
-                            }
+                                  height: "100%",
+                                  pointerEvents: "auto",
+                              }
                             : {
-                                display: "none",
-                                height: "0px",
-                                pointerEvents: "none",
-                            }
+                                  display: "none",
+                                  height: "0px",
+                                  pointerEvents: "none",
+                              }
                     }
                 >
                     <AppSelectPaneInline

@@ -116,15 +116,18 @@ export const Header = ({
             {canvas && (
                 <div
                     ref={forwardRef}
-                    className={`flex pt-0 ${reverseLayout ? "flex-row-reverse" : ""
-                        } items-center gap-1 ${direction === "col" ? "flex-col" : "flex-row"
-                        } ${className ?? ""} ${variant === "large" && "w-full"}`}
+                    className={`flex pt-0 ${
+                        reverseLayout ? "flex-row-reverse" : ""
+                    } items-center gap-1 ${
+                        direction === "col" ? "flex-col" : "flex-row"
+                    } ${className ?? ""} ${variant === "large" && "w-full"}`}
                 >
                     <div
-                        className={`overflow-hidden flex mr-1   ${variant === "tiny" || variant === "medium"
-                            ? "rounded-full"
-                            : "rounded-lg"
-                            }`}
+                        className={`overflow-hidden flex mr-1   ${
+                            variant === "tiny" || variant === "medium"
+                                ? "rounded-full"
+                                : "rounded-lg"
+                        }`}
                     >
                         <ProfileButton
                             publicKey={canvas.publicKey}
@@ -133,8 +136,8 @@ export const Header = ({
                                 variant === "large"
                                     ? 20
                                     : variant === "medium"
-                                        ? 16
-                                        : 12
+                                    ? 16
+                                    : 12
                             }
                         />
                     </div>
@@ -146,7 +149,7 @@ export const Header = ({
                                     new Date(
                                         Number(
                                             canvas.context.created /
-                                            BigInt(1000000)
+                                                BigInt(1000000)
                                         )
                                     )
                                 }

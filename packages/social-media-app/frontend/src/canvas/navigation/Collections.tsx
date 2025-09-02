@@ -2,11 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { CanvasWrapper, useCanvas } from "../CanvasWrapper";
 import { CanvasPreview } from "../render/preview/Preview";
 import { useAllPosts } from "../feed/useCollection";
-import {
-    Canvas,
-    IndexableCanvas,
-    LOWEST_QUALITY,
-} from "@giga-app/interface";
+import { Canvas, IndexableCanvas, LOWEST_QUALITY } from "@giga-app/interface";
 import { FaChevronRight, FaList, FaPlus } from "react-icons/fa";
 import { PiTabs } from "react-icons/pi";
 import { BiSolidChevronsUp } from "react-icons/bi";
@@ -21,7 +17,7 @@ import { useNavigate } from "react-router";
 import { getCanvasPath } from "../../routes";
 import { CanvasSettingsButton } from "../header/CanvasSettingsButton";
 import { usePeer } from "@peerbit/react";
-import { WithIndexedContext } from "@peerbit/document"
+import { WithIndexedContext } from "@peerbit/document";
 
 export const TabsOrList = (properties?: {
     className?: string;
@@ -43,12 +39,9 @@ export const TabsOrList = (properties?: {
     });
     const { peer } = usePeer();
     const showToolbar = useMemo(() => {
-
         if (properties?.hideOnEmpty && posts.length === 0) {
             return false;
         }
-
-
 
         const canEdit = properties.canvas?.publicKey.equals(
             peer?.identity.publicKey
@@ -236,7 +229,12 @@ const NewSection: React.FC<{ canvasId: string }> = ({ canvasId }) => {
         <div className="flex flex-col gap-2">
             <InlineEditor /> {/* <-- pass the id */}
             <CloseableAppPane>
-                {!isEmpty && <ToolbarEdit canvasId={canvasId} className="bg-transparent dark:bg-transparent" />}
+                {!isEmpty && (
+                    <ToolbarEdit
+                        canvasId={canvasId}
+                        className="bg-transparent dark:bg-transparent"
+                    />
+                )}
             </CloseableAppPane>
         </div>
     );

@@ -25,12 +25,14 @@ import { CustomizationProvider } from "./canvas/custom/CustomizationProvider";
 import clsx from "clsx";
 import { FocusProvider } from "./FocusProvider";
 import { CanvasProvider } from "./canvas/useCanvas";
-import {
-    StreamProvider,
-} from "./canvas/feed/StreamContext";
+import { StreamProvider } from "./canvas/feed/StreamContext";
 import { EditModeProvider } from "./canvas/edit/EditModeProvider";
 import { ToolbarVisibilityProvider } from "./canvas/edit/ToolbarVisibilityProvider";
-import { PrivateScope, PublicScope, ScopeRegistryProvider } from "./canvas/useScope";
+import {
+    PrivateScope,
+    PublicScope,
+    ScopeRegistryProvider,
+} from "./canvas/useScope";
 import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 
@@ -98,7 +100,9 @@ export const Content = () => {
                                             ref={headerRef}
                                             className={clsx(
                                                 "sticky top-0 inset-x-0  z-30",
-                                                heightStyle[String(headerVisible)]
+                                                heightStyle[
+                                                    String(headerVisible)
+                                                ]
                                             )} /* transition-transform duration-800 ease-in-out */
                                             style={
                                                 {
@@ -121,7 +125,6 @@ export const Content = () => {
                             </ToolbarVisibilityProvider>
                         </DraftManagerProvider>
                         {/* This is the main content area, which will be scrolled */}
-
                     </StreamProvider>
                 </StreamSettingsProvider>
             </CustomizedBackground>
@@ -132,14 +135,14 @@ export const Content = () => {
 const networkConfig: NetworkOption =
     import.meta.env.MODE === "development"
         ? {
-            type: "local",
-        }
+              type: "local",
+          }
         : {
-            type: "remote",
-            bootstrap: [
-                "/dns4/139addd561462895f63820536f36c08a5bd23daa.peerchecker.com/tcp/4003/wss/p2p/12D3KooWMwHdVQHuYd22aUWwBNAStsmVAEchxFhpvdUC6mQiC9wi",
-            ],
-        };
+              type: "remote",
+              bootstrap: [
+                  "/dns4/139addd561462895f63820536f36c08a5bd23daa.peerchecker.com/tcp/4003/wss/p2p/12D3KooWMwHdVQHuYd22aUWwBNAStsmVAEchxFhpvdUC6mQiC9wi",
+              ],
+          };
 
 export const App = () => {
     return (

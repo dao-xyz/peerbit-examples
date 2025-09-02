@@ -35,8 +35,9 @@ export const CreateRoot = () => {
 
     // we keep a raw, serializable draft and an opened+indexed draft for UI
     const [draftRaw, setDraftRaw] = useState<CanvasDB | undefined>();
-    const [draftIndexed, setDraftIndexed] =
-        useState<WithIndexedContext<CanvasDB, IndexableCanvas> | undefined>();
+    const [draftIndexed, setDraftIndexed] = useState<
+        WithIndexedContext<CanvasDB, IndexableCanvas> | undefined
+    >();
 
     const [base64, setBase64] = useState<string | undefined>();
     const [importError, setImportError] = useState<string | false>(false);
@@ -60,7 +61,9 @@ export const CreateRoot = () => {
             // make draft private by giving it a private home
             const raw = new CanvasDB({
                 publicKey: peer.identity.publicKey,
-                selfScope: new AddressReference({ address: privateScope.address }),
+                selfScope: new AddressReference({
+                    address: privateScope.address,
+                }),
             });
 
             // open + register top-level in its home so queries work during drafting
@@ -78,7 +81,9 @@ export const CreateRoot = () => {
     const savePending = async () => {
         if (!draftRaw) return;
         if (!publicScope) {
-            setImportError("Public scope is not mounted. Open/mount public scope first.");
+            setImportError(
+                "Public scope is not mounted. Open/mount public scope first."
+            );
             return;
         }
 
@@ -88,7 +93,7 @@ export const CreateRoot = () => {
         // - visibility:both: mirror link so it’s discoverable from both scopes
         const [, published] = await publicScope.getOrCreateReply(
             undefined,
-            draftRaw,
+            draftRaw
         );
 
         const indexed = await published.getSelfIndexedCoerced();
@@ -104,10 +109,11 @@ export const CreateRoot = () => {
             const imported = deserialize(fromBase64(base64), CanvasDB);
             setDraftRaw(imported);
             // if privateScope matches, open and index for preview
-            const home = mounted.find((s) => s.address === imported.selfScope!.address);
+            const home = mounted.find(
+                (s) => s.address === imported.selfScope!.address
+            );
             if (home) {
-                home
-                    .openWithSameSettings(imported)
+                home.openWithSameSettings(imported)
                     .then((o) => o.getSelfIndexedCoerced())
                     .then(setDraftIndexed)
                     .catch(console.error);
@@ -132,17 +138,38 @@ export const CreateRoot = () => {
     };
 
     return (
-        <div className="relative p-4 w-screen overflow-hidden" style={{ height: "calc(100vh - 50px)" }}>
-            <video className="absolute top-0 left-0 w-full h-full object-cover dark:invert" src="/turtle720.mp4" autoPlay muted loop playsInline />
+        <div
+            className="relative p-4 w-screen overflow-hidden"
+            style={{ height: "calc(100vh - 50px)" }}
+        >
+            <video
+                className="absolute top-0 left-0 w-full h-full object-cover dark:invert"
+                src="/turtle720.mp4"
+                autoPlay
+                muted
+                loop
+                playsInline
+            />
             <div className="relative z-10 p-4 flex justify-center overflow-auto">
                 {!isLoading ? (
-                    <div className="flex flex-col max-w-[600px] w-full space-y-6 p-10 rounded bg-[#87bbc4b5] dark:bg-[#222627b5]" style={{ backdropFilter: "blur(10px)" }}>
+                    <div
+                        className="flex flex-col max-w-[600px] w-full space-y-6 p-10 rounded bg-[#87bbc4b5] dark:bg-[#222627b5]"
+                        style={{ backdropFilter: "blur(10px)" }}
+                    >
                         <div className="flex flex-row gap-4 items-center justify-center">
-                            <h2>Create a new Root (draft privately, publish on save)</h2>
+                            <h2>
+                                Create a new Root (draft privately, publish on
+                                save)
+                            </h2>
                             <LuSprout size={40} className="text-green-500" />
                         </div>
 
-                        <CanvasWrapper canvas={draftIndexed} draft multiCanvas onSave={savePending}>
+                        <CanvasWrapper
+                            canvas={draftIndexed}
+                            draft
+                            multiCanvas
+                            onSave={savePending}
+                        >
                             <div className="flex flex-row gap-4">
                                 <Canvas fitWidth draft />
                                 <SaveButton icon={IoArrowForward} />
@@ -150,8 +177,12 @@ export const CreateRoot = () => {
                         </CanvasWrapper>
 
                         <div className="flex flex-col">
-                            <label htmlFor="base64-input" className="mb-1 font-semibold">
-                                Root Base64 source (paste to import an existing one)
+                            <label
+                                htmlFor="base64-input"
+                                className="mb-1 font-semibold"
+                            >
+                                Root Base64 source (paste to import an existing
+                                one)
                             </label>
                             <div className="flex flex-row gap-2 w-full">
                                 <input
@@ -162,10 +193,18 @@ export const CreateRoot = () => {
                                     className="p-2 flex-grow border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
                                     placeholder="Enter or view base64 string"
                                 />
-                                <button onClick={() => verifyAndImport()} className="btn-elevated btn-icon btn-icon-md" aria-label="Import Base64">
+                                <button
+                                    onClick={() => verifyAndImport()}
+                                    className="btn-elevated btn-icon btn-icon-md"
+                                    aria-label="Import Base64"
+                                >
                                     <IoArrowForward />
                                 </button>
-                                <button onClick={handleCopy} className="btn-elevated btn-icon btn-icon-md" aria-label="Copy Base64">
+                                <button
+                                    onClick={handleCopy}
+                                    className="btn-elevated btn-icon btn-icon-md"
+                                    aria-label="Copy Base64"
+                                >
                                     <BsCopy />
                                 </button>
                             </div>

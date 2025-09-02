@@ -40,14 +40,14 @@ import { equals } from "uint8arrays";
 import { useStreamSettings } from "./StreamSettingsContext"; // ⬅️ new: consume settings via provider
 
 export const STREAM_QUERY_PARAMS = {
-    SETTINGS: "s",      // stream view
-    TIME: "t",      // time filter
-    TYPE: "c",      // type/content filter
-    QUERY: "q",     // free-text search
+    SETTINGS: "s", // stream view
+    TIME: "t", // time filter
+    TYPE: "c", // type/content filter
+    QUERY: "q", // free-text search
 } as const;
 
-export type StreamQueryParamKey = typeof STREAM_QUERY_PARAMS[keyof typeof STREAM_QUERY_PARAMS];
-
+export type StreamQueryParamKey =
+    (typeof STREAM_QUERY_PARAMS)[keyof typeof STREAM_QUERY_PARAMS];
 
 /** Debounce any primitive or reference value *together* so effects run once per change-set. */
 function useCombinedDebounced<A, B>(a: A, b: B, delay: number): { a: A; b: B } {
@@ -66,13 +66,19 @@ function useCombinedDebounced<A, B>(a: A, b: B, delay: number): { a: A; b: B } {
 export type LineType = "start" | "end" | "end-and-start" | "none" | "middle";
 
 // Helper: retrieves parent's address from a canvas message.
-function getParentId(msg: WithIndexedContext<Canvas, IndexableCanvas>): Uint8Array | undefined {
-    return msg.__indexed.path.length ? msg.__indexed.path[msg.__indexed.path.length - 1] : undefined;
+function getParentId(
+    msg: WithIndexedContext<Canvas, IndexableCanvas>
+): Uint8Array | undefined {
+    return msg.__indexed.path.length
+        ? msg.__indexed.path[msg.__indexed.path.length - 1]
+        : undefined;
 }
 
 function useStreamContextHook() {
     const { path: canvases, loading: loadingCanvases, leaf } = useCanvases();
-    const [feedRoot, setFeedRoot] = useState<WithIndexedContext<CanvasDB, IndexableCanvas> | undefined>(undefined);
+    const [feedRoot, setFeedRoot] = useState<
+        WithIndexedContext<CanvasDB, IndexableCanvas> | undefined
+    >(undefined);
     const visualization = useVisualizationContext().visualization;
 
     useEffect(() => {
@@ -84,26 +90,34 @@ function useStreamContextHook() {
 
     // URL-derived view state
     const [searchParams, setSearchParams] = useSearchParams();
-    const settingsQuery: string = searchParams.get(STREAM_QUERY_PARAMS.SETTINGS) as string;
+    const settingsQuery: string = searchParams.get(
+        STREAM_QUERY_PARAMS.SETTINGS
+    ) as string;
 
     const timeFilter: TimeFilter = TIME_FILTERS.get(
-        (searchParams.get(STREAM_QUERY_PARAMS.TIME) as TimeFilterType) || DEFAULT_TIME_FILTER
+        (searchParams.get(STREAM_QUERY_PARAMS.TIME) as TimeFilterType) ||
+            DEFAULT_TIME_FILTER
     );
 
     const typeFilter: TypeFilter = TYPE_FILTERS.get(
-        (searchParams.get(STREAM_QUERY_PARAMS.TYPE) as TypeFilterType) || DEFAULT_TYPE_FILTER
+        (searchParams.get(STREAM_QUERY_PARAMS.TYPE) as TypeFilterType) ||
+            DEFAULT_TYPE_FILTER
     );
 
-    const query: string = (searchParams.get(STREAM_QUERY_PARAMS.QUERY) as string) || undefined;
+    const query: string =
+        (searchParams.get(STREAM_QUERY_PARAMS.QUERY) as string) || undefined;
 
     // helper to safely mutate latest URL params
     const mutateParams = React.useCallback(
         (mutator: (p: URLSearchParams) => void) =>
-            setSearchParams((prev) => {
-                const p = new URLSearchParams(prev);
-                mutator(p);
-                return p;
-            }, { replace: true }),
+            setSearchParams(
+                (prev) => {
+                    const p = new URLSearchParams(prev);
+                    mutator(p);
+                    return p;
+                },
+                { replace: true }
+            ),
         [setSearchParams]
     );
 
@@ -111,27 +125,41 @@ function useStreamContextHook() {
     const setQueryParams = React.useCallback(
         (opts: {
             settings?: string;
-            time?: TimeFilterType;  // 'all' → delete 't'
-            type?: TypeFilterType;  // 'all' → delete 'c'
-            query?: string;         // ''    → delete 'q'
+            time?: TimeFilterType; // 'all' → delete 't'
+            type?: TypeFilterType; // 'all' → delete 'c'
+            query?: string; // ''    → delete 'q'
         }) =>
             mutateParams((p) => {
-                if (opts.settings !== undefined) p.set(STREAM_QUERY_PARAMS.SETTINGS, opts.settings);
-                if (opts.time !== undefined) opts.time === "all" ? p.delete("t") : p.set("t", opts.time);
-                if (opts.type !== undefined) opts.type === "all" ? p.delete("c") : p.set("c", opts.type);
-                if (opts.query !== undefined) opts.query ? p.set(STREAM_QUERY_PARAMS.QUERY, opts.query) : p.delete(STREAM_QUERY_PARAMS.QUERY);
+                if (opts.settings !== undefined)
+                    p.set(STREAM_QUERY_PARAMS.SETTINGS, opts.settings);
+                if (opts.time !== undefined)
+                    opts.time === "all" ? p.delete("t") : p.set("t", opts.time);
+                if (opts.type !== undefined)
+                    opts.type === "all" ? p.delete("c") : p.set("c", opts.type);
+                if (opts.query !== undefined)
+                    opts.query
+                        ? p.set(STREAM_QUERY_PARAMS.QUERY, opts.query)
+                        : p.delete(STREAM_QUERY_PARAMS.QUERY);
             }),
         [mutateParams]
     );
 
     // convenience wrappers
-    const changeSettings = (v: string) => v !== settingsQuery && setQueryParams({ settings: v });
-    const setTimeFilterParam = (t: TimeFilterType) => t !== timeFilter.key && setQueryParams({ time: t });
-    const setTypeFilterParam = (t: TypeFilterType) => t !== typeFilter.key && setQueryParams({ type: t });
-    const setQueryParam = (q: string) => q !== query && setQueryParams({ query: q });
+    const changeSettings = (v: string) =>
+        v !== settingsQuery && setQueryParams({ settings: v });
+    const setTimeFilterParam = (t: TimeFilterType) =>
+        t !== timeFilter.key && setQueryParams({ time: t });
+    const setTypeFilterParam = (t: TypeFilterType) =>
+        t !== typeFilter.key && setQueryParams({ type: t });
+    const setQueryParam = (q: string) =>
+        q !== query && setQueryParams({ query: q });
 
     // Debounce *both* the current view and the canvases path to avoid duplicate effects
-    const { a: debouncedView } = useCombinedDebounced(settingsQuery, canvases, 123);
+    const { a: debouncedView } = useCombinedDebounced(
+        settingsQuery,
+        canvases,
+        123
+    );
 
     // settings (custom views) come from the dedicated provider
     const { dynamicViewItems, createSettings, pinToView } = useStreamSettings();
@@ -152,14 +180,12 @@ function useStreamContextHook() {
 
         const viewToFind = debouncedView || "best";
         return (
-            dynamicViewItems.find((x) => x.id === viewToFind)?.toFilterModel() ||
+            dynamicViewItems
+                .find((x) => x.id === viewToFind)
+                ?.toFilterModel() ||
             ALL_DEFAULT_SETTINGS.find((x) => x.id === viewToFind)
         );
     }, [wantsHeaderDisabled, debouncedView, dynamicViewItems]);
-
-
-
-
 
     // unified replies query
     const canvasQuery = useMemo(() => {
@@ -176,7 +202,9 @@ function useStreamContextHook() {
         }
 
         if (typeFilter && typeFilter.types?.length > 0) {
-            queryObject.query.push(getCanvasWithContentTypesQuery(typeFilter.types));
+            queryObject.query.push(
+                getCanvasWithContentTypesQuery(typeFilter.types)
+            );
         }
 
         queryObject.query.push(getReplyKindQuery(ReplyKind));
@@ -220,11 +248,18 @@ function useStreamContextHook() {
                 return undefined;
             },
             update: async (prev, filtered) => {
-                const merged = await feedRoot.replies.index.updateResults(prev, filtered, canvasQuery, true);
+                const merged = await feedRoot.replies.index.updateResults(
+                    prev,
+                    filtered,
+                    canvasQuery,
+                    true
+                );
                 if (visualization?.view !== ChildVisualization.CHAT) {
                     // Put added to the top (non-chat)
                     for (const added of filtered.added) {
-                        const index = merged.findIndex((item) => item.idString === added.idString);
+                        const index = merged.findIndex(
+                            (item) => item.idString === added.idString
+                        );
                         if (index !== -1) {
                             merged.splice(index, 1);
                             merged.unshift(added);
@@ -326,29 +361,33 @@ function useStreamContextHook() {
         });
     }
 
-    const processedReplies:
-        | ReturnType<typeof insertQuotes>
-        | undefined = useMemo(() => {
+    const processedReplies: ReturnType<typeof insertQuotes> | undefined =
+        useMemo(() => {
             if (!feedRoot?.initialized) return undefined;
-            if (debouncedView === "chat" && sortedReplies && sortedReplies.length > 0 && feedRoot) {
+            if (
+                debouncedView === "chat" &&
+                sortedReplies &&
+                sortedReplies.length > 0 &&
+                feedRoot
+            ) {
                 return insertQuotes(sortedReplies, feedRoot);
             }
             return sortedReplies
                 ? sortedReplies.map((reply) => ({
-                    reply,
-                    type: "reply" as const,
-                    lineType: "none" as const,
-                    id: reply.idString,
-                }))
+                      reply,
+                      type: "reply" as const,
+                      lineType: "none" as const,
+                      id: reply.idString,
+                  }))
                 : [];
         }, [sortedReplies, debouncedView, feedRoot, feedRoot?.initialized]);
 
     return {
         feedRoot,
-        pinToView,           // from settings provider
+        pinToView, // from settings provider
         defaultViews: ALL_DEFAULT_SETTINGS.filter((x) => x.id !== "chat"),
         dynamicViews: dynamicViewItems, // from settings provider
-        createSettings,      // from settings provider
+        createSettings, // from settings provider
         filterModel,
         setView: changeSettings,
         loadMore,
@@ -378,41 +417,46 @@ type Ctx = ReturnType<typeof useStreamContextHook> | undefined;
 
 // (In dev, I recommend throwing to catch wiring issues early.)
 const makeInitialStreamValue = (): ReturnType<typeof useStreamContextHook> =>
-({
-    feedRoot: undefined,
-    pinToView: async () => { },
-    defaultViews: [],
-    dynamicViews: [],
-    createSettings: async () => undefined as any,
-    filterModel: undefined,
-    setView: () => { },
-    loadMore: async () => { },
-    isLoading: false,
-    loading: false,
-    setBatchSize: () => { },
-    batchSize: 3,
-    iteratorId: undefined,
-    lastReply: undefined,
-    sortedReplies: [],
-    processedReplies: [],
-    timeFilter: TIME_FILTERS.get(DEFAULT_TIME_FILTER)!,
-    typeFilter: TYPE_FILTERS.get(DEFAULT_TYPE_FILTER)!,
-    setTimeFilter: () => { },
-    setTypeFilter: () => { },
-    setQueryParams: () => { },
-    hasMore: () => false,
-    query: "",
-    setQuery: () => { },
-} as any);
-
+    ({
+        feedRoot: undefined,
+        pinToView: async () => {},
+        defaultViews: [],
+        dynamicViews: [],
+        createSettings: async () => undefined as any,
+        filterModel: undefined,
+        setView: () => {},
+        loadMore: async () => {},
+        isLoading: false,
+        loading: false,
+        setBatchSize: () => {},
+        batchSize: 3,
+        iteratorId: undefined,
+        lastReply: undefined,
+        sortedReplies: [],
+        processedReplies: [],
+        timeFilter: TIME_FILTERS.get(DEFAULT_TIME_FILTER)!,
+        typeFilter: TYPE_FILTERS.get(DEFAULT_TYPE_FILTER)!,
+        setTimeFilter: () => {},
+        setTypeFilter: () => {},
+        setQueryParams: () => {},
+        hasMore: () => false,
+        query: "",
+        setQuery: () => {},
+    } as any);
 
 const StreamContext: React.Context<Ctx> =
     (globalThis as any)[CTX_KEY] ??
     ((globalThis as any)[CTX_KEY] = createContext<Ctx>(undefined));
 
-export const StreamProvider: React.FC<{ children: ReactNode }> = ({ children }) => {
+export const StreamProvider: React.FC<{ children: ReactNode }> = ({
+    children,
+}) => {
     const value = useStreamContextHook();
-    return <StreamContext.Provider value={value}>{children}</StreamContext.Provider>;
+    return (
+        <StreamContext.Provider value={value}>
+            {children}
+        </StreamContext.Provider>
+    );
 };
 
 // Define the context type from the hook’s return type.

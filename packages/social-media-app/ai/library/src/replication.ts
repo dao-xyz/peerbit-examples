@@ -3,7 +3,7 @@ import { createRoot, Scope } from "@giga-app/interface";
 export interface LifeCycle {
     start: () => Promise<void>;
     stop: () => Promise<void>;
-    root: Scope
+    root: Scope;
 }
 
 export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
@@ -30,6 +30,6 @@ export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
             }
 
             return out.scope;
-        }
+        },
     };
 };

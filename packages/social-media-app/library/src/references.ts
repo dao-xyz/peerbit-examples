@@ -1,4 +1,10 @@
-import { deserialize, field, fixedArray, serialize, variant } from "@dao-xyz/borsh";
+import {
+    deserialize,
+    field,
+    fixedArray,
+    serialize,
+    variant,
+} from "@dao-xyz/borsh";
 import { ProgramClient } from "@peerbit/program";
 import { WithIndexedContext } from "@peerbit/document";
 import { AddressReference, Canvas, IndexableCanvas, Scope } from "./content";
@@ -32,7 +38,9 @@ async function openInHomeAndIndex(
     const opened = await home.openWithSameSettings(canvas);
     const indexed = await opened.getSelfIndexedCoerced();
     if (!indexed) {
-        throw new Error("Failed get indexed Canvas after opening in home scope");
+        throw new Error(
+            "Failed get indexed Canvas after opening in home scope"
+        );
     }
 
     if (!indexed.initialized) {
@@ -58,14 +66,14 @@ export abstract class CanvasReference {
     ): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
         return Promise.all(
             refs.map((r) =>
-                r instanceof Canvas ? openInHomeAndIndex(node, r) : r.resolve(node, opts)
+                r instanceof Canvas
+                    ? openInHomeAndIndex(node, r)
+                    : r.resolve(node, opts)
             )
         );
     }
 
     abstract get id();
-
-
 }
 
 @variant(0)
@@ -99,15 +107,15 @@ export class CanvasAddressReference extends CanvasReference {
         const opened = await home.openWithSameSettings(stub);
         const indexed = await opened.getSelfIndexedCoerced();
         if (!indexed) {
-            throw new Error("Failed to get indexed Canvas after opening in home scope");
+            throw new Error(
+                "Failed to get indexed Canvas after opening in home scope"
+            );
         }
         if (!indexed.initialized) {
             throw new Error("Unexpected");
         }
         return indexed;
     }
-
-
 }
 
 @variant(1)
@@ -143,7 +151,10 @@ export function toValueReference(canvas: Canvas): CanvasValueReference {
 /** Convert to an address ref (requires selfScope to be present). */
 export function toAddressReference(canvas: Canvas): CanvasAddressReference {
     if (!canvas.selfScope) throw new Error("Canvas has no selfScope set");
-    return new CanvasAddressReference({ id: canvas.id, scope: canvas.selfScope });
+    return new CanvasAddressReference({
+        id: canvas.id,
+        scope: canvas.selfScope,
+    });
 }
 
 /** Fallback resolver for mixed inputs (Canvas | CanvasReference). */

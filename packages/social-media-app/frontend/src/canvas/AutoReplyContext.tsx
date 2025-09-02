@@ -1,4 +1,10 @@
-import React, { createContext, useContext, useEffect, useRef, useState } from "react";
+import React, {
+    createContext,
+    useContext,
+    useEffect,
+    useRef,
+    useState,
+} from "react";
 import { ChildVisualization } from "@giga-app/interface";
 import { useCanvas } from "./CanvasWrapper";
 import { useStream } from "./feed/StreamContext";
@@ -12,10 +18,15 @@ interface AutoReplyContextType {
     disable: () => void;
 }
 
-const AutoReplyContext = createContext<AutoReplyContextType | undefined>(undefined);
+const AutoReplyContext = createContext<AutoReplyContextType | undefined>(
+    undefined
+);
 
-export const AutoReplyProvider: React.FC<{ children: React.ReactNode; disabled?: boolean; }> = ({ children, disabled }) => {
-    const { subscribeContentChange, pendingRects, } = useCanvas();
+export const AutoReplyProvider: React.FC<{
+    children: React.ReactNode;
+    disabled?: boolean;
+}> = ({ children, disabled }) => {
+    const { subscribeContentChange, pendingRects } = useCanvas();
     const { processedReplies, feedRoot } = useStream();
     const { visualization } = useVisualizationContext();
     const session = useDraftSession();
@@ -24,7 +35,9 @@ export const AutoReplyProvider: React.FC<{ children: React.ReactNode; disabled?:
     const typedOnce = useRef(false);
     const enabled = useRef(disabled !== undefined ? !disabled : true);
 
-    useEffect(() => { enabled.current = disabled !== undefined ? !disabled : true; }, [disabled]);
+    useEffect(() => {
+        enabled.current = disabled !== undefined ? !disabled : true;
+    }, [disabled]);
 
     const isChat = visualization?.view === ChildVisualization.CHAT;
 
@@ -35,13 +48,21 @@ export const AutoReplyProvider: React.FC<{ children: React.ReactNode; disabled?:
         session.setReplyTarget(target);
     };
 
-    useEffect(() => { setReplyTo(feedRoot); /* reset when root changes */ }, [feedRoot?.idString]); // eslint-disable-line
+    useEffect(() => {
+        setReplyTo(feedRoot); /* reset when root changes */
+    }, [feedRoot?.idString]); // eslint-disable-line
 
     const autoPickReplyTarget = () => {
         if (!processedReplies?.length) return;
         const last = processedReplies[processedReplies.length - 1]?.reply;
         const current = session.getReplyTarget();
-        if (isChat && last && (!current || (current.idString === feedRoot?.idString && last.idString !== feedRoot?.idString))) {
+        if (
+            isChat &&
+            last &&
+            (!current ||
+                (current.idString === feedRoot?.idString &&
+                    last.idString !== feedRoot?.idString))
+        ) {
             setReplyTo(last);
         }
     };
@@ -51,7 +72,10 @@ export const AutoReplyProvider: React.FC<{ children: React.ReactNode; disabled?:
             if (!enabled.current) return;
             typedOnce.current = true;
             for (const el of pendingRects) {
-                if (!el.content.isEmpty) { autoPickReplyTarget(); return; }
+                if (!el.content.isEmpty) {
+                    autoPickReplyTarget();
+                    return;
+                }
             }
             setReplyTo(undefined);
         };
@@ -69,12 +93,17 @@ export const AutoReplyProvider: React.FC<{ children: React.ReactNode; disabled?:
     }, [isChat, processedReplies]); // eslint-disable-line
 
     return (
-        <AutoReplyContext.Provider value={{
-            typedOnce: typedOnce.current,
-            replyTo,
-            setReplyTo,
-            disable: () => { enabled.current = false; setReplyTo(undefined); },
-        }}>
+        <AutoReplyContext.Provider
+            value={{
+                typedOnce: typedOnce.current,
+                replyTo,
+                setReplyTo,
+                disable: () => {
+                    enabled.current = false;
+                    setReplyTo(undefined);
+                },
+            }}
+        >
             {children}
         </AutoReplyContext.Provider>
     );
@@ -82,6 +111,7 @@ export const AutoReplyProvider: React.FC<{ children: React.ReactNode; disabled?:
 
 export const useAutoReply = (): AutoReplyContextType => {
     const ctx = useContext(AutoReplyContext);
-    if (!ctx) throw new Error("useAutoReply must be used within a AutoReplyProvider");
+    if (!ctx)
+        throw new Error("useAutoReply must be used within a AutoReplyProvider");
     return ctx;
 };

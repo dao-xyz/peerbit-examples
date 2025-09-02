@@ -50,8 +50,12 @@ import { ModedThemePalette } from "./colors.js";
 import { type ReplicationOptions } from "@peerbit/shared-log";
 import { orderKeyBetween } from "./order-key.js";
 import { coerceWithContext, coerceWithIndexed } from "@peerbit/document";
-import { /* TODO later BoardViewKind, */ Layout, LinkKind, ReplyKind, ViewKind } from "./link.js";
-
+import {
+    /* TODO later BoardViewKind, */ Layout,
+    LinkKind,
+    ReplyKind,
+    ViewKind,
+} from "./link.js";
 
 export abstract class ElementContent {
     abstract toIndex():
@@ -73,7 +77,6 @@ export abstract class ElementContent {
     abstract get quality(): Quality;
 }
 
-
 @variant(0)
 export class AddressReference {
     @field({ type: "string" })
@@ -81,9 +84,7 @@ export class AddressReference {
     constructor(properties: { address: string }) {
         this.address = properties.address;
     }
-
 }
-
 
 export const LOWEST_QUALITY: 0 = 0;
 export const MEDIUM_QUALITY: 1431655765 = 1431655765; // 33% of max u32
@@ -241,7 +242,7 @@ export class IndexableCanvas {
         this.replies = properties.replies;
         this.path = properties.path;
         this.pathDepth = properties.path.length;
-        this.kind = properties.kind
+        this.kind = properties.kind;
         this.view = properties.view;
         this.contents = properties.contents;
         this.vector = [];
@@ -285,9 +286,7 @@ export class IndexableCanvas {
          );
      } */
 
-    static async from(
-        canvas: Canvas
-    ): Promise<IndexableCanvas> {
+    static async from(canvas: Canvas): Promise<IndexableCanvas> {
         // Build ancestry via ReplyKind edges (same-scope)
         const pathIds = await getPathIdsForIndex(canvas);
 
@@ -300,13 +299,17 @@ export class IndexableCanvas {
         // Child experience + hasLayout
         const vis = await canvas.getVisualization();
         const childrenVisualization =
-            (vis instanceof BasicVisualization ? vis.view : undefined) ?? ChildVisualization.FEED;
+            (vis instanceof BasicVisualization ? vis.view : undefined) ??
+            ChildVisualization.FEED;
 
-        const allKinds = (await canvas.getParentLinks()).map(x => x.kind)
+        const allKinds = (await canvas.getParentLinks()).map((x) => x.kind);
 
         // Content types present on this canvas
         const owned = await canvas.elements.index
-            .iterate({ query: getOwnedElementsQuery(canvas) }, { resolve: false })
+            .iterate(
+                { query: getOwnedElementsQuery(canvas) },
+                { resolve: false }
+            )
             .all();
 
         return new IndexableCanvas({
@@ -317,7 +320,7 @@ export class IndexableCanvas {
             path: pathIds,
             kind: allKinds,
             view: childrenVisualization,
-            contents: owned.map(e => e.type),
+            contents: owned.map((e) => e.type),
         });
     }
 
@@ -370,15 +373,15 @@ export const getOwnedByCanvasQuery = (to: { id: Uint8Array }) => {
     ];
 };
 
-
 async function getPathIdsForIndex(canvas: Canvas): Promise<Uint8Array[]> {
     const chain = await canvas.loadPath({ includeSelf: false }); // ROOT…PARENT
-    return chain.map(c => c.id);
+    return chain.map((c) => c.id);
 }
 
-export const getChildrenLinksQuery = (parentId: Uint8Array) => new ByteMatchQuery({ key: ["parent", "canvasId"], value: parentId })
-export const getParentLinksQuery = (parentId: Uint8Array) => new ByteMatchQuery({ key: ["child", "canvasId"], value: parentId })
-
+export const getChildrenLinksQuery = (parentId: Uint8Array) =>
+    new ByteMatchQuery({ key: ["parent", "canvasId"], value: parentId });
+export const getParentLinksQuery = (parentId: Uint8Array) =>
+    new ByteMatchQuery({ key: ["child", "canvasId"], value: parentId });
 
 async function ensureOpenedInScope(
     scope: Scope,
@@ -397,37 +400,51 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
     try {
         const n = await canvas.nearestScope.replies.count({
             query: [new ByteMatchQuery({ key: "path", value: canvas.id })],
-            approximate: true
+            approximate: true,
         });
         return BigInt(n);
-    } catch { }
+    } catch {}
 
     // Fallback: aggregate children’s cached totals (Σ (1 + childDeep))
     try {
         const scope = canvas.nearestScope;
-        const edges = await scope.links.index.iterate({
-            query: [
-                getChildrenLinksQuery(canvas.id),
-                new IntegerCompare({ key: ["kind", "tag"], value: 0, compare: Compare.Equal }) // ReplyKind
-            ]
-        }).all();
+        const edges = await scope.links.index
+            .iterate({
+                query: [
+                    getChildrenLinksQuery(canvas.id),
+                    new IntegerCompare({
+                        key: ["kind", "tag"],
+                        value: 0,
+                        compare: Compare.Equal,
+                    }), // ReplyKind
+                ],
+            })
+            .all();
 
         let total = 0n;
         for (const e of edges as Link[]) {
-            const childIndexed = await scope.replies.index.get(e.child.canvasId, { resolve: false, local: true });
+            const childIndexed = await scope.replies.index.get(
+                e.child.canvasId,
+                { resolve: false, local: true }
+            );
             const deep = (childIndexed as any)?.__indexed?.replies;
             if (typeof deep === "bigint") total += 1n + deep;
             else if (typeof deep === "number") total += 1n + BigInt(deep);
             else {
                 const n = await scope.replies.count({
-                    query: [new ByteMatchQuery({ key: "path", value: e.child.canvasId })],
-                    approximate: true
+                    query: [
+                        new ByteMatchQuery({
+                            key: "path",
+                            value: e.child.canvasId,
+                        }),
+                    ],
+                    approximate: true,
                 });
                 total += 1n + BigInt(n);
             }
         }
         return total;
-    } catch { }
+    } catch {}
 
     // Last resort: BFS traversal (with loop guards)
     return await canvas.countRepliesBFS({ immediate: false });
@@ -443,27 +460,41 @@ export const getReplyKindQuery = (kind: Constructor<LinkKind>) => {
         tag = 0; // default ReplyKind
     } else if (kind === ViewKind) {
         tag = 1; // ViewKind
-    }
+    } else {
     /* TODO later else if (kind === BoardViewKind) {
          tag = 2; // BoardViewKind
      } */
-    else {
         throw new Error(`Unknown kind: ${kind.name}`);
     }
-    return new IntegerCompare({ key: ["kind", "tag"], value: tag, compare: Compare.Equal });
-}
+    return new IntegerCompare({
+        key: ["kind", "tag"],
+        value: tag,
+        compare: Compare.Equal,
+    });
+};
 
-export const getImmediateRepliesQueryByDepth = (parentId: Uint8Array, parentDepth: number) => [
+export const getImmediateRepliesQueryByDepth = (
+    parentId: Uint8Array,
+    parentDepth: number
+) => [
     new ByteMatchQuery({ key: "path", value: parentId }),
-    new IntegerCompare({ key: "pathDepth", value: parentDepth + 1, compare: Compare.Equal }),
+    new IntegerCompare({
+        key: "pathDepth",
+        value: parentDepth + 1,
+        compare: Compare.Equal,
+    }),
 ];
 
 // If you already fetched the parent indexed doc, you can write:
-export const getImmediateRepliesQuery = (parentIndexed: WithIndexedContext<Canvas, IndexableCanvas> | IndexableCanvas) =>
-    getImmediateRepliesQueryByDepth(parentIndexed.id, parentIndexed instanceof IndexableCanvas ? parentIndexed.pathDepth : parentIndexed.__indexed.pathDepth);
-
-
-
+export const getImmediateRepliesQuery = (
+    parentIndexed: WithIndexedContext<Canvas, IndexableCanvas> | IndexableCanvas
+) =>
+    getImmediateRepliesQueryByDepth(
+        parentIndexed.id,
+        parentIndexed instanceof IndexableCanvas
+            ? parentIndexed.pathDepth
+            : parentIndexed.__indexed.pathDepth
+    );
 
 export const getQualityLessThanOrEqualQuery = (quality: number) => {
     return [
@@ -556,31 +587,61 @@ export const getCanvasWithContentQuery = (source: string) => {
 };
 
 /** Refresh only the cached replies total on a single canvas’ indexed row. */
-async function updateIndexedRepliesOnly(scope: Scope, canvas: Canvas): Promise<void> {
-    const indexed = await scope.replies.index.get(canvas.id, { resolve: false, local: true, remote: { strategy: "fallback", timeout: 5_000 } });
+async function updateIndexedRepliesOnly(
+    scope: Scope,
+    canvas: Canvas
+): Promise<void> {
+    const indexed = await scope.replies.index.get(canvas.id, {
+        resolve: false,
+        local: true,
+        remote: { strategy: "fallback", timeout: 5_000 },
+    });
     if (!indexed) return; // not in index yet (e.g. parent still building); skip
 
     const total = await countRepliesFast(canvas);
     (indexed as IndexableCanvas).replies = total;
 
     // write through the index (keep __context)
-    const wrapped = new scope.replies.index.wrappedIndexedType(indexed, indexed.__context);
+    const wrapped = new scope.replies.index.wrappedIndexedType(
+        indexed,
+        indexed.__context
+    );
     await scope.replies.index.index.put(wrapped);
 }
 
-
-export const loadCanvasFromScopes = async (id: Uint8Array, scopes: Scope[], options?: { local?: boolean }): Promise<Canvas | undefined> => {
-    let first = await Promise.any(scopes.map(scope => scope.replies.index.get(id, { waitFor: 5e3, resolve: true, local: options?.local ?? true, remote: { eager: true, strategy: "fallback", timeout: 1e4 } }).then(x => { return { canvas: x, scope } })));
+export const loadCanvasFromScopes = async (
+    id: Uint8Array,
+    scopes: Scope[],
+    options?: { local?: boolean }
+): Promise<Canvas | undefined> => {
+    let first = await Promise.any(
+        scopes.map((scope) =>
+            scope.replies.index
+                .get(id, {
+                    waitFor: 5e3,
+                    resolve: true,
+                    local: options?.local ?? true,
+                    remote: { eager: true, strategy: "fallback", timeout: 1e4 },
+                })
+                .then((x) => {
+                    return { canvas: x, scope };
+                })
+        )
+    );
 
     if (first) {
         return first.scope.openWithSameSettings(first.canvas);
     }
-    return undefined
-}
+    return undefined;
+};
 
 /** Ensure a canvas is registered in target scope's replies. */
 async function ensureInReplies(scope: Scope, c: Canvas): Promise<boolean> {
-    const existed = await scope.replies.index.get(c.id, { resolve: false, local: true, remote: false });
+    const existed = await scope.replies.index.get(c.id, {
+        resolve: false,
+        local: true,
+        remote: false,
+    });
     if (!existed) {
         await scope.replies.put(c);
         return true;
@@ -591,30 +652,27 @@ async function ensureInReplies(scope: Scope, c: Canvas): Promise<boolean> {
 type Visibility = "child" | "both";
 
 type PublishBase = {
-    visibility?: Visibility;                 // default "both"
-    kind?: LinkKind;                          // default new ReplyKind()
-    view?: ChildVisualization;                // optional child experience
-    parent?: Canvas;                          // if provided, we will link under this parent
-    debug?: boolean;                           // default: false
+    visibility?: Visibility; // default "both"
+    kind?: LinkKind; // default new ReplyKind()
+    view?: ChildVisualization; // optional child experience
+    parent?: Canvas; // if provided, we will link under this parent
+    debug?: boolean; // default: false
 };
 
-type LinkOnly = { type: "link-only" } & PublishBase
+type LinkOnly = { type: "link-only" } & PublishBase;
 type Sync = {
-    type: "sync"
-    targetScope?: Scope;                  // default: parent.nearestScope or this scope
-    updateHome?: "keep" | "set";          // default: "keep"
-} & PublishBase
+    type: "sync";
+    targetScope?: Scope; // default: parent.nearestScope or this scope
+    updateHome?: "keep" | "set"; // default: "keep"
+} & PublishBase;
 type Fork = {
-    type: "fork"
-    targetScope?: Scope;                  // default: parent.nearestScope or this scope
-    id?: "preserve" | "new";              // default: "new"
-    updateHome?: "keep" | "set";          // default: "keep"
+    type: "fork";
+    targetScope?: Scope; // default: parent.nearestScope or this scope
+    id?: "preserve" | "new"; // default: "new"
+    updateHome?: "keep" | "set"; // default: "keep"
 } & PublishBase;
 
-
 type Publish = LinkOnly | Sync | Fork;
-
-
 
 /** Extract scope addresses referenced by a NodeRef; LocalRef belongs to `fallback`. */
 const refScopes = (r: NodeRef, fallback: string): string[] =>
@@ -630,7 +688,7 @@ export async function collectLinkScopesBFS(
     const seeds = new Set<string>();
     seeds.add(parent.nearestScope.address);
     if (child.selfScope) seeds.add(child.selfScope.address);
-    (extraSeeds ?? []).forEach(s => seeds.add(s.address));
+    (extraSeeds ?? []).forEach((s) => seeds.add(s.address));
 
     const visited = new Set<string>();
     const q: string[] = [...seeds];
@@ -643,17 +701,25 @@ export async function collectLinkScopesBFS(
 
         const scope = await client.open<Scope>(addr, {
             existing: "reuse",
-            args: parent.nearestScope.openingArgs
+            args: parent.nearestScope.openingArgs,
         });
 
-        const links = await scope.links.index.iterate({
-            query: [getChildrenLinksQuery(parent.id), getParentLinksQuery(child.id)]
-        }).all() as Link[];
+        const links = (await scope.links.index
+            .iterate({
+                query: [
+                    getChildrenLinksQuery(parent.id),
+                    getParentLinksQuery(child.id),
+                ],
+            })
+            .all()) as Link[];
 
         if (links.length) {
             out.push(scope);
             for (const l of links) {
-                for (const next of [...refScopes(l.parent, addr), ...refScopes(l.child, addr)]) {
+                for (const next of [
+                    ...refScopes(l.parent, addr),
+                    ...refScopes(l.child, addr),
+                ]) {
                     if (!visited.has(next)) q.push(next);
                 }
             }
@@ -661,7 +727,9 @@ export async function collectLinkScopesBFS(
     }
 
     const seen = new Set<string>();
-    return out.filter(s => (seen.has(s.address) ? false : (seen.add(s.address), true)));
+    return out.filter((s) =>
+        seen.has(s.address) ? false : (seen.add(s.address), true)
+    );
 }
 
 /** Discover *all parents* of `child` by scanning reachable scopes (BFS on NodeRefs). */
@@ -672,7 +740,7 @@ export async function collectParentsBFS(
     const client = child.nearestScope.node;
     const seeds = new Set<string>();
     seeds.add(child.nearestScope.address);
-    if (extraSeeds) extraSeeds.forEach(s => seeds.add(s.address));
+    if (extraSeeds) extraSeeds.forEach((s) => seeds.add(s.address));
 
     const visited = new Set<string>();
     const q: string[] = [...seeds];
@@ -685,19 +753,24 @@ export async function collectParentsBFS(
 
         const scope = await client.open<Scope>(addr, {
             existing: "reuse",
-            args: child.nearestScope.openingArgs
+            args: child.nearestScope.openingArgs,
         });
 
         // Links where this child appears as the child end
-        const links = await scope.links.index.iterate({
-            query: [getParentLinksQuery(child.id)]
-        }).all() as Link[];
+        const links = (await scope.links.index
+            .iterate({
+                query: [getParentLinksQuery(child.id)],
+            })
+            .all()) as Link[];
 
         for (const l of links) {
             const parent = await resolveParent(l, scope);
             if (parent) parents.push(parent);
             // Follow NodeRef scopes so we converge
-            for (const next of [...refScopes(l.parent, addr), ...refScopes(l.child, addr)]) {
+            for (const next of [
+                ...refScopes(l.parent, addr),
+                ...refScopes(l.child, addr),
+            ]) {
                 if (!visited.has(next)) q.push(next);
             }
         }
@@ -705,7 +778,9 @@ export async function collectParentsBFS(
 
     // de-dupe parents
     const seen = new Set<string>();
-    return parents.filter(p => (seen.has(p.idString) ? false : (seen.add(p.idString), true)));
+    return parents.filter((p) =>
+        seen.has(p.idString) ? false : (seen.add(p.idString), true)
+    );
 }
 
 type LinkVisibility = "both" | "child";
@@ -723,14 +798,33 @@ async function addReply(
     const linkId = Link.createId(parentRef, childRef, kind.tag);
 
     // ground truth in CHILD scope
-    if (!(await childScope.links.index.get(linkId, { resolve: false, local: true }))) {
-        await childScope.links.put(new Link({ id: linkId, parent: parentRef, child: childRef, kind }));
+    if (
+        !(await childScope.links.index.get(linkId, {
+            resolve: false,
+            local: true,
+        }))
+    ) {
+        await childScope.links.put(
+            new Link({ id: linkId, parent: parentRef, child: childRef, kind })
+        );
     }
 
     // optional mirror in PARENT scope
     if (visibility === "both") {
-        if (!(await parentScope.links.index.get(linkId, { resolve: false, local: true }))) {
-            await parentScope.links.put(new Link({ id: linkId, parent: parentRef, child: childRef, kind }));
+        if (
+            !(await parentScope.links.index.get(linkId, {
+                resolve: false,
+                local: true,
+            }))
+        ) {
+            await parentScope.links.put(
+                new Link({
+                    id: linkId,
+                    parent: parentRef,
+                    child: childRef,
+                    kind,
+                })
+            );
         }
     }
 }
@@ -740,7 +834,9 @@ async function* iterLinksOverScopes(
     q: Query[]
 ): AsyncGenerator<Link> {
     for (const s of scopes) {
-        const links = await s.links.index.iterate({ query: q }).all() as Link[];
+        const links = (await s.links.index
+            .iterate({ query: q })
+            .all()) as Link[];
         for (const l of links) yield l;
     }
 }
@@ -750,7 +846,7 @@ async function* iterLinksWithOrigin(
     query: Query[]
 ): AsyncGenerator<{ link: Link; scope: Scope }> {
     for (const s of scopes) {
-        const links = await s.links.index.iterate({ query }).all() as Link[];
+        const links = (await s.links.index.iterate({ query }).all()) as Link[];
         for (const l of links) yield { link: l, scope: s };
     }
 }
@@ -761,9 +857,14 @@ async function deleteLinksInScope(
     childId: Uint8Array,
     shouldDelete: (l: Link) => boolean
 ): Promise<void> {
-    const links = await scope.links.index.iterate({
-        query: [getChildrenLinksQuery(parentId), getParentLinksQuery(childId)]
-    }).all() as Link[];
+    const links = (await scope.links.index
+        .iterate({
+            query: [
+                getChildrenLinksQuery(parentId),
+                getParentLinksQuery(childId),
+            ],
+        })
+        .all()) as Link[];
 
     for (const l of links) {
         if (shouldDelete(l)) {
@@ -775,27 +876,32 @@ async function deleteLinksInScope(
 // --- unified remover ---
 type UnlinkKind = "reply" | "view" | "all";
 const isReply = (l: Link) => l.kind instanceof ReplyKind;
-const isView = (l: Link) => l.kind instanceof ViewKind
+const isView = (l: Link) => l.kind instanceof ViewKind;
 const anyKind = (_: Link) => true;
-
 
 async function unlink(
     this: Canvas,
     childId: Uint8Array,
     options?: {
-        kinds?: UnlinkKind | UnlinkKind[];  // default: "all"
-        scopes?: Scope[];                   // mirrors to clean (default: [parentScope])
-        strict?: boolean;                   // if true, don't fallback to parentScope.replies
+        kinds?: UnlinkKind | UnlinkKind[]; // default: "all"
+        scopes?: Scope[]; // mirrors to clean (default: [parentScope])
+        strict?: boolean; // if true, don't fallback to parentScope.replies
     }
 ): Promise<void> {
     const parentScope = this.nearestScope;
-    const mirrorScopes = options?.scopes?.length ? options.scopes : [parentScope];
+    const mirrorScopes = options?.scopes?.length
+        ? options.scopes
+        : [parentScope];
 
     // normalize kinds → predicate
-    const ks = Array.isArray(options?.kinds) ? options!.kinds : [options?.kinds ?? "all"];
-    const shouldDelete: (l: Link) => boolean =
-        ks.includes("all") ? anyKind :
-            (l) => (ks.includes("reply") && isReply(l)) || (ks.includes("view") && isView(l));
+    const ks = Array.isArray(options?.kinds)
+        ? options!.kinds
+        : [options?.kinds ?? "all"];
+    const shouldDelete: (l: Link) => boolean = ks.includes("all")
+        ? anyKind
+        : (l) =>
+              (ks.includes("reply") && isReply(l)) ||
+              (ks.includes("view") && isView(l));
 
     // 1) remove mirrors first (parent + any extra scopes)
     for (const s of mirrorScopes) {
@@ -807,15 +913,20 @@ async function unlink(
     let childCanvas: Canvas | undefined;
     for await (const { link, scope } of iterLinksWithOrigin(mirrorScopes, [
         getChildrenLinksQuery(this.id),
-        getParentLinksQuery(childId)
+        getParentLinksQuery(childId),
     ])) {
         const maybeChild = await resolveChild(link, scope);
-        if (maybeChild) { childCanvas = maybeChild; break; }
+        if (maybeChild) {
+            childCanvas = maybeChild;
+            break;
+        }
     }
 
     // Optional fallback if no mirrors present or strict privacy
     if (!childCanvas && options?.strict !== true) {
-        const fallback = await parentScope.replies.index.get(childId, { resolve: true });
+        const fallback = await parentScope.replies.index.get(childId, {
+            resolve: true,
+        });
         if (fallback) childCanvas = fallback;
     }
 
@@ -824,7 +935,6 @@ async function unlink(
         await deleteLinksInScope(childScope, this.id, childId, shouldDelete);
     }
 }
-
 
 /** Copy ALL owned elements from src→dst (across scopes), preserving IDs. */
 async function copyElementsBetweenScopes(
@@ -835,7 +945,9 @@ async function copyElementsBetweenScopes(
     opts?: { debug?: boolean }
 ): Promise<void> {
     const debug = !!opts?.debug;
-    const dlog = (...args: any[]) => { if (debug) console.debug("[copyElementsBetweenScopes]", ...args); };
+    const dlog = (...args: any[]) => {
+        if (debug) console.debug("[copyElementsBetweenScopes]", ...args);
+    };
 
     // gather source elements
     const srcEls = await from.elements.index
@@ -846,7 +958,7 @@ async function copyElementsBetweenScopes(
     const existingAtDest = await to.elements.index
         .iterate({ query: getOwnedByCanvasQuery(dst) }, { resolve: false })
         .all();
-    const existingIds = new Set(existingAtDest.map(e => e.idString));
+    const existingIds = new Set(existingAtDest.map((e) => e.idString));
 
     dlog("begin", {
         from: from.address,
@@ -863,11 +975,12 @@ async function copyElementsBetweenScopes(
     await Promise.all(
         srcEls.map(async (e) => {
             const existed = existingIds.has(e.idString);
-            if (existed) updated++; else created++;
+            if (existed) updated++;
+            else created++;
 
             await to.elements.put(
                 new Element({
-                    id: e.id,                                 // preserve id for "sync"
+                    id: e.id, // preserve id for "sync"
                     publicKey: to.node.identity.publicKey,
                     canvasId: dst.id,
                     location: e.location,
@@ -890,8 +1003,6 @@ async function copyElementsBetweenScopes(
     }
 }
 
-
-
 /** Copy visualization (if any) from src→dst (across scopes). */
 async function copyVisualizationBetweenScopes(
     from: Scope,
@@ -901,7 +1012,9 @@ async function copyVisualizationBetweenScopes(
     opts?: { debug?: boolean }
 ): Promise<void> {
     const debug = !!opts?.debug;
-    const dlog = (...args: any[]) => { if (debug) console.debug("[copyVisualizationBetweenScopes]", ...args); };
+    const dlog = (...args: any[]) => {
+        if (debug) console.debug("[copyVisualizationBetweenScopes]", ...args);
+    };
 
     const viz = await from.getVisualization(src).catch(() => null);
     dlog("begin", {
@@ -929,7 +1042,6 @@ async function copyVisualizationBetweenScopes(
     dlog("end: visualization upserted in dest");
 }
 
-
 // helpers (drop these near copyElementsBetweenScopes)
 async function deleteOwnedElementsInScope(scope: Scope, canvas: Canvas) {
     const els = await scope.elements.index
@@ -947,17 +1059,13 @@ async function deleteVisualizationsInScope(scope: Scope, canvas: Canvas) {
 
 /** Remove any links that reference `canvas` as a child inside `scope`. */
 async function deleteChildLinksForCanvasInScope(scope: Scope, canvas: Canvas) {
-    const links = await scope.links.index
+    const links = (await scope.links.index
         .iterate({ query: [getParentLinksQuery(canvas.id)] })
-        .all() as Link[];
+        .all()) as Link[];
     for (const l of links) await scope.links.del(l.id);
 }
 
-
-
-
-
-export abstract class CanvasMessage { }
+export abstract class CanvasMessage {}
 
 @variant(0)
 export class ReplyingInProgresss extends CanvasMessage {
@@ -969,7 +1077,7 @@ export class ReplyingInProgresss extends CanvasMessage {
         this.reference =
             properties.reference instanceof Uint8Array
                 ? properties.reference
-                : properties.reference.id
+                : properties.reference.id;
     }
 }
 
@@ -983,13 +1091,13 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
         this.reference =
             properties.reference instanceof Uint8Array
                 ? properties.reference
-                : properties.reference.id
+                : properties.reference.id;
     }
 }
 
 /* -------------- STYLING ------------------ */
 
-export abstract class AbstractBackground { }
+export abstract class AbstractBackground {}
 
 @variant(0)
 export class ModedBackground {
@@ -1163,14 +1271,16 @@ export type ScopeArgs = {
  * --------------------------------------------------------- */
 
 export abstract class NodeRef {
-    abstract get canvasId(): Uint8Array
+    abstract get canvasId(): Uint8Array;
 }
 
 @variant(0)
 export class LocalRef extends NodeRef {
-
     @field({ type: fixedArray("u8", 32) }) canvasId: Uint8Array; // same scope as the link store
-    constructor(p: { canvasId: Uint8Array }) { super(); this.canvasId = p.canvasId; }
+    constructor(p: { canvasId: Uint8Array }) {
+        super();
+        this.canvasId = p.canvasId;
+    }
 }
 
 @variant(1)
@@ -1179,54 +1289,75 @@ export class ScopedRef extends NodeRef {
     @field({ type: fixedArray("u8", 32) }) canvasId: Uint8Array;
     constructor(p: { scope: string | Scope; id: Uint8Array }) {
         super();
-        this.scope = p.scope instanceof Scope
-            ? new AddressReference({ address: p.scope.address })
-            : new AddressReference({ address: p.scope });
+        this.scope =
+            p.scope instanceof Scope
+                ? new AddressReference({ address: p.scope.address })
+                : new AddressReference({ address: p.scope });
         this.canvasId = p.id;
     }
 }
 
-async function resolveRef(ref: NodeRef, defaultScope: Scope, args?: ScopeArgs, resolveOptions?: ResolveOptions): Promise<WithIndexedContext<Canvas, IndexableCanvas> | null> {
+async function resolveRef(
+    ref: NodeRef,
+    defaultScope: Scope,
+    args?: ScopeArgs,
+    resolveOptions?: ResolveOptions
+): Promise<WithIndexedContext<Canvas, IndexableCanvas> | null> {
     if (ref instanceof LocalRef) {
-        return defaultScope.replies.index.get(ref.canvasId, { resolve: true, waitFor: 5e3, ...resolveOptions });
+        return defaultScope.replies.index.get(ref.canvasId, {
+            resolve: true,
+            waitFor: 5e3,
+            ...resolveOptions,
+        });
     } else if (ref instanceof ScopedRef) {
-        const scope = await defaultScope.node.open<Scope>(ref.scope.address, { existing: "reuse", args });
-        return scope.replies.index.get(ref.canvasId, { resolve: true, waitFor: 5e3, ...resolveOptions });
-    }
-    else {
+        const scope = await defaultScope.node.open<Scope>(ref.scope.address, {
+            existing: "reuse",
+            args,
+        });
+        return scope.replies.index.get(ref.canvasId, {
+            resolve: true,
+            waitFor: 5e3,
+            ...resolveOptions,
+        });
+    } else {
         throw new Error("Unknown NodeRef type: " + ref?.constructor.name);
     }
 }
 
-type ResolveOptions = { local?: boolean, remote?: boolean, waitFor?: number };
-export async function resolveParent(link: Link, baseScope: Scope, options?: ResolveOptions) {
+type ResolveOptions = { local?: boolean; remote?: boolean; waitFor?: number };
+export async function resolveParent(
+    link: Link,
+    baseScope: Scope,
+    options?: ResolveOptions
+) {
     return resolveRef(link.parent, baseScope, baseScope.openingArgs, options);
 }
 
-export async function resolveChild(link: Link, baseScope: Scope, options?: ResolveOptions) {
+export async function resolveChild(
+    link: Link,
+    baseScope: Scope,
+    options?: ResolveOptions
+) {
     return resolveRef(link.child, baseScope, baseScope.openingArgs, options);
 }
-
 
 const buildRefLink = (parent: Canvas, child: Canvas) => {
     const parentScope = parent.nearestScope;
     const childScope = child.nearestScope;
-    const sameScope = parentScope.address === childScope.address
-    const parentRef: NodeRef =
-        sameScope
-            ? new LocalRef({ canvasId: parent.id })
-            : new ScopedRef({ id: parent.id, scope: parentScope.address });
+    const sameScope = parentScope.address === childScope.address;
+    const parentRef: NodeRef = sameScope
+        ? new LocalRef({ canvasId: parent.id })
+        : new ScopedRef({ id: parent.id, scope: parentScope.address });
 
-    const childRef: NodeRef =
-        sameScope
-            ? new LocalRef({ canvasId: child.id })
-            : new ScopedRef({ id: child.id, scope: childScope.address });
+    const childRef: NodeRef = sameScope
+        ? new LocalRef({ canvasId: child.id })
+        : new ScopedRef({ id: child.id, scope: childScope.address });
 
     return {
         parent: parentRef,
         child: childRef,
-    }
-}
+    };
+};
 
 @variant(0)
 export class Link<TKind extends LinkKind = LinkKind> {
@@ -1248,11 +1379,9 @@ export class Link<TKind extends LinkKind = LinkKind> {
         child: NodeRef;
         kind: TKind;
     }) {
-        this.id = props.id || Link.createId(
-            props.parent,
-            props.child,
-            props.kind.tag
-        );
+        this.id =
+            props.id ||
+            Link.createId(props.parent, props.child, props.kind.tag);
         this.parent = props.parent;
         this.child = props.child;
         this.kind = props.kind;
@@ -1261,9 +1390,14 @@ export class Link<TKind extends LinkKind = LinkKind> {
     static createId(parent: NodeRef, child: NodeRef, tag: number) {
         const enc = (r: NodeRef) =>
             r instanceof ScopedRef
-                ? concat([new TextEncoder().encode(r.scope.address), r.canvasId])
+                ? concat([
+                      new TextEncoder().encode(r.scope.address),
+                      r.canvasId,
+                  ])
                 : (r as LocalRef).canvasId;
-        return sha256Sync(concat([new Uint8Array([tag]), enc(parent), enc(child)]));
+        return sha256Sync(
+            concat([new Uint8Array([tag]), enc(parent), enc(child)])
+        );
     }
 
     private _idString: string;
@@ -1273,16 +1407,18 @@ export class Link<TKind extends LinkKind = LinkKind> {
 }
 
 const reIndexRepliesInParents = async (scope: Scope, canvas: Canvas) => {
-
     const opened = await ensureOpenedInScope(scope, canvas);
 
     const loadedPath = await opened.loadPath({ includeSelf: false });
     // i = 1 start to skip the root, -1 to skip the current canvas
     // (we only want to-re-index parents)
-    for (let i = loadedPath.length - 1; i >= 1; i--) { // don't load the last element because that is the root which does not need to be re-indexed
+    for (let i = loadedPath.length - 1; i >= 1; i--) {
+        // don't load the last element because that is the root which does not need to be re-indexed
         //  await loadedPath[i].load();
         if (!loadedPath[i]) {
-            throw new Error("Loaded path is empty, cannot re-index replies in parents");
+            throw new Error(
+                "Loaded path is empty, cannot re-index replies in parents"
+            );
         }
 
         await scope.reIndexDebouncer.add({
@@ -1322,9 +1458,11 @@ function makeReindexListener<T, I>(
                     key: canvas.idString,
                     value: {
                         canvas,
-                        options: opts?.onlyReplies ? { onlyReplies: true } : undefined,
+                        options: opts?.onlyReplies
+                            ? { onlyReplies: true }
+                            : undefined,
                     },
-                })
+                });
 
                 // 2) optionally propagate reply totals to ancestors
                 if (opts?.alsoParents) {
@@ -1448,8 +1586,6 @@ export class Scope extends Program<ScopeArgs> {
         this.messages = new RPC();
         this.acl = 0;
     }
-
-
 
     private _idString: string;
     get idString() {
@@ -1684,8 +1820,8 @@ export class Scope extends Program<ScopeArgs> {
                             args: {
                                 replicate: args?.replicate,
                                 replicas: args?.replicas,
-                            }
-                        })
+                            },
+                        });
                     }
 
                     return IndexableCanvas.from(arg);
@@ -1701,11 +1837,13 @@ export class Scope extends Program<ScopeArgs> {
             topic: sha256Base64Sync(
                 concat([this.id, new TextEncoder().encode("messages")])
             ),
-            responseHandler: async () => { }, // need an empty response handle to make response events to emit TODO fix this?
+            responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
         });
     }
 
-    async getVisualization(canvas: { id: Uint8Array }): Promise<WithIndexedContext<
+    async getVisualization(canvas: {
+        id: Uint8Array;
+    }): Promise<WithIndexedContext<
         BasicVisualization,
         IndexedVisualization
     > | null> {
@@ -1721,7 +1859,9 @@ export class Scope extends Program<ScopeArgs> {
         }
         if (visualizations.length > 1) {
             throw new Error(
-                `Multiple visualizations found for canvas ${sha256Base64Sync(canvas.id)}`
+                `Multiple visualizations found for canvas ${sha256Base64Sync(
+                    canvas.id
+                )}`
             );
         }
         const first = visualizations[0];
@@ -1729,7 +1869,9 @@ export class Scope extends Program<ScopeArgs> {
             return first;
         }
         throw new Error(
-            `Unexpected visualization type for canvas ${sha256Base64Sync(canvas.id)}`
+            `Unexpected visualization type for canvas ${sha256Base64Sync(
+                canvas.id
+            )}`
         );
     }
 
@@ -1739,16 +1881,23 @@ export class Scope extends Program<ScopeArgs> {
         publish: Publish = { type: "link-only" }
     ): Promise<[created: boolean, result: Canvas]> {
         const debug = !!publish.debug;
-        const dlog = (...args: any[]) => { if (debug) console.debug("[Scope.publish]", ...args); };
+        const dlog = (...args: any[]) => {
+            if (debug) console.debug("[Scope.publish]", ...args);
+        };
 
         // Ensure every canvas has a home
         if (!child.selfScope) {
-            dlog("assigning selfScope to caller scope", { scope: this.address, child: child.idString });
+            dlog("assigning selfScope to caller scope", {
+                scope: this.address,
+                child: child.idString,
+            });
             child.selfScope = new AddressReference({ address: this.address });
         }
 
         // Load the source in its own home settings
-        const src = child.initialized ? child : await this.openWithSameSettings(child);
+        const src = child.initialized
+            ? child
+            : await this.openWithSameSettings(child);
         const srcHome = src.nearestScope;
 
         dlog("start", {
@@ -1781,15 +1930,25 @@ export class Scope extends Program<ScopeArgs> {
                 await publish.parent.addReply(dst, kind, visibility);
 
                 if (publish.view != null) {
-                    dlog("finalize: setExperience", { child: dst.idString, view: publish.view });
-                    await dst.setExperience(publish.view, { scope: dst.nearestScope });
+                    dlog("finalize: setExperience", {
+                        child: dst.idString,
+                        view: publish.view,
+                    });
+                    await dst.setExperience(publish.view, {
+                        scope: dst.nearestScope,
+                    });
                 }
 
                 await dst.nearestScope.reIndexDebouncer.flush();
             } else {
                 if (publish.view != null) {
-                    dlog("finalize: top-level setExperience", { child: dst.idString, view: publish.view });
-                    await dst.setExperience(publish.view, { scope: dst.nearestScope });
+                    dlog("finalize: top-level setExperience", {
+                        child: dst.idString,
+                        view: publish.view,
+                    });
+                    await dst.setExperience(publish.view, {
+                        scope: dst.nearestScope,
+                    });
                     await dst.nearestScope.reIndexDebouncer.flush();
                 }
             }
@@ -1807,61 +1966,96 @@ export class Scope extends Program<ScopeArgs> {
 
         // Where are we materializing the node?
         const dest = publish.targetScope ?? defaultDestScope;
-        dlog("dest resolution", { dest: dest.address, defaultFrom: defaultDestScope.address });
+        dlog("dest resolution", {
+            dest: dest.address,
+            defaultFrom: defaultDestScope.address,
+        });
 
         // --------- sync (same id at dest) ----------
         if (publish.type === "sync") {
             const updateHome = publish.updateHome ?? "keep";
-            const existing = await dest.replies.index.get(src.id, { resolve: true });
+            const existing = await dest.replies.index.get(src.id, {
+                resolve: true,
+            });
             dlog("mode=sync", { updateHome, existingAtDest: !!existing });
 
             const dst = existing
                 ? await dest.openWithSameSettings(existing)
                 : new Canvas({
-                    id: src.id,
-                    publicKey: dest.node.identity.publicKey,
-                    selfScope: updateHome === "set"
-                        ? new AddressReference({ address: dest.address })
-                        : src.selfScope
-                });
+                      id: src.id,
+                      publicKey: dest.node.identity.publicKey,
+                      selfScope:
+                          updateHome === "set"
+                              ? new AddressReference({ address: dest.address })
+                              : src.selfScope,
+                  });
 
             const created = !existing;
             if (!existing) {
-                dlog("sync: ensureInReplies(dest) for dst", { dest: dest.address, dst: dst.idString });
+                dlog("sync: ensureInReplies(dest) for dst", {
+                    dest: dest.address,
+                    dst: dst.idString,
+                });
                 await ensureInReplies(dest, dst);
                 await dest.openWithSameSettings(dst);
             }
 
             // (debug) count elements owned by dst in dest scope before copy
             const preIds = debug
-                ? (await dest.elements.index
-                    .iterate({ query: getOwnedByCanvasQuery(dst) }, { resolve: false })
-                    .all())
-                    .map(e => e.idString)
-                    .sort()
+                ? (
+                      await dest.elements.index
+                          .iterate(
+                              { query: getOwnedByCanvasQuery(dst) },
+                              { resolve: false }
+                          )
+                          .all()
+                  )
+                      .map((e) => e.idString)
+                      .sort()
                 : undefined;
 
             // Copy payload over
             await Promise.all([
-                copyElementsBetweenScopes(srcHome, dest, src, dst /* , { debug } */),
-                copyVisualizationBetweenScopes(srcHome, dest, src, dst /* , { debug } */),
+                copyElementsBetweenScopes(
+                    srcHome,
+                    dest,
+                    src,
+                    dst /* , { debug } */
+                ),
+                copyVisualizationBetweenScopes(
+                    srcHome,
+                    dest,
+                    src,
+                    dst /* , { debug } */
+                ),
             ]);
 
             // If we are *moving* the home, flip selfScope and clean up old home payload & child-links
             if (updateHome === "set" && srcHome.address !== dest.address) {
-                dlog("sync: update home of src → dest", { from: srcHome.address, to: dest.address });
+                dlog("sync: update home of src → dest", {
+                    from: srcHome.address,
+                    to: dest.address,
+                });
                 src.selfScope = new AddressReference({ address: dest.address });
 
-                dlog("sync: cleanup old home payload", { oldHome: srcHome.address, canvas: src.idString });
+                dlog("sync: cleanup old home payload", {
+                    oldHome: srcHome.address,
+                    canvas: src.idString,
+                });
                 await deleteOwnedElementsInScope(srcHome, src);
                 await deleteVisualizationsInScope(srcHome, src);
                 await deleteChildLinksForCanvasInScope(srcHome, src);
 
                 // Optional: remove the replies row in the old home to avoid ghosts
-                const hadRow = await srcHome.replies.index.get(src.id, { resolve: false, local: true });
+                const hadRow = await srcHome.replies.index.get(src.id, {
+                    resolve: false,
+                    local: true,
+                });
                 if (hadRow) {
                     await srcHome.replies.del(src.id);
-                    dlog("sync: removed old replies row", { oldHome: srcHome.address });
+                    dlog("sync: removed old replies row", {
+                        oldHome: srcHome.address,
+                    });
                 }
 
                 // Flush both sides so indexes converge deterministically
@@ -1870,11 +2064,16 @@ export class Scope extends Program<ScopeArgs> {
 
             // (debug) count elements owned by dst in dest scope after copy
             const postIds = debug
-                ? (await dest.elements.index
-                    .iterate({ query: getOwnedByCanvasQuery(dst) }, { resolve: false })
-                    .all())
-                    .map(e => e.idString)
-                    .sort()
+                ? (
+                      await dest.elements.index
+                          .iterate(
+                              { query: getOwnedByCanvasQuery(dst) },
+                              { resolve: false }
+                          )
+                          .all()
+                  )
+                      .map((e) => e.idString)
+                      .sort()
                 : undefined;
 
             if (debug) {
@@ -1882,7 +2081,8 @@ export class Scope extends Program<ScopeArgs> {
                     dst: dst.idString,
                     preCount: preIds?.length ?? 0,
                     postCount: postIds?.length ?? 0,
-                    createdDelta: (postIds?.length ?? 0) - (preIds?.length ?? 0),
+                    createdDelta:
+                        (postIds?.length ?? 0) - (preIds?.length ?? 0),
                 });
             }
 
@@ -1898,22 +2098,37 @@ export class Scope extends Program<ScopeArgs> {
             const idMode = publish.id ?? "new";
             const newId = idMode === "preserve" ? src.id : randomBytes(32);
 
-            dlog("mode=fork", { updateHome, idMode, newId: sha256Base64Sync(newId) });
+            dlog("mode=fork", {
+                updateHome,
+                idMode,
+                newId: sha256Base64Sync(newId),
+            });
 
             const dst = new Canvas({
                 id: newId,
                 publicKey: dest.node.identity.publicKey,
-                selfScope: updateHome === "set"
-                    ? new AddressReference({ address: dest.address })
-                    : src.selfScope
+                selfScope:
+                    updateHome === "set"
+                        ? new AddressReference({ address: dest.address })
+                        : src.selfScope,
             });
 
             await ensureInReplies(dest, dst);
             await dest.openWithSameSettings(dst);
 
             await Promise.all([
-                copyElementsBetweenScopes(srcHome, dest, src, dst /* , { debug } */),
-                copyVisualizationBetweenScopes(srcHome, dest, src, dst /* , { debug } */),
+                copyElementsBetweenScopes(
+                    srcHome,
+                    dest,
+                    src,
+                    dst /* , { debug } */
+                ),
+                copyVisualizationBetweenScopes(
+                    srcHome,
+                    dest,
+                    src,
+                    dst /* , { debug } */
+                ),
             ]);
 
             await finalize(dst);
@@ -1927,20 +2142,23 @@ export class Scope extends Program<ScopeArgs> {
         publish: Omit<Publish, "parent"> = { type: "sync" }
     ) {
         return this.publish(draft, publish);
-    };
-
+    }
 
     /**
-  * Register `draft` in THIS scope if needed, then (optionally) link it under `parent`.
-  * - Never migrates data across scopes (use Canvas.upsertReply for that).
-  * - Honors child-owned links with optional parent mirror via `visibility`.
-  *
-  * Returns { createdCanvas, createdLink, canvas }.
-  */
+     * Register `draft` in THIS scope if needed, then (optionally) link it under `parent`.
+     * - Never migrates data across scopes (use Canvas.upsertReply for that).
+     * - Honors child-owned links with optional parent mirror via `visibility`.
+     *
+     * Returns { createdCanvas, createdLink, canvas }.
+     */
     async getOrCreateReply(
         parent: Canvas | undefined | null,
         draft: Canvas,
-        opts?: { kind?: LinkKind; type?: ChildVisualization; visibility?: Visibility }
+        opts?: {
+            kind?: LinkKind;
+            type?: ChildVisualization;
+            visibility?: Visibility;
+        }
     ): Promise<[boolean, Canvas]> {
         // Ensure draft has a home; adopt into *this* scope if missing
         if (!draft.selfScope) {
@@ -1950,14 +2168,17 @@ export class Scope extends Program<ScopeArgs> {
         if (!parent) {
             // ── ROOT CASE ─────────────────────────────────────────────
             // Only register in the child's HOME scope, do NOT mirror into caller.
-            const home: Scope = await this.node.open<Scope>(draft.selfScope.address, {
-                existing: "reuse",
-                args: {
-                    replicate: {
-                        factor: 1
-                    }
-                },
-            });
+            const home: Scope = await this.node.open<Scope>(
+                draft.selfScope.address,
+                {
+                    existing: "reuse",
+                    args: {
+                        replicate: {
+                            factor: 1,
+                        },
+                    },
+                }
+            );
 
             // 2) Open the draft with the home scope’s settings (gives an opened Canvas).
             const child = await home.openWithSameSettings(draft);
@@ -1989,7 +2210,7 @@ export class Scope extends Program<ScopeArgs> {
             kind: opts?.kind,
             view: opts?.type,
         });
-    };
+    }
 
     async setExperience(canvas: { id: Uint8Array }, type: ChildVisualization) {
         let visualization: BasicVisualization | null =
@@ -2008,7 +2229,6 @@ export class Scope extends Program<ScopeArgs> {
         }
         await this.setVisualization(canvas, visualization);
     }
-
 
     async setVisualization(
         canvas: { id: Uint8Array },
@@ -2061,7 +2281,10 @@ export class Scope extends Program<ScopeArgs> {
     async getText(canvas: Canvas): Promise<string> {
         const elements = await this.elements.index.index
             .iterate({
-                query: [getTextElementsQuery(), ...getOwnedElementsQuery(canvas)],
+                query: [
+                    getTextElementsQuery(),
+                    ...getOwnedElementsQuery(canvas),
+                ],
             })
             .all();
         let concat = "";
@@ -2076,21 +2299,27 @@ export class Scope extends Program<ScopeArgs> {
         return concat;
     }
 
-    async getOwnedElements(canvas: Canvas): Promise<WithIndexedContext<Element, IndexableElement>[]> {
+    async getOwnedElements(
+        canvas: Canvas
+    ): Promise<WithIndexedContext<Element, IndexableElement>[]> {
         return this.elements.index
             .iterate(
                 { query: getOwnedElementsQuery(canvas) },
-                { resolve: true, local: true, remote: { strategy: "fallback", timeout: 2e4 } }
+                {
+                    resolve: true,
+                    local: true,
+                    remote: { strategy: "fallback", timeout: 2e4 },
+                }
             )
             .all();
     }
 
     async countOwnedElements(canvas: Canvas): Promise<number> {
-        return this.elements.count(
-            { query: getOwnedElementsQuery(canvas), approximate: true },
-        )
+        return this.elements.count({
+            query: getOwnedElementsQuery(canvas),
+            approximate: true,
+        });
     }
-
 
     async reIndex(
         from: Canvas | WithIndexedContext<Canvas, IndexableCanvas>,
@@ -2101,7 +2330,9 @@ export class Scope extends Program<ScopeArgs> {
             return;
         }
         const canvas: Canvas = await this.openWithSameSettings(
-            (from as WithContext<Canvas>).__context ? (from as any) : (from as Canvas)
+            (from as WithContext<Canvas>).__context
+                ? (from as any)
+                : (from as Canvas)
         );
 
         if (options?.onlyReplies) {
@@ -2121,7 +2352,7 @@ export class Scope extends Program<ScopeArgs> {
         const existing = await this.replies.index.get(canvas.id, {
             resolve: false,
             local: true,
-            remote: false
+            remote: false,
         });
         if (!existing) {
             // This scope does not own/index this canvas → do not create a ghost row
@@ -2216,13 +2447,18 @@ export class Scope extends Program<ScopeArgs> {
             this._repliesChangeListener
         );
 
-        const onVisualizationChange = makeReindexListener<Visualization, IndexedVisualization>(
+        const onVisualizationChange = makeReindexListener<
+            Visualization,
+            IndexedVisualization
+        >(
             this,
-            (v: any) => [v.canvasId],                     // your IndexedVisualization has canvasId
+            (v: any) => [v.canvasId], // your IndexedVisualization has canvasId
             { onlyReplies: false, alsoParents: false }
         );
-        this.visualizations.events.addEventListener("change", onVisualizationChange);
-
+        this.visualizations.events.addEventListener(
+            "change",
+            onVisualizationChange
+        );
 
         // One small discriminator
         const isReplyKind = (l: Link) => (l.kind as any).tag === 0;
@@ -2235,69 +2471,111 @@ export class Scope extends Program<ScopeArgs> {
         );
 
         // Child full + parent/ancestors onlyReplies
-        const onSemanticLinkChange = async (evt: CustomEvent<DocumentsChange<Link, Link>>) => {
-            const changed = [...evt.detail.added, ...evt.detail.removed] as Link[];
+        const onSemanticLinkChange = async (
+            evt: CustomEvent<DocumentsChange<Link, Link>>
+        ) => {
+            const changed = [
+                ...evt.detail.added,
+                ...evt.detail.removed,
+            ] as Link[];
 
             for (const l of changed) {
-
-                const child = await resolveChild(l, this, { local: true, remote: false, waitFor: 0 })
+                const child = await resolveChild(l, this, {
+                    local: true,
+                    remote: false,
+                    waitFor: 0,
+                });
                 if (!child) {
                     console.warn("Child not found for link");
                 }
-                const parent = await resolveParent(l, this, { local: true, remote: false, waitFor: 0 });
+                const parent = await resolveParent(l, this, {
+                    local: true,
+                    remote: false,
+                    waitFor: 0,
+                });
                 if (!parent) {
                     console.warn("Parent not found for link");
                 }
 
                 if (child) {
-                    await this.reIndexDebouncer.add({ key: child.idString, value: { canvas: child, options: { onlyReplies: false } } }); // child’s totals
+                    await this.reIndexDebouncer.add({
+                        key: child.idString,
+                        value: {
+                            canvas: child,
+                            options: { onlyReplies: false },
+                        },
+                    }); // child’s totals
                 }
                 if (parent) {
                     await this.reIndexDebouncer.add({
                         key: parent.idString,
-                        value: { canvas: parent, options: { onlyReplies: true } },
-                    })
-                    await parent.load(this.node, { args: this.openingArgs })
+                        value: {
+                            canvas: parent,
+                            options: { onlyReplies: true },
+                        },
+                    });
+                    await parent.load(this.node, { args: this.openingArgs });
                     const chain = await parent.loadPath({ includeSelf: false });
                     for (let i = chain.length - 1; i >= 0; i--) {
                         await this.reIndexDebouncer.add({
                             key: chain[i].idString,
-                            value: { canvas: chain[i], options: { onlyReplies: true } },
+                            value: {
+                                canvas: chain[i],
+                                options: { onlyReplies: true },
+                            },
                         });
                     }
                 }
-
             }
-
         };
-
 
         this._linksChangeListener = async (evt) => {
             // Fast path: split by kind once to avoid redundant fetches
-            const added = evt.detail.added
-            const removed = evt.detail.removed
+            const added = evt.detail.added;
+            const removed = evt.detail.removed;
 
-            const hasViewsChange = added.some(l => (l.kind).tag === 1) || removed.some(l => (l.kind).tag === 1);
-            const hasSemanticsChange = added.some(isReplyKind) || removed.some(isReplyKind);
+            const hasViewsChange =
+                added.some((l) => l.kind.tag === 1) ||
+                removed.some((l) => l.kind.tag === 1);
+            const hasSemanticsChange =
+                added.some(isReplyKind) || removed.some(isReplyKind);
 
-            if (hasViewsChange) await onViewLinkChange(new CustomEvent("change", { detail: { added: added.filter(l => !isReplyKind(l)), removed: removed.filter(l => !isReplyKind(l)) } }));
-            if (hasSemanticsChange) await onSemanticLinkChange(new CustomEvent("change", { detail: { added: added.filter(isReplyKind), removed: removed.filter(isReplyKind) } }));
-        }
+            if (hasViewsChange)
+                await onViewLinkChange(
+                    new CustomEvent("change", {
+                        detail: {
+                            added: added.filter((l) => !isReplyKind(l)),
+                            removed: removed.filter((l) => !isReplyKind(l)),
+                        },
+                    })
+                );
+            if (hasSemanticsChange)
+                await onSemanticLinkChange(
+                    new CustomEvent("change", {
+                        detail: {
+                            added: added.filter(isReplyKind),
+                            removed: removed.filter(isReplyKind),
+                        },
+                    })
+                );
+        };
 
         this.links?.events.addEventListener(
             "change",
             this._linksChangeListener
         );
 
-
-        this._elementsChangeListener = makeReindexListener<Element, IndexableElement>(
-            this,
-            (e: any) => [e.canvasId],
-            { onlyReplies: false, alsoParents: false }
-        );;
-        this.elements.events.addEventListener("change", this._elementsChangeListener);
-
-
+        this._elementsChangeListener = makeReindexListener<
+            Element,
+            IndexableElement
+        >(this, (e: any) => [e.canvasId], {
+            onlyReplies: false,
+            alsoParents: false,
+        });
+        this.elements.events.addEventListener(
+            "change",
+            this._elementsChangeListener
+        );
     }
 
     close(from?: Program): Promise<boolean> {
@@ -2397,10 +2675,9 @@ export class Scope extends Program<ScopeArgs> {
         return [true, reply];
     } */
 
-
-
-
-    async openWithSameSettings(target: Canvas | Uint8Array | NodeRef): Promise<Canvas> {
+    async openWithSameSettings(
+        target: Canvas | Uint8Array | NodeRef
+    ): Promise<Canvas> {
         if (!this.node) throw new Error("Scope has no ProgramClient bound");
         const client = this.node as ProgramClient;
         const args = this.openingArgs;
@@ -2412,33 +2689,47 @@ export class Scope extends Program<ScopeArgs> {
             // Prefer canvas’ own bound scope if it’s initialized; otherwise fall back to “this”
             owningScope = target.tryNearestScope() ?? this;
             canvas = target;
-
         } else if (target instanceof Uint8Array) {
             owningScope = this;
-            canvas = await owningScope.replies.index.get(target, { resolve: true });
+            canvas = await owningScope.replies.index.get(target, {
+                resolve: true,
+            });
             if (!canvas) {
-                throw new Error(`Canvas ${sha256Base64Sync(target)} not found in scope ${this.address}`);
+                throw new Error(
+                    `Canvas ${sha256Base64Sync(target)} not found in scope ${
+                        this.address
+                    }`
+                );
             }
-
         } else if (target instanceof LocalRef) {
             owningScope = this;
-            canvas = await owningScope.replies.index.get(target.canvasId, { resolve: true });
-            if (!canvas) throw new Error(`LocalRef not found in scope ${this.address}`);
-
+            canvas = await owningScope.replies.index.get(target.canvasId, {
+                resolve: true,
+            });
+            if (!canvas)
+                throw new Error(`LocalRef not found in scope ${this.address}`);
         } else if (target instanceof ScopedRef) {
-            owningScope = await client.open<Scope>(target.scope.address, { existing: "reuse", args });
-            canvas = await owningScope.replies.index.get(target.canvasId, { resolve: true });
+            owningScope = await client.open<Scope>(target.scope.address, {
+                existing: "reuse",
+                args,
+            });
+            canvas = await owningScope.replies.index.get(target.canvasId, {
+                resolve: true,
+            });
             if (!canvas) {
-                throw new Error(`ScopedRef not found: ${sha256Base64Sync(target.canvasId)} in ${target.scope.address}`);
+                throw new Error(
+                    `ScopedRef not found: ${sha256Base64Sync(
+                        target.canvasId
+                    )} in ${target.scope.address}`
+                );
             }
-
         } else {
             throw new Error("Unsupported target for openWithSameSettings");
         }
 
         // Ensure the Canvas is bound & ready (idempotent if already initialized)
         await canvas.load(client, { args, candidates: [owningScope] });
-        return canvas
+        return canvas;
     }
 
     async remove(
@@ -2446,8 +2737,8 @@ export class Scope extends Program<ScopeArgs> {
         canvas: Canvas,
         options?: {
             drop?: boolean;
-            seedScopes?: Scope[];   // optional: extra scopes to help discover mirrors
-            ignore?: Set<string>;   // recursion guard
+            seedScopes?: Scope[]; // optional: extra scopes to help discover mirrors
+            ignore?: Set<string>; // recursion guard
         }
     ): Promise<boolean> {
         // Open the handle with this scope's settings (no-op if already opened)
@@ -2476,9 +2767,16 @@ export class Scope extends Program<ScopeArgs> {
             await parent.load(this.node, { args: this.openingArgs }); // ensure parent is opened
 
             // For each (parent -> target) pair, find *all* scopes that store that link (canonical + mirrors).
-            const linkScopes = await collectLinkScopesBFS(parent, target, options?.seedScopes);
+            const linkScopes = await collectLinkScopesBFS(
+                parent,
+                target,
+                options?.seedScopes
+            );
             // Remove links of any kind (Reply/View/BoardView) in those scopes.
-            await unlink.call(parent, target.id, { kinds: "all", scopes: linkScopes });
+            await unlink.call(parent, target.id, {
+                kinds: "all",
+                scopes: linkScopes,
+            });
         }
 
         // ---- 2) Enumerate children canonically (child links are stored in the child's/home scope) ----
@@ -2496,7 +2794,9 @@ export class Scope extends Program<ScopeArgs> {
         // ---- 4) Delete local rows for THIS canvas in ITS HOME SCOPE (this === home) ----
 
         // Elements owned here
-        const els = await home.elements.index.iterate({ query: getOwnedElementsQuery(target) }).all();
+        const els = await home.elements.index
+            .iterate({ query: getOwnedElementsQuery(target) })
+            .all();
         for (const e of els) await home.elements.del(e.id);
 
         // Visualizations here
@@ -2506,19 +2806,24 @@ export class Scope extends Program<ScopeArgs> {
         for (const v of vizz) await home.visualizations.del(v.id);
 
         // Replies row here (correct store)
-        if (await home.replies.index.get(target.id, { resolve: false, local: true })) {
+        if (
+            await home.replies.index.get(target.id, {
+                resolve: false,
+                local: true,
+            })
+        ) {
             await home.replies.del(target.id);
         }
 
         // Defensive sweeps for any leftover links in THIS scope that reference the target
-        const byParent = await home.links.index
+        const byParent = (await home.links.index
             .iterate({ query: [getChildrenLinksQuery(target.id)] })
-            .all() as Link[];
+            .all()) as Link[];
         for (const l of byParent) await home.links.del(l.id);
 
-        const byChild = await home.links.index
+        const byChild = (await home.links.index
             .iterate({ query: [getParentLinksQuery(target.id)] })
-            .all() as Link[];
+            .all()) as Link[];
         for (const l of byChild) await home.links.del(l.id);
 
         // ---- 5) Optional block GC (TODO when supported) ----
@@ -2529,7 +2834,6 @@ export class Scope extends Program<ScopeArgs> {
         return true;
     }
 }
-
 
 /* @variant(0) */
 export class Canvas {
@@ -2547,21 +2851,29 @@ export class Canvas {
     @field({ type: "u8" })
     acl: 0;
 
-    constructor(p: { publicKey: PublicSignKey; selfScope?: AddressReference | Scope } & ({ id?: Uint8Array } | { seed?: Uint8Array })) {
+    constructor(
+        p: {
+            publicKey: PublicSignKey;
+            selfScope?: AddressReference | Scope;
+        } & ({ id?: Uint8Array } | { seed?: Uint8Array })
+    ) {
         this.publicKey = p.publicKey;
-        this.id = (p as { id: Uint8Array }).id ||
+        this.id =
+            (p as { id: Uint8Array }).id ||
             ((p as { seed: Uint8Array }).seed
                 ? sha256Sync((p as { seed: Uint8Array }).seed)
                 : randomBytes(32));
-        this.selfScope = (p.selfScope instanceof Scope ? new AddressReference({ address: p.selfScope.address }) : p.selfScope) as AddressReference; // TODO types
+        this.selfScope = (
+            p.selfScope instanceof Scope
+                ? new AddressReference({ address: p.selfScope.address })
+                : p.selfScope
+        ) as AddressReference; // TODO types
         this.acl = 0;
     }
 
     // ---- optional tiny cache (not a “bound scope”, just an open handle) ----
-    private _scope?: Scope;           // resolved & opened scope
-    private _client?: ProgramClient;  // last client used to open
-
-
+    private _scope?: Scope; // resolved & opened scope
+    private _client?: ProgramClient; // last client used to open
 
     /** True if this canvas has a bound scope and it isn’t closed. */
     get initialized(): boolean {
@@ -2573,12 +2885,14 @@ export class Canvas {
         return this.initialized ? this._scope! : undefined;
     }
 
-
     /** Resolve and cache the usable scope once; after this, nearestScope is sync. */
-    async load(client: ProgramClient, options?: {
-        candidates?: Scope[]; // optional fallback scopes to search if selfScope is missing
-        args?: ScopeArgs;
-    }): Promise<this> {
+    async load(
+        client: ProgramClient,
+        options?: {
+            candidates?: Scope[]; // optional fallback scopes to search if selfScope is missing
+            args?: ScopeArgs;
+        }
+    ): Promise<this> {
         this._client = client;
 
         // Fast path: already opened and alive
@@ -2586,53 +2900,81 @@ export class Canvas {
 
         // 1) have a home? open it
         if (this.selfScope) {
-            this._scope = await client.open<Scope>(this.selfScope.address, { existing: "reuse", args: options?.args });
+            this._scope = await client.open<Scope>(this.selfScope.address, {
+                existing: "reuse",
+                args: options?.args,
+            });
             return this;
         }
 
         // 2) discover via candidate scopes (if provided)
         if (options?.candidates?.length) {
-            const found = await loadCanvasFromScopes(this.id, options.candidates, { local: true });
+            const found = await loadCanvasFromScopes(
+                this.id,
+                options.candidates,
+                { local: true }
+            );
             if (found) {
                 // grab the scope used by the found instance
                 const scopeAddr = found.nearestScope?.address;
-                if (!scopeAddr) throw new Error("Located canvas but could not resolve its scope address");
-                this._scope = await client.open<Scope>(scopeAddr, { existing: "reuse", args: options?.args });
+                if (!scopeAddr)
+                    throw new Error(
+                        "Located canvas but could not resolve its scope address"
+                    );
+                this._scope = await client.open<Scope>(scopeAddr, {
+                    existing: "reuse",
+                    args: options?.args,
+                });
                 // optionally “learn” the home so future reloads skip discovery
                 this.selfScope = this._scope;
                 return this;
             }
         }
 
-        throw new Error("Canvas.load(): cannot resolve scope (no selfScope and no candidates matched).");
+        throw new Error(
+            "Canvas.load(): cannot resolve scope (no selfScope and no candidates matched)."
+        );
     }
 
     /** Forget cached handles (e.g., when client disconnects). */
-    unload() { this._scope = undefined; }
-
+    unload() {
+        this._scope = undefined;
+    }
 
     /** After load(), this is synchronous. Throws if not loaded. */
     get nearestScope(): Scope {
         if (!this._scope || this._scope.closed) {
-            throw new Error("Canvas.nearestScope: not loaded — call await canvas.load(client, ...) first.");
+            throw new Error(
+                "Canvas.nearestScope: not loaded — call await canvas.load(client, ...) first."
+            );
         }
         return this._scope;
     }
 
     /** Program client used in the last load (optional helper). */
-    get client(): ProgramClient | undefined { return this._client; }
+    get client(): ProgramClient | undefined {
+        return this._client;
+    }
 
     // ---- sync store accessors (safe after load) ----
-    get elements(): Documents<Element, IndexableElement, any> { return this.nearestScope.elements; }
-    get links(): Documents<Link, Link, any> { return this.nearestScope.links as unknown as Documents<Link, Link, any>; }
-    get replies(): Documents<Canvas, IndexableCanvas, any> { return this.nearestScope.replies; }
-    get visualizations(): Documents<Visualization, IndexedVisualization, any> { return this.nearestScope.visualizations; }
-
+    get elements(): Documents<Element, IndexableElement, any> {
+        return this.nearestScope.elements;
+    }
+    get links(): Documents<Link, Link, any> {
+        return this.nearestScope.links as unknown as Documents<Link, Link, any>;
+    }
+    get replies(): Documents<Canvas, IndexableCanvas, any> {
+        return this.nearestScope.replies;
+    }
+    get visualizations(): Documents<Visualization, IndexedVisualization, any> {
+        return this.nearestScope.visualizations;
+    }
 
     async addReply(
         child: Canvas,
         kind: LinkKind = new ReplyKind(),
-        visibility: LinkVisibility = "both"): Promise<void> {
+        visibility: LinkVisibility = "both"
+    ): Promise<void> {
         return addReply.call(this, child, kind, visibility);
     }
 
@@ -2642,21 +2984,30 @@ export class Canvas {
             .iterate({
                 query: [
                     getParentLinksQuery(this.id),
-                    new IntegerCompare({ key: ["kind", "tag"], value: 0, compare: Compare.Equal }),
-                ]
-            }).first();
+                    new IntegerCompare({
+                        key: ["kind", "tag"],
+                        value: 0,
+                        compare: Compare.Equal,
+                    }),
+                ],
+            })
+            .first();
         if (!edge) return null;
         return resolveParent(edge, scope);
     }
 
-    async getChildren(options?: { scopes?: Scope[] }): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
+    async getChildren(options?: {
+        scopes?: Scope[];
+    }): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
         const parentScope = this.nearestScope;
         const scopes = options?.scopes?.length ? options.scopes : [parentScope];
 
         const out: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
         const seen = new Set<string>();
 
-        for await (const { link, scope } of iterLinksWithOrigin(scopes, [getChildrenLinksQuery(this.id)])) {
+        for await (const { link, scope } of iterLinksWithOrigin(scopes, [
+            getChildrenLinksQuery(this.id),
+        ])) {
             const child = await resolveChild(link, scope);
             if (!child) continue;
             const key = child.idString;
@@ -2668,7 +3019,10 @@ export class Canvas {
         return out;
     }
 
-    async loadPath(options?: { includeSelf?: boolean; length?: number }): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
+    async loadPath(options?: {
+        includeSelf?: boolean;
+        length?: number;
+    }): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
         const max = options?.length ?? Number.MAX_SAFE_INTEGER;
         const result: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
 
@@ -2684,7 +3038,8 @@ export class Canvas {
                         getParentLinksQuery(current.id), // NodeRef.child.id
                         /* new IntegerCompare({ key: ["kind", "tag"], value: 0, compare: Compare.Equal }), */ // ReplyKind
                     ],
-                }).first();
+                })
+                .first();
 
             if (!edge) break;
 
@@ -2694,7 +3049,9 @@ export class Canvas {
             const parent = await resolveParent(l, currentScope);
             if (!parent) break;
 
-            await parent.load(currentScope.node, { args: currentScope.openingArgs })
+            await parent.load(currentScope.node, {
+                args: currentScope.openingArgs,
+            });
 
             // Keep walking from the parent
             result.push(parent);
@@ -2704,7 +3061,7 @@ export class Canvas {
 
         result.reverse();
         if (options?.includeSelf) {
-            const selfIndexed = await this.getSelfIndexedCoerced()
+            const selfIndexed = await this.getSelfIndexedCoerced();
             if (!selfIndexed) {
                 throw new Error("Failed to get self indexed canvas");
             }
@@ -2713,26 +3070,21 @@ export class Canvas {
         return result;
     }
 
-
     private _idString: string;
     get idString() {
-        return this._idString || (this._idString = Canvas.createIdString(this.id));
+        return (
+            this._idString || (this._idString = Canvas.createIdString(this.id))
+        );
     }
 
     static createIdString(id: Uint8Array) {
         return sha256Base64Sync(id);
     }
 
-
-
     async loadParent() {
-        const path = await this.loadPath({ includeSelf: false, length: 1 })
-        return path[0]
+        const path = await this.loadPath({ includeSelf: false, length: 1 });
+        return path[0];
     }
-
-
-
-
 
     async countRepliesIndexedDirect(): Promise<bigint> {
         const scope = this.nearestScope;
@@ -2746,12 +3098,18 @@ export class Canvas {
     }
 
     /** O(1) index count of IMMEDIATE children using materialized path + depth. */
-    async countImmediateIndexedDirect(parentPathDepth: number): Promise<bigint> {
+    async countImmediateIndexedDirect(
+        parentPathDepth: number
+    ): Promise<bigint> {
         const scope = this.nearestScope;
         const n = await scope.replies.count({
             query: [
                 new ByteMatchQuery({ key: "path", value: this.id }),
-                new IntegerCompare({ key: "pathDepth", value: parentPathDepth + 1, compare: Compare.Equal }),
+                new IntegerCompare({
+                    key: "pathDepth",
+                    value: parentPathDepth + 1,
+                    compare: Compare.Equal,
+                }),
             ],
             approximate: true,
         });
@@ -2762,7 +3120,7 @@ export class Canvas {
     async countRepliesBFS(options?: {
         immediate?: boolean;
         maxNodes?: number;
-        scopes?: Scope[];      // mirrors/candidate scopes to read links from; default = [nearestScope]
+        scopes?: Scope[]; // mirrors/candidate scopes to read links from; default = [nearestScope]
     }): Promise<bigint> {
         const immediate = options?.immediate ?? true;
         const maxNodes = options?.maxNodes ?? Number.POSITIVE_INFINITY;
@@ -2775,7 +3133,9 @@ export class Canvas {
         if (immediate) {
             // Count unique immediate children across all provided scopes without resolving.
             const seenChildren = new Set<string>();
-            for await (const link of iterLinksOverScopes(scopes, [getChildrenLinksQuery(this.id)])) {
+            for await (const link of iterLinksOverScopes(scopes, [
+                getChildrenLinksQuery(this.id),
+            ])) {
                 const k = key(link.child.canvasId);
                 if (!seenChildren.has(k)) {
                     seenChildren.add(k);
@@ -2789,8 +3149,8 @@ export class Canvas {
         let total = 0n;
         const q: Uint8Array[] = [this.id];
 
-        const expanded = new Set<string>();  // parents we already expanded
-        const counted = new Set<string>();   // children we've counted (unique across scopes)
+        const expanded = new Set<string>(); // parents we already expanded
+        const counted = new Set<string>(); // children we've counted (unique across scopes)
 
         while (q.length) {
             const parentId = q.shift()!;
@@ -2799,7 +3159,9 @@ export class Canvas {
             expanded.add(pKey);
 
             // Gather all edges for this parent from all scopes (mirrors + canonical child scopes)
-            for await (const e of iterLinksOverScopes(scopes, [getChildrenLinksQuery(parentId)])) {
+            for await (const e of iterLinksOverScopes(scopes, [
+                getChildrenLinksQuery(parentId),
+            ])) {
                 const cKey = key(e.child.canvasId);
 
                 if (!counted.has(cKey)) {
@@ -2819,7 +3181,9 @@ export class Canvas {
         return (options?.scope || this.nearestScope).getText(this);
     }
 
-    async getOwnedElements(options?: { scope: Scope }): Promise<WithIndexedContext<Element, IndexableElement>[]> {
+    async getOwnedElements(options?: {
+        scope: Scope;
+    }): Promise<WithIndexedContext<Element, IndexableElement>[]> {
         return (options?.scope || this.nearestScope).getOwnedElements(this);
     }
 
@@ -2892,7 +3256,9 @@ export class Canvas {
             for (const name of path) {
                 const newCanvases: Canvas[] = [];
                 for (let parent of canvases) {
-                    newCanvases.push(...(await parent.findCanvasesByName(name)));
+                    newCanvases.push(
+                        ...(await parent.findCanvasesByName(name))
+                    );
                 }
                 if (newCanvases.length > 0) {
                     visitedPath.push(name);
@@ -2925,7 +3291,10 @@ export class Canvas {
                             method: StringMatchMethod.exact,
                         }),
                         // immediate children of `this` via pathDepth
-                        ...getImmediateRepliesQueryByDepth(this.id, selfIdx.pathDepth),
+                        ...getImmediateRepliesQueryByDepth(
+                            this.id,
+                            selfIdx.pathDepth
+                        ),
                     ],
                 })
             );
@@ -2936,9 +3305,7 @@ export class Canvas {
         //    resolve each child via `resolveChild`, then match by context.
         const links = await scope.links.index
             .iterate({
-                query: [
-                    getChildrenLinksQuery(this.id),
-                ],
+                query: [getChildrenLinksQuery(this.id)],
             })
             .all();
 
@@ -2948,10 +3315,15 @@ export class Canvas {
             if (!child) continue;
 
             // Prefer indexed context; compute on miss
-            const idxRow = await scope.replies.index.get(child.id, { resolve: false, local: true });
+            const idxRow = await scope.replies.index.get(child.id, {
+                resolve: false,
+                local: true,
+            });
             const ctx = idxRow?.context as string | undefined;
             const matches = ctx
-                ? ctx.localeCompare(name, undefined, { sensitivity: "accent" }) === 0
+                ? ctx.localeCompare(name, undefined, {
+                      sensitivity: "accent",
+                  }) === 0
                 : (await child.createContext()) === name;
 
             if (matches) out.push(child);
@@ -2960,25 +3332,21 @@ export class Canvas {
         return out;
     }
 
-
     async removeAllReplies() {
         for (const link of await this.getChildrenLinks()) {
             let reply = await resolveChild(link, this.nearestScope);
             // we can not use reply.drop() because it would delete the reply itself
             // but we want to delete the reply from the index
-            reply && await this.nearestScope.remove(reply, { drop: true });
+            reply && (await this.nearestScope.remove(reply, { drop: true }));
         }
     }
-
-
 
     async createContext(): Promise<string> {
         return this.nearestScope.createContext(this);
     }
 
-
     async setVisualization(
-        visualization: BasicVisualization | null,
+        visualization: BasicVisualization | null
     ): Promise<void> {
         const db = this.nearestScope;
         return db.setVisualization(this, visualization);
@@ -2995,9 +3363,9 @@ export class Canvas {
         this: Canvas,
         segments: string[],
         options?: {
-            id?: Uint8Array;            // id for the last node (optional)
-            kind?: LinkKind;            // kind to apply for each new link
-            type?: ChildVisualization;  // experience to set on each created node
+            id?: Uint8Array; // id for the last node (optional)
+            kind?: LinkKind; // kind to apply for each new link
+            type?: ChildVisualization; // experience to set on each created node
         }
     ): Promise<Canvas[]> {
         if (segments.length === 0) return [];
@@ -3014,9 +3382,11 @@ export class Canvas {
         }
 
         // If fully matched, we’re done (walk to get the tail for return shape)
-        const existingPath = ((await found.canvases[0].loadPath({ includeSelf: true })).slice(1));
+        const existingPath = (
+            await found.canvases[0].loadPath({ includeSelf: true })
+        ).slice(1);
         if (found.path.length === segments.length) {
-            return existingPath
+            return existingPath;
         }
 
         // Ensure current is opened under this scope’s settings
@@ -3030,7 +3400,10 @@ export class Canvas {
 
             // Create node; by default, new id per node, or use provided id for leaf
             const node = new Canvas({
-                id: (i === segments.length - 1 && options?.id) ? options.id : undefined,
+                id:
+                    i === segments.length - 1 && options?.id
+                        ? options.id
+                        : undefined,
                 publicKey: scope.node.identity.publicKey,
                 selfScope: new AddressReference({ address: scope.address }),
             });
@@ -3040,13 +3413,18 @@ export class Canvas {
 
             // Give it a title/name element (deterministic id)
             await node.addTextElement(name, {
-                id: sha256Sync(concat([node.id, new TextEncoder().encode(name)])),
+                id: sha256Sync(
+                    concat([node.id, new TextEncoder().encode(name)])
+                ),
                 skipReindex: true,
             });
 
             // Link parent→child & set experience (batched)
-            const ops: Promise<any>[] = [this.addReply.call(current, node, options?.kind)];
-            if (options?.type) ops.push(node.setExperience(options.type, { scope }));
+            const ops: Promise<any>[] = [
+                this.addReply.call(current, node, options?.kind),
+            ];
+            if (options?.type)
+                ops.push(node.setExperience(options.type, { scope }));
             await Promise.all(ops);
 
             created.push(node);
@@ -3057,13 +3435,9 @@ export class Canvas {
         return [...existingPath, ...created];
     }
 
-    async upsertReply(
-        child: Canvas,
-        publish: Publish = { type: "link-only" }
-    ) {
+    async upsertReply(child: Canvas, publish: Publish = { type: "link-only" }) {
         return this.nearestScope.publish(child, { ...publish, parent: this });
-    };
-
+    }
 
     /*  TODO later async getChildPosition(child: Uint8Array): Promise<Layout | undefined> {
          const links = await this.links.index
@@ -3080,24 +3454,29 @@ export class Canvas {
          return board ? (board.kind as BoardViewKind).layout : undefined;
      } */
 
-
-
     /** Create or update a View link (ordering/placement) stored in the PARENT's scope. */
     async upsertViewPlacement(child: Canvas, orderKey: string): Promise<void> {
         const childScope = child.nearestScope;
-        const {
-            child: childRef,
-            parent: parentRef
-        } = buildRefLink(this, child);
+        const { child: childRef, parent: parentRef } = buildRefLink(
+            this,
+            child
+        );
         const kind = new ViewKind({ orderKey });
         const linkId = Link.createId(parentRef, childRef, kind.tag);
 
         const existing = await childScope.links.index.get(linkId);
         if (!existing) {
-            await childScope.links.put(new Link({ id: linkId, parent: parentRef, child: childRef, kind }));
+            await childScope.links.put(
+                new Link({
+                    id: linkId,
+                    parent: parentRef,
+                    child: childRef,
+                    kind,
+                })
+            );
         } else {
             // update orderKey if changed
-            const l = existing
+            const l = existing;
             if (l.kind instanceof ViewKind && l.kind.orderKey !== orderKey) {
                 l.kind.orderKey = orderKey;
                 await childScope.links.put(l);
@@ -3106,23 +3485,41 @@ export class Canvas {
     }
 
     /** Remove any View placement(s) for the given child under this parent (keep semantic Reply). */
-    async removeViewPlacement(childId: Uint8Array, o?: { scopes?: Scope[], strict?: boolean }) {
-        return unlink.call(this, childId, { kinds: "view", scopes: o?.scopes, strict: o?.strict });
+    async removeViewPlacement(
+        childId: Uint8Array,
+        o?: { scopes?: Scope[]; strict?: boolean }
+    ) {
+        return unlink.call(this, childId, {
+            kinds: "view",
+            scopes: o?.scopes,
+            strict: o?.strict,
+        });
     }
 
-    async unlinkSemantic(childId: Uint8Array, o?: { scopes?: Scope[], strict?: boolean }) {
-        return unlink.call(this, childId, { kinds: "reply", scopes: o?.scopes, strict: o?.strict });
+    async unlinkSemantic(
+        childId: Uint8Array,
+        o?: { scopes?: Scope[]; strict?: boolean }
+    ) {
+        return unlink.call(this, childId, {
+            kinds: "reply",
+            scopes: o?.scopes,
+            strict: o?.strict,
+        });
     }
 
     /** Return children *with* their order key (if any). */
-    async listChildrenWithOrder(options?: { scopes?: Scope[] }): Promise<Array<{ child: Canvas; orderKey?: string }>> {
+    async listChildrenWithOrder(options?: {
+        scopes?: Scope[];
+    }): Promise<Array<{ child: Canvas; orderKey?: string }>> {
         const parentScope = this.nearestScope;
         const scopes = options?.scopes?.length ? options.scopes : [parentScope];
 
         // De-dupe by child; if multiple links exist, prefer one that carries a ViewKind orderKey
         const byChild = new Map<string, { child: Canvas; orderKey?: string }>();
 
-        for await (const { link, scope } of iterLinksWithOrigin(scopes, [getChildrenLinksQuery(this.id)])) {
+        for await (const { link, scope } of iterLinksWithOrigin(scopes, [
+            getChildrenLinksQuery(this.id),
+        ])) {
             const child = await resolveChild(link, scope);
             if (!child) continue;
 
@@ -3130,7 +3527,10 @@ export class Canvas {
             const current = byChild.get(k);
 
             // only ViewKind carries orderKey; others (ReplyKind/BoardViewKind/etc.) contribute presence only
-            const maybeOrder = (link.kind as any).tag === 1 ? (link.kind as ViewKind).orderKey : undefined;
+            const maybeOrder =
+                (link.kind as any).tag === 1
+                    ? (link.kind as ViewKind).orderKey
+                    : undefined;
 
             if (!current || maybeOrder !== undefined) {
                 byChild.set(k, { child, orderKey: maybeOrder });
@@ -3140,46 +3540,58 @@ export class Canvas {
         return Array.from(byChild.values());
     }
 
-
     /** Ordered children: sort by ViewKind.orderKey (ascending). Children without a View are appended (stable by id). */
-    async getOrderedChildren(options?: { scopes?: Scope[] }): Promise<Canvas[]> {
+    async getOrderedChildren(options?: {
+        scopes?: Scope[];
+    }): Promise<Canvas[]> {
         const withOrder = await this.listChildrenWithOrder(options);
 
-        const withK = withOrder.filter(x => typeof x.orderKey === "string");
-        const withoutK = withOrder.filter(x => typeof x.orderKey !== "string");
+        const withK = withOrder.filter((x) => typeof x.orderKey === "string");
+        const withoutK = withOrder.filter(
+            (x) => typeof x.orderKey !== "string"
+        );
 
-        withK.sort((a, b) => (a.orderKey! < b.orderKey! ? -1 : a.orderKey! > b.orderKey! ? 1 : 0));
+        withK.sort((a, b) =>
+            a.orderKey! < b.orderKey! ? -1 : a.orderKey! > b.orderKey! ? 1 : 0
+        );
         withoutK.sort((a, b) => compare(a.child.id, b.child.id));
 
-        return [...withK, ...withoutK].map(x => x.child);
+        return [...withK, ...withoutK].map((x) => x.child);
     }
 
     /** Move/insert child at an index by computing a new orderKey between neighbors. */
     async moveChildTo(child: Canvas, index: number): Promise<string> {
         const ordered = await this.getOrderedChildren();
-        const ids = ordered.map(c => toBase64(c.id));
+        const ids = ordered.map((c) => toBase64(c.id));
 
         const already = ids.indexOf(toBase64(child.id));
         if (already >= 0) ordered.splice(already, 1);
 
         const i = Math.max(0, Math.min(index, ordered.length));
 
-        const beforeKey = i > 0 ? await this.getChildOrderKey(ordered[i - 1].id) : undefined;
-        const afterKey = i < ordered.length ? await this.getChildOrderKey(ordered[i].id) : undefined;
+        const beforeKey =
+            i > 0 ? await this.getChildOrderKey(ordered[i - 1].id) : undefined;
+        const afterKey =
+            i < ordered.length
+                ? await this.getChildOrderKey(ordered[i].id)
+                : undefined;
 
         const newKey =
             i === 0
-                ? orderKeyBetween(undefined, afterKey)           // strictly before first
+                ? orderKeyBetween(undefined, afterKey) // strictly before first
                 : i === ordered.length
-                    ? orderKeyBetween(beforeKey, undefined)          // strictly after last
-                    : orderKeyBetween(beforeKey, afterKey);          // strictly between neighbors
+                ? orderKeyBetween(beforeKey, undefined) // strictly after last
+                : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
 
         await this.upsertViewPlacement(child, newKey);
         return newKey;
     }
 
     /** Read a child's current orderKey (if any). */
-    async getChildOrderKey(childId: Uint8Array, options?: { scopes?: Scope[] }): Promise<string | undefined> {
+    async getChildOrderKey(
+        childId: Uint8Array,
+        options?: { scopes?: Scope[] }
+    ): Promise<string | undefined> {
         const parentScope = this.nearestScope;
         const scopes = options?.scopes?.length ? options.scopes : [parentScope];
 
@@ -3187,11 +3599,11 @@ export class Canvas {
             getChildrenLinksQuery(this.id),
             getParentLinksQuery(childId),
         ])) {
-            if ((link.kind as any).tag === 1) return (link.kind as ViewKind).orderKey;
+            if ((link.kind as any).tag === 1)
+                return (link.kind as ViewKind).orderKey;
         }
         return undefined;
     }
-
 
     async getParentLinks(): Promise<Link[]> {
         const links = await this.links.index
@@ -3211,7 +3623,9 @@ export class Canvas {
         return links;
     }
 
-    async getChildrenReplies(): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
+    async getChildrenReplies(): Promise<
+        WithIndexedContext<Canvas, IndexableCanvas>[]
+    > {
         const links = await this.getChildrenLinks();
         const children: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
         for (const link of links) {
@@ -3221,7 +3635,6 @@ export class Canvas {
             }
         }
         return children;
-
     }
 
     async hasParentLinks(): Promise<boolean> {
@@ -3242,7 +3655,6 @@ export class Canvas {
         }
     }
 
-
     /*     async getStandaloneParent(): Promise<WithIndexedContext<Canvas, IndexableCanvas>[] | null> {
             let current: WithIndexedContext<Canvas, IndexableCanvas> | undefined = await this.getSelfIndexedCoerced();
             const chain: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
@@ -3255,7 +3667,6 @@ export class Canvas {
             return chain.reverse();
         } */
 
-
     async getSelfIndexed(): Promise<WithContext<IndexableCanvas> | undefined> {
         const scope = this.nearestScope;
         const indexed = await scope.replies.index.get(this.id, {
@@ -3267,14 +3678,18 @@ export class Canvas {
         return indexed as WithContext<IndexableCanvas> | undefined;
     }
 
-    async getSelfIndexedCoerced(): Promise<WithIndexedContext<Canvas, IndexableCanvas> | undefined> {
+    async getSelfIndexedCoerced(): Promise<
+        WithIndexedContext<Canvas, IndexableCanvas> | undefined
+    > {
         const indexed = await this.getSelfIndexed();
         if (!indexed) {
             return undefined;
         }
-        return coerceWithContext(coerceWithIndexed(this as Canvas, indexed), indexed.__context);
+        return coerceWithContext(
+            coerceWithIndexed(this as Canvas, indexed),
+            indexed.__context
+        );
     }
-
 
     async createElement(
         element: Element,
@@ -3292,7 +3707,6 @@ export class Canvas {
                 },
             }));
     }
-
 
     get messages(): RPC<CanvasMessage, CanvasMessage> {
         return this.nearestScope.messages;
@@ -3355,10 +3769,13 @@ export class Canvas {
         return this.nearestScope.openWithSameSettings(toOpen);
     } */
 
-    async addTextElement(text: string, options?: {
-        id?: Uint8Array;
-        skipReindex?: boolean;
-    }): Promise<void> {
+    async addTextElement(
+        text: string,
+        options?: {
+            id?: Uint8Array;
+            skipReindex?: boolean;
+        }
+    ): Promise<void> {
         /*   await this.load(); */
 
         let elementId = options?.id || randomBytes(32);
@@ -3382,19 +3799,13 @@ export class Canvas {
                         text,
                     }),
                     quality: LOWEST_QUALITY,
-                    contentId: sha256Sync(
-                        new TextEncoder().encode(text)
-                    ),
+                    contentId: sha256Sync(new TextEncoder().encode(text)),
                 }),
                 canvasId: this.id,
             }),
             options
         );
     }
-
-
-
-
 
     /*   async copyInto(
           dst: Canvas 
@@ -3419,10 +3830,9 @@ export class Canvas {
         return deserialize(serialize(this), Canvas);
     }
 
-
     toBase64Url() {
         // Convert to a base64 URL-safe string representation
-        return toBase64URL(serialize(this))
+        return toBase64URL(serialize(this));
     }
 
     static fromBase64Url(base64Url: string) {
@@ -3430,24 +3840,25 @@ export class Canvas {
     }
 
     async isEmpty(): Promise<boolean> {
-
-        const count = (await this.elements.count({ query: getOwnedElementsQuery(this), approximate: true }))
+        const count = await this.elements.count({
+            query: getOwnedElementsQuery(this),
+            approximate: true,
+        });
         if (count > 0) {
             return false;
         }
         if (count === 1) {
-            const first = await this.elements.index.iterate({ query: getOwnedElementsQuery(this) }).first();
+            const first = await this.elements.index
+                .iterate({ query: getOwnedElementsQuery(this) })
+                .first();
             if (first && first.content.isEmpty) {
                 // only one element and it is empty
                 return true;
-
             }
             return false;
         }
         return true;
     }
-
-
 }
 /* export const openCanvasWithAddress = async (root: Canvas | Scope, address: string, scopes?: Scope[]): Promise<Canvas> => {
     const rootScope = root instanceof Canvas ? root.nearestScope : root;
@@ -3467,8 +3878,6 @@ export class Canvas {
     }
     return root.openWithSameSettings(address);
 } */
-
-
 
 /*
  WE CAN NOT USE BELOW YET BECAUSE WE CAN NOT HAVE CIRCULAR DEPENDENCIE
@@ -3495,7 +3904,6 @@ export class CanvasValueReference extends AddressReference {
         return this.canvas.address;
     }
 } */
-
 
 @variant(0)
 export class IFrameContent extends ElementContent {
@@ -3586,7 +3994,6 @@ export class StaticContent<
     }
 }
 
-
 /**
  * Options that control how the diff is performed
  */
@@ -3614,45 +4021,51 @@ export interface CanvasDiffResult {
     different: boolean;
 }
 
-
-
 /**
  * Async helper that loads all owned elements for a canvas and
  * returns a *stable* hash you can compare cheaply.
  * Here we hash: id ‖ quality ‖ contentId ‖ location.(x,y,z,w,h,breakpoint)
  */
-async function getElementHash(canvas: Canvas, scope: Scope): Promise<Uint8Array> {
+async function getElementHash(
+    canvas: Canvas,
+    scope: Scope
+): Promise<Uint8Array> {
     const els = await (scope || canvas).elements.index
         .iterate({ query: getOwnedElementsQuery(canvas) }, { resolve: false })
         .all();
 
     // Build a deterministic byte buffer
     const buf: Uint8Array[] = [];
-    els
-        .sort((a, b) => compare(a.id, b.id))
-        .forEach(e => {
-            buf.push(
-                serialize(e)
-            );
-        });
+    els.sort((a, b) => compare(a.id, b.id)).forEach((e) => {
+        buf.push(serialize(e));
+    });
 
     return sha256Sync(concat(buf));
 }
 
 /** Similar helper for LinkPlacement */
-async function getLinkHash(canvas: Canvas, scope: Scope, orderSensitive = false): Promise<Uint8Array> {
-    const links = await scope.links.index
+async function getLinkHash(
+    canvas: Canvas,
+    scope: Scope,
+    orderSensitive = false
+): Promise<Uint8Array> {
+    const links = (await scope.links.index
         .iterate({ query: [getChildrenLinksQuery(canvas.id)] })
-        .all() as Link[];
+        .all()) as Link[];
 
-    const sorted = orderSensitive ? links : links.sort((a, b) => compare(a.child.canvasId, b.child.canvasId));
+    const sorted = orderSensitive
+        ? links
+        : links.sort((a, b) => compare(a.child.canvasId, b.child.canvasId));
     const buf: Uint8Array[] = [];
-    sorted.forEach(l => buf.push(serialize(l)));
+    sorted.forEach((l) => buf.push(serialize(l)));
     return sha256Sync(concat(buf));
 }
 
 /** Hash for BasicVisualization (or any subclass) */
-async function getVisualisationHash(canvas: Canvas, scope?: Scope): Promise<Uint8Array> {
+async function getVisualisationHash(
+    canvas: Canvas,
+    scope?: Scope
+): Promise<Uint8Array> {
     const v = await (scope || canvas.nearestScope).getVisualization(canvas);
     return v ? sha256Sync(serialize(v)) : new Uint8Array(32); // zero-hash when none
 }
@@ -3675,8 +4088,8 @@ export async function diffCanvases(
     /* 1️⃣ elements ---------------------------------------------------------- */
     if (
         !equals(
-            await getElementHash(ca, (a.scope || a.canvas.nearestScope)),
-            await getElementHash(cb, (b.scope || b.canvas.nearestScope))
+            await getElementHash(ca, a.scope || a.canvas.nearestScope),
+            await getElementHash(cb, b.scope || b.canvas.nearestScope)
         )
     ) {
         return true;
@@ -3685,8 +4098,8 @@ export async function diffCanvases(
     /* 2️⃣ visualisation ----------------------------------------------------- */
     if (
         !equals(
-            await getVisualisationHash(ca, (a.scope || a.canvas.nearestScope)),
-            await getVisualisationHash(cb, (b.scope || b.canvas.nearestScope)),
+            await getVisualisationHash(ca, a.scope || a.canvas.nearestScope),
+            await getVisualisationHash(cb, b.scope || b.canvas.nearestScope)
         )
     ) {
         return true;
@@ -3695,8 +4108,16 @@ export async function diffCanvases(
     /* 3️⃣ links ------------------------------------------------------------- */
     if (
         !equals(
-            await getLinkHash(ca, (a.scope || a.canvas.nearestScope), opts.orderSensitiveLinks),
-            await getLinkHash(cb, (b.scope || b.canvas.nearestScope), opts.orderSensitiveLinks),
+            await getLinkHash(
+                ca,
+                a.scope || a.canvas.nearestScope,
+                opts.orderSensitiveLinks
+            ),
+            await getLinkHash(
+                cb,
+                b.scope || b.canvas.nearestScope,
+                opts.orderSensitiveLinks
+            )
         )
     ) {
         return true;
@@ -3706,21 +4127,27 @@ export async function diffCanvases(
     if (opts.recursive) {
         const [kidsA, kidsB] = await Promise.all([
             ca.getChildren(),
-            cb.getChildren()
+            cb.getChildren(),
         ]);
 
         /* quick set-difference test – if #children differs we can stop here */
         if (kidsA.length !== kidsB.length) return true;
 
         const byId = (c: Canvas) => toBase64(c.id);
-        const mapB = new Map(kidsB.map(k => [byId(k), k]));
+        const mapB = new Map(kidsB.map((k) => [byId(k), k]));
 
         for (const childA of kidsA) {
             const childB = mapB.get(byId(childA));
             if (!childB) return true; // missing counterpart
 
             /* recurse; bail as soon as any subtree differs */
-            if (await diffCanvases({ canvas: childA, scope: a.scope }, { canvas: childB, scope: b.scope }, opts)) {
+            if (
+                await diffCanvases(
+                    { canvas: childA, scope: a.scope },
+                    { canvas: childB, scope: b.scope },
+                    opts
+                )
+            ) {
                 return true;
             }
         }

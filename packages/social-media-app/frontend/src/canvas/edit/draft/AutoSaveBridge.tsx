@@ -5,7 +5,9 @@ import { useCanvas } from "../../CanvasWrapper";
 import { PrivateScope } from "../../useScope";
 import { useDraftSession } from "./DraftSession";
 
-export const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({ enabled }) => {
+export const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({
+    enabled,
+}) => {
     const { savePending, pendingRects, subscribeContentChange } = useCanvas();
     const privateScope = PrivateScope.useScope();
     const session = useDraftSession();
@@ -34,7 +36,7 @@ export const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({ enabled }) => 
     // also react to presence of non-empty pending rects (e.g. programmatic inserts)
     useEffect(() => {
         if (!enabled) return;
-        if (pendingRects.some(p => !p.content.isEmpty)) flush();
+        if (pendingRects.some((p) => !p.content.isEmpty)) flush();
     }, [enabled, pendingRects, flush]);
 
     // safety: flush on unmount if something is pending

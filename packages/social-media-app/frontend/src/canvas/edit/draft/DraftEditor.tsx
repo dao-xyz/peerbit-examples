@@ -7,7 +7,7 @@ import { useDraftSession } from "./DraftSession";
 import { PrivateScope } from "../../useScope";
 
 const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({ enabled }) => {
-    const session = useDraftSession();                  // for DraftManager.saveDebounced()
+    const session = useDraftSession(); // for DraftManager.saveDebounced()
     const privateScope = PrivateScope.useScope();
     const { subscribeContentChange, savePending } = useCanvas();
 
@@ -48,7 +48,14 @@ export const DraftEditor: React.FC<{
     placeholder?: string;
     classNameContent?: string;
     debug?: boolean;
-}> = ({ children, autoSave, autoReply, placeholder, classNameContent, debug }) => {
+}> = ({
+    children,
+    autoSave,
+    autoReply,
+    placeholder,
+    classNameContent,
+    debug,
+}) => {
     const session = useDraftSession();
 
     return (
@@ -62,7 +69,9 @@ export const DraftEditor: React.FC<{
         >
             {/* Lives INSIDE CanvasWrapper so it can use useCanvas() */}
             <AutoSaveBridge enabled={!!autoSave} />
-            <AutoReplyProvider disabled={!autoReply}>{children}</AutoReplyProvider>
+            <AutoReplyProvider disabled={!autoReply}>
+                {children}
+            </AutoReplyProvider>
         </CanvasWrapper>
     );
 };

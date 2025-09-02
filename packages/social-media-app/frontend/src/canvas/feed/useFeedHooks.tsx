@@ -217,8 +217,7 @@ export const useFeedHooks = (props: {
 
     const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
 
-    const scrollUpForMore =
-        visualization?.view === ChildVisualization.CHAT;
+    const scrollUpForMore = visualization?.view === ChildVisualization.CHAT;
 
     useEffect(() => {
         document.documentElement.style.setProperty(
@@ -395,7 +394,7 @@ export const useFeedHooks = (props: {
         setViewRootById: (id) => {
             if (feedRoot?.idString !== id) {
                 const found = path.find((c) => c.idString === id);
-                return found
+                return found;
             }
         },
         onSnapshot: props.onSnapshot,
@@ -417,7 +416,6 @@ export const useFeedHooks = (props: {
         if (!processedReplies) return [];
         return processedReplies.filter((_, i) => indexIsReadyToRender(i));
     }, [processedReplies, indexIsReadyToRender]);
-
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: visibleReplies,
@@ -466,8 +464,7 @@ export const useFeedHooks = (props: {
             );
         }
     }, [isAtBottom, processedReplies]);
-    const isChat =
-        visualization?.view === ChildVisualization.CHAT;
+    const isChat = visualization?.view === ChildVisualization.CHAT;
 
     return {
         repliesContainerRef,

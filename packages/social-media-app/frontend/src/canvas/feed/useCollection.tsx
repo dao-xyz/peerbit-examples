@@ -11,7 +11,6 @@ import {
 } from "@giga-app/interface";
 import { Documents, type WithIndexedContext } from "@peerbit/document";
 
-
 export const useAllPosts = (properties: {
     scope: Scope;
     parent?: WithIndexedContext<Canvas, IndexableCanvas>;
@@ -19,7 +18,6 @@ export const useAllPosts = (properties: {
     type?: "navigational" | "narrative";
     debug?: boolean;
 }) => {
-
     const replies = properties.scope?.replies;
     const parent = properties.parent;
 
@@ -38,15 +36,14 @@ export const useAllPosts = (properties: {
                     ...getImmediateRepliesQuery(parent),
                     ...(properties.type != null
                         ? [
-                            properties.type === "navigational"
-                                ? getReplyKindQuery(ViewKind)
-                                : getReplyKindQuery(ReplyKind),
-                        ]
+                              properties.type === "navigational"
+                                  ? getReplyKindQuery(ViewKind)
+                                  : getReplyKindQuery(ReplyKind),
+                          ]
                         : []),
                 ],
             };
         }, [properties.scope, properties.type, properties.replies, parent]),
-
 
         batchSize: 100,
         debug: properties?.debug ?? false, // { id: "replies" },
@@ -59,7 +56,7 @@ export const useAllPosts = (properties: {
 
         prefetch: true,
         onChange: {
-            merge: true
+            merge: true,
         },
     });
     return {

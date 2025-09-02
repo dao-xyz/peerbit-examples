@@ -1,4 +1,3 @@
-
 /* ---------------------------------------------------------
  * The edge that lives * inside the parent * and describes
  * how one child should appear under that parent.
@@ -7,11 +6,8 @@
 import { field, option, variant } from "@dao-xyz/borsh";
 
 export abstract class LinkKind {
-
     abstract get tag(): number;
-
 }
-
 
 @variant(0)
 export class Layout {
@@ -63,24 +59,23 @@ export class Layout {
 
 @variant(0)
 export class ReplyKind extends LinkKind {
-
-    @field({ type: 'u8' })
+    @field({ type: "u8" })
     tag: number;
     constructor() {
-        super()
+        super();
         this.tag = 0; // ReplyKind tag
     }
 }
 
 @variant(1)
 export class ViewKind extends LinkKind {
-    @field({ type: 'u8' })
+    @field({ type: "u8" })
     tag: number;
 
     @field({ type: "string" })
     orderKey: string;
     constructor(p: { orderKey: string }) {
-        super()
+        super();
         this.tag = 1; // ViewKind tag
         this.orderKey = p.orderKey;
     }

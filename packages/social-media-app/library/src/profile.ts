@@ -31,8 +31,6 @@ import {
 import { Layout } from "./link.js";
 import { StaticImage } from "./static/image.js";
 
-
-
 /* ──────────────────────────────────────────────
  * Profile record
  *   - stores a CanvasReference
@@ -46,7 +44,10 @@ export class Profile {
     @field({ type: CanvasReference })
     profile: CanvasReference;
 
-    constructor(props: { publicKey: PublicSignKey; profile: CanvasReference | Canvas }) {
+    constructor(props: {
+        publicKey: PublicSignKey;
+        profile: CanvasReference | Canvas;
+    }) {
         this.profile =
             props.profile instanceof CanvasReference
                 ? props.profile
@@ -56,9 +57,9 @@ export class Profile {
             this.profile instanceof CanvasAddressReference
                 ? concat([props.publicKey.bytes, this.profile.id])
                 : concat([
-                    props.publicKey.bytes,
-                    (this.profile as CanvasValueReference).value.id,
-                ])
+                      props.publicKey.bytes,
+                      (this.profile as CanvasValueReference).value.id,
+                  ])
         );
     }
 }
@@ -93,8 +94,7 @@ export class Profiles extends Program<ProfileArgs> {
     constructor(properties?: { id?: Uint8Array }) {
         super();
         const id =
-            properties?.id ??
-            sha256Sync(new TextEncoder().encode("profiles"));
+            properties?.id ?? sha256Sync(new TextEncoder().encode("profiles"));
         this.profiles = new Documents({ id });
     }
 
@@ -150,9 +150,6 @@ export class Profiles extends Program<ProfileArgs> {
                 },
                 type: ProfileIndexed,
                 transform: async (doc, _ctx) => {
-
-
-
                     try {
                         const opened = await doc.profile.resolve(this.node, {
                             args: { replicate: args?.replicate ?? true },
@@ -164,8 +161,8 @@ export class Profiles extends Program<ProfileArgs> {
                                 args: {
                                     replicate: args?.replicate,
                                     /*  replicas: args?.replicas, */
-                                }
-                            })
+                                },
+                            });
                         }
                         const profileIx = await IndexableCanvas.from(opened);
                         return new ProfileIndexed({
@@ -182,7 +179,10 @@ export class Profiles extends Program<ProfileArgs> {
     }
 
     /** create or update profile */
-    async create(props: { publicKey: PublicSignKey; profile: CanvasReference | Canvas }) {
+    async create(props: {
+        publicKey: PublicSignKey;
+        profile: CanvasReference | Canvas;
+    }) {
         const previous = await this.get(props.publicKey);
         const record = new Profile({
             publicKey: props.publicKey,
@@ -197,12 +197,14 @@ export class Profiles extends Program<ProfileArgs> {
 
     /** get profile by publicKey, optionally checking linked devices */
     async get(publicKey: PublicSignKey, identities?: Identities) {
-        const mine = await this.profiles.index.iterate({
-            query: new ByteMatchQuery({
-                key: ["profile", "publicKey"],
-                value: publicKey.bytes,
+        const mine = await this.profiles.index
+            .iterate({
+                query: new ByteMatchQuery({
+                    key: ["profile", "publicKey"],
+                    value: publicKey.bytes,
+                }),
             })
-        }).first()
+            .first();
 
         if (mine) return mine;
 
@@ -213,12 +215,14 @@ export class Profiles extends Program<ProfileArgs> {
             for (const link of linked) {
                 const other = link.getOtherDevice(publicKey);
                 if (!other) continue;
-                const alt = await this.profiles.index.iterate({
-                    query: new ByteMatchQuery({
-                        key: ["profile", "publicKey"],
-                        value: other.publicKey.bytes,
+                const alt = await this.profiles.index
+                    .iterate({
+                        query: new ByteMatchQuery({
+                            key: ["profile", "publicKey"],
+                            value: other.publicKey.bytes,
+                        }),
                     })
-                }).first()
+                    .first();
                 if (alt) return alt;
             }
         }
@@ -286,5 +290,8 @@ export async function ensureProfile(
         }),
     });
 
-    return { canvas: canvas as WithIndexedContext<Canvas, IndexableCanvas>, profile: profile };
+    return {
+        canvas: canvas as WithIndexedContext<Canvas, IndexableCanvas>,
+        profile: profile,
+    };
 }

@@ -17,7 +17,9 @@ interface ToolbarContextType {
 }
 const ToolbarContext = createContext<ToolbarContextType | undefined>(undefined);
 
-const ToolbarProviderContextComponent: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+const ToolbarProviderContextComponent: React.FC<{
+    children: React.ReactNode;
+}> = ({ children }) => {
     const [appSelectOpen, setAppSelectOpen] = useState(false);
     return (
         <ToolbarContext.Provider value={{ appSelectOpen, setAppSelectOpen }}>
@@ -28,7 +30,8 @@ const ToolbarProviderContextComponent: React.FC<{ children: React.ReactNode }> =
 
 export const useEditTools = () => {
     const ctx = useContext(ToolbarContext);
-    if (!ctx) throw new Error("useToolbar must be used within a ToolbarProvider");
+    if (!ctx)
+        throw new Error("useToolbar must be used within a ToolbarProvider");
     return ctx;
 };
 
@@ -70,12 +73,12 @@ export const CanvasEditorProvider: React.FC<{
     replyTo?: WithIndexedContext<Canvas, IndexableCanvas>;
 
     // Optional knobs
-    sessionKey?: Uint8Array;         // share one draft across multiple toolbars (draft mode only)
-    autoSave?: boolean;              // draft mode: enable debounced saves on content changes
-    autoReply?: boolean;             // draft mode: enable auto-reply targeting
+    sessionKey?: Uint8Array; // share one draft across multiple toolbars (draft mode only)
+    autoSave?: boolean; // draft mode: enable debounced saves on content changes
+    autoReply?: boolean; // draft mode: enable auto-reply targeting
     placeholder?: string;
     classNameContent?: string;
-    debug?: boolean;               // log if neither canvas nor replyTo provided
+    debug?: boolean; // log if neither canvas nor replyTo provided
 }> = ({
     children,
     canvas,
@@ -85,40 +88,47 @@ export const CanvasEditorProvider: React.FC<{
     autoReply,
     placeholder,
     classNameContent,
-    debug
+    debug,
 }) => {
-        // Drafting path (reply composer etc.)
-        if (replyTo) {
-            return (
-                <DraftSessionProvider replyTo={replyTo} keyish={sessionKey} >
-                    <DraftEditor
-                        autoSave={autoSave}
-                        autoReply={autoReply}
-                        placeholder={placeholder}
-                        classNameContent={classNameContent}
-                        debug={debug}
-                    >
-                        <ToolbarProviderContextComponent>{children}</ToolbarProviderContextComponent>
-                    </DraftEditor>
-                </DraftSessionProvider>
-            );
-        }
+    // Drafting path (reply composer etc.)
+    if (replyTo) {
+        return (
+            <DraftSessionProvider replyTo={replyTo} keyish={sessionKey}>
+                <DraftEditor
+                    autoSave={autoSave}
+                    autoReply={autoReply}
+                    placeholder={placeholder}
+                    classNameContent={classNameContent}
+                    debug={debug}
+                >
+                    <ToolbarProviderContextComponent>
+                        {children}
+                    </ToolbarProviderContextComponent>
+                </DraftEditor>
+            </DraftSessionProvider>
+        );
+    }
 
-        // Existing canvas path (outer editor for viewRoot)
-        if (canvas) {
-            return (
-                <ExistingCanvasEditor canvas={canvas} placeholder={placeholder} classNameContent={classNameContent}>
+    // Existing canvas path (outer editor for viewRoot)
+    if (canvas) {
+        return (
+            <ExistingCanvasEditor
+                canvas={canvas}
+                placeholder={placeholder}
+                classNameContent={classNameContent}
+            >
+                <ToolbarProviderContextComponent>
+                    {children}
+                </ToolbarProviderContextComponent>
+            </ExistingCanvasEditor>
+        );
+    }
 
-                    <ToolbarProviderContextComponent>{children}</ToolbarProviderContextComponent>
-                </ExistingCanvasEditor>
-            );
-        }
-
-        // Nothing to edit — render nothing but log for visibility
-        if (process.env.NODE_ENV !== "production") {
-            console.error(
-                "[CanvasEditorProvider] You must provide either `replyTo` (draft mode) or `canvas` (existing)."
-            );
-        }
-        return null;
-    };
+    // Nothing to edit — render nothing but log for visibility
+    if (process.env.NODE_ENV !== "production") {
+        console.error(
+            "[CanvasEditorProvider] You must provide either `replyTo` (draft mode) or `canvas` (existing)."
+        );
+    }
+    return null;
+};

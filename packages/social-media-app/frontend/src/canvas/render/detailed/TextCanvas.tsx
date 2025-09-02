@@ -10,7 +10,7 @@ const filterText = (rects: Element<any>[]) =>
 const config: CanvasBaseConfig = {
     mode: "text",
     containerClass: "flex-col gap-4",
-    frameFit: undefined,             // keep Frame's default sizing for text
+    frameFit: undefined, // keep Frame's default sizing for text
     editModeEnabled: (global) => global,
     showEditControls: (global, n) => global && n > 1,
     filterRects: filterText,

@@ -33,8 +33,8 @@ const useVisualization = (properies: { canvas: Canvas }) => {
         return !canvas
             ? null
             : {
-                query: getOwnedByCanvasQuery(canvas),
-            };
+                  query: getOwnedByCanvasQuery(canvas),
+              };
     }, [canvas?.idString]);
 
     /* 1. fetch the current saved visualization ------------------- */
@@ -53,8 +53,8 @@ const useVisualization = (properies: { canvas: Canvas }) => {
         remote: {
             eager: true,
             joining: {
-                waitFor: 5e3
-            }
+                waitFor: 5e3,
+            },
         },
         prefetch: true,
     });
@@ -134,7 +134,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     const [searchParams, setSearchParams] = useSearchParams();
     const childrenVisualizationFromParam: ChildVisualization =
         CHILDREN_VISUALIZATION_PARAM_MAP[
-        (searchParams.get(VIEW_PARAM_QUERY_KEY) as string) || "feed"
+            (searchParams.get(VIEW_PARAM_QUERY_KEY) as string) || "feed"
         ];
 
     const setChildrenVisualizationParam = (

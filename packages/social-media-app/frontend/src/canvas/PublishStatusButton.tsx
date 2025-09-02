@@ -7,14 +7,12 @@ import { useState } from "react";
 interface PublishStatusButtonProps {
     className?: string;
     canvas: Canvas;
-
 }
 
 export const PublishStatusButton = ({
     className,
-    canvas
+    canvas,
 }: PublishStatusButtonProps) => {
-
     const [published, setPublished] = useState<boolean>(false);
     const handleToggle = () => {
         if (!published) {

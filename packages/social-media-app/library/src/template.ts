@@ -35,9 +35,9 @@ async function linkSection(
     view: ChildVisualization
 ) {
     const [created, child] = await parent.upsertReply(draft, {
-        type: "link-only",                      // new API (no migration)
-        kind: new ViewKind({ orderKey }),       // View/ordering kind
-        view,                             // replaces old `type`
+        type: "link-only", // new API (no migration)
+        kind: new ViewKind({ orderKey }), // View/ordering kind
+        view, // replaces old `type`
     });
     return [created, child] as const;
 }
@@ -60,7 +60,12 @@ export class Template {
     @field({ type: Canvas })
     prototype: Canvas;
 
-    constructor(p: { name: string; description: string; prototype: Canvas; id?: Uint8Array }) {
+    constructor(p: {
+        name: string;
+        description: string;
+        prototype: Canvas;
+        id?: Uint8Array;
+    }) {
         this.id = p.id ?? randomBytes(32);
         this.name = p.name;
         this.description = p.description;
@@ -68,13 +73,12 @@ export class Template {
     }
 
     /**
- * Deep-copy this.template.prototype under `parent` (new ids, parent’s scope).
- * Uses Scope.publish(..., { type: "fork", updateHome: "set" }) so payload/experience
- * are copied by the publish pipeline, not manually here.
- */
+     * Deep-copy this.template.prototype under `parent` (new ids, parent’s scope).
+     * Uses Scope.publish(..., { type: "fork", updateHome: "set" }) so payload/experience
+     * are copied by the publish pipeline, not manually here.
+     */
     async insertInto(parent: Canvas): Promise<Canvas> {
         const parentScope = parent.nearestScope;
-
 
         const clone = async (
             src: Canvas,
@@ -83,18 +87,20 @@ export class Template {
             view?: ChildVisualization
         ): Promise<Canvas> => {
             // Open source with its own home settings (publish does copies from srcHome→dest)
-            const srcOpen = src.initialized ? src : await dstParent.nearestScope.openWithSameSettings(src);
+            const srcOpen = src.initialized
+                ? src
+                : await dstParent.nearestScope.openWithSameSettings(src);
 
             // Materialize a fork in the parent scope; preserve edge metadata if provided
             const [, dst] = await parentScope.publish(srcOpen, {
                 type: "fork",
-                id: "new",           // new id for each node in the cloned tree
-                updateHome: 'set', // keep srcOpen's selfScope as is (copied by publish)
+                id: "new", // new id for each node in the cloned tree
+                updateHome: "set", // keep srcOpen's selfScope as is (copied by publish)
                 visibility: "both",
                 targetScope: parentScope,
-                parent: dstParent,   // link under the parent we just created
-                kind,    // preserves ViewKind(orderKey) for ordering
-                view,    // if you store view on the edge, keep it; otherwise omit
+                parent: dstParent, // link under the parent we just created
+                kind, // preserves ViewKind(orderKey) for ordering
+                view, // if you store view on the edge, keep it; otherwise omit
                 // no need to pass publish.view for node’s own experience:
                 // copyVisualizationBetweenScopes already copies the node view/experience
             });
@@ -104,9 +110,13 @@ export class Template {
             for (const link of links) {
                 let child = await resolveChild(link, src.nearestScope);
                 if (!child) {
-                    throw new Error("Failed to resolve child during template cloning");
+                    throw new Error(
+                        "Failed to resolve child during template cloning"
+                    );
                 }
-                const loaded = await src.nearestScope.openWithSameSettings(child);
+                const loaded = await src.nearestScope.openWithSameSettings(
+                    child
+                );
                 const vizualization = await loaded.getVisualization();
                 await clone(loaded, dst, link.kind, vizualization?.view);
             }
@@ -193,12 +203,11 @@ export async function createAlbumTemplate(properties: {
         name: "Photo album",
         description: "Photos and Comments children",
         prototype: albumRoot,
-    })
+    });
 
     if (!created) {
         return template;
     }
-
 
     await albumRoot.setExperience(ChildVisualization.FEED);
 
@@ -263,7 +272,7 @@ export async function createProfileTemplate(props: {
         name: "Personal profile",
         description: "Profile root with Posts, Photos and About sections",
         prototype: root,
-    })
+    });
 
     if (!created) {
         return template;
@@ -345,7 +354,7 @@ export async function createCommunityTemplate(props: {
         name: "Community",
         description: "A community Posts, Members and Photos sections",
         prototype: root,
-    })
+    });
 
     if (!created) {
         return template;
@@ -433,8 +442,6 @@ export async function createPlaylistTemplate(props: {
         return template;
     }
 
-
-
     await root.setExperience(ChildVisualization.FEED);
 
     let header = props.name ?? "Playlist";
@@ -471,7 +478,7 @@ export async function createPlaylistTemplate(props: {
         await comments.addTextElement("Comments");
     }
 
-    return template
+    return template;
 }
 
 export async function createChatTemplate(props: {
@@ -496,7 +503,7 @@ export async function createChatTemplate(props: {
         name: "Chat",
         description: "Start a chat with your friends",
         prototype: root,
-    })
+    });
 
     if (!created) {
         return template;
@@ -534,7 +541,7 @@ export async function createArticleTemplate(props: {
         name: "My new article",
         description: "Article with comments sections",
         prototype: root,
-    })
+    });
 
     if (!created) {
         return template;

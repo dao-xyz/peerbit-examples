@@ -141,7 +141,7 @@ export const Reply = ({
              ? await viewRoot.nearestScope.openWithSameSettings(canvas)
              : canvas;
          await canvas.load(); */
-        await viewRoot.nearestScope.openWithSameSettings(canvas)
+        await viewRoot.nearestScope.openWithSameSettings(canvas);
 
         navigate(getCanvasPath(canvas, { view: viewAfterNavigation }), {});
         onClick && onClick();
@@ -157,23 +157,25 @@ export const Reply = ({
     const highlightStyle =
         (highlightType
             ? "animated-border p-0 " +
-            (highlightType === "pre-selected" ? "unfocused" : "focused")
+              (highlightType === "pre-selected" ? "unfocused" : "focused")
             : "") +
         " " +
         (classNameHighlight ?? "");
     let styleFromFromMode = isChat
         ? ""
-        : "bg-neutral-50 dark:bg-neutral-800/60 shadow  rounded-lg p-2 " + (hideHeader ? "" : "pt-1");
+        : "bg-neutral-50 dark:bg-neutral-800/60 shadow  rounded-lg p-2 " +
+          (hideHeader ? "" : "pt-1");
 
     return (
         <div
             ref={forwardRef}
-            className={`flex flex-col  ${isChat
-                ? align === "right"
-                    ? " items-end ml-10"
-                    : "items-start mr-10"
-                : ""
-                } ${styleFromFromMode} ${className}`}
+            className={`flex flex-col  ${
+                isChat
+                    ? align === "right"
+                        ? " items-end ml-10"
+                        : "items-start mr-10"
+                    : ""
+            } ${styleFromFromMode} ${className}`}
         >
             {/* {lineType && lineType !== "none" && (
                 <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">
@@ -181,21 +183,23 @@ export const Reply = ({
                 </div>
             )} */}
             <div
-                className={`inline-flex h-full flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${isThread ? "w-full" : ""
-                    }`}
+                className={`inline-flex h-full flex-col border-transparent hover:border-black dark:hover:border-white ${highlightStyle} ${
+                    isThread ? "w-full" : ""
+                }`}
             >
                 {!hideHeader && (
                     <div
-                        className={`flex items-center mb-1 ${align === "right" ? "justify-end" : "justify-start"
-                            }`}
+                        className={`flex items-center mb-1 ${
+                            align === "right" ? "justify-end" : "justify-start"
+                        }`}
                     >
                         <Header
                             variant={
                                 isChat
                                     ? "medium"
                                     : isExpandedBreadcrumb
-                                        ? "tiny"
-                                        : "large"
+                                    ? "tiny"
+                                    : "large"
                             }
                             forwardRef={headerRef}
                             canvas={canvas}
@@ -209,8 +213,9 @@ export const Reply = ({
                 {/* Preview / Canvas Section*/}
                 <div
                     ref={previewContainerRef}
-                    className={` relative overflow-y-scroll flex flex-col min-h-0 max-height-inherit-children ${showMore ? "max-h-full" : "max-h-[40vh]"
-                        }`}
+                    className={` relative overflow-y-scroll flex flex-col min-h-0 max-height-inherit-children ${
+                        showMore ? "max-h-full" : "max-h-[40vh]"
+                    }`}
                 >
                     <CanvasWrapper canvas={canvas} quality={MEDIUM_QUALITY}>
                         {isExpandedBreadcrumb ? (
@@ -226,17 +231,18 @@ export const Reply = ({
                                 onClick={handleCanvasClick}
                                 variant={isQuote ? "quote" : "chat-message"}
                                 align={align}
-                                className={`flex flex-col gap-2  ${align === "right"
-                                    ? "flex flex-col justify-end items-end"
-                                    : ""
-                                    }`}
+                                className={`flex flex-col gap-2  ${
+                                    align === "right"
+                                        ? "flex flex-col justify-end items-end"
+                                        : ""
+                                }`}
                                 classNameContent={
                                     align === "right"
                                         ? (element) =>
-                                            "bg-neutral-200 dark:bg-neutral-700 rounded " +
-                                            (rectIsStaticMarkdownText(element)
-                                                ? "p-2"
-                                                : "")
+                                              "bg-neutral-200 dark:bg-neutral-700 rounded " +
+                                              (rectIsStaticMarkdownText(element)
+                                                  ? "p-2"
+                                                  : "")
                                         : ""
                                 }
                                 onLoad={onLoad}
@@ -283,8 +289,9 @@ export const Reply = ({
             {!isExpandedBreadcrumb && isOverflowing && (
                 /* Show more button, overlay with content, if contracted */
                 <div
-                    className={`flex gap-2.5 w-full ${!showMore ? "-translate-y-full" : ""
-                        }`}
+                    className={`flex gap-2.5 w-full ${
+                        !showMore ? "-translate-y-full" : ""
+                    }`}
                 >
                     <div className="ml-auto p-2">
                         <ReplyButton

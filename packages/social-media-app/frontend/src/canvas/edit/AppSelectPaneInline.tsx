@@ -21,10 +21,17 @@ export const TEMPATE_ICON_MAP: Record<string, JSX.Element> = {
     Article: <GrArticle />,
 };
 
-const TemplateButton: React.FC<{ tpl: Template; onClick: () => void }> = ({ tpl, onClick }) => {
+const TemplateButton: React.FC<{ tpl: Template; onClick: () => void }> = ({
+    tpl,
+    onClick,
+}) => {
     const icon = TEMPATE_ICON_MAP[tpl.name];
     return (
-        <button className="btn btn-sm" onClick={onClick} title={tpl.description}>
+        <button
+            className="btn btn-sm"
+            onClick={onClick}
+            title={tpl.description}
+        >
             {icon && <span className="mr-2">{icon}</span>}
             {tpl.name}
         </button>
@@ -36,7 +43,10 @@ interface Props {
     className?: string;
 }
 
-export const AppSelectPaneInline: React.FC<Props> = ({ onSelected: _onSelected, className }) => {
+export const AppSelectPaneInline: React.FC<Props> = ({
+    onSelected: _onSelected,
+    className,
+}) => {
     /* ---------- data sources --------------------------- */
     const { apps, search: searchApps } = useApps();
     const { templates, search: searchTpls, insert: insertTpl } = useTemplates();
@@ -45,7 +55,7 @@ export const AppSelectPaneInline: React.FC<Props> = ({ onSelected: _onSelected, 
     const { leaf } = useCanvases();
 
     // Draft manager (use the current leaf as the sharing key)
-    const { publish, saveDebounced } = useDraftSession()
+    const { publish, saveDebounced } = useDraftSession();
     const canvasId = leaf?.idString;
 
     /* ---------- local state ---------------------------- */
@@ -62,25 +72,34 @@ export const AppSelectPaneInline: React.FC<Props> = ({ onSelected: _onSelected, 
     }, [query, searchApps, searchTpls, templates]);
 
     /* split native / web apps --------------------------- */
-    const nativeApps = useMemo(() => appsFiltered.filter((x) => x.isNative), [appsFiltered]);
-    const nonNativeApps = useMemo(() => appsFiltered.filter((x) => !x.isNative), [appsFiltered]);
+    const nativeApps = useMemo(
+        () => appsFiltered.filter((x) => x.isNative),
+        [appsFiltered]
+    );
+    const nonNativeApps = useMemo(
+        () => appsFiltered.filter((x) => !x.isNative),
+        [appsFiltered]
+    );
 
     /* handlers ------------------------------------------ */
-    const onAppSelected = async (app: SimpleWebManifest, insertDefaultValue: boolean) => {
+    const onAppSelected = async (
+        app: SimpleWebManifest,
+        insertDefaultValue: boolean
+    ) => {
         setQuery("");
         if (insertDefaultValue) {
             // Prefer inserting into the private scope if present
             insertDefault({ app, increment: true, scope: privateScope });
         }
         // Debounced save for the shared draft of this view, if available
-        saveDebounced()
+        saveDebounced();
         _onSelected(app);
     };
 
     const onTemplateSelected = async (tpl: Template) => {
         if (!privateScope) return;
         await insertTpl(tpl, leaf); // insert relative to current leaf
-        await saveDebounced()
+        await saveDebounced();
         setQuery("");
     };
 
@@ -107,7 +126,11 @@ export const AppSelectPaneInline: React.FC<Props> = ({ onSelected: _onSelected, 
                         <span className="font-ganja">Templates</span>
                         <div className="flex flex-wrap gap-2">
                             {templatesFiltered.map((tpl) => (
-                                <TemplateButton key={tpl.id.toString()} tpl={tpl} onClick={() => onTemplateSelected(tpl)} />
+                                <TemplateButton
+                                    key={tpl.id.toString()}
+                                    tpl={tpl}
+                                    onClick={() => onTemplateSelected(tpl)}
+                                />
                             ))}
                         </div>
                     </>
@@ -118,13 +141,17 @@ export const AppSelectPaneInline: React.FC<Props> = ({ onSelected: _onSelected, 
                     <>
                         <span className="font-ganja">Native apps</span>
                         <div className="flex gap-2">
-                            {window.location.hostname !== "giga.place" && <DebugGeneratePostButton />}
+                            {window.location.hostname !== "giga.place" && (
+                                <DebugGeneratePostButton />
+                            )}
                             {nativeApps.map((app) => (
                                 <AppButton
                                     key={app.url}
                                     app={app}
                                     className="btn btn-md"
-                                    onClick={(insertDefaultValue) => onAppSelected(app, insertDefaultValue)}
+                                    onClick={(insertDefaultValue) =>
+                                        onAppSelected(app, insertDefaultValue)
+                                    }
                                 />
                             ))}
                         </div>
@@ -142,7 +169,9 @@ export const AppSelectPaneInline: React.FC<Props> = ({ onSelected: _onSelected, 
                                     app={app}
                                     showTitle
                                     className="btn btn-md"
-                                    onClick={(insertDefaultValue) => onAppSelected(app, insertDefaultValue)}
+                                    onClick={(insertDefaultValue) =>
+                                        onAppSelected(app, insertDefaultValue)
+                                    }
                                 />
                             ))}
                         </div>

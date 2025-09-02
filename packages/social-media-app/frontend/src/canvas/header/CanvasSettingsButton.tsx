@@ -25,7 +25,7 @@ import { CreateNewViewMenuItem } from "../feed/CreateNewViewMenuItem";
 export const CanvasSettingsButton = ({
     canvas,
     onOpen,
-    className
+    className,
 }: {
     canvas: Canvas | WithIndexedContext<Canvas, IndexableCanvas>;
     onOpen?: () => void;

@@ -12,7 +12,6 @@ export const useDrafts = () => {
         type: undefined,
     });
 
-
     const deleteDraft = async (draft: Canvas) => {
         await privateRoot.remove(draft);
     };

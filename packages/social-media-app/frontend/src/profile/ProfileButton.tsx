@@ -1,6 +1,11 @@
 import { forwardRef, useEffect, useState } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
-import { Canvas, IndexableCanvas, LOWEST_QUALITY, Profile as ProfileData } from "@giga-app/interface";
+import {
+    Canvas,
+    IndexableCanvas,
+    LOWEST_QUALITY,
+    Profile as ProfileData,
+} from "@giga-app/interface";
 import { IndexedProfileRow, useProfiles } from "./useProfiles";
 import { CanvasPreview } from "../canvas/render/preview/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
@@ -91,10 +96,7 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
                             "overflow-hidden " + (rounded ? "rounded-md" : "")
                         }
                     >
-                        <CanvasWrapper
-                            quality={LOWEST_QUALITY}
-                            canvas={canvas}
-                        >
+                        <CanvasWrapper quality={LOWEST_QUALITY} canvas={canvas}>
                             <CanvasPreview onClick={onClick} variant="tiny" />
                         </CanvasWrapper>
                     </div>
@@ -119,9 +121,9 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
                     onClick
                         ? onClick
                         : (e) => {
-                            e.stopPropagation();
-                            navigateTo(profile);
-                        }
+                              e.stopPropagation();
+                              navigateTo(profile);
+                          }
                 }
             >
                 {content}

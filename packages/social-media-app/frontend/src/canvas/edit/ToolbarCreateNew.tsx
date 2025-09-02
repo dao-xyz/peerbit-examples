@@ -33,8 +33,8 @@ export const ToolbarCreateNew = (props: {
     inlineEditorActive: boolean;
     parent: CanvasDB;
     className?: string;
-    overlayRichMedia?: boolean
-    debug?: boolean
+    overlayRichMedia?: boolean;
+    debug?: boolean;
 }) => {
     const {
         hasTextElement,
@@ -51,7 +51,9 @@ export const ToolbarCreateNew = (props: {
     const { replyTo, disable: disableAutoReply } = useAutoReply();
     const { visualization } = useVisualizationContext();
     const { search } = useApps();
-    const [resolvedApp, setResolvedApp] = useState<null | SimpleWebManifest>(null);
+    const [resolvedApp, setResolvedApp] = useState<null | SimpleWebManifest>(
+        null
+    );
     const { peer } = usePeer();
     const privateScope = PrivateScope.useScope();
 
@@ -60,7 +62,13 @@ export const ToolbarCreateNew = (props: {
             console.log("Inserting default text element");
             insertDefault({ once: true, scope: privateScope });
         }
-    }, [hasTextElement, canvas?.idString, pendingRects.length, insertDefault, privateScope]);
+    }, [
+        hasTextElement,
+        canvas?.idString,
+        pendingRects.length,
+        insertDefault,
+        privateScope,
+    ]);
 
     useEffect(() => {
         const trimmed = text?.trim();
@@ -78,10 +86,14 @@ export const ToolbarCreateNew = (props: {
     };
 
     const AddButton = () => (
-        <button onClick={() => onToggleAppSelect(null)} className="btn btn-icon p-0 m-0 h-full">
+        <button
+            onClick={() => onToggleAppSelect(null)}
+            className="btn btn-icon p-0 m-0 h-full"
+        >
             <FaPlus
-                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300 ${appSelectOpen ? "rotate-45" : "rotate-0"
-                    }`}
+                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300 ${
+                    appSelectOpen ? "rotate-45" : "rotate-0"
+                }`}
             />
         </button>
     );
@@ -105,12 +117,16 @@ export const ToolbarCreateNew = (props: {
     }
 
     const isChat = visualization?.view === ChildVisualization.CHAT;
-    const colorStyle = "dark:bg-neutral-700 " + (isChat ? "bg-neutral-200" : "bg-neutral-50");
+    const colorStyle =
+        "dark:bg-neutral-700 " + (isChat ? "bg-neutral-200" : "bg-neutral-50");
 
     return (
-        <div className={`flex flex-col z-20 w-full left-0  ${colorStyle} ${props.className || ""}`}>
+        <div
+            className={`flex flex-col z-20 w-full left-0  ${colorStyle} ${
+                props.className || ""
+            }`}
+        >
             {/* Top area: (unchanged) images canvas above toolbar */}
-
 
             {/* First row: input */}
             <div className="flex flex-row ">
@@ -133,7 +149,18 @@ export const ToolbarCreateNew = (props: {
                 />
             </div>
 
-            <div className=" flex justify-left " style={props.overlayRichMedia ? { position: "absolute", top: "0", transform: "translateY(-100%)" } : {}}>
+            <div
+                className=" flex justify-left "
+                style={
+                    props.overlayRichMedia
+                        ? {
+                              position: "absolute",
+                              top: "0",
+                              transform: "translateY(-100%)",
+                          }
+                        : {}
+                }
+            >
                 <ImageCanvas draft={false} requestPublish={publish}>
                     <ImageUploadTrigger
                         onFileChange={() => onToggleAppSelect(false)}
@@ -160,7 +187,11 @@ export const ToolbarCreateNew = (props: {
                             app={resolvedApp}
                             onClick={(insertDefaultValue) => {
                                 if (!insertDefaultValue) return;
-                                insertDefault({ app: resolvedApp, increment: true, scope: privateScope });
+                                insertDefault({
+                                    app: resolvedApp,
+                                    increment: true,
+                                    scope: privateScope,
+                                });
                             }}
                             className="btn items-center px-2 p-1"
                             orientation="horizontal"
@@ -176,20 +207,24 @@ export const ToolbarCreateNew = (props: {
                     <BiExpandAlt size={20} />
                 </button>
 
-                {isChat && replyTo && replyTo.idString !== props.parent.idString && (
-                    <button
-                        className="btn btn-icon btn-icon-md "
-                        onClick={() => {
-                            disableAutoReply();
-                        }}
-                    >
-                        <MdClear className="animated-bg-btn [--inner-bg:theme('colors.primary.900')] dark:[--inner-bg:theme('colors.primary.200')] text-white dark:text-black " />
-                    </button>
-                )}
+                {isChat &&
+                    replyTo &&
+                    replyTo.idString !== props.parent.idString && (
+                        <button
+                            className="btn btn-icon btn-icon-md "
+                            onClick={() => {
+                                disableAutoReply();
+                            }}
+                        >
+                            <MdClear className="animated-bg-btn [--inner-bg:theme('colors.primary.900')] dark:[--inner-bg:theme('colors.primary.200')] text-white dark:text-black " />
+                        </button>
+                    )}
 
                 <PrivacySwitch className="ml-auto" />
-                <SaveButton onClick={() => props.setInlineEditorActive(false)} icon={BsSend} />
-
+                <SaveButton
+                    onClick={() => props.setInlineEditorActive(false)}
+                    icon={BsSend}
+                />
             </div>
         </div>
     );

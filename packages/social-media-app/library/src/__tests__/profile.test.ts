@@ -18,21 +18,26 @@ describe("profile", () => {
         await session.stop();
     });
 
-    const createOpenRootScope = (args?: { seed?: Uint8Array | number[] | Scope, replicate?: boolean, replicas?: { min?: number } }) => {
+    const createOpenRootScope = (args?: {
+        seed?: Uint8Array | number[] | Scope;
+        replicate?: boolean;
+        replicas?: { min?: number };
+    }) => {
         return session.peers[0].open(
-            args?.seed instanceof Scope ? args?.seed : new Scope({
-                seed: args?.seed ? new Uint8Array(args?.seed) : undefined,
-                publicKey: session.peers[0].identity.publicKey,
-            }),
+            args?.seed instanceof Scope
+                ? args?.seed
+                : new Scope({
+                      seed: args?.seed ? new Uint8Array(args?.seed) : undefined,
+                      publicKey: session.peers[0].identity.publicKey,
+                  }),
             {
                 args: {
                     replicate: args?.replicate ?? true,
-                    replicas: args?.replicas ?? undefined
-                }
+                    replicas: args?.replicas ?? undefined,
+                },
             }
         );
     };
-
 
     it("same address by default", async () => {
         const profiles1 = await session.peers[0].open(new Profiles());
@@ -49,19 +54,22 @@ describe("profile", () => {
             new Identities({ baseUrl: "root://" })
         );
 
-
-        const rootScope = await createOpenRootScope()
-        const [_, root] = await rootScope.getOrCreateReply(null,
+        const rootScope = await createOpenRootScope();
+        const [_, root] = await rootScope.getOrCreateReply(
+            null,
             new Canvas({
                 publicKey: session.peers[0].identity.publicKey,
                 selfScope: rootScope,
-            }));
-
+            })
+        );
 
         const [_a, _b, c] = await ensurePath(root, ["a", "b", "c"]);
 
         const profiles = await session.peers[0].open(new Profiles());
-        await profiles.create({ publicKey: session.peers[0].identity.publicKey, profile: c });
+        await profiles.create({
+            publicKey: session.peers[0].identity.publicKey,
+            profile: c,
+        });
 
         const profile = await profiles.get(
             profiles.node.identity.publicKey,
@@ -75,19 +83,23 @@ describe("profile", () => {
             new Identities({ baseUrl: "root://" })
         );
 
-        const rootScope = await createOpenRootScope()
+        const rootScope = await createOpenRootScope();
         const [_, root] = await rootScope.getOrCreateReply(
             null,
             new Canvas({
                 publicKey: session.peers[0].identity.publicKey,
                 selfScope: rootScope,
-            }));
+            })
+        );
 
         const [_a, _b, c] = await ensurePath(root, ["a", "b", "c"]);
         const [__a, __b, d] = await ensurePath(root, ["a", "b", "d"]);
 
         const profiles = await session.peers[0].open(new Profiles());
-        await profiles.create({ publicKey: session.peers[0].identity.publicKey, profile: c });
+        await profiles.create({
+            publicKey: session.peers[0].identity.publicKey,
+            profile: c,
+        });
 
         const profile = await profiles.get(
             profiles.node.identity.publicKey,
@@ -95,7 +107,10 @@ describe("profile", () => {
         );
         expect(equals(profile?.profile.id, c.id)).to.be.true;
 
-        await profiles.create({ publicKey: session.peers[0].identity.publicKey, profile: d });
+        await profiles.create({
+            publicKey: session.peers[0].identity.publicKey,
+            profile: d,
+        });
         const updatedProfile = await profiles.get(
             profiles.node.identity.publicKey,
             identities
@@ -130,18 +145,22 @@ describe("profile", () => {
         expect(await identities1.getAllLinkedDevices()).to.have.length(1);
         expect(await identities2.getAllLinkedDevices()).to.have.length(1);
 
-        const rootScope = await createOpenRootScope()
+        const rootScope = await createOpenRootScope();
         const [_, root] = await rootScope.getOrCreateReply(
             undefined,
             new Canvas({
                 publicKey: session.peers[0].identity.publicKey,
                 selfScope: rootScope,
-            }));
+            })
+        );
 
         const [_a, _b, c] = await ensurePath(root, ["a", "b", "c"]);
 
         const profiles = await session.peers[0].open(new Profiles());
-        await profiles.create({ publicKey: session.peers[0].identity.publicKey, profile: c });
+        await profiles.create({
+            publicKey: session.peers[0].identity.publicKey,
+            profile: c,
+        });
 
         const profiles2 = await session.peers[1].open(new Profiles());
         await waitForResolved(async () =>

@@ -69,9 +69,9 @@ export const usePublish = ({ canvas, canvasHandleRef }: UsePublishArgs) => {
             if (replyTo) {
                 // Promote to PUBLIC by syncing + linking under the reply target
                 await replyTo.upsertReply(canvas, {
-                    type: "sync",            // move/copy canonical data to targetScope
+                    type: "sync", // move/copy canonical data to targetScope
                     targetScope: publicScope,
-                    visibility: "both",      // mirror in parent’s scope as needed
+                    visibility: "both", // mirror in parent’s scope as needed
                 });
             } else {
                 // Publish as PUBLIC top-level (no parent)

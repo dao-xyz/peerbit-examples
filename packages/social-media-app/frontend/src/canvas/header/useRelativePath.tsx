@@ -17,7 +17,6 @@ export const useRelativePath = (properties: {
             return;
         }
 
-
         // get the path of the canvas that is unique to the viewRoot
 
         if (!properties.canvas || !properties.canvas.initialized || !leaf) {
@@ -25,14 +24,18 @@ export const useRelativePath = (properties: {
         }
 
         // filter the path to only include elements that are not in the viewRoot path
-        const indexWhereTheRootEnds = properties.canvas.__indexed?.path.findIndex(
-            (p) => equals(p, leaf.id)
-        );
+        const indexWhereTheRootEnds =
+            properties.canvas.__indexed?.path.findIndex((p) =>
+                equals(p, leaf.id)
+            );
         if (indexWhereTheRootEnds === -1) {
             return setPath([] as Canvas[]);
         }
         const pathPromise = properties.canvas.loadPath({
-            length: properties.canvas.__indexed.path.length - indexWhereTheRootEnds - 1,
+            length:
+                properties.canvas.__indexed.path.length -
+                indexWhereTheRootEnds -
+                1,
         });
         pathPromise
             .then((path) => {
