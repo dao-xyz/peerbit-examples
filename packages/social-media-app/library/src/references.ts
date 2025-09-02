@@ -32,7 +32,7 @@ async function openInHomeAndIndex(
     const opened = await home.openWithSameSettings(canvas);
     const indexed = await opened.getSelfIndexedCoerced();
     if (!indexed) {
-        throw new Error("Failed to index Canvas after opening in home scope");
+        throw new Error("Failed get indexed Canvas after opening in home scope");
     }
 
     if (!indexed.initialized) {
@@ -99,7 +99,7 @@ export class CanvasAddressReference extends CanvasReference {
         const opened = await home.openWithSameSettings(stub);
         const indexed = await opened.getSelfIndexedCoerced();
         if (!indexed) {
-            throw new Error("Failed to index Canvas after opening in home scope");
+            throw new Error("Failed to get indexed Canvas after opening in home scope");
         }
         if (!indexed.initialized) {
             throw new Error("Unexpected");
