@@ -228,9 +228,9 @@ export class Identities extends Program<IdentitiesArgs> {
                         }),
                         device2: arg.device2
                             ? new DeviceIndexed({
-                                  publicKey: arg.device2.publicKey,
-                                  name: arg.device2.name,
-                              })
+                                publicKey: arg.device2.publicKey,
+                                name: arg.device2.name,
+                            })
                             : undefined,
                         nonce: arg.nonce,
                         verified: arg.verified,
@@ -401,16 +401,16 @@ export class Identities extends Program<IdentitiesArgs> {
     async connectDevicesFlow(
         properties:
             | {
-                  canvas?: HTMLCanvasElement;
-                  onCode?: (result: {
-                      encodedConnection: string;
-                      deepLinkUrl: string;
-                      qrCodeUrl: string;
-                  }) => void;
-              }
+                canvas?: HTMLCanvasElement;
+                onCode?: (result: {
+                    encodedConnection: string;
+                    deepLinkUrl: string;
+                    qrCodeUrl: string;
+                }) => void;
+            }
             | {
-                  deepLinkOrCode: string;
-              }
+                deepLinkOrCode: string;
+            }
     ): Promise<Connection> {
         if (!this.baseUrl) {
             throw new Error("Baseurl not set!");

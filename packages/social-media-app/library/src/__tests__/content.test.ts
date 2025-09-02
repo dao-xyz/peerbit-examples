@@ -1,1206 +1,833 @@
 import { TestSession } from "@peerbit/test-utils";
 import {
     Canvas,
+    Scope,
     getImmediateRepliesQuery,
     getRepliesQuery,
     getOwnedElementsQuery,
     Element,
     StaticContent,
-    Layout,
     getTextElementsQuery,
     getImagesQuery,
     LOWEST_QUALITY,
-    Purpose,
-    Navigation,
-    Narrative,
-    getNarrativePostsQuery,
+    IndexableCanvas,
+    diffCanvases,
+    getReplyKindQuery,
+    AddressReference,
 } from "../content.js";
-import { SearchRequest, Sort, SortDirection } from "@peerbit/document";
+import {
+    Sort,
+    SortDirection,
+    WithIndexedContext,
+} from "@peerbit/document";
 import { expect } from "chai";
 import { delay, waitForResolved } from "@peerbit/time";
-import { Ed25519Keypair, sha256Sync } from "@peerbit/crypto";
+import { sha256Base64Sync, sha256Sync, toBase64 } from "@peerbit/crypto";
 import { StaticImage } from "../static/image.js";
-import { Peerbit } from "peerbit";
-import { createRoot } from "../root.js";
+import { deserialize, serialize } from "@dao-xyz/borsh";
+import { orderKeyBetween } from "../order-key.js";
+import { ensurePath } from "./utils.js";
+import { Layout, ViewKind } from "../link.js";
+import { randomBytes } from "@peerbit/crypto";
 
-describe("canvas", () => {
+/* ----------------------- helpers (public APIs only) ----------------------- */
+
+async function createOpenRootScope(
+    session: TestSession,
+    opts?: { seed?: Uint8Array | number[] | Scope; replicate?: boolean; replicas?: { min?: number } }
+) {
+    const peer = session.peers[0];
+    return peer.open(
+        opts?.seed instanceof Scope
+            ? opts.seed
+            : new Scope({
+                seed: opts?.seed ? new Uint8Array(opts.seed as number[]) : undefined,
+                publicKey: peer.identity.publicKey,
+            }),
+        { args: { replicate: opts?.replicate ?? true, replicas: opts?.replicas } }
+    );
+}
+
+
+async function contextOf(
+    scope: Scope,
+    c: Canvas | WithIndexedContext<Canvas, IndexableCanvas>
+) {
+    const real = c instanceof Canvas ? c : (c as any as WithIndexedContext<Canvas, IndexableCanvas>);
+    return scope.createContext(real as Canvas);
+}
+
+/* ------------------------------ tests ------------------------------ */
+
+describe("canvas (updated)", () => {
     let session: TestSession;
 
-    beforeEach(async () => {
-        session = await TestSession.connected(2);
+    beforeEach(async () => { session = await TestSession.connected(2); });
+    afterEach(async () => { await session.stop(); });
+
+
+    it("can serialize deserialize", () => {
+        const clazz = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: new AddressReference({ address: "abc123" }),
+            id: randomBytes(32)
+        })
+        const serialized = serialize(clazz);
+        const deserialized = deserialize(serialized, Canvas);
+        expect(deserialized.idString).to.eq(clazz.idString);
+        expect(deserialized.selfScope.address).to.eq(clazz.selfScope.address);
+        expect(deserialized.publicKey.equals(clazz.publicKey)).to.be.true;
+        expect(deserialized.idString).to.deep.eq(clazz.idString);
+
+    })
+
+    it("loadCanvasFromScopes replacement: can fetch from replies", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
+            new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: rootScope })
+        );
+
+        const [a] = await ensurePath(root, ["a"]);
+        const again = await rootScope.replies.index.get(a.id, { resolve: true });
+        expect(again?.idString).to.eq(a.idString);
     });
 
-    afterEach(async () => {
+    it("multiple canvases referencing same scope opens fine", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, r1] = await scope.getOrCreateReply(undefined, new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: scope }));
+        const [__, r2] = await scope.getOrCreateReply(undefined, new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: scope }));
+        expect(r1.nearestScope.address).to.eq(scope.address);
+        expect(r2.nearestScope.address).to.eq(scope.address);
+    });
+
+    it("add + delete subtree (counts via indexed methods)", async () => {
         await session.stop();
-    });
+        const directory = "./tmp/add-delete/" + +new Date();
+        session = await TestSession.connected(1, { directory });
 
-    const checkContent = async (canvas: Canvas, content: string) => {
-        const elements = await canvas.elements.index
-            .iterate({ query: getOwnedElementsQuery(canvas) })
-            .all();
-        expect(elements).to.have.length(1);
-        expect(elements[0].__indexed.content).to.eq(content);
-    };
-
-    it("can make path", async () => {
-        const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-        const root = await session.peers[0].open(
-            new Canvas({
-                publicKey: randomRootKey,
-                seed: new Uint8Array(),
-            })
-        );
-        const [_a, _b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
-        expect(await c.createContext()).to.eq("c");
-        expect((await c.loadPath({ includeSelf: true })).length).to.eq(4);
-
-        expect((await c.loadPath({ includeSelf: true }))[3]).to.eq(c);
-
-        const [__a, __b, d] = await root.getCreateCanvasByPath(["a", "b", "d"]);
-        expect(await d.createContext()).to.eq("d");
-        expect((await d.loadPath({ includeSelf: true })).length).to.eq(4);
-
-        expect((await d.loadPath({ includeSelf: true }))[3]).to.eq(d);
-
-        const childrenFromRoot = await root.replies.index.index
-            .iterate({ query: getImmediateRepliesQuery(root) })
-            .all();
-        expect(childrenFromRoot).to.have.length(1); // both paths start at "a"
-
-        const ab = await root.findCanvasesByPath(["a", "b"]);
-        expect(
-            await Promise.all(ab.canvases.map((x) => x.createContext()))
-        ).to.deep.eq(["b"]);
-
-        const elementsInB = await ab.canvases[0].replies.index.search(
-            new SearchRequest({
-                query: getImmediateRepliesQuery(ab.canvases[0]),
-            })
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(
+            undefined,
+            new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: scope })
         );
 
-        const titlesFromB = await Promise.all(
-            elementsInB.map((x) => x.createContext())
-        );
-        expect(titlesFromB.sort()).to.deep.eq(["c", "d"]);
+        const [a, b, c] = await ensurePath(root, ["a", "b", "c"]);
 
-        const rootFromAnotherNode = await session.peers[1].open(
-            new Canvas({
-                publicKey: randomRootKey,
-                seed: new Uint8Array(),
-            })
-        );
+        const rootIdx = await root.getSelfIndexed();
+        const aIdx = await a.getSelfIndexed();
+        const bIdx = await b.getSelfIndexed();
+        expect(rootIdx && aIdx && bIdx).to.exist;
+        expect(aIdx!.context).to.eq("a");
 
-        // the root will contain all posts eventually because of the flattening
+        // indexing is async
         await waitForResolved(async () => {
-            expect(rootFromAnotherNode.replies.log.log.length).to.eq(4);
+            expect(Number(await root.countRepliesIndexedDirect())).to.eq(3);
+            expect(Number(await a.countRepliesIndexedDirect())).to.eq(2);
+            expect(Number(await b.countRepliesIndexedDirect())).to.eq(1);
 
-            const allReplies = await rootFromAnotherNode.replies.index
-                .iterate({ query: [] }, { local: true })
-                .all();
-            expect(allReplies).to.have.length(4);
-            for (const x of allReplies) {
-                const title = await x.createContext();
-                expect(title.length > 0).to.be.true;
-            }
+            // immediate counts
+            expect(Number(await root.countImmediateIndexedDirect(rootIdx!.pathDepth))).to.eq(1);
+            expect(Number(await a.countImmediateIndexedDirect(aIdx!.pathDepth))).to.eq(1);
+            expect(Number(await b.countImmediateIndexedDirect(bIdx!.pathDepth))).to.eq(1);
         });
+
+
+
+        // index search helpers
+
+        await waitForResolved(async () => {
+            const allUnderRoot = await scope.replies.index.iterate({
+                query: getRepliesQuery(root),
+                sort: new Sort({ key: "replies", direction: SortDirection.ASC }),
+            }).all();
+
+            expect(allUnderRoot).to.have.length(3);
+            expect(allUnderRoot.map(x => Number(x.__indexed.replies))).to.deep.eq([0, 1, 2])
+            expect(allUnderRoot.map(x => x.__indexed.context)).to.deep.eq(["c", "b", "a"]);
+
+        });
+
+        // delete subtree at "a"
+        await scope.remove(a);
+
+        const repliesAfter = await scope.replies.index.iterate({}).all();
+        expect(repliesAfter).to.have.length(1); // only root remains after removal
+
+        // restart and check persistence
+        await session.peers[0].stop();
+        session = await TestSession.connected(1, { directory });
+        const reopened = await session.peers[0].open(scope.clone(), {
+            existing: "reuse", args: { replicate: true }
+        });
+        const all = await reopened.replies.index.iterate({}).all();
+        expect(all).to.have.length(1);
     });
 
-    describe("loadPath", () => {
-        it("can load path with length", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                })
-            );
-            const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
-            const path = await c.loadPath({ length: 2, includeSelf: true });
-            expect(path).to.have.length(3);
-            expect(path.map((x) => x.idString)).to.deep.eq([
-                a.idString,
-                b.idString,
-                c.idString,
-            ]);
-        });
+    it("loadPath with limit", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: scope
+        }));
+        const [a, b, c] = await ensurePath(root, ["a", "b", "c"]);
+        const path = await c.loadPath({ length: 2, includeSelf: true });
+        expect(path.map(x => x.idString)).to.deep.eq([a.idString, b.idString, c.idString]);
     });
-    describe("createRoot", () => {
-        it("can create", async () => {
-            let sections = ["About", "Help"];
-            const root = await createRoot(session.peers[0], {
-                persisted: true,
-                sections,
+
+    it("create + query immediate & deep replies", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: scope
+        }));
+
+        await ensurePath(root, ["a", "b", "c"]);
+        await ensurePath(root, ["a", "b", "d"]);
+        const [a] = await ensurePath(root, ["a"]);
+        const [__, b] = await ensurePath(root, ["a", "b"]);
+
+
+        // indexing is async, so we need to wait for it
+        await waitForResolved(async () => {
+            const deep = await scope.replies.index.iterate({ query: getRepliesQuery(a) }).all();
+            expect(deep).to.have.length(3);
+            const titles = await Promise.all(deep.map(x => contextOf(scope, x)));
+            expect(titles.sort()).to.deep.eq(["b", "c", "d"]);
+        })
+
+        const bIdx = await b.getSelfIndexed();
+        const immed = await scope.replies.index.iterate({ query: getImmediateRepliesQuery(bIdx!) }).all();
+        const immedTitles = await Promise.all(immed.map(x => contextOf(scope, x)));
+        expect(immedTitles.sort()).to.deep.eq(["c", "d"]);
+    });
+
+    it("sort immediate children by replies (desc)", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: scope
+        }));
+        await ensurePath(root, ["b", "b"]);
+        await ensurePath(root, ["a", "b"]);
+        await ensurePath(root, ["c"]);
+        await ensurePath(root, ["a", "c"]);
+
+        const rootIdx = await root.getSelfIndexed();
+        await waitForResolved(async () => {
+            const sorted = await scope.replies.index.search({
+                query: getImmediateRepliesQuery(rootIdx!),
+                sort: new Sort({ key: "replies", direction: SortDirection.DESC }),
             });
-            expect(root).to.exist;
+            expect(await Promise.all(sorted.map(x => contextOf(scope, x)))).to.deep.eq(["a", "b", "c"]);
+        })
+    });
 
-            const repliesCount = await root.replies.index.getSize();
+    it("index/iterate works when viewer is non-replicator (remote warmup)", async () => {
+        const replicating = await createOpenRootScope(session);
+        const [_, root] = await replicating.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: replicating,
+        }));
 
-            expect(repliesCount).to.eq(2);
-            const replies = await root.replies.index
-                .iterate({ query: getRepliesQuery(root) })
-                .all();
-            replies.sort((a, b) =>
-                a.__indexed.context.localeCompare(b.__indexed.context)
-            );
-            const [first, second] = replies;
+        await ensurePath(root, ["a", "b"]);
+        await ensurePath(root, ["b", "b"]);
+        await ensurePath(root, ["c"]);
+        await ensurePath(root, ["a", "c"]);
 
-            await checkContent(first, "About");
-            await checkContent(second, "Help");
+        const viewer = await session.peers[1].open(replicating.clone(), { args: { replicate: false } });
+        await viewer.replies.log.waitForReplicators({ waitForNewPeers: true });
 
-            const type = await root.getType();
-            expect(type).to.not.exist;
+        const rootIdx = await root.getSelfIndexed();
+        const sorted = await viewer.replies.index.iterate({
+            query: getImmediateRepliesQuery(rootIdx!),
+            sort: new Sort({ key: "replies", direction: SortDirection.DESC }),
+        }).all();
 
-            const feedType = await first.getType();
-            expect(feedType).to.exist;
-            expect(feedType?.type).to.be.instanceOf(Navigation);
+        await waitForResolved(async () => {
+            expect(await Promise.all(sorted.map(x => contextOf(viewer, x)))).to.deep.eq(["a", "b", "c"]);
+        });
 
-            // creating again should resolve in the same address
-            const root2 = await createRoot(session.peers[1], {
-                persisted: true,
-                sections,
+    });
+
+    it("elements: query by ownership and type", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey
+        }));
+
+        const [a] = await ensurePath(root, ["a"]);
+        const [__, withImage] = await ensurePath(a, ["img"]);
+
+        await withImage.elements.put(new Element({
+            content: new StaticContent({
+                content: new StaticImage({
+                    data: new Uint8Array([1, 2, 3, 4]),
+                    height: 100,
+                    width: 100,
+                    mimeType: "image/png",
+                }),
+                contentId: sha256Sync(new Uint8Array([1, 2, 3, 4])),
+                quality: LOWEST_QUALITY,
+            }),
+            canvasId: withImage.id,
+            location: Layout.zero(),
+            publicKey: scope.node.identity.publicKey,
+        }));
+
+        const ownedA = await a.elements.index.iterate({ query: getOwnedElementsQuery(a) }).all();
+        expect(ownedA).to.have.length(1);
+
+        const ownedTextA = await a.elements.index.iterate({
+            query: [...getOwnedElementsQuery(a), getTextElementsQuery()],
+        }).all();
+        expect(ownedTextA).to.have.length(1);
+
+        const ownedImages = await withImage.elements.index.iterate({
+            query: [...getOwnedElementsQuery(withImage), getImagesQuery()],
+        }).all();
+        expect(ownedImages).to.have.length(1);
+    });
+
+    it("diffCanvases basic", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: scope
+        }));
+
+        const [a] = await ensurePath(root, ["a"]);
+        const aClone = deserialize(serialize(a), Canvas);
+        const same = await diffCanvases({ canvas: a, scope }, { canvas: aClone, scope });
+        expect(same).to.be.false;
+
+        const [__, b] = await ensurePath(root, ["a", "b"]);
+        const diff = await diffCanvases({ canvas: a, scope }, { canvas: b, scope });
+        expect(diff).to.be.true;
+    });
+
+    it("removeAllReplies removes subtree", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: scope
+        }));
+
+        const [a] = await ensurePath(root, ["a", "b"]);
+        await a.removeAllReplies();
+
+
+        await waitForResolved(async () => {
+            const deepUnderRoot = await scope.replies.index.iterate({ query: getRepliesQuery(root) }).all();
+            expect(deepUnderRoot).to.have.length(1); // only "a" remains
+            const rootIdx = await root.getSelfIndexed();
+
+            const immedUnderRoot = await scope.replies.index.iterate({ query: getImmediateRepliesQuery(rootIdx!) }).all();
+            expect(immedUnderRoot).to.have.length(1);
+        })
+    });
+
+    it("cross-scope: create in temp scope, then migrate+link under root scope", async () => {
+        const rootScope = await createOpenRootScope(session);
+
+        // Create a top-level parent in rootScope
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
+            new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: rootScope })
+        );
+
+        // Temp/private scope
+        const tempScope = await createOpenRootScope(session);
+
+        // Draft lives in temp, add content there
+        const draft = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: tempScope,
+        });
+        await tempScope.getOrCreateReply(undefined, draft);
+        await draft.addTextElement("hello");
+
+        // Publish: sync (same id), migrate home → rootScope, and link under `root`
+        const [createdNew, moved] = await root.upsertReply(draft, {
+            type: "sync",
+            targetScope: rootScope,
+            updateHome: "set", // migrate the node's home to rootScope
+            // visibility defaults to "both"
+        });
+
+        expect(createdNew).to.be.true;
+        expect(sha256Base64Sync(moved.id)).to.eq(sha256Base64Sync(draft.id)); // id preserved
+        expect(moved.selfScope.address).to.eq(rootScope.address); // home updated
+
+        // Ensure indexes have flushed/settled in root
+        await rootScope.reIndexDebouncer.flush();
+
+        // Node should exist in rootScope.replies
+        await waitForResolved(async () => {
+            const maybe = await rootScope.replies.index.get(draft.id, {
+                resolve: false,
+                local: true,
+                remote: { strategy: "fallback", timeout: 3_000 },
             });
-            expect(root2.address).to.eq(root.address);
-
-            await root2.replies.log.waitForReplicator(
-                session.peers[0].identity.publicKey
-            );
-            const replies2 = await root2.replies.index
-                .iterate({ query: getRepliesQuery(root) })
-                .all();
-            const [first2] = replies2;
-            expect(first2.address).to.eq(first.address);
+            expect(!!maybe).to.be.true;
         });
+
+        // Content should now be readable from rootScope (new home)
+        expect(await moved.getText({ scope: rootScope })).to.eq("hello");
+
+        // And content should be cleaned up from the old home (tempScope)
+        const oldRows = await tempScope.elements.index
+            .iterate({ query: getOwnedElementsQuery(moved) }, { resolve: false })
+            .all();
+        expect(oldRows.length).to.eq(0);
+
+        // Old replies row should also be gone in tempScope
+        const tempRow = await tempScope.replies.index.get(draft.id, {
+            resolve: false,
+            local: true,
+            remote: { strategy: "fallback", timeout: 3_000 },
+        });
+        expect(tempRow).to.be.undefined;
+
+        // Optional: verify link exists under `root` (child present)
+        const kids = await root.getChildren();
+        expect(kids.map(k => k.idString)).to.include(moved.idString);
     });
 
-    describe("getViewContext", () => {
-        it("view context from root", async () => {
-            const root = await createRoot(session.peers[0], {
-                persisted: true,
-            });
-            expect((await root.getType())?.type).to.be.undefined;
-            const [feed] = await root.getCreateCanvasByPath(["Feed"]);
-            expect((await feed.getType())?.type).to.be.instanceOf(Navigation);
+    it("reply counting: indexed vs BFS (immediate=false) agree", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: scope
+        }));
+        const [a, b, c] = await ensurePath(root, ["a", "b", "c"]);
+        const [__, d] = await ensurePath(root, ["a", "d"]);
 
-            const path = await feed.getCreateCanvasByPath(["a"]);
-            const a = path[path.length - 1];
-            const rootFromA = await a.getViewContext();
-            expect(rootFromA![0].idString).to.eq(a.idString);
+        // deep totals should match
+        await waitForResolved(async () => {
+            const idxA = await a.countRepliesIndexedDirect();
+            const bfsA = await a.countRepliesBFS({ immediate: false });
+            expect(Number(idxA)).to.eq(Number(bfsA));
 
-            const rootFromFeed = await feed.getViewContext();
-            expect(rootFromFeed![0].idString).to.eq(root.idString);
+            const idxRoot = await root.countRepliesIndexedDirect();
+            const bfsRoot = await root.countRepliesBFS({ immediate: false });
+            expect(Number(idxRoot)).to.eq(Number(bfsRoot));
+        })
+    });
+});
 
-            const rootFromRoot = await root.getViewContext();
-            expect(rootFromRoot![0].idString).to.eq(root.idString);
-        });
+describe("privacy / scope mixing", () => {
+    let session: TestSession;
 
-        it("root as navigation", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                    seed: new Uint8Array(),
-                })
-            );
+    beforeEach(async () => { session = await TestSession.connected(2); });
+    afterEach(async () => { await session.stop(); });
 
-            const [a] = await root.getCreateCanvasByPath(["a"]);
-            await root.setType(
-                new Purpose({
-                    canvasId: root.id,
-                    type: new Navigation(),
-                })
-            );
+    it("private-only child is discoverable only if private scope is passed", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
 
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Navigation(),
-                })
-            );
+        const [_, root] = await rootScope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: rootScope,
+        }));
 
-            expect(await root.getType()).to.exist;
-            expect(await a.getType()).to.exist;
-            const rootFromC = await a.getViewContext();
-            expect(rootFromC?.map((x) => x.idString)).to.deep.eq([
-                root.idString,
-                a.idString,
-            ]);
-        });
+        // child that only exists in privateScope (no mirror in rootScope)
+        const privateChild = new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: privateScope });
+        await privateScope.getOrCreateReply(root, privateChild, { visibility: "child" });
 
-        it("skips tab visualization", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                    seed: new Uint8Array(),
-                })
-            );
+        // only discoverable when privateScope is included
+        const foundPublicOnly = await root.getChildren({ scopes: [rootScope] });
+        expect(foundPublicOnly).to.have.length(0);
 
-            const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
-
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Narrative(),
-                })
-            );
-
-            await b.setType(
-                new Purpose({
-                    canvasId: b.id,
-                    type: new Navigation(),
-                })
-            );
-
-            await c.setType(
-                new Purpose({
-                    canvasId: c.id,
-                    type: new Navigation(),
-                })
-            );
-
-            expect(await a.getType()).to.exist;
-            expect(await b.getType()).to.exist;
-            expect(await c.getType()).to.exist;
-
-            const rootFromC = await c.getViewContext();
-            expect(rootFromC?.map((x) => x.idString)).to.deep.eq([
-                a.idString,
-                b.idString,
-                c.idString,
-            ]);
-        });
-
-        it("root returns root", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                    seed: new Uint8Array(),
-                })
-            );
-
-            const rootFromRoot = await root.getViewContext();
-            expect(rootFromRoot?.map((x) => x.idString)).to.deep.eq([
-                root.idString,
-            ]);
-        });
+        const foundWithPrivate = await root.getChildren({ scopes: [rootScope, privateScope] });
+        expect(foundWithPrivate.map(c => c.idString)).to.include(privateChild.idString);
     });
 
-    describe("getFeedContext", () => {
-        it("feed context from root", async () => {
-            const root = await createRoot(session.peers[0], {
-                persisted: true,
-            });
-            const [feed] = await root.getCreateCanvasByPath(["Feed"]);
-            const path = await feed.getCreateCanvasByPath(["a"]);
-            const a = path[path.length - 1];
-            const feedFromA = await a.getFeedContext();
-            expect(feedFromA!.idString).to.eq(a.idString);
+    it("both public + private mirror means child is discoverable everywhere", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
 
-            const feedFromRoot = await root.getFeedContext();
-            expect(feedFromRoot!.idString).to.eq(feed.idString);
-        });
-
-        it("narrative at root", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                    seed: new Uint8Array(),
-                })
-            );
-
-            const [a, b, c] = await root.getCreateCanvasByPath(["a", "b", "c"]);
-
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Narrative(),
-                })
-            );
-
-            await b.setType(
-                new Purpose({
-                    canvasId: b.id,
-                    type: new Navigation(),
-                })
-            );
-            expect(await a.getType()).to.exist;
-            expect(await b.getType()).to.exist;
-            const feedFromA = await a.getFeedContext();
-            expect(feedFromA?.idString).to.deep.eq(a.idString);
-        });
-
-        it("narrative at middle", async () => {
-            const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: randomRootKey,
-                    seed: new Uint8Array(),
-                })
-            );
-
-            const [a, b, _c] = await root.getCreateCanvasByPath([
-                "a",
-                "b",
-                "c",
-            ]);
-
-            await a.setType(
-                new Purpose({
-                    canvasId: a.id,
-                    type: new Navigation(),
-                })
-            );
-
-            await b.setType(
-                new Purpose({
-                    canvasId: b.id,
-                    type: new Narrative(),
-                })
-            );
-
-            expect(await a.getType()).to.exist;
-            expect(await b.getType()).to.exist;
-            const feedFromA = await a.getFeedContext();
-            expect(feedFromA?.idString).to.deep.eq(b.idString);
-        });
-    });
-
-    it("index once", async () => {
-        const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-        const root = await session.peers[0].open(
-            new Canvas({
-                publicKey: randomRootKey,
-                seed: new Uint8Array(),
-            })
-        );
-
-        let putIndexCalls = root.replies.index.putWithContext.bind(
-            root.replies.index
-        );
-
-        let putCount = 0;
-        root.replies.index.putWithContext = async (a, b, c) => {
-            putCount++;
-            return putIndexCalls(a, b, c);
-        };
-
-        await root.getCreateCanvasByPath(["a"]);
-        expect(putCount).to.eq(1);
-    });
-
-    it("indexes replies", async () => {
-        const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-        const root1 = await session.peers[0].open(
-            new Canvas({
-                publicKey: randomRootKey,
-                seed: new Uint8Array(),
-            })
-        );
-        const [a, b] = await root1.getCreateCanvasByPath(["a", "b"]);
-
-        expect(Number(a.__indexed.replies)).to.eq(1); // a has one reply (b)
-        expect(Number(b.__indexed.replies)).to.eq(0); // b has no replies
-    });
-
-    it("indexes replies ignores navigational posts", async () => {
-        const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-        const root1 = await session.peers[0].open(
-            new Canvas({
-                publicKey: randomRootKey,
-                seed: new Uint8Array(),
-            })
-        );
-        let [a, b, c] = await root1.getCreateCanvasByPath(["a", "b", "c"]);
-
-        expect(Number(a.__indexed.replies)).to.eq(2);
-        expect(Number(b.__indexed.replies)).to.eq(1);
-        expect(Number(c.__indexed.replies)).to.eq(0);
-
-        // await delay(2e3)
-
-        await b.setType(
-            new Purpose({
-                canvasId: b.id,
-                type: new Navigation({}),
-            })
-        );
-
-        await delay(5e3);
-        const iterator = root1.replies.index.iterate({
-            query: getNarrativePostsQuery(),
-        });
-        const all = await iterator.all();
-        expect(all).to.have.length(2);
-
-        let [aMod, bMod, cMod] = await root1.getCreateCanvasByPath([
-            "a",
-            "b",
-            "c",
-        ]);
-
-        expect(Number(aMod.__indexed.replies)).to.eq(1);
-        expect(Number(bMod.__indexed.replies)).to.eq(1);
-        expect(Number(cMod.__indexed.replies)).to.eq(0);
-    });
-
-    /*
-    //  TODO for keep: 'self' property is used and a remote not is modifying the same document, updates will not be propagate
-    // this will lead to issues when working with indexed data and fetching stuff "local first"
-    
-    it("will not re-index parents if not replicating", async () => {
-         const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-         const root1 = await session.peers[0].open(
-             new Canvas({
-                 publicKey: randomRootKey,
-                 seed: new Uint8Array(),
-             })
-         );
-         const [a1] = await root1.getCreateCanvasByPath(["a"]);
- 
-         const root2 = await session.peers[1].open(root1.clone(), {
-             args: {
-                 replicate: false,
-             },
-         });
- 
-         await root2.replies.log.waitForReplicators({ waitForNewPeers: true });
- 
-         let putIndexCalls = root2.replies.index.putWithContext.bind(
-             root2.replies.index
-         );
- 
-         let putCount = 0;
-         await root2.load();
-         root2.replies.index.putWithContext = async (a, b, c) => {
-             putCount++;
-             return putIndexCalls(a, b, c);
-         };
- 
-         const [a2, b2] = await root2.getCreateCanvasByPath(["a", "b"]);
-         await waitForResolved(async () => expect(Number(await a1.countReplies({ onlyImmediate: true }))).to.eq(1))
- 
-         expect(putCount).to.eq(1);
- 
-         const checkReplies = async (root: Canvas) => {
-             const a = await root.getCreateCanvasByPath(["a"])
-             expect(a).to.have.length(1);
-             const asIndexed = a[0] as WithIndexedContext<Canvas, IndexableCanvas>;
- 
-             expect(asIndexed.__indexed).to.exist; // root + a
-             expect(Number(await a1.countReplies({ onlyImmediate: true }))).to.eq(1);
-             expect(Number(asIndexed.__indexed.replies)).to.eq(1); // a has one reply (b)
-         }
- 
-         await checkReplies(root1);
-         await checkReplies(root2);
- 
- 
- 
-     }); */
-    it("same path", async () => {
-        const randomRootKey = (await Ed25519Keypair.create()).publicKey;
-        const root1 = await session.peers[0].open(
-            new Canvas({
-                publicKey: randomRootKey,
-                seed: new Uint8Array(),
-            })
-        );
-
-        const indexSize = await root1.replies.index.getSize();
-        expect(indexSize).to.eq(0);
-
-        const [a1] = await root1.getCreateCanvasByPath(["a"]);
-
-        const indexSize1 = await root1.replies.index.getSize();
-        expect(indexSize1).to.eq(1);
-
-        const [a2, b2] = await root1.getCreateCanvasByPath(["a", "b"]);
-
-        const indexSize2 = await root1.replies.index.getSize();
-        expect(indexSize2).to.eq(2);
-    });
-
-    it("can reload", async () => {
-        let root = await session.peers[0].open(
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
             new Canvas({
                 publicKey: session.peers[0].identity.publicKey,
-                seed: new Uint8Array(),
+                selfScope: rootScope,
             })
         );
-        let [a] = await root.getCreateCanvasByPath(["a"]);
-        await root.getCreateCanvasByPath(["a", "b"]);
-        await root.getCreateCanvasByPath(["a", "c"]);
 
-        const allReplies = await a.replies.index
-            .iterate({ query: getImmediateRepliesQuery(a) })
-            .all();
-        expect(allReplies).to.have.length(2);
-
-        const elements = await a.elements.index
-            .iterate({ query: getOwnedElementsQuery(a) })
-            .all();
-        expect(elements).to.have.length(1);
-
-        await root.close();
-        root = await session.peers[0].open(root.clone());
-
-        const allRepliesAfterReload = await root.replies.index
-            .iterate({ query: getImmediateRepliesQuery(root) })
-            .all();
-
-        expect(allRepliesAfterReload).to.have.length(1);
-        const aReopen = await session.peers[0].open(a.clone(), {
-            existing: "reuse",
+        // child has canonical home in privateScope; we link-only with a mirror in rootScope
+        const child = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
         });
-        await aReopen.load();
-        const elementsAfterReload = await aReopen.elements.index
-            .iterate({ query: getOwnedElementsQuery(a) })
-            .all();
-        expect(elementsAfterReload).to.have.length(1);
+
+        await root.upsertReply(child, { type: "link-only", visibility: "both" });
+
+        await waitForResolved(async () => {
+            const foundPublic = await root.getChildren({ scopes: [rootScope] });
+            expect(foundPublic.map(c => c.idString)).to.include(child.idString);
+
+            const foundPrivate = await root.getChildren({ scopes: [privateScope] });
+            expect(foundPrivate.map(c => c.idString)).to.include(child.idString);
+        });
     });
 
-    it("can reload subpath only ", async () => {
-        await session.stop();
+    it("remove cleans up canonical + mirrors", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
 
-        let directory = "./tmp/can reload subpath only/" + +new Date();
-        session = await TestSession.connected(1, { directory });
-        let peer = session.peers[0];
-
-        let root = await peer.open(
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
             new Canvas({
-                publicKey: peer.identity.publicKey,
-                seed: new Uint8Array(),
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: rootScope,
             })
         );
-        const [a, b] = await root.getCreateCanvasByPath(["a", "b"]);
-        const experience = await peer.services.blocks.get(b.address);
-        expect(experience).to.exist;
 
-        await peer.stop();
+        const privateChild = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
+        });
 
-        // session = await TestSession.connected(1, { directory });
-        // peer = session.peers[0] as any;
-        peer = await Peerbit.create({ directory });
+        // canonical in private, mirror in public
+        await root.upsertReply(privateChild, { type: "link-only", visibility: "both" });
 
-        const experienceAgain = await peer.services.blocks.get(b.address);
-        expect(experienceAgain).to.exist;
+        await waitForResolved(async () => {
+            const before = await root.getChildren({ scopes: [rootScope, privateScope] });
+            expect(before.map(c => c.idString)).to.include(privateChild.idString);
+        });
+
+        expect(await rootScope.replies.index.get(privateChild.id, { resolve: false, local: true, remote: false })).to.be.undefined;
+        expect(await privateScope.replies.index.get(privateChild.id, { resolve: false, local: true, remote: false })).to.not.be.undefined;
+
+        // remove across both scopes (canonical + mirrors)
+        await rootScope.remove(privateChild);
+
+        await waitForResolved(async () => {
+            const after = await root.getChildren({ scopes: [rootScope, privateScope] });
+            expect(after.map(c => c.idString)).to.not.include(privateChild.idString);
+        });
     });
 
-    describe("replies", () => {
-        it("index 1 reply", async () => {
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
+    it("can remove concurrently ", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
 
-            const [a, b] = await root.getCreateCanvasByPath(["a", "b"]);
-            expect(a).to.exist;
-            expect(b).to.exist;
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
+            new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: rootScope,
+            })
+        );
+        const privateChild = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
+        });
 
-            // index updates are not immediate, so we do checks until it's updated
+        const [created1, c1] = await root.upsertReply(privateChild, { type: "sync", updateHome: "set", visibility: "both" });
+
+
+        const privateChild2 = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
+        });
+
+        const [created2, c2] = await root.upsertReply(privateChild2, { type: "sync", updateHome: "set", visibility: "both" });
+
+        expect(created1).to.be.true;
+        expect(created2).to.be.true;
+
+        const before = await root.getChildren({ scopes: [rootScope, privateScope] });
+
+        expect(before.map(c => c.idString)).to.include(privateChild.idString);
+        expect(before.map(c => c.idString)).to.include(privateChild2.idString);
+
+        await Promise.all([
+            privateScope.remove(c1),
+            privateScope.remove(c2)
+        ]);
+
+        await waitForResolved(async () => {
+            const after = await root.getChildren({ scopes: [rootScope, privateScope] });
+            expect(after.map(c => c.idString)).to.not.include(privateChild.idString);
+            expect(after.map(c => c.idString)).to.not.include(privateChild2.idString);
+
+        });
+    })
+
+    it("counts respect scopes (indexed vs BFS)", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
+
+        const [_, root] = await rootScope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: rootScope,
+        }));
+
+        const privateChild = new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: privateScope });
+        await privateScope.getOrCreateReply(root, privateChild, { visibility: 'child' });
+
+        // wait for indexes to catch up
+        await waitForResolved(async () => {
+            const countPublic = await root.countRepliesBFS({ scopes: [rootScope] });
+            expect(Number(countPublic)).to.eq(0);
+
+            const countWithPrivate = await root.countRepliesBFS({ scopes: [rootScope, privateScope] });
+            expect(Number(countWithPrivate)).to.eq(1);
+        });
+    });
+
+    it("persistence with private scopes", async () => {
+        await session.stop();
+        const directory = "./tmp/private-persist/" + +new Date();
+        session = await TestSession.connected(1, { directory });
+
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
+
+        const [_, root] = await rootScope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: rootScope,
+        }));
+
+        const privateChild = new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: privateScope });
+        await privateScope.getOrCreateReply(root, privateChild);
+
+        // restart
+        await session.peers[0].stop();
+        session = await TestSession.connected(1, { directory });
+        const reopenedRoot = await session.peers[0].open(rootScope.clone(), { existing: "reuse" });
+        const reopenedPrivate = await session.peers[0].open(privateScope.clone(), { existing: "reuse" });
+        await root.load(session.peers[0]);
+
+        const children = await root.getChildren({ scopes: [reopenedRoot, reopenedPrivate] });
+        expect(children.map(c => c.idString)).to.include(privateChild.idString);
+    });
+
+    it("replication boundaries: peer without private scope cannot see private children", async () => {
+        const rootScope = await createOpenRootScope(session);
+        const privateScope = await createOpenRootScope(session);
+
+        const [_, root] = await rootScope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: rootScope,
+        }));
+
+        const privateChild = new Canvas({ publicKey: session.peers[0].identity.publicKey, selfScope: privateScope });
+        await privateScope.getOrCreateReply(root, privateChild, { visibility: 'child' });
+
+        // peer 1 only opens rootScope
+        const peer1Root = await session.peers[1].open(rootScope.clone(), { args: { replicate: true } });
+
+        const childrenPeer1 = await root.getChildren({ scopes: [peer1Root] });
+        expect(childrenPeer1).to.have.length(0);
+
+        // peer 1 opens privateScope too
+        const peer1Private = await session.peers[1].open(privateScope.clone(), { args: { replicate: true } });
+        const childrenPeer1WithPrivate = await root.getChildren({ scopes: [peer1Root, peer1Private] });
+        expect(childrenPeer1WithPrivate.map(c => c.idString)).to.include(privateChild.idString);
+    });
+
+    it("nested draft under a public reply migrates to public and is visible with content", async () => {
+        const rootScope = await createOpenRootScope(session);     // public scope
+        const privateScope = await createOpenRootScope(session);  // private scope
+
+        // root in public scope
+        const [_, root] = await rootScope.getOrCreateReply(
+            undefined,
+            new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: rootScope,
+            })
+        );
+
+        // public reply 1 under root (also in public)
+        const [__, publicReply1] = await rootScope.getOrCreateReply(
+            root,
+            new Canvas({
+                publicKey: session.peers[0].identity.publicKey,
+                selfScope: rootScope,
+            })
+        );
+
+        // draft1 in PRIVATE scope as a reply to publicReply1
+        const draft1 = new Canvas({
+            publicKey: session.peers[0].identity.publicKey,
+            selfScope: privateScope,
+        });
+        await privateScope.getOrCreateReply(publicReply1, draft1);
+        await draft1.addTextElement("hello-from-draft-1");
+
+        // "Publish": convert/migrate draft1 to PUBLIC and keep it as a reply to publicReply1
+        // Expectation: same id, selfScope becomes rootScope, content readable from rootScope
+        await publicReply1.upsertReply(draft1, {
+            type: "sync",
+            targetScope: rootScope,
+            updateHome: "set",
+            visibility: "both",
+        });
+
+        // Let indexes settle in public
+        await rootScope.reIndexDebouncer.flush();
+
+        // It should appear as a child of publicReply1 from the PUBLIC scope
+        await waitForResolved(async () => {
+            const kidsPublic = await publicReply1.getChildren({ scopes: [rootScope] });
+            expect(kidsPublic.map(c => c.idString)).to.include(draft1.idString);
+        });
+
+        // Its content should be directly readable from PUBLIC scope
+        await waitForResolved(async () => {
+            const textFromPublic = await draft1.getText({ scope: rootScope });
+            expect(textFromPublic).to.eq("hello-from-draft-1"); // <-- currently fails; will pass after patch
+        });
+
+        // Optional: ensure elements are indexed in PUBLIC scope (and no longer present in PRIVATE)
+        await waitForResolved(async () => {
+            // public has elements
+            const pubElems = await rootScope.elements.index
+                .iterate({ query: getOwnedElementsQuery(draft1) })
+                .all();
+            expect(pubElems.length).to.be.greaterThan(0);
+
+            // private no longer holds the rows for this draft
+            const privElems = await privateScope.elements.index
+                .iterate({ query: getOwnedElementsQuery(draft1) }, { resolve: false })
+                .all();
+            expect(privElems.length).to.eq(0);
+        });
+    });
+});
+
+describe("canvas (replies + ordering)", () => {
+    let session: TestSession;
+
+    beforeEach(async () => { session = await TestSession.connected(2); });
+    afterEach(async () => { await session.stop(); });
+
+    describe("ordering / view links", () => {
+        it("orders via ViewKind.orderKey and supports move/insert", async () => {
+            const scope = await createOpenRootScope(session);
+            const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+                publicKey: session.peers[0].identity.publicKey, selfScope: scope
+            }));
+
+            const [a] = await ensurePath(root, ["a"]);
+            const [b] = await ensurePath(root, ["b"]);
+            const [c] = await ensurePath(root, ["c"]);
+            const [d] = await ensurePath(root, ["d"]);
+
             await waitForResolved(async () => {
-                const countedAllRepliesFromRoot = await root.countReplies();
-                expect(countedAllRepliesFromRoot).to.eq(2n); // a immediate child of root, b immediate child of a
+                let ordered0 = await root.getOrderedChildren();
+                expect(await Promise.all(ordered0.map(async (x) => (await scope.createContext(x))))).to.have.members(["a", "b", "c", "d"]);
+            })
 
-                const countedImmediateRepliesFromRoot = await root.countReplies(
-                    { onlyImmediate: true }
-                );
-                expect(countedImmediateRepliesFromRoot).to.eq(1n); // a immediate child of root
+            const kB = orderKeyBetween(undefined, undefined);
+            await root.upsertViewPlacement(b, kB);
 
-                const replies = await root.replies.index
-                    .iterate(
-                        { query: getImmediateRepliesQuery(root) },
-                        { resolve: false }
-                    )
-                    .all();
-                expect(replies).to.have.length(1);
-                expect(replies[0].context).to.eq("a");
-                expect(replies[0].replies).to.eq(1n); // one reply (b)
-            });
+            const kD = orderKeyBetween(kB, undefined);
+            await root.upsertViewPlacement(d, kD);
+
+            const kA = orderKeyBetween(kB, kD);
+            await root.upsertViewPlacement(a, kA);
+
+            await waitForResolved(async () => {
+                let ordered1 = await root.getOrderedChildren();
+                expect(await Promise.all(ordered1.map(x => scope.createContext(x)))).to.deep.eq(["b", "a", "d", "c"]);
+            })
+
+            const nkC = await root.moveChildTo(c, 0);
+            expect(nkC).to.be.a("string");
+
+            await waitForResolved(async () => {
+                let ordered2 = await root.getOrderedChildren();
+                expect(await Promise.all(ordered2.map(x => scope.createContext(x)))).to.deep.eq(["c", "b", "a", "d"]);
+            })
+
+            const keyB = await root.getChildOrderKey(b.id);
+            const keyA2 = await root.getChildOrderKey(a.id);
+            const keyBetween = orderKeyBetween(keyB!, keyA2!);
+
+            const [x] = await ensurePath(root, ["x"]);
+            await root.upsertViewPlacement(x, keyBetween);
+
+            await waitForResolved(async () => {
+                let ordered3 = await root.getOrderedChildren();
+                expect(await Promise.all(ordered3.map(x => scope.createContext(x)))).to.deep.eq(["c", "b", "x", "a", "d"]);
+            })
+
+
+
+            /// some indexing stuff
+            // fetch all canvases that have a view placement
+            await waitForResolved(async () => {
+                const allCanvases = await scope.replies.index.iterate({
+                    query: [...getRepliesQuery(root), getReplyKindQuery(ViewKind)],
+                    sort: new Sort({ key: "replies", direction: SortDirection.ASC }),
+                }).all();
+
+                expect(allCanvases.map(x => x.idString)).to.have.members([c.idString, b.idString, x.idString, a.idString, d.idString]);
+            })
         });
 
-        it("getRepliesQuery", async () => {
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            await root.getCreateCanvasByPath(["a", "b", "c"]);
-            await root.getCreateCanvasByPath(["a", "b", "d"]);
-            const a = (await root.getCreateCanvasByPath(["a"]))[0];
-            expect(await a.createContext()).to.eq("a");
 
-            const all = await a.replies.index
-                .iterate({
-                    query: getRepliesQuery(a),
-                })
-                .all();
-            // should return all children
-            // b, c, d
-            expect(all).to.have.length(3);
-            const allTitles = await Promise.all(
-                all.map((x) => x.createContext())
-            );
-            expect(allTitles.sort()).to.deep.eq(["b", "c", "d"]);
+        it("removeViewPlacement keeps semantic reply", async () => {
+            const scope = await createOpenRootScope(session);
+            const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+                publicKey: session.peers[0].identity.publicKey, selfScope: scope
+            }));
+
+            const [a] = await ensurePath(root, ["a"]);
+            await root.upsertViewPlacement(a, orderKeyBetween(undefined, undefined));
+
+            let ordered = await root.getOrderedChildren();
+            expect(await Promise.all(ordered.map(x => scope.createContext(x)))).to.deep.eq(["a"]);
+
+            await root.removeViewPlacement(a.id);
+
+            await waitForResolved(async () => {
+                const rootIdx = await root.getSelfIndexed();
+                const immed = await scope.replies.index.iterate({ query: getImmediateRepliesQuery(rootIdx!) }).all();
+                expect(await Promise.all(immed.map(x => scope.createContext(x)))).to.deep.eq(["a"]);
+
+                ordered = await root.getOrderedChildren();
+                expect(await Promise.all(ordered.map(x => scope.createContext(x)))).to.deep.eq(["a"]);
+            })
         });
 
-        it("getImmediateRepliesQuery", async () => {
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            await root.getCreateCanvasByPath(["a", "b", "c"]);
-            await root.getCreateCanvasByPath(["a", "b", "d"]);
-            const [_a, b] = await root.getCreateCanvasByPath(["a", "b"]);
-            expect(await b.createContext()).to.eq("b");
+        it("upsertViewPlacement is added to right scope", async () => {
+            const scope = await createOpenRootScope(session);
+            const innerScope = await createOpenRootScope(session);
 
-            const all = await b.replies.index
-                .iterate({
-                    query: getImmediateRepliesQuery(b),
-                })
-                .all();
+            const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+                publicKey: session.peers[0].identity.publicKey, selfScope: innerScope
+            }));
+            const [a] = await ensurePath(root, ["a"]);
+            await root.upsertViewPlacement(a, orderKeyBetween(undefined, undefined));
 
-            const allTitles = await Promise.all(
-                all.map((x) => x.createContext())
-            );
-            expect(allTitles.sort()).to.deep.eq(["c", "d"]);
-        });
+            expect(a.selfScope!.address).to.eq(innerScope.address);
+            expect(await scope.replies.index.get(a.id, { resolve: false, local: true })).to.be.undefined;
+            expect(await innerScope.replies.index.get(a.id, { resolve: false, local: true })).to.not.be.undefined;
 
-        it("can sort by replies", async () => {
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            await root.getCreateCanvasByPath(["b", "b"]);
-            await root.getCreateCanvasByPath(["a", "b"]);
-            await root.getCreateCanvasByPath(["c"]);
-            await root.getCreateCanvasByPath(["a", "c"]);
-
-            const sortedByReplies = await root.replies.index.search({
-                query: getImmediateRepliesQuery(root),
-                sort: new Sort({
-                    key: "replies",
-                    direction: SortDirection.DESC,
-                }),
-            });
-            expect(
-                await Promise.all(sortedByReplies.map((x) => x.createContext()))
-            ).to.deep.eq(["a", "b", "c"]);
-        });
-
-        it("will use remote for sorting during warmup", async () => {
-            const rootA = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-
-            let childrenCount = {
-                a: 1,
-                b: 2,
-                c: 3,
-            };
-
-            for (const [key, count] of Object.entries(childrenCount)) {
-                for (let i = 0; i < count; i++) {
-                    // console.log("key: " + key + "key", "i", i)
-                    await rootA.getCreateCanvasByPath([key, i.toString()]);
-                }
-            }
-
-            // a has 1 reply
-            // b has 2 replies
-            // c has 3 replies
-
-            // so sorting by replies will be c, b, a
-            const results = async (root: Canvas) => {
-                const sorted = await root.replies.index
-                    .iterate({
-                        query: getImmediateRepliesQuery(root),
-                        sort: new Sort({
-                            key: "replies",
-                            direction: SortDirection.DESC,
-                        }),
-                    })
-                    .all();
-
-                for (const [i, r] of sorted.entries()) {
-                    if (r.closed) {
-                        sorted[i] = await root.node.open(r, {
-                            existing: "reuse",
-                        });
-                    }
-                }
-                const titles = await Promise.all(
-                    sorted.map((x) => x.createContext())
-                );
-                expect(titles).to.deep.eq(["c", "b", "a"]);
-            };
-            await results(rootA);
-
-            const rootB = await session.peers[1].open(rootA.clone(), {
-                args: {
-                    replicate: false,
-                },
-            });
-            await rootB.replies.log.waitForReplicators();
-            await results(rootB);
-        });
-
-        it("will use remote for sorting during warmup when not replicating", async () => {
-            const rootA = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-
-            let childrenCount = {
-                a: 1,
-                b: 2,
-                c: 3,
-            };
-
-            for (const [key, count] of Object.entries(childrenCount)) {
-                for (let i = 0; i < count; i++) {
-                    // console.log("key: " + key + "key", "i", i)
-                    await rootA.getCreateCanvasByPath([key, i.toString()]);
-                }
-            }
-
-            // a has 1 reply
-            // b has 2 replies
-            // c has 3 replies
-
-            // so sorting by replies will be c, b, a
-            const results = async (root: Canvas) => {
-                const sorted = await root.replies.index
-                    .iterate({
-                        query: getImmediateRepliesQuery(root),
-                        sort: new Sort({
-                            key: "replies",
-                            direction: SortDirection.DESC,
-                        }),
-                    })
-                    .all();
-
-                for (const [i, r] of sorted.entries()) {
-                    if (r.closed) {
-                        sorted[i] = await root.node.open(r, {
-                            existing: "reuse",
-                            args: {
-                                replicate: false,
-                            },
-                        });
-                    }
-                }
-
-                await delay(3e3);
-                const titles = await Promise.all(
-                    sorted.map((x) => x.createContext())
-                );
-                expect(titles).to.deep.eq(["c", "b", "a"]);
-            };
-            await results(rootA);
-
-            const rootB = await session.peers[1].open(rootA.clone(), {
-                args: {
-                    replicate: false,
-                },
-            });
-            await rootB.replies.log.waitForReplicators({ roleAge: 5e3 });
-            await results(rootB);
-        });
-
-        it("can sort by replies after restart", async () => {
-            await session.stop();
-
-            session = await TestSession.connected(1, {
-                directory: "./tmp/can-sort-after-restart/" + +new Date(),
-            });
-
-            let root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            await root.getCreateCanvasByPath(["b", "b"]);
-            await root.getCreateCanvasByPath(["a", "b"]);
-            await root.getCreateCanvasByPath(["c"]);
-            await root.getCreateCanvasByPath(["a", "c"]);
-
-            const checkSort = async () => {
-                const sortedByReplies = await root.replies.index.search({
-                    query: getImmediateRepliesQuery(root),
-                    sort: new Sort({
-                        key: "replies",
-                        direction: SortDirection.DESC,
-                    }),
-                });
-                for (const [i, r] of sortedByReplies.entries()) {
-                    if (r.closed) {
-                        sortedByReplies[i] = await root.node.open(r, {
-                            existing: "reuse",
-                        });
-                        await sortedByReplies[i].load(); // TODO why is this needed?
-                    }
-                }
-                expect(
-                    await Promise.all(
-                        sortedByReplies.map((x) => x.createContext())
-                    )
-                ).to.deep.eq(["a", "b", "c"]);
-            };
-
-            await checkSort();
-            await root.close();
-            root = await session.peers[0].open(root.clone(), {
-                existing: "reject",
-            });
-            await checkSort();
-        });
-
-        it("can sort by replies as non replicator", async () => {
-            let root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                }),
-                {
-                    args: {
-                        replicate: false,
-                    },
-                }
-            );
-            let replicator = await session.peers[1].open(root.clone());
-
-            await root.getCreateCanvasByPath(["b", "b"]);
-            await root.getCreateCanvasByPath(["a", "b"]);
-            await root.getCreateCanvasByPath(["c"]);
-            await root.getCreateCanvasByPath(["a", "c"]);
-
-            await waitForResolved(() =>
-                expect(replicator.replies.log.log.length).to.eq(6)
-            );
-
-            const checkSort = async () => {
-                const sortedByReplies = await root.replies.index.search({
-                    query: getImmediateRepliesQuery(root),
-                    sort: new Sort({
-                        key: "replies",
-                        direction: SortDirection.DESC,
-                    }),
-                });
-                for (const [i, r] of sortedByReplies.entries()) {
-                    if (r.closed) {
-                        sortedByReplies[i] = await root.node.open(r, {
-                            existing: "reuse",
-                        });
-                        await sortedByReplies[i].load(); // TODO why is this needed?
-                    }
-                }
-                expect(
-                    await Promise.all(
-                        sortedByReplies.map((x) => x.createContext())
-                    )
-                ).to.deep.eq(["a", "b", "c"]);
-            };
-
-            await checkSort();
-            await root.close();
-            root = await session.peers[0].open(root.clone(), {
-                existing: "reject",
-                args: {
-                    replicate: false,
-                },
-            });
-            await checkSort();
-        });
-
-        it("can index partially", async () => {
-            let viewer = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                }),
-                {
-                    args: {
-                        replicate: false,
-                        replicas: {
-                            min: 1,
-                        },
-                    },
-                }
-            );
-            let replicator = await session.peers[1].open(viewer.clone(), {
-                args: {
-                    replicas: {
-                        min: 1,
-                    },
-                },
-            });
-            await replicator.getCreateCanvasByPath(["a", "b"]);
-
-            const all = await viewer.replies.index.search({
-                sort: new Sort({
-                    key: "replies",
-                    direction: SortDirection.DESC,
-                }),
-            });
-            const first = await viewer.node.open(all[0], {
-                existing: "reuse",
-                args: {
-                    replicate: false,
-                },
-            });
-            expect(await first.createContext()).to.eq("a");
-
-            const entry = await replicator.replies.log.log.get(
-                first.__context.head
-            );
-            await viewer.replies.log.replicate(entry);
-
-            await delay(2e3);
-            await waitForResolved(() =>
-                expect(viewer.replies.log.log.length).to.eq(1)
-            );
-            expect(await viewer.replies.log.isReplicating()).to.be.true;
-        });
-
-        it("two way replication", async () => {
-            let first = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                }),
-                {
-                    args: {
-                        replicate: true,
-                    },
-                }
-            );
-            await first.getCreateCanvasByPath(["a", "b"]);
-
-            let second = await session.peers[1].open(first.clone(), {
-                args: {
-                    replicate: true,
-                },
-            });
-
-            await waitForResolved(() =>
-                expect(second.replies.log.log.length).to.eq(2)
-            );
-
-            await first.close();
-
-            first = await session.peers[0].open(second.clone(), {
-                existing: "reuse",
-                args: {
-                    replicate: true,
-                },
-            });
-            await waitForResolved(() =>
-                expect(first.replies.log.log.length).to.eq(2)
-            );
-        });
+        })
     });
 
-    describe("elements", async () => {
-        it("can query by ownership", async () => {
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            const [a] = await root.getCreateCanvasByPath(["a"]);
-            await root.getCreateCanvasByPath(["a", "b1"]);
-            await root.getCreateCanvasByPath(["a", "b2"]);
 
-            expect(await a.createContext()).to.eq("a");
+    it("reply counting immediate vs deep (indexed APIs)", async () => {
+        const scope = await createOpenRootScope(session);
+        const [_, root] = await scope.getOrCreateReply(undefined, new Canvas({
+            publicKey: session.peers[0].identity.publicKey, selfScope: scope
+        }));
 
-            const ownedElements = await a.elements.index
-                .iterate({
-                    query: getOwnedElementsQuery(a),
-                })
-                .all();
+        const [a, b, c] = await ensurePath(root, ["a", "b", "c"]);
+        const [__, d] = await ensurePath(root, ["a", "d"]);
 
-            expect(ownedElements).to.have.length(1);
-        });
+        const rootIdx = await root.getSelfIndexed();
+        const aIdx = await a.getSelfIndexed();
+        expect(rootIdx && aIdx).to.exist;
 
-        it("can query by type", async () => {
-            const root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            const [a] = await root.getCreateCanvasByPath(["a"]);
-            await root.getCreateCanvasByPath(["a", "b1"]);
+        await waitForResolved(async () => {
+            // deep
+            expect(Number(await root.countRepliesIndexedDirect())).to.eq(4);
+            expect(Number(await a.countRepliesIndexedDirect())).to.eq(3);
 
-            const subcanvasWithImage = await session.peers[0].open(
-                new Canvas({
-                    parent: a,
-                    publicKey: session.peers[0].identity.publicKey,
-                })
-            );
-            await subcanvasWithImage.load();
-            await subcanvasWithImage.elements.put(
-                new Element({
-                    content: new StaticContent({
-                        content: new StaticImage({
-                            data: new Uint8Array([1, 2, 3, 4]),
-                            height: 100,
-                            width: 100,
-                            mimeType: "image/png",
-                        }),
-                        contentId: sha256Sync(new Uint8Array([1, 2, 3, 4])),
-                        quality: LOWEST_QUALITY,
-                    }),
-                    canvasId: subcanvasWithImage.id,
-                    location: Layout.zero(),
-                    publicKey: session.peers[0].identity.publicKey,
-                })
-            );
-
-            await a.load();
-            await a.createReply(subcanvasWithImage);
-
-            const ownedElements = await a.elements.index
-                .iterate({
-                    query: getOwnedElementsQuery(a),
-                })
-                .all();
-
-            expect(ownedElements).to.have.length(1); // self
-
-            const ownedTextElements = await a.elements.index
-                .iterate({
-                    query: [
-                        ...getOwnedElementsQuery(a),
-                        getTextElementsQuery(),
-                    ],
-                })
-                .all();
-
-            expect(ownedTextElements).to.have.length(1); // self + text reply
-
-            const ownedImageElements = await subcanvasWithImage.elements.index
-                .iterate({
-                    query: [
-                        ...getOwnedElementsQuery(subcanvasWithImage),
-                        getImagesQuery(),
-                    ],
-                })
-                .all();
-
-            expect(ownedImageElements).to.have.length(1); // image reply
-        });
-    });
-
-    describe("path", () => {
-        it("setParent", async () => {
-            let root = await session.peers[0].open(
-                new Canvas({
-                    publicKey: session.peers[0].identity.publicKey,
-                    seed: new Uint8Array(),
-                })
-            );
-            const [_a, _b, c] = await root.getCreateCanvasByPath([
-                "a",
-                "b",
-                "c",
-            ]);
-            const [a] = await root.getCreateCanvasByPath(["a"]);
-            const [__a, b] = await root.getCreateCanvasByPath(["a", "b"]);
-            expect(a.path).to.have.length(1);
-            expect(b.path).to.have.length(2);
-            expect(c.path).to.have.length(3);
-            expect(c.path[0].address).to.eq(root.address);
-            expect(c.path[1].address).to.eq(a.address);
-            expect(c.path[2].address).to.eq(b.address);
-
-            let cElements = await c.elements.index
-                .iterate({ query: getOwnedElementsQuery(c) })
-                .all();
-            expect(cElements).to.have.length(1);
-            expect(cElements[0].canvasId).to.deep.eq(c.id);
-
-            await c.setParent(a);
-            const checkCanvas = async (c: Canvas) => {
-                expect(c.path).to.have.length(2);
-                expect(c.path[0].address).to.eq(root.address);
-                expect(c.path[1].address).to.eq(a.address);
-
-                cElements = await c.elements.index
-                    .iterate({ query: getOwnedElementsQuery(c) })
-                    .all();
-                expect(cElements).to.have.length(1);
-                expect(cElements[0].canvasId).to.deep.eq(c.id);
-            };
-            await checkCanvas(c);
-
-            // also check c from another peer that is querying the canvas
-            const root2 = await session.peers[1].open(root.clone(), {
-                existing: "reuse",
-                args: {
-                    replicate: false,
-                },
-            });
-
-            await root2.replies.log.waitForReplicators({
-                waitForNewPeers: true,
-            });
-            const [_a2, c2] = await root2.getCreateCanvasByPath(["a", "c"]);
-            await checkCanvas(c2);
-        });
-
-        // TODO implement sub elements move
-    });
-
-    describe("visualization", () => {
-        it("can set visualization", () => {});
-    });
-    /*  it("determinstic with seed", async () => {
-         let seed = new Uint8Array([0, 1, 2]);
-         const rootA = await session.peers[0].open(
-             new Canvas({
-                 seed,
-                 rootTrust: session.peers[0].identity.publicKey,
-             })
-         );
-         const pathA = await rootA.getCreateCanvasByPath(["a", "b", "c"]);
- 
-         await session.peers[0].stop();
-         await session.peers[0].start();
- 
-         const rootB = await session.peers[0].open(
-             new Canvas({
-                 seed,
-                 rootTrust: session.peers[0].identity.publicKey,
-             })
-         );
- 
-         expect(rootA.address).to.eq(rootB.address);
- 
-         const pathB = await rootB.getCreateCanvasByPath(["a", "b", "c"]);
-         for (const room of pathB) {
-             await session.peers[0].open(room);
-         }
- 
-         expect(typeof pathA[pathA.length - 1].address).to.eq("string");
-         expect(pathA[pathA.length - 1].address).to.eq(
-             pathB[pathB.length - 1].address
-         );
-     }); */
+            // immediate
+            expect(Number(await root.countImmediateIndexedDirect(rootIdx!.pathDepth))).to.eq(1);
+            expect(Number(await a.countImmediateIndexedDirect(aIdx!.pathDepth))).to.eq(2);
+        })
+    })
 });

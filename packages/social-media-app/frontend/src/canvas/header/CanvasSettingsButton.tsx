@@ -4,7 +4,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { HiDotsHorizontal } from "react-icons/hi";
 import { usePeer } from "@peerbit/react";
 import { useProfiles } from "../../profile/useProfiles";
-import { useFeed } from "../feed/FeedContext";
+import { useStream } from "../feed/StreamContext";
 import {
     Canvas,
     getOwnedElementsQuery,
@@ -25,14 +25,16 @@ import { CreateNewViewMenuItem } from "../feed/CreateNewViewMenuItem";
 export const CanvasSettingsButton = ({
     canvas,
     onOpen,
+    className
 }: {
     canvas: Canvas | WithIndexedContext<Canvas, IndexableCanvas>;
     onOpen?: () => void;
+    className?: string; // optional className for styling
 }) => {
     /* ─────────────────── hooks & deps ─────────────────── */
     const { peer } = usePeer();
     const { create } = useProfiles();
-    const { dynamicViews, pinToView } = useFeed();
+    const { dynamicViews, pinToView } = useStream();
 
     /* ─────────────────── “More info” state ─────────────────── */
     const [infoOpen, setInfoOpen] = useState(false);
@@ -66,7 +68,7 @@ export const CanvasSettingsButton = ({
             {/* ───── trigger (⋯) ───── */}
             <DropdownMenu.Root>
                 <DropdownMenu.Trigger asChild>
-                    <button className="btn btn-icon btn-icon-sm">
+                    <button className={"btn btn-icon btn-icon-sm " + className}>
                         <HiDotsHorizontal size={20} />
                     </button>
                 </DropdownMenu.Trigger>

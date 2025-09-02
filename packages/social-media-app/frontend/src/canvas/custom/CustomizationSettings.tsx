@@ -345,7 +345,7 @@ const ModeEditor: React.FC<{
     const bgWrap = visualization.background as ModedBackground;
     const palWrap = visualization.palette as ModedThemePalette;
 
-    const bg = mode === "light" ? bgWrap.light : bgWrap.dark;
+    const bg = mode === "light" ? bgWrap?.light : bgWrap?.dark;
     const setBg = (b: BackGroundTypes | undefined) => {
         if (mode === "light") bgWrap.light = b!;
         else bgWrap.dark = b;
@@ -355,8 +355,8 @@ const ModeEditor: React.FC<{
 
     const pal =
         mode === "light"
-            ? (palWrap.light as SimpleThemePalette)
-            : (palWrap.dark as SimpleThemePalette | undefined);
+            ? (palWrap?.light as SimpleThemePalette)
+            : (palWrap?.dark as SimpleThemePalette | undefined);
     const setPal = (p?: SimpleThemePalette) => {
         if (mode === "light") palWrap.light = p!;
         else palWrap.dark = p;

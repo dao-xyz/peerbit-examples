@@ -1,22 +1,13 @@
-import React, { useState } from "react";
+import React from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { HiDotsHorizontal } from "react-icons/hi";
-import { usePeer } from "@peerbit/react";
-import { useProfiles } from "../../profile/useProfiles";
-import {
-    Canvas,
-    getOwnedElementsQuery,
-    IFrameContent,
-    IndexableCanvas,
-} from "@giga-app/interface";
+import { Canvas, IndexableCanvas } from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
 import { WithIndexedContext } from "@peerbit/document";
 import { FaRegComment } from "react-icons/fa";
-import { MdOpenInFull } from "react-icons/md";
 import { CanvasSettingsButton } from "./CanvasSettingsButton";
 import { TinyPath } from "../path/RelativePath";
 import { useRelativePath } from "./useRelativePath";
+import { IoEnterOutline } from "react-icons/io5";
 
 export const Header = ({
     canvas,
@@ -29,7 +20,7 @@ export const Header = ({
     detailed,
     showPath,
 }: {
-    canvas?: Canvas | WithIndexedContext<Canvas, IndexableCanvas>;
+    canvas?: WithIndexedContext<Canvas, IndexableCanvas>;
     direction?: "row" | "col";
     className?: string;
     variant: "tiny" | "large" | "medium";
@@ -80,7 +71,7 @@ export const Header = ({
                     >
                         <FaRegComment size={16} />
                         {(canvas as WithIndexedContext<Canvas, IndexableCanvas>)
-                            .__indexed.replies ? (
+                            .__indexed?.replies ? (
                             <span className="text-xs">
                                 {Number(
                                     (
@@ -101,7 +92,7 @@ export const Header = ({
                         className="btn flex p-2 flex-row items-center gap-1"
                         onClick={open}
                     >
-                        <MdOpenInFull size={16} />
+                        <IoEnterOutline className="ml-[-4px]" size={20} />
                     </button>
                 </>
             )}
@@ -125,18 +116,15 @@ export const Header = ({
             {canvas && (
                 <div
                     ref={forwardRef}
-                    className={`flex pt-0 ${
-                        reverseLayout ? "flex-row-reverse" : ""
-                    } items-center gap-1 ${
-                        direction === "col" ? "flex-col" : "flex-row"
-                    } ${className ?? ""} ${variant === "large" && "w-full"}`}
+                    className={`flex pt-0 ${reverseLayout ? "flex-row-reverse" : ""
+                        } items-center gap-1 ${direction === "col" ? "flex-col" : "flex-row"
+                        } ${className ?? ""} ${variant === "large" && "w-full"}`}
                 >
                     <div
-                        className={`overflow-hidden flex mr-1   ${
-                            variant === "tiny" || variant === "medium"
-                                ? "rounded-full"
-                                : "rounded-lg"
-                        }`}
+                        className={`overflow-hidden flex mr-1   ${variant === "tiny" || variant === "medium"
+                            ? "rounded-full"
+                            : "rounded-lg"
+                            }`}
                     >
                         <ProfileButton
                             publicKey={canvas.publicKey}
@@ -145,8 +133,8 @@ export const Header = ({
                                 variant === "large"
                                     ? 20
                                     : variant === "medium"
-                                    ? 16
-                                    : 12
+                                        ? 16
+                                        : 12
                             }
                         />
                     </div>
@@ -158,7 +146,7 @@ export const Header = ({
                                     new Date(
                                         Number(
                                             canvas.context.created /
-                                                BigInt(1000000)
+                                            BigInt(1000000)
                                         )
                                     )
                                 }

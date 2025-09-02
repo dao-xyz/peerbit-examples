@@ -1,9 +1,5 @@
-import { CanvasAndReplies } from "./canvas/main/CanvasAndReplies";
+import { CanvasAndReplies } from "./canvas/feed/ChatOrFeed";
 
 export const Home = () => {
-    return (
-        <>
-            <CanvasAndReplies />
-        </>
-    );
+    return <CanvasAndReplies />;
 };

@@ -1,4 +1,3 @@
-// CustomizationProvider.tsx
 import React, {
     createContext,
     useMemo,
@@ -10,17 +9,77 @@ import {
     BasicVisualization,
     Visualization,
     Canvas,
-    ModedBackground,
-    StyledBackground,
-    ModedThemePalette,
     SimpleThemePalette,
+    ChildVisualization,
+} from "@giga-app/interface";
+import { useThemeContext } from "../../theme/useTheme";
+import { useSearchParams } from "react-router";
+import { useQuery } from "@peerbit/react";
+import {
+    IndexedVisualization,
+    getOwnedByCanvasQuery,
 } from "@giga-app/interface";
 import { equals } from "uint8arrays";
-import { useView } from "../view/ViewContext";
-import { useThemeContext } from "../../theme/useTheme";
-import { useVisualization } from "./useVisualization";
-import { useNavigate } from "react-router";
-import { getCanvasPath } from "../../routes";
+import { STREAM_QUERY_PARAMS } from "../feed/StreamContext";
+import { useCanvases } from "../useCanvas";
+
+const useVisualization = (properies: { canvas: Canvas }) => {
+    const { canvas } = properies;
+    const [visualization, setVisualization] = useState<
+        Visualization | undefined
+    >();
+
+    const query = useMemo(() => {
+        return !canvas
+            ? null
+            : {
+                query: getOwnedByCanvasQuery(canvas),
+            };
+    }, [canvas?.idString]);
+
+    /* 1. fetch the current saved visualization ------------------- */
+    const { items, isLoading } = useQuery(canvas?.nearestScope.visualizations, {
+        query,
+        onChange: {
+            merge: (ch) => ({
+                added: ch.added.filter((v) => equals(v.canvasId, canvas.id)),
+                removed: ch.removed.filter((v) =>
+                    equals(v.canvasId, canvas.id)
+                ),
+            }),
+        },
+        resolve: true,
+        local: true,
+        remote: {
+            eager: true,
+            joining: {
+                waitFor: 5e3
+            }
+        },
+        prefetch: true,
+    });
+
+    useEffect(() => {
+        if (items && items.length > 0) {
+            // we have a visualization, set it
+            const v = items[0] as IndexedVisualization;
+            if (canvas && equals(v.canvasId, canvas.id)) {
+                setVisualization(v);
+            } else {
+                setVisualization(undefined);
+            }
+        } else {
+            // no visualization found
+            setVisualization(undefined);
+        }
+    }, [items, canvas?.id]);
+
+    return {
+        visualization,
+        setVisualization,
+        isLoading,
+    };
+};
 
 /* ─── context type ───────────────────────────────────────────── */
 interface VisualizationCtx {
@@ -28,7 +87,7 @@ interface VisualizationCtx {
 
     isLoading: boolean;
     /** last saved vis (DB) */
-    visualization?: Visualization;
+    visualization?: BasicVisualization;
     /** working copy shown in UI */
     draft?: BasicVisualization;
     /** mutate draft in-place and re-apply css */
@@ -43,11 +102,27 @@ interface VisualizationCtx {
 const Ctx = createContext<VisualizationCtx>({} as any);
 export const useVisualizationContext = () => useContext(Ctx);
 
+const CHILDREN_VISUALIZATION_PARAM_MAP = {
+    feed: ChildVisualization.FEED,
+    tree: ChildVisualization.OUTLINE,
+    explore: ChildVisualization.EXPLORE,
+    chat: ChildVisualization.CHAT,
+};
+
+const CHILDREN_VISUALIZATION_PARAM_MAP_REVERSE = Object.fromEntries(
+    Object.entries(CHILDREN_VISUALIZATION_PARAM_MAP).map(([key, value]) => [
+        value,
+        key,
+    ])
+);
+
+export const VIEW_PARAM_QUERY_KEY = "v";
+
 /* ─── provider ───────────────────────────────────────────────── */
 export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     children,
 }) => {
-    const { viewRoot: canvas, canvases } = useView();
+    const { viewRoot: canvas } = useCanvases();
     const { theme } = useThemeContext(); // 'light' | 'dark'
 
     const { isLoading, visualization, setVisualization } = useVisualization({
@@ -55,6 +130,43 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     });
 
     const [draft, setDraft] = useState<BasicVisualization | undefined>();
+
+    const [searchParams, setSearchParams] = useSearchParams();
+    const childrenVisualizationFromParam: ChildVisualization =
+        CHILDREN_VISUALIZATION_PARAM_MAP[
+        (searchParams.get(VIEW_PARAM_QUERY_KEY) as string) || "feed"
+        ];
+
+    const setChildrenVisualizationParam = (
+        childrenVisualization: ChildVisualization
+    ) => {
+        const newParams = new URLSearchParams(searchParams);
+        if (childrenVisualization != null) {
+            const newView =
+                CHILDREN_VISUALIZATION_PARAM_MAP_REVERSE[childrenVisualization];
+            newParams.set(VIEW_PARAM_QUERY_KEY, newView);
+            if (childrenVisualization === ChildVisualization.CHAT) {
+                // if we are in chat mode, remove the filter param
+                newParams.delete(STREAM_QUERY_PARAMS.SETTINGS);
+            }
+        } else {
+            newParams.delete(VIEW_PARAM_QUERY_KEY);
+        }
+
+        console.log("SET PARAMS", childrenVisualization, newParams.toString());
+        setSearchParams(newParams, { replace: true });
+    };
+
+    useEffect(() => {
+        // if we have a draft, update the children visualization param
+        if (draft) {
+            setChildrenVisualizationParam(draft.view);
+        } else if (visualization) {
+            setChildrenVisualizationParam(
+                (visualization as BasicVisualization).view
+            );
+        }
+    }, [visualization, draft]);
 
     const resetThemeVars = () => {
         const root = document.documentElement;
@@ -136,6 +248,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
                 id: d.id,
                 previewHeight: d.previewHeight,
                 showAuthorInfo: d.showAuthorInfo,
+                view: d.view,
             })
         );
     };
@@ -171,41 +284,41 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             setDraft(
                 new BasicVisualization({
                     canvasId: canvas.id,
-                    background: new ModedBackground({
-                        light: new StyledBackground({
-                            css: "background-color:#ffffff",
-                        }),
-                    }),
-                    palette: new ModedThemePalette({
-                        light: new SimpleThemePalette({}),
-                    }),
+                    view:
+                        childrenVisualizationFromParam ??
+                        ChildVisualization.FEED,
                 })
             );
         }
     };
-    const navigate = useNavigate();
 
-    const navigateToNarrative = async () => {
-        // navigate to the first leaf that is of narrative type
-        let root = canvases[canvases.length - 1];
-        let feedContext = await root.getFeedContext();
-        if (feedContext !== root) {
-            navigate(getCanvasPath(feedContext));
-        }
-    };
+    useEffect(() => {
+        // if we have a draft, update the visualization in the canvas
+        canvas && createDraft(true); // replace the current draft with the new one
+    }, [childrenVisualizationFromParam, visualization, canvas]);
 
-    /* 4. context value ------------------------------------------- */
+    /* const navigate = useNavigate(); */
+
+    /*   const navigateToNarrative = async () => {
+          // navigate to the first leaf that is of narrative type
+          let root = canvases[canvases.length - 1];
+          let feedContext = await root.getFeedContext();
+          if (feedContext !== root) {
+              navigate(getCanvasPath(feedContext));
+          }
+      }; */
+
     const value = useMemo<VisualizationCtx>(
         () => ({
             canvas,
             isLoading,
-            visualization,
+            visualization: (draft || visualization) as BasicVisualization,
             draft,
             createDraft,
             updateDraft,
             saveDraft,
             cancelDraft,
-            navigateToNarrative,
+            /*      navigateToNarrative, */
         }),
         [canvas, isLoading, visualization, draft]
     );

@@ -1,30 +1,17 @@
-import { useEffect, useMemo, useRef } from "react";
-import { Canvas } from "../Canvas";
+import { useRef } from "react";
+import { Canvas } from "../render/detailed/Canvas";
+import { useDraftSession } from "./draft/DraftSession";
 
 type InlineEditorProps = {
-    className?: string; // Optional class name for the container
+    className?: string;
 };
 
-// Array of 30 casual, everyday titles.
-
 export const InlineEditor = ({ className }: InlineEditorProps) => {
-    const ref = useRef(null);
-
-    // Use the ref to focus the title input if needed
-    /*  useEffect(() => {
-         ref.current?.scrollIntoView({
-             // scroll to the top of the page
-             behavior: "instant",
-             block: "start",
-             inline: "nearest",
-         });
-     }, [ref]);
-  */
+    const ref = useRef<HTMLDivElement | null>(null);
+    const { publish } = useDraftSession()
     return (
-        <div className={` flex flex-col h-full ${className}`} ref={ref}>
-            {" "}
-            {/* mb-12 does not work here */}
-            <Canvas className="px-4" fitWidth draft={true} inFullScreen />
+        <div className={`flex flex-col h-full ${className || ""}`} ref={ref}>
+            <Canvas requestPublish={publish} className="px-4" fitWidth draft /* inFullScreen */ />
         </div>
     );
 };

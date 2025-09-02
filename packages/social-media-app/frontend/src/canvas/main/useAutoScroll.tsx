@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { Canvas, ViewModel } from "@giga-app/interface";
+import { Canvas } from "@giga-app/interface";
 import { debounce, throttle } from "lodash";
 import { usePeer } from "@peerbit/react";
 import { getScrollTop } from "../../HeaderVisibilitiyProvider";
@@ -27,7 +27,9 @@ const IS_AT_BOTTOM_THRESHOLD = 30;
 
 export type ScrollSettings = {
     scrollUsingWindow?: boolean;
-    view: ViewModel /*  we pass view here because scrollUsingWindow should be updated at the same time as view! */;
+    scrollDirection:
+        | "up"
+        | "down" /*  we pass direction here because scrollUsingWindow should be updated at the same time as directional changes! */;
 };
 
 export const useAutoScroll = (properties: {
@@ -50,7 +52,7 @@ export const useAutoScroll = (properties: {
     const scrollMode = useRef<"automatic" | "manual">("automatic");
     const [isAtBottom, setIsAtBottom] = useState(true);
 
-    const viewIsShouldScrollToBottom = setting?.view.settings.focus === "last";
+    const viewIsShouldScrollToBottom = setting?.scrollDirection === "down";
 
     const triggerScroll = () => {
         if (!setting) {
@@ -92,7 +94,7 @@ export const useAutoScroll = (properties: {
         properties.debug &&
             console.log("trigger scroll because the view changed", setting);
         triggerScroll();
-    }, [setting.view.id, properties.enabled]);
+    }, [setting?.scrollDirection, properties.enabled]);
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
@@ -220,6 +222,9 @@ export const useAutoScroll = (properties: {
 
     // UPDATED scrollToBottom: scroll the container if available.
     const scrollToBottom = () => {
+        if (!setting) {
+            return;
+        }
         properties.debug && console.log("scroll to bottom!");
         if (!setting.scrollUsingWindow) {
             if (!repliesContainerRef.current) {
@@ -254,6 +259,9 @@ export const useAutoScroll = (properties: {
     };
 
     const scrollToTop = () => {
+        if (!setting) {
+            return;
+        }
         properties.debug && console.log("scroll to top!");
         if (!setting.scrollUsingWindow) {
             properties.parentRef.current.scrollTo({

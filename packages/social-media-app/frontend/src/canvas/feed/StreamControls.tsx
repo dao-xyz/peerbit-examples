@@ -1,6 +1,5 @@
 import { StickyHeader } from "../main/StickyHeader";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
-import { useView } from "../view/ViewContext";
 import { FaChevronDown } from "react-icons/fa6";
 import {
     useCallback,
@@ -10,26 +9,28 @@ import {
     useRef,
     useState,
 } from "react";
-import { View, ViewModel } from "@giga-app/interface";
-import { CreateNewViewMenuItem } from "../feed/CreateNewViewMenuItem";
+import { FilterModel, StreamSetting } from "@giga-app/interface";
+import { CreateNewViewMenuItem } from "./CreateNewViewMenuItem";
 
 import { GoPin } from "react-icons/go";
 import { GrNotification } from "react-icons/gr";
 import { IoSettingsOutline } from "react-icons/io5";
-import { useFeed } from "../feed/FeedContext";
-import { TabsOrList } from "./Collections";
+import { useStream } from "./StreamContext";
+import { TabsOrList } from "../navigation/Collections";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
+import { useCanvases } from "../useCanvas";
+import { ExperienceDropdownButton } from "../custom/ExperienceDropdown";
 
 interface SubHeaderProps {
     collapsable?: boolean; // if true, the header can be collapsed
     onBackToTop?: () => void;
-    onViewChange: (view: ViewModel) => void;
+    onViewChange: (view: FilterModel) => void;
     onCollapse: (collapsed: boolean) => void;
     onNavTypeChange?: (type: "tabs" | "rows") => void;
 }
 
 interface ViewSelectorSubheaderProps {
-    onViewChange?: (view: ViewModel) => void;
+    onViewChange?: (view: FilterModel) => void;
     gapPx?: number; // Tailwind gap-2 ≈ 8 px
 }
 
@@ -41,10 +42,10 @@ export const ViewSelectorSubheader = ({
     const {
         defaultViews,
         dynamicViews,
-        view: currentView,
+        filterModel: currentFilterModel,
         setView,
         feedRoot,
-    } = useFeed();
+    } = useStream();
 
     /* ─────────────────── MRU list (ids, newest → oldest) ──────────── */
     const [recent, setRecent] = useState<string[]>([]);
@@ -53,39 +54,39 @@ export const ViewSelectorSubheader = ({
         setRecent([]);
     }, [feedRoot]);
 
-    const select = (v: ViewModel | View) => {
-        if (currentView && v.id !== currentView.id) {
+    const select = (v: FilterModel | StreamSetting) => {
+        if (currentFilterModel && v.id !== currentFilterModel.id) {
             setRecent((prev) => {
                 const withoutDup = prev.filter(
-                    (id) => id !== currentView.id && id !== v.id
+                    (id) => id !== currentFilterModel.id && id !== v.id
                 );
-                return [currentView.id, ...withoutDup].slice(0, 20);
+                return [currentFilterModel.id, ...withoutDup].slice(0, 20);
             });
         }
         setView(v.id);
-        onViewChange?.(v instanceof View ? v.toViewModel() : v);
+        onViewChange?.(v instanceof StreamSetting ? v.toFilterModel() : v);
     };
 
     /* ── order “others”: MRU first, then remaining (dynamic ∪ default) ── */
-    const orderedOthers: ViewModel[] = useMemo(() => {
+    const orderedOthers: FilterModel[] = useMemo(() => {
         const all = [
-            ...dynamicViews.map((x) => x.toViewModel()),
+            ...dynamicViews.map((x) => x.toFilterModel()),
             ...defaultViews,
         ].filter((x) => x.index == null);
         const byId = new Map(all.map((v) => [v.id, v]));
 
         const mru = recent
             .map((id) => byId.get(id))
-            .filter(Boolean) as ViewModel[];
+            .filter(Boolean) as FilterModel[];
 
         const rest = all.filter((v) => !recent.includes(v.id));
 
-        return [...mru, ...rest].filter((v) => v.id !== currentView?.id);
-    }, [recent, dynamicViews, defaultViews, currentView]);
+        return [...mru, ...rest].filter((v) => v.id !== currentFilterModel?.id);
+    }, [recent, dynamicViews, defaultViews, currentFilterModel]);
 
-    const pinned: ViewModel[] = useMemo(() => {
+    const pinned: FilterModel[] = useMemo(() => {
         const all = [
-            ...dynamicViews.map((x) => x.toViewModel()),
+            ...dynamicViews.map((x) => x.toFilterModel()),
             ...defaultViews,
         ].filter((x) => x.index != null);
 
@@ -105,8 +106,11 @@ export const ViewSelectorSubheader = ({
         const w: Record<string, number> = {};
         let viewsToMeaure = [...orderedOthers, ...pinned];
 
-        if (viewsToMeaure.find((x) => x.id === currentView?.id) === undefined) {
-            viewsToMeaure.push(currentView!);
+        if (
+            viewsToMeaure.find((x) => x.id === currentFilterModel?.id) ===
+            undefined
+        ) {
+            viewsToMeaure.push(currentFilterModel!);
         }
 
         for (const v of viewsToMeaure) {
@@ -120,7 +124,7 @@ export const ViewSelectorSubheader = ({
         }
 
         setButtonW(w);
-    }, [orderedOthers, currentView]);
+    }, [orderedOthers, currentFilterModel]);
 
     useEffect(measureAll, [measureAll]);
 
@@ -135,10 +139,10 @@ export const ViewSelectorSubheader = ({
 
     /* ───────────── decide which “others” fit on the line ─────────── */
     let used = 0;
-    const visible: ViewModel[] = [];
+    const visible: FilterModel[] = [];
     const avail = containerW - 32; // tiny pad
 
-    for (const v of [currentView, ...orderedOthers]) {
+    for (const v of [currentFilterModel, ...orderedOthers]) {
         if (!v) continue;
         const w = buttonW[v.id] ?? 120;
         const need = visible.length ? w + gapPx : w;
@@ -150,16 +154,17 @@ export const ViewSelectorSubheader = ({
     }
 
     /* ────────── dropdown lists (always sectioned) ────────── */
-    const inDynamic = (v: ViewModel) => dynamicViews.some((d) => d.id === v.id);
+    const inDynamic = (v: FilterModel) =>
+        dynamicViews.some((d) => d.id === v.id);
     const dynamicList = [...dynamicViews];
     const defaultList = [...defaultViews];
 
     const selectedViewStyle =
         "px-2 py-1 text-sm font-semibold underline underline-offset-4  whitespace-nowrap  text-primary-600 dark:text-primary-400";
 
-    const buttonStyle = (v: ViewModel) =>
+    const buttonStyle = (v: FilterModel) =>
         "btn h-full rounded-t-none px-2 py-1 text-sm text-neutral-500 dark:text-neutral-400  hover:text-text-neutral-50 hover:dark:text-neutral-50 whitespace-nowrap transition " +
-        (currentView?.id === v.id ? selectedViewStyle : "");
+        (currentFilterModel?.id === v.id ? selectedViewStyle : "");
 
     /* ─────────────────────────── render ─────────────────────────── */
     return (
@@ -170,7 +175,7 @@ export const ViewSelectorSubheader = ({
                 className="absolute h-0 overflow-hidden whitespace-nowrap flex flex-row gap-2 w-full "
                 style={{ visibility: "hidden" }}
             >
-                {[currentView, ...orderedOthers].map(
+                {[currentFilterModel, ...orderedOthers].map(
                     (v) =>
                         v && (
                             <button
@@ -203,13 +208,13 @@ export const ViewSelectorSubheader = ({
                     ))}
 
                     {/* selected view – counted in width */}
-                    {currentView &&
-                        pinned.find((x) => x.id !== currentView.id) && (
+                    {currentFilterModel &&
+                        pinned.find((x) => x.id !== currentFilterModel.id) && (
                             <button
-                                onClick={() => select(currentView)}
+                                onClick={() => select(currentFilterModel)}
                                 className={selectedViewStyle}
                             >
-                                {currentView.name}
+                                {currentFilterModel.name}
                             </button>
                         )}
 
@@ -255,11 +260,11 @@ export const ViewSelectorSubheader = ({
                                                 className={`w-full flex flex-row px-2 py-2`}
                                             >
                                                 <button
-                                                    className={`btn  px-2 justify-start flex-grow  underline text-sm whitespace-nowrap transition  ${
-                                                        currentView?.id === v.id
-                                                            ? " font-semibold"
-                                                            : "text-neutral-600 hover:text-neutral-700 dark:text-neutral-400 hover:dark:text-neutral-300"
-                                                    }`}
+                                                    className={`btn  px-2 justify-start flex-grow  underline text-sm whitespace-nowrap transition  ${currentFilterModel?.id ===
+                                                        v.id
+                                                        ? " font-semibold"
+                                                        : "text-neutral-600 hover:text-neutral-700 dark:text-neutral-400 hover:dark:text-neutral-300"
+                                                        }`}
                                                 >
                                                     {v.id}
                                                 </button>
@@ -284,11 +289,11 @@ export const ViewSelectorSubheader = ({
                                             <DropdownMenu.Item
                                                 key={v.id}
                                                 onClick={() => select(v)}
-                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${
-                                                    currentView?.id === v.id
-                                                        ? "underline font-semibold"
-                                                        : "text-neutral-600 hover:text-neutral-700"
-                                                }`}
+                                                className={`cursor-pointer px-4 py-2 text-sm whitespace-nowrap transition ${currentFilterModel?.id ===
+                                                    v.id
+                                                    ? "underline font-semibold"
+                                                    : "text-neutral-600 hover:text-neutral-700"
+                                                    }`}
                                             >
                                                 {v.name}
                                             </DropdownMenu.Item>
@@ -343,10 +348,15 @@ const People = () => {
 } */
 
 export const BottomControls = (props: {
-    onViewChange?: (view: ViewModel) => void;
+    onViewChange?: (view: FilterModel) => void;
 }) => {
     return (
-        <div className="flex flex-row h-full px-2 ">
+        <div className="flex flex-row h-full ">
+            <ExperienceDropdownButton className="rounded-bl-xl" />
+            <div className="flex items-center">
+                <div className="h-6 border-l border-gray-300" />
+            </div>
+
             <ViewSelectorSubheader onViewChange={props?.onViewChange} />
             {/*  <People /> */}
             {
@@ -373,7 +383,6 @@ export const SubHeader = ({
     onBackToTop,
     collapsable,
     onCollapse: _onCollapsed,
-    onNavTypeChange: _setNavType,
 }: SubHeaderProps) => {
     const [collapsed, setCollapsed] = useState(false);
     const [headerHeight, setHeaderHeight] = useState(0);
@@ -394,12 +403,12 @@ export const SubHeader = ({
         }
     }, []);
 
-    const { view } = useFeed();
-    const { viewRoot } = useView();
+    const { viewRoot } = useCanvases();
 
-    const toolBarBG = ` bg-neutral-50 ${
-        view?.id === "chat" ? "dark:bg-neutral-700" : "dark:bg-neutral-900"
-    } bg-white border-[#ccc] dark:border-none dark:bg-[linear-gradient(15deg,var(--color-neutral-950),var(--color-neutral-800))] `; /* dark:bg-[linear-gradient(15deg,rgba(23,23,23,1),rgba(45,45,45,1))] */
+    /* 
+    const toolBarBG = ` bg-neutral-50 ${view?.id === "chat" ? "dark:bg-neutral-700" : "dark:bg-neutral-900"
+        } bg-white border-[#ccc] dark:border-none dark:bg-[linear-gradient(15deg,var(--color-neutral-950),var(--color-neutral-800))] `; // dark:bg-[linear-gradient(15deg,rgba(23,23,23,1),rgba(45,45,45,1))]
+    */
 
     const [navType, setNavType] = useState<"tabs" | "rows">("tabs");
 
@@ -407,21 +416,31 @@ export const SubHeader = ({
     return (
         <StickyHeader collapsable={collapsable} onStateChange={onCollapse}>
             <div className="w-full max-w-[876px]  flex flex-col">
-                <TabsOrList
+                {/* <TabsOrList
                     className={
                         navType === "rows"
                             ? ""
-                            : `${
-                                  visible
-                                      ? "bg-white dark:bg-neutral-700"
-                                      : "bg-neutral-50 dark:bg-neutral-900 transition-colors  duration-800 ease-in-out"
-                              } shadow-md `
+                            : `${visible
+                                ? "bg-white dark:bg-neutral-700"
+                                : "bg-neutral-50 dark:bg-neutral-900 transition-colors  duration-800 ease-in-out"
+                            } shadow-md `
                     }
                     canvas={viewRoot}
                     onChange={(change) => {
                         setNavType(change);
-                        _setNavType?.(change);
+                          _setNavType?.(change);
                     }}
+                    onBackToTop={onBackToTop}
+                /> */}
+                <TabsOrList
+                    hideOnEmpty
+                    className={`${visible
+                        ? "bg-white dark:bg-neutral-700"
+                        : "bg-neutral-50 dark:bg-neutral-900 transition-colors  duration-800 ease-in-out"
+                        } shadow-md `}
+                    canvas={viewRoot}
+                    view={navType}
+                    setView={setNavType}
                     onBackToTop={onBackToTop}
                 />
                 {/*  {navType === "tabs" && (

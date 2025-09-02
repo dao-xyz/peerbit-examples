@@ -68,7 +68,7 @@ const cli = async (args?: string[]) => {
                     await peerbit.bootstrap();
                 }
 
-                const file = fs.readFileSync(args.path);
+                const file = fs.readFileSync(args.path) as Uint8Array;
                 const id = await files.add(path.basename(args.path), file);
                 console.log(
                     `Id: ${chalk.green(

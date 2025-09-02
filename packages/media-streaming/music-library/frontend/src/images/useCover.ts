@@ -29,7 +29,7 @@ export const useCover = (id?: Uint8Array) => {
     /* blob-url for <img> / background-image */
     const url = useMemo(() => {
         if (!doc) return null;
-        const blob = new Blob([doc.img], { type: "image/*" });
+        const blob = new Blob([doc.img as BlobPart], { type: "image/*" });
         return URL.createObjectURL(blob);
     }, [doc?.img]);
 

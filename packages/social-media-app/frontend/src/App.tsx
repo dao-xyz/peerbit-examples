@@ -1,4 +1,3 @@
-// Content.tsx
 import { ClientBusyError, usePeer } from "@peerbit/react";
 import { PeerProvider } from "@peerbit/react";
 import { HashRouter } from "react-router";
@@ -6,7 +5,6 @@ import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
 import { AppProvider } from "./content/useApps";
 import { inIframe } from "@peerbit/react";
-import { CanvasProvider } from "./canvas/useCanvas";
 import { ProfileProvider } from "./profile/useProfiles";
 import { IdentitiesProvider } from "./identity/useIdentities";
 import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
@@ -15,7 +13,6 @@ import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { ThemeProvider } from "./theme/useTheme";
 import { ReplyProgressProvider } from "./canvas/main/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
-import { ViewProvider } from "./canvas/view/ViewContext";
 import {
     HeaderVisibilityProvider,
     useHeaderVisibilityContext,
@@ -25,9 +22,17 @@ import type { NetworkOption } from "@peerbit/react";
 import { BlurOnOutsidePointerProvider } from "./canvas/feed/BlurOnScrollProvider";
 import { CustomizedBackground } from "./canvas/custom/applyVisualization";
 import { CustomizationProvider } from "./canvas/custom/CustomizationProvider";
-import { FeedProvider } from "./canvas/feed/FeedContext";
 import clsx from "clsx";
 import { FocusProvider } from "./FocusProvider";
+import { CanvasProvider } from "./canvas/useCanvas";
+import {
+    StreamProvider,
+} from "./canvas/feed/StreamContext";
+import { EditModeProvider } from "./canvas/edit/EditModeProvider";
+import { ToolbarVisibilityProvider } from "./canvas/edit/ToolbarVisibilityProvider";
+import { PrivateScope, PublicScope, ScopeRegistryProvider } from "./canvas/useScope";
+import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
+import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 
 const HEADER_EXPANDED_HEIGHT = 12;
 const heightStyle: { [expanded: string]: string } = {
@@ -78,53 +83,63 @@ export const Content = () => {
     }, []);
 
     return (
-        <ViewProvider>
-            <FeedProvider>
-                <CustomizationProvider>
-                    <CustomizedBackground className=" h-full">
-                        <FocusProvider>
-                            {/* Main header with transform animation */}
-                            <div
-                                ref={headerRef}
-                                className={clsx(
-                                    "sticky top-0 inset-x-0  z-30",
-                                    heightStyle[String(headerVisible)]
-                                )} /* transition-transform duration-800 ease-in-out */
-                                style={
-                                    {
-                                        /*  transform: headerVisible
-                                         ? "translateY(0)"
-                                         : `translateY(-${headerHeight}px)`, */
-                                        /* transition: "max-height 0.3s ease-in-out", */
-                                        /*     transform: "translateY(0)",
-                                        backfaceVisibility: "hidden", */
-                                    }
-                                }
-                            >
-                                <Header fullscreen={inIframe()} />
-                            </div>
+        <CustomizationProvider>
+            <CustomizedBackground className=" h-full">
+                <StreamSettingsProvider>
+                    <StreamProvider>
+                        <DraftManagerProvider debug>
+                            <ToolbarVisibilityProvider>
+                                <EditModeProvider>
+                                    {" "}
+                                    {/* influences whether canvases are editable or not */}
+                                    <FocusProvider>
+                                        {/* Main header with transform animation */}
+                                        <div
+                                            ref={headerRef}
+                                            className={clsx(
+                                                "sticky top-0 inset-x-0  z-30",
+                                                heightStyle[String(headerVisible)]
+                                            )} /* transition-transform duration-800 ease-in-out */
+                                            style={
+                                                {
+                                                    /*  transform: headerVisible
+                                                     ? "translateY(0)"
+                                                     : `translateY(-${headerHeight}px)`, */
+                                                    /* transition: "max-height 0.3s ease-in-out", */
+                                                    /*     transform: "translateY(0)",
+                                                    backfaceVisibility: "hidden", */
+                                                }
+                                            }
+                                        >
+                                            <Header fullscreen={inIframe()} />
+                                        </div>
 
-                            {/* Add padding so content isn’t hidden by the fixed header */}
-                            <BaseRoutes />
-                        </FocusProvider>
-                    </CustomizedBackground>
-                </CustomizationProvider>
-            </FeedProvider>
-        </ViewProvider>
+                                        {/* Add padding so content isn’t hidden by the fixed header */}
+                                        <BaseRoutes />
+                                    </FocusProvider>
+                                </EditModeProvider>
+                            </ToolbarVisibilityProvider>
+                        </DraftManagerProvider>
+                        {/* This is the main content area, which will be scrolled */}
+
+                    </StreamProvider>
+                </StreamSettingsProvider>
+            </CustomizedBackground>
+        </CustomizationProvider>
     );
 };
 
 const networkConfig: NetworkOption =
     import.meta.env.MODE === "development"
         ? {
-              type: "local",
-          }
+            type: "local",
+        }
         : {
-              type: "remote",
-              bootstrap: [
-                  "/dns4/139addd561462895f63820536f36c08a5bd23daa.peerchecker.com/tcp/4003/wss/p2p/12D3KooWMwHdVQHuYd22aUWwBNAStsmVAEchxFhpvdUC6mQiC9wi",
-              ],
-          };
+            type: "remote",
+            bootstrap: [
+                "/dns4/139addd561462895f63820536f36c08a5bd23daa.peerchecker.com/tcp/4003/wss/p2p/12D3KooWMwHdVQHuYd22aUWwBNAStsmVAEchxFhpvdUC6mQiC9wi",
+            ],
+        };
 
 export const App = () => {
     return (
@@ -134,7 +149,7 @@ export const App = () => {
                     <PeerProvider
                         network={networkConfig}
                         iframe={{ type: "proxy", targetOrigin: "*" }}
-                        waitForConnnected={true}
+                        waitForConnnected={false}
                         inMemory={false}
                         singleton
                     >
@@ -142,17 +157,19 @@ export const App = () => {
                             <AppProvider>
                                 <HeaderVisibilityProvider>
                                     <BlurOnOutsidePointerProvider>
-                                        <CanvasProvider>
-                                            <ReplyProgressProvider>
-                                                <ProfileProvider>
-                                                    <AIReplyProvider>
-                                                        <HostRegistryProvider>
-                                                            <Content />
-                                                        </HostRegistryProvider>
-                                                    </AIReplyProvider>
-                                                </ProfileProvider>
-                                            </ReplyProgressProvider>
-                                        </CanvasProvider>
+                                        <ScopeRegistryProvider>
+                                            <CanvasProvider>
+                                                <ReplyProgressProvider>
+                                                    <ProfileProvider>
+                                                        <AIReplyProvider>
+                                                            <HostRegistryProvider>
+                                                                <Content />
+                                                            </HostRegistryProvider>
+                                                        </AIReplyProvider>
+                                                    </ProfileProvider>
+                                                </ReplyProgressProvider>
+                                            </CanvasProvider>
+                                        </ScopeRegistryProvider>
                                     </BlurOnOutsidePointerProvider>
                                 </HeaderVisibilityProvider>
                             </AppProvider>

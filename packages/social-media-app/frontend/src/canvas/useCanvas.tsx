@@ -1,181 +1,272 @@
+import {
+    createContext,
+    useContext,
+    useMemo,
+    useState,
+    JSX,
+    useEffect,
+    useRef,
+} from "react";
 import { usePeer } from "@peerbit/react";
-import React, { JSX, useContext, useEffect, useState } from "react";
-import { Canvas, createRoot } from "@giga-app/interface";
-import { useLocation } from "react-router";
-import { sha256Sync } from "@peerbit/crypto";
-import { ProgramClient } from "@peerbit/program";
-import { toId } from "@peerbit/indexer-interface";
-interface ICanvasContext {
-    // root canvas
-    root?: Canvas;
+import {
+    Canvas,
+    IndexableCanvas,
+    Scope,
+    createRoot,
+    loadCanvasFromScopes,
+} from "@giga-app/interface";
+import { PrivateScope, PublicScope } from "./useScope";
+import { WithIndexedContext } from "@peerbit/document";
+import { getCanvasIdFromPart, getScopeAddrsFromSearch } from "../routes";
+import { useLocation, useMatch } from "react-router";
 
-    // leaf canvas
-    leaf?: Canvas;
-
-    // the current path
-    path: Canvas[];
+export interface ICanvasContext {
+    scope?: Scope; // kept for compatibility
+    root?: WithIndexedContext<Canvas, IndexableCanvas>;
+    leaf?: WithIndexedContext<Canvas, IndexableCanvas>;
+    path: WithIndexedContext<Canvas, IndexableCanvas>[];
     loading: boolean;
-
-    // create all canvases required for current path
-    createCanvasAtPath: () => Promise<Canvas[]>;
-    setRoot: (root: Canvas) => void;
+    /* createCanvasAtPath: () => Promise<WithIndexedContext<Canvas, IndexableCanvas>[]>; */
+    setRoot: (root: WithIndexedContext<Canvas, IndexableCanvas>) => void;
+    viewRoot?: WithIndexedContext<Canvas, IndexableCanvas>;
 }
 
-export const getCanvasAdressFromUrl = (): string | undefined => {
-    if (!window.location.hash) {
-        return undefined;
-    }
-    const pathname = window.location.hash.split("#")[1];
-    const path = pathname.split("/").map((x) => decodeURIComponent(x));
-    path.splice(0, 2); // remove '' and 'c'
-    if (path[0] === "") {
-        path.splice(0, 1);
-    }
-    // Remove query parameters (e.g. ?view=new) if present
-    const canvasAddress = path[0]?.split("?")[0];
-    return canvasAddress;
+
+
+const initialCtx: ICanvasContext = {
+    loading: true,
+    path: [],
+    /*  createCanvasAtPath: async () => [], */
+    setRoot: () => { },
 };
 
-const getCanvasesPathFromURL = async (
-    peer: ProgramClient,
-    root: Canvas
-): Promise<Canvas[]> => {
-    const canvasAddress = getCanvasAdressFromUrl();
+const Ctx = createContext<ICanvasContext>(initialCtx);
+const useCanvases = () => useContext(Ctx);
 
-    if (!canvasAddress) {
-        return [root];
-    }
-    const current = await peer.open<Canvas>(canvasAddress, {
-        existing: "reuse",
-    });
-    return current.loadPath({ includeSelf: true });
-};
+const CanvasProvider = ({ children }: { children: JSX.Element }) => {
+    const publicScope = PublicScope.useScope();
+    const privateScope = PrivateScope.useScope();
 
-const CanvasContext = React.createContext<ICanvasContext>({} as any);
-export const useCanvases = () => useContext(CanvasContext);
-
-export const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const { peer, loading: loadingPeer, persisted } = usePeer();
-    const [root, _setRoot] = useState<Canvas>(undefined);
+    const location = useLocation();
 
-    const [canvases, setCanvases] = useState<Canvas[]>([]);
+    const matchA = useMatch("/c/:id/*")
+    const matchB = useMatch("/c/:id");
+    const match = matchA || matchB;
+
+    const idParam = match?.params?.id; // string | undefined
+    const idBytes = getCanvasIdFromPart(idParam);
+
+    const [root, _setRoot] =
+        useState<WithIndexedContext<Canvas, IndexableCanvas> | undefined>();
+    const [path, setPath] =
+        useState<WithIndexedContext<Canvas, IndexableCanvas>[]>([]);
     const [isLoading, setIsLoading] = useState(true);
-    const rlocation = useLocation();
+    const [standalone, setStandalone] = useState<
+        WithIndexedContext<Canvas, IndexableCanvas>[] | undefined
+    >();
 
-    const setRoot = (canvas: Canvas) => {
-        setCanvases([]);
-        _setRoot(canvas);
-    };
+    // avoid race-y path updates
+    const reqToken = useRef(0);
+    const creatingRootRef = useRef<Promise<void> | null>(null);
 
-    const leaf = React.useMemo<Canvas | undefined>(
-        () => (canvases?.length ? canvases[canvases.length - 1] : undefined),
-        [canvases]
+    // choose candidate scopes from URL ?scopes=a,b (default: all available)
+    const scopeAddrsFromUrl = useMemo(
+        () => getScopeAddrsFromSearch(location.search),
+        [location.search]
     );
 
-    const [viewContext, setViewContext] = useState<Canvas[] | undefined>(
-        undefined
+    const availableScopes = useMemo(
+        () => [publicScope, privateScope].filter(Boolean) as Scope[],
+        [publicScope?.address, privateScope?.address]
+    );
+
+    const candidateScopes = useMemo(() => {
+        if (!scopeAddrsFromUrl.length) return availableScopes;
+        const set = new Set(scopeAddrsFromUrl);
+        return availableScopes.filter((s) => set.has(s.address));
+    }, [availableScopes, scopeAddrsFromUrl.join("|")]);
+
+    const setRoot = (c: WithIndexedContext<Canvas, IndexableCanvas>) => {
+        setPath([]);
+        _setRoot(c);
+    };
+
+    const leaf = useMemo(
+        () => (path.length ? path[path.length - 1] : undefined),
+        [path]
     );
 
     useEffect(() => {
-        const fn = async () => {
-            setViewContext(await leaf?.getViewContext());
-        };
-        fn();
-    }, [leaf]);
+        if (!leaf) return setStandalone(undefined);
 
-    const memo = React.useMemo<ICanvasContext>(
+        const chain = [leaf]; // TODO: await leaf.getStandaloneParent();
+        setStandalone(chain || undefined);
+    }, [leaf?.idString]);
+
+    const openAndIndex = async (canvases: Canvas[]) => {
+        if (!root) return [];
+        const opened = await Promise.all(
+            canvases.map((c) =>
+                root.nearestScope
+                    .openWithSameSettings(c)
+                    .then((cc) => cc.getSelfIndexedCoerced())
+            )
+        );
+        return opened;
+    };
+
+    /* TODO? const createCanvasAtPath = async () => {
+         if (!root) throw new Error("Root not found");
+         if (!candidateScopes.length) return [root];
+ 
+         setIsLoading(true);
+         const token = ++reqToken.current;
+         try {
+             console.log("loading starting canvases", idParam);
+             const canvases =
+                 !idBytes
+                     ? [root]
+                     : await (async () => {
+                         const current = await loadCanvasFromScopes(idBytes, candidateScopes, {
+                             local: true,
+                         });
+                         if (!current) return [root];
+                         const path = current.loadPath({ includeSelf: true });
+                         console.log("done loading starting canvases");
+                         return path;
+                     })();
+ 
+             const opened = await openAndIndex(canvases);
+             if (token === reqToken.current) setPath(opened);
+             return opened;
+         } finally {
+             if (token === reqToken.current) setIsLoading(false);
+         }
+     };
+  */
+    // sync path with URL (id/scopes) and scope availability
+    useEffect(() => {
+        if (!root || !candidateScopes.length) {
+            console.log("no root or scopes yet");
+            return;
+        }
+
+        const token = ++reqToken.current;
+        setIsLoading(true);
+
+        let cancelled = false;
+        (async () => {
+            const canvases =
+                !idBytes
+                    ? [root]
+                    : await (async () => {
+                        const current = await loadCanvasFromScopes(idBytes, candidateScopes, {
+                            local: true,
+                        });
+                        if (!current) return [root];
+                        const path = await current.loadPath({ includeSelf: true });
+                        console.log("done loading path canvases", path);
+                        return path
+                    })();
+
+            if (cancelled) return;
+            const opened = await openAndIndex(canvases);
+            if (!cancelled && token === reqToken.current) setPath(opened);
+        })()
+            .catch(console.error)
+            .finally(() => {
+                if (!cancelled && token === reqToken.current) setIsLoading(false);
+            });
+
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        root?.idString,
+        idParam, // route id changes
+        candidateScopes
+    ]);
+
+    // ensure a root exists (public root by default)
+    useEffect(() => {
+        if (!peer || !publicScope) {
+
+            console.log("no peer or public scope yet", { peer: !!peer, publicScope: !!publicScope });
+            return;
+        }
+
+        // Already have a root: ensure it's loaded/initialized
+        if (root) {
+            if (!root.initialized) {
+                setIsLoading(true);
+                let cancelled = false;
+                root
+                    .load(peer, { args: { replicate: persisted } })
+                    .then((c) => c.getSelfIndexedCoerced())
+                    .then((c) => {
+                        if (!cancelled) setRoot(c);
+                    })
+                    .catch(console.error)
+                    .finally(() => {
+                        if (!cancelled) setIsLoading(false);
+                    });
+
+                return () => {
+                    cancelled = true;
+                };
+            }
+            return;
+        }
+
+        // Guard: avoid launching multiple createRoot calls during HMR
+        if (!creatingRootRef.current) {
+            setIsLoading(true);
+            creatingRootRef.current = (async () => {
+                const res = await createRoot(peer, {
+                    persisted,
+                    scope: publicScope,
+                    sections: ["About", "Help"],
+                });
+                const ix = await res.canvas.getSelfIndexedCoerced();
+                setRoot(ix);
+            })()
+                .catch((e) => console.error("Error creating root canvas:", e))
+                .finally(() => {
+                    creatingRootRef.current = null;
+                    setIsLoading(false);
+                });
+        }
+    }, [peer?.identity?.toString(), publicScope, persisted, root?.idString]);
+
+    // Compose loading: only block on usePeer while peer is actually missing.
+    const loading = useMemo(
+        () => isLoading || (loadingPeer && !peer),
+        [isLoading, loadingPeer, peer]
+    );
+
+    const value = useMemo<ICanvasContext>(
         () => ({
+            scope: publicScope,
             root,
             leaf,
             setRoot,
-            path: canvases,
-            loading: isLoading || loadingPeer,
-            createCanvasAtPath: async () => {
-                setIsLoading(true);
-                if (!root) {
-                    throw new Error("Root not found");
-                }
-                return getCanvasesPathFromURL(peer, root)
-                    .then((canvases) => {
-                        return Promise.all(
-                            canvases.map((canvas) =>
-                                root.openWithSameSettings(canvas)
-                            )
-                        ).then((openCanvases) => {
-                            console.log("OPEN CANVASES", openCanvases);
-                            setCanvases(openCanvases);
-                            return openCanvases;
-                        });
-                    })
-                    .finally(() => {
-                        setIsLoading(false);
-                    });
-            },
+            path,
+            loading,
+            /* createCanvasAtPath, */
+            viewRoot: standalone?.[0],
         }),
         [
-            root?.id.toString(),
-            canvases.length,
-            canvases[canvases.length - 1]?.idString,
-            rlocation,
-            isLoading,
-            leaf,
-            loadingPeer,
+            publicScope?.address,
+            root?.idString,
+            leaf?.idString,
+            path.length,
+            standalone,
+            loading,
         ]
     );
 
-    const updateCanvasPath = async (reset = true) => {
-        let startLocation = window.location.hash;
-        const maybeSetCanvases = (canvases: Canvas[]) => {
-            if (startLocation === window.location.hash) {
-                setCanvases(canvases);
-                setIsLoading(false);
-            } else {
-                console.log("SKIP SET", startLocation, window.location.hash);
-            }
-        };
-        /* setCanvasPath(newRoomPath);
-        document.title = newRoomPath.join(" / ") || "Giga"; */
-        if (reset) {
-            maybeSetCanvases(null);
-            setIsLoading(true);
-        }
-
-        if (!root) {
-            throw new Error("Root not found");
-        }
-        getCanvasesPathFromURL(peer, root)
-            .then((result) => {
-                maybeSetCanvases(result);
-            })
-            .catch((e) => {
-                console.error(e);
-            })
-            .finally(() => {
-                setIsLoading(false);
-            });
-    };
-
-    useEffect(() => {
-        if (!root) {
-            return;
-        }
-        updateCanvasPath(false);
-    }, [root?.address, rlocation]);
-
-    useEffect(() => {
-        if (root || !peer) {
-            return;
-        }
-        createRoot(peer, { persisted, sections: ["Home", "About", "Help"] })
-            .then((result) => {
-                setRoot(result);
-            })
-            .catch((e) => {
-                console.error("Error creating root canvas:", e);
-            });
-    }, [peer?.identity?.toString()]);
-
-    return (
-        <CanvasContext.Provider value={memo}>{children}</CanvasContext.Provider>
-    );
+    return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 };
+
+export { CanvasProvider, useCanvases };

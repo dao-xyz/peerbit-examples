@@ -1,28 +1,35 @@
 import { ProgramClient } from "@peerbit/program";
-import { createRoot, Canvas } from "@giga-app/interface";
+import { createRoot, Scope } from "@giga-app/interface";
 export interface LifeCycle {
     start: () => Promise<void>;
     stop: () => Promise<void>;
+    root: Scope
 }
 
 export const defaultGigaReplicator = (client: ProgramClient): LifeCycle => {
-    let canvas: Canvas | undefined = undefined;
-
+    let out: Awaited<ReturnType<typeof createRoot>> | undefined = undefined;
     return {
         start: async () => {
-            if (canvas) {
+            if (out) {
                 return;
             }
-            canvas = await createRoot(client, { persisted: true });
+            const created = await createRoot(client, { persisted: true });
+
+            out = created;
             console.log(
-                "Starting replicator at canvas root: " + canvas.address
+                "Starting replicator at canvas root: " + out.canvas.idString,
+                "capsule: " + out.scope.address
             );
         },
         stop: async () => {
-            if (!canvas) {
-                return;
-            }
-            await canvas.close();
+            await out?.scope.close(); // TODO close everthing?
         },
+        get root() {
+            if (!out) {
+                throw new Error("Not started");
+            }
+
+            return out.scope;
+        }
     };
 };

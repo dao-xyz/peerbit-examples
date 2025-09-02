@@ -1,42 +1,71 @@
-import { field, option, variant } from "@dao-xyz/borsh";
-import { Program } from "@peerbit/program";
-import { Canvas, IndexableCanvas } from "./content.js";
+import { field, variant } from "@dao-xyz/borsh";
+import { Program, ProgramClient } from "@peerbit/program";
+import {
+    AddressReference,
+    Canvas,
+    Element,
+    HIGH_QUALITY,
+    HIGHEST_QUALITY,
+    IndexableCanvas,
+    LOWEST_QUALITY,
+    MEDIUM_QUALITY,
+    Scope,
+    StaticContent,
+} from "./content.js";
+import { ReplicationOptions } from "@peerbit/shared-log";
+
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
-import { concat } from "uint8arrays";
-import { Documents } from "@peerbit/document";
+import { concat, equals } from "uint8arrays";
+import { Documents, WithIndexedContext } from "@peerbit/document";
 import {
     ByteMatchQuery,
     Sort,
     SortDirection,
 } from "@peerbit/indexer-interface";
 import { Identities } from "./identity.js";
+import {
+    CanvasAddressReference,
+    CanvasReference,
+    CanvasValueReference,
+} from "./references.js";
+import { Layout } from "./link.js";
+import { StaticImage } from "./static/image.js";
 
+
+
+/* ──────────────────────────────────────────────
+ * Profile record
+ *   - stores a CanvasReference
+ *   - ID = hash(publicKey + canvas.id)
+ * ────────────────────────────────────────────── */
 @variant(0)
 export class Profile {
     @field({ type: Uint8Array })
     id: Uint8Array;
 
-    @field({ type: Canvas })
-    profile: Canvas;
+    @field({ type: CanvasReference })
+    profile: CanvasReference;
 
-    @field({ type: option(Canvas) })
-    context?: Canvas; // when the profile should be used
+    constructor(props: { publicKey: PublicSignKey; profile: CanvasReference | Canvas }) {
+        this.profile =
+            props.profile instanceof CanvasReference
+                ? props.profile
+                : new CanvasValueReference({ value: props.profile });
 
-    constructor(properties: {
-        publicKey: PublicSignKey;
-        profile: Canvas;
-        context?: Canvas;
-    }) {
-        this.profile = properties.profile;
-        this.context = properties.context;
-
-        let arr: Uint8Array[] = [properties.publicKey.bytes, this.profile.id];
-        if (this.context) {
-            arr.push(this.context.id);
-        }
-        this.id = sha256Sync(concat(arr));
+        this.id = sha256Sync(
+            this.profile instanceof CanvasAddressReference
+                ? concat([props.publicKey.bytes, this.profile.id])
+                : concat([
+                    props.publicKey.bytes,
+                    (this.profile as CanvasValueReference).value.id,
+                ])
+        );
     }
 }
+
+/* ──────────────────────────────────────────────
+ * Indexed profile row
+ * ────────────────────────────────────────────── */
 @variant(0)
 export class ProfileIndexed {
     @field({ type: Uint8Array })
@@ -45,21 +74,17 @@ export class ProfileIndexed {
     @field({ type: IndexableCanvas })
     profile: IndexableCanvas;
 
-    @field({ type: option(IndexableCanvas) })
-    context?: IndexableCanvas;
-
-    constructor(properties: {
-        id: Uint8Array;
-        profile: IndexableCanvas;
-        context?: IndexableCanvas;
-    }) {
-        this.id = properties.id;
-        this.profile = properties.profile;
-        this.context = properties.context;
+    constructor(props: { id: Uint8Array; profile: IndexableCanvas }) {
+        this.id = props.id;
+        this.profile = props.profile;
     }
 }
+
 type ProfileArgs = { replicate?: boolean };
 
+/* ──────────────────────────────────────────────
+ * Profiles registry program
+ * ────────────────────────────────────────────── */
 @variant("profile")
 export class Profiles extends Program<ProfileArgs> {
     @field({ type: Documents })
@@ -67,11 +92,35 @@ export class Profiles extends Program<ProfileArgs> {
 
     constructor(properties?: { id?: Uint8Array }) {
         super();
-
         const id =
-            properties?.id || sha256Sync(new TextEncoder().encode("profiles"));
-        this.profiles = new Documents({
-            id,
+            properties?.id ??
+            sha256Sync(new TextEncoder().encode("profiles"));
+        this.profiles = new Documents({ id });
+    }
+
+    /** deterministic public-scope id */
+    static scopeIdFor(publicKey: PublicSignKey): Uint8Array {
+        return sha256Sync(
+            concat([
+                new TextEncoder().encode("giga-profile-scope:"),
+                publicKey.bytes,
+            ])
+        );
+    }
+
+    /** open deterministic public scope for user */
+    static async openPublicScopeFor(
+        client: ProgramClient,
+        publicKey: PublicSignKey,
+        opts?: { replicate?: ReplicationOptions }
+    ): Promise<Scope> {
+        const scope = new Scope({
+            id: Profiles.scopeIdFor(publicKey),
+            publicKey,
+        });
+        return client.open(scope, {
+            existing: "reuse",
+            args: { replicate: opts?.replicate ?? { factor: 1 } },
         });
     }
 
@@ -80,48 +129,16 @@ export class Profiles extends Program<ProfileArgs> {
             type: Profile,
             replicate:
                 args?.replicate != null
-                    ? args?.replicate
+                    ? args.replicate
                         ? { factor: 1 }
                         : false
-                    : { factor: 1 }, // TODO choose better
+                    : { factor: 1 },
             canOpen: () => false,
             keep: "self",
-            canPerform: async (operation) => {
-                /**
-                 * Only allow updates if we created it
-                 *  or from myself (this allows us to modifying someone elsecanvas locally)
-                 */
-                if (operation.type === "put") {
-                    const document = operation.value;
-                    return (
-                        operation.entry.signatures.find((x) =>
-                            x.publicKey.equals(document.profile.publicKey)
-                        ) != null
-                    );
-                } else {
-                    const get = await this.profiles.index.get(
-                        operation.operation.key,
-                        {
-                            local: true,
-                            remote: false, // TODO (?) this should be remote
-                        }
-                    );
-                    if (
-                        !get ||
-                        !operation.entry.signatures.find((x) =>
-                            x.publicKey.equals(get.profile.publicKey)
-                        )
-                    ) {
-                        return false;
-                    }
-                    return true;
-                }
-            },
+            canPerform: async () => true,
             index: {
-                idProperty: "id", // we need this because we use @id inside of Canvas (TODO is this expected?)
-                prefetch: {
-                    strict: false,
-                },
+                idProperty: "id",
+                prefetch: { strict: false },
                 cache: {
                     query: {
                         strategy: "auto",
@@ -132,89 +149,142 @@ export class Profiles extends Program<ProfileArgs> {
                     },
                 },
                 type: ProfileIndexed,
-                transform: async (arg, _context) => {
-                    return new ProfileIndexed({
-                        id: arg.id,
-                        profile: await IndexableCanvas.from(
-                            arg.profile,
-                            this.node,
-                            {
-                                replicate: args?.replicate,
-                            }
-                        ),
-                        context: arg.context
-                            ? await IndexableCanvas.from(
-                                  arg.context,
-                                  this.node,
-                                  {
-                                      replicate: args?.replicate,
-                                  }
-                              )
-                            : undefined,
-                    });
+                transform: async (doc, _ctx) => {
+
+
+
+                    try {
+                        const opened = await doc.profile.resolve(this.node, {
+                            args: { replicate: args?.replicate ?? true },
+                            existing: "reuse",
+                        });
+
+                        if (!opened.initialized) {
+                            await opened.load(this.node, {
+                                args: {
+                                    replicate: args?.replicate,
+                                    /*  replicas: args?.replicas, */
+                                }
+                            })
+                        }
+                        const profileIx = await IndexableCanvas.from(opened);
+                        return new ProfileIndexed({
+                            id: doc.id,
+                            profile: profileIx,
+                        });
+                    } catch (error) {
+                        console.error("Failed to index profile:", error);
+                        throw new Error(`Failed to index profile: ${error}`);
+                    }
                 },
             },
         });
     }
 
-    async create(properties: { profile: Canvas; context?: Canvas }) {
-        const previous = await this.get(properties.profile.publicKey);
-
-        const profileIndexed = new Profile({
-            publicKey: properties.profile.publicKey,
-            profile: properties.profile,
-            context: properties.context,
+    /** create or update profile */
+    async create(props: { publicKey: PublicSignKey; profile: CanvasReference | Canvas }) {
+        const previous = await this.get(props.publicKey);
+        const record = new Profile({
+            publicKey: props.publicKey,
+            profile: props.profile,
         });
-        await this.profiles.put(profileIndexed);
-
+        await this.profiles.put(record);
         if (previous) {
             await this.profiles.del(previous.id);
         }
-
-        return profileIndexed;
+        return record;
     }
 
+    /** get profile by publicKey, optionally checking linked devices */
     async get(publicKey: PublicSignKey, identities?: Identities) {
-        const profileFromKey = async (_publicKey: PublicSignKey) => {
-            const profiles = await this.profiles.index.search({
-                query: [
-                    new ByteMatchQuery({
-                        key: ["profile", "publicKey"],
-                        value: _publicKey.bytes,
-                    }),
-                ],
-                sort: [
-                    // sort by newest first
-                    new Sort({
-                        key: ["__context", "created"],
-                        direction: SortDirection.DESC,
-                    }),
-                ],
-            });
-            return profiles[0];
-        };
-        const found = await profileFromKey(publicKey);
-        if (found) {
-            return found;
-        }
+        const mine = await this.profiles.index.iterate({
+            query: new ByteMatchQuery({
+                key: ["profile", "publicKey"],
+                value: publicKey.bytes,
+            })
+        }).first()
+
+        if (mine) return mine;
 
         if (identities) {
-            // if not found, try to find from linked accounts
             const linked = await identities.connections.index.search({
                 query: identities.getLinkedDevicesQuery(publicKey),
             });
-
-            if (linked.length === 0) {
-                return undefined;
-            }
-
             for (const link of linked) {
-                const otherDevice = link.getOtherDevice(publicKey);
-                const profile = await profileFromKey(otherDevice!.publicKey);
-                if (profile) {
-                    return profile;
-                }
+                const other = link.getOtherDevice(publicKey);
+                if (!other) continue;
+                const alt = await this.profiles.index.iterate({
+                    query: new ByteMatchQuery({
+                        key: ["profile", "publicKey"],
+                        value: other.publicKey.bytes,
+                    })
+                }).first()
+                if (alt) return alt;
             }
         }
     }
+}
+
+/* ──────────────────────────────────────────────
+ * ensureProfile helper
+ *   - opens public scope
+ *   - creates a canvas with avatar image
+ *   - stores Profile with CanvasAddressReference
+ * ────────────────────────────────────────────── */
+export async function ensureProfile(
+    client: ProgramClient,
+    imageBytes: Uint8Array
+) {
+    const profiles = await client.open(new Profiles(), { existing: "reuse" });
+
+    const publicScope = await Profiles.openPublicScopeFor(
+        client,
+        client.identity.publicKey,
+        { replicate: { factor: 1 } }
+    );
+
+    const draft = new Canvas({
+        publicKey: client.identity.publicKey,
+        selfScope: new AddressReference({ address: publicScope.address }),
+    });
+    const canvas = await publicScope.openWithSameSettings(draft);
+
+    const qualities = [
+        LOWEST_QUALITY,
+        MEDIUM_QUALITY,
+        HIGH_QUALITY,
+        HIGHEST_QUALITY,
+    ];
+    const contentId = sha256Sync(imageBytes);
+    await Promise.all(
+        qualities.map((q) =>
+            publicScope.elements.put(
+                new Element({
+                    location: Layout.zero(),
+                    content: new StaticContent({
+                        content: new StaticImage({
+                            data: imageBytes,
+                            mimeType: "image/jpeg",
+                            width: 512,
+                            height: 512,
+                        }),
+                        quality: q,
+                        contentId,
+                    }),
+                    canvasId: canvas.id,
+                    publicKey: client.identity.publicKey,
+                })
+            )
+        )
+    );
+
+    const profile = await profiles.create({
+        publicKey: client.identity.publicKey,
+        profile: new CanvasAddressReference({
+            id: canvas.id,
+            scope: new AddressReference({ address: publicScope.address }),
+        }),
+    });
+
+    return { canvas: canvas as WithIndexedContext<Canvas, IndexableCanvas>, profile: profile };
 }

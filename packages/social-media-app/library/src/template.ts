@@ -1,15 +1,54 @@
-/* template.ts ------------------------------------------------------------ */
 import { field, fixedArray, variant } from "@dao-xyz/borsh";
 import { randomBytes, sha256Sync } from "@peerbit/crypto";
-import { Canvas, Navigation, Purpose } from "./content.js";
+import {
+    AddressReference,
+    Canvas,
+    Scope,
+    ChildVisualization,
+    resolveChild,
+} from "./content.js";
 import { Program, ProgramClient } from "@peerbit/program";
 import { Documents, id } from "@peerbit/document";
+import { concat } from "uint8arrays";
+import { LinkKind, ViewKind } from "./link.js";
 
-/** A serialisable template that can be cloned into any Canvas tree. */
+/* ----------------------------------------------------------------------------
+ * helpers
+ * ------------------------------------------------------------------------- */
+
+const generateId = (...keys: (Uint8Array | string)[]): Uint8Array => {
+    const seed = keys.map((key) =>
+        typeof key === "string" ? new TextEncoder().encode(key) : key
+    );
+    return sha256Sync(concat(seed));
+};
+
+const getContextText = async (c: Canvas): Promise<string> => {
+    return c.nearestScope.createContext(c);
+};
+
+/** Minimal helper for same-scope insertions with ordering + experience. */
+async function linkSection(
+    parent: Canvas,
+    draft: Canvas,
+    orderKey: string,
+    view: ChildVisualization
+) {
+    const [created, child] = await parent.upsertReply(draft, {
+        type: "link-only",                      // new API (no migration)
+        kind: new ViewKind({ orderKey }),       // View/ordering kind
+        view,                             // replaces old `type`
+    });
+    return [created, child] as const;
+}
+
+/* ----------------------------------------------------------------------------
+ * Template (serializable)
+ * ------------------------------------------------------------------------- */
+
 @variant(0)
 export class Template {
-    /* --- Meta data (for catalogues, search, etc.) ----------------------- */
-    @id({ type: fixedArray("u8", 32) })
+    @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
 
     @field({ type: "string" })
@@ -18,16 +57,10 @@ export class Template {
     @field({ type: "string" })
     description: string;
 
-    /* --- The prototype Canvas subtree ---------------------------------- */
     @field({ type: Canvas })
     prototype: Canvas;
 
-    constructor(p: {
-        name: string;
-        description: string;
-        prototype: Canvas;
-        id?: Uint8Array;
-    }) {
+    constructor(p: { name: string; description: string; prototype: Canvas; id?: Uint8Array }) {
         this.id = p.id ?? randomBytes(32);
         this.name = p.name;
         this.description = p.description;
@@ -35,18 +68,53 @@ export class Template {
     }
 
     /**
-     * Materialise the template *below* an already‑opened parent Canvas.
-     * A deep copy is produced – nothing in the original prototype
-     * (IDs, authors, addresses) leaks into the newly created canvases.
-     */
+ * Deep-copy this.template.prototype under `parent` (new ids, parent’s scope).
+ * Uses Scope.publish(..., { type: "fork", updateHome: "set" }) so payload/experience
+ * are copied by the publish pipeline, not manually here.
+ */
     async insertInto(parent: Canvas): Promise<Canvas> {
-        const node = parent.node as ProgramClient;
-        if (!node) {
-            throw new Error("Parent canvas is not opened");
-        }
+        const parentScope = parent.nearestScope;
 
-        // Recursively copy the prototype subtree ------------------------
-        return await this.prototype.cloneInto(parent);
+
+        const clone = async (
+            src: Canvas,
+            dstParent: Canvas,
+            kind?: LinkKind,
+            view?: ChildVisualization
+        ): Promise<Canvas> => {
+            // Open source with its own home settings (publish does copies from srcHome→dest)
+            const srcOpen = src.initialized ? src : await dstParent.nearestScope.openWithSameSettings(src);
+
+            // Materialize a fork in the parent scope; preserve edge metadata if provided
+            const [, dst] = await parentScope.publish(srcOpen, {
+                type: "fork",
+                id: "new",           // new id for each node in the cloned tree
+                updateHome: 'set', // keep srcOpen's selfScope as is (copied by publish)
+                visibility: "both",
+                targetScope: parentScope,
+                parent: dstParent,   // link under the parent we just created
+                kind,    // preserves ViewKind(orderKey) for ordering
+                view,    // if you store view on the edge, keep it; otherwise omit
+                // no need to pass publish.view for node’s own experience:
+                // copyVisualizationBetweenScopes already copies the node view/experience
+            });
+
+            // Recreate children using their original link metadata
+            const links = await srcOpen.getChildrenLinks(); // { child, kind?, view? }[]
+            for (const link of links) {
+                let child = await resolveChild(link, src.nearestScope);
+                if (!child) {
+                    throw new Error("Failed to resolve child during template cloning");
+                }
+                const loaded = await src.nearestScope.openWithSameSettings(child);
+                const vizualization = await loaded.getVisualization();
+                await clone(loaded, dst, link.kind, vizualization?.view);
+            }
+
+            return dst;
+        };
+
+        return clone(this.prototype, parent);
     }
 }
 
@@ -61,20 +129,14 @@ export class IndexableTemplate {
     @field({ type: "string" })
     description: string;
 
-    constructor(properties: {
-        id: Uint8Array;
-        name: string;
-        description: string;
-    }) {
-        this.id = properties.id;
-        this.name = properties.name;
-        this.description = properties.description;
+    constructor(p: { id: Uint8Array; name: string; description: string }) {
+        this.id = p.id;
+        this.name = p.name;
+        this.description = p.description;
     }
 }
 
-type TemplateArgs = {
-    replicate?: boolean;
-};
+type TemplateArgs = { replicate?: boolean };
 
 @variant("templates")
 export class Templates extends Program<TemplateArgs> {
@@ -83,273 +145,436 @@ export class Templates extends Program<TemplateArgs> {
 
     constructor(id: Uint8Array) {
         super();
-        this.templates = new Documents<Template, IndexableTemplate>({
-            id: id,
-        });
+        this.templates = new Documents<Template, IndexableTemplate>({ id });
     }
 
     async open(args?: TemplateArgs): Promise<void> {
         await this.templates.open({
             type: Template,
             keep: "self",
-            replicate: args?.replicate ? { factor: 1 } : false, // TODO choose better
-            canPerform: async (operation) => {
-                return true;
-            },
+            replicate: args?.replicate ? { factor: 1 } : false,
+            canPerform: async () => true,
             index: {
                 type: IndexableTemplate,
-                prefetch: {
-                    strict: false,
-                },
+                prefetch: { strict: false },
+                transform: async (t) =>
+                    new IndexableTemplate({
+                        id: t.id,
+                        name: t.name,
+                        description: t.description,
+                    }),
             },
         });
     }
 }
 
-/* ----------------------------------------------------------------------- */
-/* A concrete photo‑album template --------------------------------------- */
+/* ----------------------------------------------------------------------------
+ * Concrete templates
+ * ------------------------------------------------------------------------- */
+
 export async function createAlbumTemplate(properties: {
     peer: ProgramClient;
+    scope: Scope;
     name?: string;
     description?: string;
 }): Promise<Template> {
-    const peer = properties.peer;
+    const { peer, scope } = properties;
 
-    /* Root (Album) ------------------------------------------------------ */
-    let albumRoot = new Canvas({
-        id: sha256Sync(new TextEncoder().encode("album")),
-        publicKey: peer.identity.publicKey,
-    });
-
-    albumRoot = await peer.open(albumRoot, { existing: "reuse" });
-    let infoText =
-        properties?.description == null
-            ? properties.name ?? "Album"
-            : `# ${properties.name}\n\n${properties.description}`;
-    await albumRoot.addTextElement({ text: infoText });
-
-    /* Child: “Photos” --------------------------------------------------- */
-    const photos = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: albumRoot,
-    });
-    await peer.open(photos, { existing: "reuse" });
-    await albumRoot.createReply(photos, "navigation");
-    await photos.addTextElement({ text: "Photos" });
-    await photos.setType(
-        new Purpose({
-            canvasId: photos.id,
-            type: new Navigation({}),
+    const [created, albumRoot] = await scope.getOrCreateReply(
+        undefined,
+        new Canvas({
+            id: generateId("album"),
+            publicKey: peer.identity.publicKey,
+            selfScope: new AddressReference({ address: scope.address }),
         })
     );
-
-    /* Child: “Comments” ------------------------------------------------- */
-    const comments = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: albumRoot,
-    });
-    await peer.open(comments, { existing: "reuse" });
-    await albumRoot.createReply(comments, "navigation");
-    await comments.addTextElement({ text: "Comments" });
-
-    /* Wrap everything into a shareable Template object ----------------- */
-    return new Template({
+    const template = new Template({
         id: sha256Sync(new TextEncoder().encode("album")),
         name: "Photo album",
         description: "Photos and Comments children",
         prototype: albumRoot,
-    });
+    })
+
+    if (!created) {
+        return template;
+    }
+
+
+    await albumRoot.setExperience(ChildVisualization.FEED);
+
+    const infoText =
+        properties?.description == null
+            ? properties.name ?? "Album"
+            : `# ${properties.name}\n\n${properties.description}`;
+    await albumRoot.addTextElement(infoText);
+
+    // Photos
+    {
+        const draft = new Canvas({
+            id: generateId(albumRoot.id, "photos"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, photos] = await linkSection(
+            albumRoot,
+            draft,
+            "0",
+            ChildVisualization.OUTLINE
+        );
+        await photos.addTextElement("Photos");
+    }
+
+    // Comments
+    {
+        const draft = new Canvas({
+            id: generateId(albumRoot.id, "comments"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, comments] = await linkSection(
+            albumRoot,
+            draft,
+            "1",
+            ChildVisualization.OUTLINE
+        );
+        await comments.addTextElement("Comments");
+    }
+
+    return template;
 }
 
-/* ----------------------------------------------------------------------- */
-/* 1. Personal‑profile template ----------------------------------------- */
 export async function createProfileTemplate(props: {
     peer: ProgramClient;
-    name?: string; // e.g. “Marcus Pousette”
-    description?: string; // optional tagline / bio
+    scope: Scope;
+    name?: string;
+    description?: string;
 }): Promise<Template> {
-    const { peer } = props;
-    /* Root ---------------------------------------------------------------- */
-    let root = new Canvas({
-        id: sha256Sync(new TextEncoder().encode("profile")),
-        publicKey: peer.identity.publicKey,
-    });
-    root = await peer.open(root, { existing: "reuse" });
+    const { peer, scope } = props;
 
-    let header = props.name ?? "Profile";
-    if (props.description) {
-        header = `# ${header}\n\n${props.description}`;
-    }
-    await root.addTextElement({ text: header });
-
-    /* Child: “Posts” (timeline, narrative) -------------------------------- */
-    const posts = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(posts, { existing: "reuse" });
-    await posts.addTextElement({ text: "Posts" });
-    await root.createReply(posts, "narrative"); // set narrative type
-
-    /* Child: “Photos” (navigation) --------------------------------------- */
-    const photos = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(photos, { existing: "reuse" });
-    await photos.addTextElement({ text: "Photos" });
-    await root.createReply(photos, "navigation");
-    await photos.setType(
-        new Purpose({
-            canvasId: photos.id,
-            type: new Navigation({}),
+    const [created, root] = await scope.getOrCreateReply(
+        undefined,
+        new Canvas({
+            id: sha256Sync(new TextEncoder().encode("profile")),
+            publicKey: peer.identity.publicKey,
+            selfScope: new AddressReference({ address: scope.address }),
         })
     );
 
-    /* Child: “About” (navigation) ---------------------------------------- */
-    const about = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(about, { existing: "reuse" });
-    await about.addTextElement({ text: "About" });
-    await root.createReply(about, "navigation");
-    await about.setType(
-        new Purpose({
-            canvasId: about.id,
-            type: new Navigation({}),
-        })
-    );
-
-    return new Template({
+    const template = new Template({
         id: sha256Sync(new TextEncoder().encode("profile")),
         name: "Personal profile",
         description: "Profile root with Posts, Photos and About sections",
         prototype: root,
-    });
+    })
+
+    if (!created) {
+        return template;
+    }
+
+    await root.setExperience(ChildVisualization.EXPLORE);
+
+    let header = props.name ?? "Profile";
+    if (props.description) header = `# ${header}\n\n${props.description}`;
+    await root.addTextElement(header);
+
+    // Posts
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "posts"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, posts] = await linkSection(
+            root,
+            draft,
+            "0",
+            ChildVisualization.FEED
+        );
+        await posts.addTextElement("Posts");
+    }
+
+    // Photos
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "photos"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, photos] = await linkSection(
+            root,
+            draft,
+            "1",
+            ChildVisualization.OUTLINE
+        );
+        await photos.addTextElement("Photos");
+    }
+
+    // About
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "about"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, about] = await linkSection(
+            root,
+            draft,
+            "2",
+            ChildVisualization.OUTLINE
+        );
+        await about.addTextElement("About");
+    }
+
+    return template;
 }
 
-/* ----------------------------------------------------------------------- */
-/* 2. Community template -------------------------------------------------- */
 export async function createCommunityTemplate(props: {
     peer: ProgramClient;
-    name?: string; // community display‑name
+    scope: Scope;
+    name?: string;
     description?: string;
 }): Promise<Template> {
-    const { peer } = props;
-    let root = new Canvas({
-        id: sha256Sync(new TextEncoder().encode("community")),
-        publicKey: peer.identity.publicKey,
-    });
-    root = await peer.open(root, { existing: "reuse" });
+    const { peer, scope } = props;
 
-    let header = props.name ?? "Community";
-    if (props.description) {
-        header = `# ${header}\n\n${props.description}`;
-    }
-    await root.addTextElement({ text: header });
-
-    /* Posts (narrative feed) --------------------------------------------- */
-    const posts = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(posts, { existing: "reuse" });
-    await posts.addTextElement({ text: "Posts" });
-    await root.createReply(posts, "narrative");
-
-    /* Members (navigation) ------------------------------------------------ */
-    const members = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(members, { existing: "reuse" });
-    await members.addTextElement({ text: "Members" });
-    await root.createReply(members, "navigation");
-    await members.setType(
-        new Purpose({
-            canvasId: members.id,
-            type: new Navigation({}),
+    const [created, root] = await scope.getOrCreateReply(
+        undefined,
+        new Canvas({
+            id: sha256Sync(new TextEncoder().encode("community")),
+            publicKey: peer.identity.publicKey,
+            selfScope: new AddressReference({ address: scope.address }),
         })
     );
 
-    /* Photos (navigation) ------------------------------------------------- */
-    const photos = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(photos, { existing: "reuse" });
-    await photos.addTextElement({ text: "Photos" });
-    await root.createReply(photos, "navigation");
-    await photos.setType(
-        new Purpose({
-            canvasId: photos.id,
-            type: new Navigation({}),
-        })
-    );
-
-    return new Template({
+    const template = new Template({
         id: sha256Sync(new TextEncoder().encode("community")),
         name: "Community",
         description: "A community Posts, Members and Photos sections",
         prototype: root,
-    });
+    })
+
+    if (!created) {
+        return template;
+    }
+
+    await root.setExperience(ChildVisualization.EXPLORE);
+
+    let header = props.name ?? "Community";
+    if (props.description) header = `# ${header}\n\n${props.description}`;
+    await root.addTextElement(header);
+
+    // Posts
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "posts"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, posts] = await linkSection(
+            root,
+            draft,
+            "0",
+            ChildVisualization.FEED
+        );
+        await posts.addTextElement("Posts");
+    }
+
+    // Members
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "members"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, members] = await linkSection(
+            root,
+            draft,
+            "1",
+            ChildVisualization.FEED
+        );
+        await members.addTextElement("Members");
+    }
+
+    // Photos
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "photos"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, photos] = await linkSection(
+            root,
+            draft,
+            "2",
+            ChildVisualization.FEED
+        );
+        await photos.addTextElement("Photos");
+    }
+
+    return template;
 }
 
-/* ----------------------------------------------------------------------- */
-/* 3. Music‑playlist template -------------------------------------------- */
 export async function createPlaylistTemplate(props: {
     peer: ProgramClient;
-    name?: string; // playlist title
+    scope: Scope;
+    name?: string;
     description?: string;
 }): Promise<Template> {
-    const { peer } = props;
-    let root = new Canvas({
-        id: sha256Sync(new TextEncoder().encode("playlist")),
-        publicKey: peer.identity.publicKey,
-    });
-    root = await peer.open(root, { existing: "reuse" });
+    const { peer, scope } = props;
 
-    let header = props.name ?? "Playlist";
-    if (props.description) {
-        header = `# ${header}\n\n${props.description}`;
-    }
-    await root.addTextElement({ text: header });
-
-    /* Tracks (navigation – list of songs) -------------------------------- */
-    const tracks = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(tracks, { existing: "reuse" });
-    await tracks.addTextElement({ text: "Tracks" });
-    await root.createReply(tracks, "navigation");
-    await tracks.setType(
-        new Purpose({
-            canvasId: tracks.id,
-            type: new Navigation({}),
+    const [created, root] = await scope.getOrCreateReply(
+        undefined,
+        new Canvas({
+            id: sha256Sync(new TextEncoder().encode("playlist")),
+            publicKey: peer.identity.publicKey,
+            selfScope: new AddressReference({ address: scope.address }),
         })
     );
 
-    /* Comments (navigation) ---------------------------------------------- */
-    const comments = new Canvas({
-        publicKey: peer.identity.publicKey,
-        parent: root,
-    });
-    await peer.open(comments, { existing: "reuse" });
-    await comments.addTextElement({ text: "Comments" });
-    await root.createReply(comments, "navigation");
-    await comments.setType(
-        new Purpose({
-            canvasId: comments.id,
-            type: new Navigation({}),
-        })
-    );
-
-    return new Template({
+    const template = new Template({
         id: sha256Sync(new TextEncoder().encode("playlist")),
         name: "Music playlist",
         description: "Playlist root with Tracks and Comments sections",
         prototype: root,
     });
+
+    if (!created) {
+        return template;
+    }
+
+
+
+    await root.setExperience(ChildVisualization.FEED);
+
+    let header = props.name ?? "Playlist";
+    if (props.description) header = `# ${header}\n\n${props.description}`;
+    await root.addTextElement(header);
+
+    // Tracks
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "tracks"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, tracks] = await linkSection(
+            root,
+            draft,
+            "0",
+            ChildVisualization.FEED
+        );
+        await tracks.addTextElement("Tracks");
+    }
+
+    // Comments
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "comments"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, comments] = await linkSection(
+            root,
+            draft,
+            "1",
+            ChildVisualization.FEED
+        );
+        await comments.addTextElement("Comments");
+    }
+
+    return template
+}
+
+export async function createChatTemplate(props: {
+    peer: ProgramClient;
+    scope: Scope;
+    name?: string;
+    description?: string;
+}): Promise<Template> {
+    const { peer, scope } = props;
+
+    const [created, root] = await scope.getOrCreateReply(
+        undefined,
+        new Canvas({
+            id: sha256Sync(new TextEncoder().encode("chat")),
+            publicKey: peer.identity.publicKey,
+            selfScope: new AddressReference({ address: scope.address }),
+        })
+    );
+
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("chat")),
+        name: "Chat",
+        description: "Start a chat with your friends",
+        prototype: root,
+    })
+
+    if (!created) {
+        return template;
+    }
+
+    await root.setExperience(ChildVisualization.CHAT);
+
+    if (props?.name || props?.description) {
+        let header = props.name ?? "Chat";
+        if (props.description) header = `# ${header}\n\n${props.description}`;
+        await root.addTextElement(header);
+    }
+
+    return template;
+}
+
+export async function createArticleTemplate(props: {
+    peer: ProgramClient;
+    scope: Scope;
+    name?: string;
+    description?: string;
+}): Promise<Template> {
+    const { peer, scope } = props;
+
+    const [created, root] = await scope.getOrCreateReply(
+        undefined,
+        new Canvas({
+            id: sha256Sync(new TextEncoder().encode("article")),
+            publicKey: peer.identity.publicKey,
+            selfScope: new AddressReference({ address: scope.address }),
+        })
+    );
+    const template = new Template({
+        id: sha256Sync(new TextEncoder().encode("article")),
+        name: "My new article",
+        description: "Article with comments sections",
+        prototype: root,
+    })
+
+    if (!created) {
+        return template;
+    }
+
+    await root.setExperience(ChildVisualization.FEED);
+
+    let header = props.name ?? "Article";
+    if (props.description) header = `# ${header}\n\n${props.description}`;
+    await root.addTextElement(header);
+
+    // Body
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "article"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, body] = await linkSection(
+            root,
+            draft,
+            "0",
+            ChildVisualization.OUTLINE
+        );
+        await body.addTextElement("Article");
+    }
+
+    // Comments
+    {
+        const draft = new Canvas({
+            id: generateId(root.id, "comments"),
+            publicKey: peer.identity.publicKey,
+        });
+        const [__, comments] = await linkSection(
+            root,
+            draft,
+            "1",
+            ChildVisualization.FEED
+        );
+        await comments.addTextElement("Comments");
+    }
+
+    return template;
 }

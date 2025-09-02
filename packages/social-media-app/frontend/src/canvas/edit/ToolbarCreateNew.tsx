@@ -1,24 +1,31 @@
-import { forwardRef, useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useCanvas } from "../CanvasWrapper";
-import { Canvas } from "../Canvas";
+import { Canvas } from "../render/detailed/Canvas";
 import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
-import { MdAdd as FaPlus, MdClear, MdSave } from "react-icons/md";
+import { MdAdd as FaPlus, MdClear } from "react-icons/md";
 import { SaveButton } from "./SaveCanvasButton";
-import { BsCamera, BsSend } from "react-icons/bs";
+import { BsSend } from "react-icons/bs";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
-import { Canvas as CanvasDB, SimpleWebManifest } from "@giga-app/interface";
+import {
+    Canvas as CanvasDB,
+    ChildVisualization,
+    SimpleWebManifest,
+} from "@giga-app/interface";
 import { useAutoReply } from "../AutoReplyContext";
-import { BsArrowsAngleExpand } from "react-icons/bs";
-import { useEditTools } from "./ToolbarContext";
+import { useEditTools } from "./CanvasEditorProvider";
 import { TbArrowsDiagonalMinimize2 } from "react-icons/tb";
-import { useFeed } from "../feed/FeedContext";
 import { ProfileButton } from "../../profile/ProfileButton";
 import { usePeer } from "@peerbit/react";
-import * as Toggle from "@radix-ui/react-toggle";
 import { useAIReply } from "../../ai/AIReployContext";
 import { PrivacySwitch } from "./PrivacySwitch";
 import { AiToggle } from "./AskAIToggle";
+import { BiExpandAlt } from "react-icons/bi";
+import { useVisualizationContext } from "../custom/CustomizationProvider";
+import { PrivateScope } from "../useScope";
+import { useDraftSession } from "./draft/DraftSession";
+import { ImageCanvas } from "../render/detailed/ImageCanvas";
+import { TextCanvas } from "../render/detailed/TextCanvas";
 
 export const ToolbarCreateNew = (props: {
     showProfile?: boolean;
@@ -26,77 +33,60 @@ export const ToolbarCreateNew = (props: {
     inlineEditorActive: boolean;
     parent: CanvasDB;
     className?: string;
+    overlayRichMedia?: boolean
+    debug?: boolean
 }) => {
     const {
-        isEmpty,
+        hasTextElement,
         text,
         insertDefault,
         canvas,
         pendingRects,
-        savedOnce,
         requestAIReply,
         setRequestAIReply,
     } = useCanvas();
 
+    const { publish } = useDraftSession();
     const { isReady } = useAIReply();
     const { replyTo, disable: disableAutoReply } = useAutoReply();
-    const { view } = useFeed();
+    const { visualization } = useVisualizationContext();
     const { search } = useApps();
-    const [resolvedApp, setResolvedApp] = useState<null | SimpleWebManifest>(
-        null
-    );
+    const [resolvedApp, setResolvedApp] = useState<null | SimpleWebManifest>(null);
     const { peer } = usePeer();
+    const privateScope = PrivateScope.useScope();
 
     useEffect(() => {
-        if (
-            !savedOnce &&
-            /*  !isSavingCanvas && !isSavingElements &&  */ pendingRects.length ===
-                0 &&
-            canvas
-        ) {
-            insertDefault({ once: true });
+        if (!hasTextElement && canvas) {
+            console.log("Inserting default text element");
+            insertDefault({ once: true, scope: privateScope });
         }
-    }, [
-        isEmpty,
-        savedOnce,
-        /* isSavingCanvas, isSavingElements, */ canvas?.idString,
-        pendingRects,
-    ]);
+    }, [hasTextElement, canvas?.idString, pendingRects.length, insertDefault, privateScope]);
 
-    // Try to resolve a matching app when the text changes.
     useEffect(() => {
         const trimmed = text?.trim();
         if (trimmed) {
-            search(trimmed).then((apps) => {
-                setResolvedApp(apps[0] || null);
-            });
+            search(trimmed).then((apps) => setResolvedApp(apps[0] || null));
         } else {
             setResolvedApp(null);
         }
     }, [text, search]);
+
     const { appSelectOpen, setAppSelectOpen } = useEditTools();
-    const onToggleAppSelect = (open) => {
-        if (open != null) {
-            setAppSelectOpen(open);
-        } else {
-            setAppSelectOpen((appSelectOpen) => !appSelectOpen);
-        }
+    const onToggleAppSelect = (open: boolean | null) => {
+        if (open != null) setAppSelectOpen(open);
+        else setAppSelectOpen((prev) => !prev);
     };
 
     const AddButton = () => (
-        <button
-            onClick={() => onToggleAppSelect(null)}
-            className="btn btn-icon p-0 m-0 h-full"
-        >
+        <button onClick={() => onToggleAppSelect(null)} className="btn btn-icon p-0 m-0 h-full">
             <FaPlus
-                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300  ${
-                    appSelectOpen ? "rotate-45" : "rotate-0"
-                }`}
+                className={`ml-[-2] mt-[-2] w-8 h-8 transition-transform duration-300 ${appSelectOpen ? "rotate-45" : "rotate-0"
+                    }`}
             />
         </button>
     );
 
-    // Fullscreen mode: retain your existing layout.
+    // Fullscreen branch unchanged
     if (props.inlineEditorActive) {
         return (
             <div className="flex flex-col z-20 w-full left-0">
@@ -111,200 +101,96 @@ export const ToolbarCreateNew = (props: {
                     </div>
                 </div>
             </div>
-
-            /* <div className="flex flex-col z-20 w-full left-0">
-                <div className="flex flex-col h-full">
-                    <div className="px-1 flex-shrink-0 flex items-center bg-neutral-50 dark:bg-neutral-700">
-                        {AddButton()}
-
-                        <button
-                            className="btn btn-icon btn-icon-md ml-auto"
-                            onClick={() => props.setInlineEditorActive(false)}
-                        >
-                            <TbArrowsDiagonalMinimize2 />
-                        </button>
-                        {isEmpty ? (
-                            <ImageUploadTrigger
-                                onFileChange={() => onToggleAppSelect(false)}
-                                className="btn btn-icon btn-icon-md flex items-center justify-center"
-                            >
-                                <BsCamera />
-                            </ImageUploadTrigger>
-                        ) : (
-                            <SaveButton
-                                onClick={() =>
-                                    props.setInlineEditorActive(false)
-                                }
-                                icon={BsSend}
-                            />
-                        )}
-                    </div>
-                </div>
-            </div> */
         );
     }
-    const colorStyle =
-        "dark:bg-neutral-700 " +
-        (view?.id === "chat" ? "bg-neutral-200" : "bg-neutral-50");
+
+    const isChat = visualization?.view === ChildVisualization.CHAT;
+    const colorStyle = "dark:bg-neutral-700 " + (isChat ? "bg-neutral-200" : "bg-neutral-50");
 
     return (
-        <>
-            <div
-                className={`flex flex-col z-20 w-full left-0  ${colorStyle} ${props.className}`}
-            >
-                {/* Top area: pending images canvas positioned above the toolbar */}
-                <div
-                    className="absolute flex justify-center"
-                    style={{ top: "0", transform: "translateY(-100%)" }}
+        <div className={`flex flex-col z-20 w-full left-0  ${colorStyle} ${props.className || ""}`}>
+            {/* Top area: (unchanged) images canvas above toolbar */}
+
+
+            {/* First row: input */}
+            <div className="flex flex-row ">
+                <div className="p-2">
+                    {props.showProfile && (
+                        <ProfileButton
+                            size={24}
+                            rounded
+                            className="p-1"
+                            publicKey={peer.identity.publicKey}
+                        />
+                    )}
+                </div>
+                <TextCanvas
+                    fitWidth
+                    fitHeight
+                    draft
+                    className="pt-2 rounded min-h-10 justify-center"
+                    requestPublish={publish}
+                />
+            </div>
+
+            <div className=" flex justify-left " style={props.overlayRichMedia ? { position: "absolute", top: "0", transform: "translateY(-100%)" } : {}}>
+                <ImageCanvas draft={false} requestPublish={publish}>
+                    <ImageUploadTrigger
+                        onFileChange={() => onToggleAppSelect(false)}
+                        className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white dark:bg-black"
+                    >
+                        <FaPlus className="btn-icon-md" />
+                    </ImageUploadTrigger>
+                </ImageCanvas>
+            </div>
+
+            {/* Second row: toolbar buttons (unchanged layout) */}
+            <div className="flex items-center p-1 pt-0 ">
+                {AddButton()}
+
+                <AiToggle
+                    onPressedChange={(e) => setRequestAIReply(e)}
+                    disabled={!isReady}
+                    pressed={requestAIReply}
+                />
+
+                <div className="flex justify-center ">
+                    {resolvedApp && (
+                        <AppButton
+                            app={resolvedApp}
+                            onClick={(insertDefaultValue) => {
+                                if (!insertDefaultValue) return;
+                                insertDefault({ app: resolvedApp, increment: true, scope: privateScope });
+                            }}
+                            className="btn items-center px-2 p-1"
+                            orientation="horizontal"
+                            showTitle
+                        />
+                    )}
+                </div>
+
+                <button
+                    className="btn btn-icon btn-icon-md "
+                    onClick={() => props.setInlineEditorActive(true)}
                 >
-                    <Canvas appearance="chat-view-images">
-                        <ImageUploadTrigger
-                            onFileChange={() => onToggleAppSelect(false)}
-                            className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white dark:bg-black"
-                        >
-                            <FaPlus className="btn-icon-md" />
-                        </ImageUploadTrigger>
-                    </Canvas>
-                </div>
+                    <BiExpandAlt size={20} />
+                </button>
 
-                {/* First row: Input field */}
-                {/* We set the min height here because without it switching views might lead to flickering behaviour where the input field gets removed and re-added */}
-                <div className="flex flex-row ">
-                    <div className="p-2">
-                        {props.showProfile && (
-                            <ProfileButton
-                                size={24}
-                                rounded
-                                className="p-1"
-                                publicKey={peer.identity.publicKey}
-                            />
-                        )}
-                    </div>
-                    <Canvas
-                        fitWidth
-                        fitHeight
-                        draft={true}
-                        appearance="chat-view-text"
-                        className="pt-2 rounded min-h-10 justify-center"
-                    />
-                </div>
-                {/* Second row: Toolbar buttons */}
-                <div className="flex items-center p-1 pt-0 ">
-                    {/* Left: Plus button */}
-                    {AddButton()}
-                    {/* AI reply slider */}
-                    {/* <form>
-                        <div className="flex items-center px-1">
-                            <label
-                                className={`font-ganja ${
-                                    !isReady ? "text-neutral-500" : ""
-                                }`}
-                                htmlFor="use-ai"
-                                style={{ paddingRight: 15 }}
-                            >
-                                AI Reply
-                            </label>
-                            <Switch.Root
-                                className="switch-root"
-                                id="use-ai"
-                                disabled={!isReady}
-                                checked={requestAIReply}
-                                onCheckedChange={(e) => {
-                                    setRequestAIReply(e);
-                                }}
-                            >
-                                <Switch.Thumb className="switch-thumb" />
-                            </Switch.Root>
-                        </div>
-                    </form> */}
-
-                    {/* AI reply button */}
-                    {/*  <button
-                        onClick={() => { }}
-                        className="btn btn-toggle btn-icon flex flex-row gap-2 h-full  px-2  p-1 "
-                        style={{
-                            fontFamily: "monospace",
-                        }}
-                        aria-label="Toggle italic"
-                    >
-                        <span>Ask AI</span>
-                    </button> */}
-
-                    {/*  <Toggle.Root
-                        onPressedChange={(e) => {
-                            setRequestAIReply(e);
-                        }}
-                        disabled={!isReady}
-                        pressed={requestAIReply}
-                        className="btn btn-icon btn-toggle btn-toggle-flat flex flex-row gap-2 h-full px-2  p-1 font-normal"
-                        aria-label="Ask AI toggle"
-                    >
-                        Ask AI
-                    </Toggle.Root> */}
-                    <AiToggle
-                        onPressedChange={(e) => {
-                            setRequestAIReply(e);
-                        }}
-                        disabled={!isReady}
-                        pressed={requestAIReply}
-                    />
-
-                    {/* Center: Space for additional buttons */}
-                    <div className="flex justify-center ">
-                        {resolvedApp && (
-                            <AppButton
-                                app={resolvedApp}
-                                onClick={(insertDefaultValue) => {
-                                    if (!insertDefaultValue) {
-                                        return;
-                                    }
-                                    insertDefault({
-                                        app: resolvedApp,
-                                        increment: true,
-                                    });
-                                }}
-                                className="btn items-center px-2 p-1"
-                                orientation="horizontal"
-                                showTitle={true}
-                            />
-                        )}
-                    </div>
-                    {/* Right: Fullscreen button */}
+                {isChat && replyTo && replyTo.idString !== props.parent.idString && (
                     <button
                         className="btn btn-icon btn-icon-md "
-                        onClick={() => props.setInlineEditorActive(true)}
+                        onClick={() => {
+                            disableAutoReply();
+                        }}
                     >
-                        <BsArrowsAngleExpand />
+                        <MdClear className="animated-bg-btn [--inner-bg:theme('colors.primary.900')] dark:[--inner-bg:theme('colors.primary.200')] text-white dark:text-black " />
                     </button>
+                )}
 
-                    {view?.id === "chat" &&
-                        replyTo &&
-                        replyTo.idString !== props.parent.idString && (
-                            <button
-                                className="btn btn-icon btn-icon-md "
-                                onClick={() => {
-                                    disableAutoReply();
-                                }}
-                            >
-                                <MdClear className="animated-bg-btn [--inner-bg:theme('colors.primary.900')] dark:[--inner-bg:theme('colors.primary.200')] text-white  dark:text-black " />
-                            </button>
-                        )}
+                <PrivacySwitch className="ml-auto" />
+                <SaveButton onClick={() => props.setInlineEditorActive(false)} icon={BsSend} />
 
-                    {/* Right: Send button */}
-                    {/*  <button
-                        onClick={() => savePending()}
-                        className="btn btn-icon btn-icon-md"
-                    >
-                        <FiSend className="btn-icon-sm" />
-                    </button> */}
-                    <PrivacySwitch className="ml-auto" />
-
-                    <SaveButton
-                        onClick={() => props.setInlineEditorActive(false)}
-                        icon={BsSend}
-                    />
-                </div>
             </div>
-        </>
+        </div>
     );
 };

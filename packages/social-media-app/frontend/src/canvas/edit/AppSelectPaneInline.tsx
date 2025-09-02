@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from "react";
+import React, { useState, useMemo, useEffect, JSX } from "react";
 import { AiOutlineSearch } from "react-icons/ai";
 import { SimpleWebManifest, Template } from "@giga-app/interface";
 import { useCanvas } from "../CanvasWrapper";
@@ -6,38 +6,47 @@ import { DebugGeneratePostButton } from "./DebugGeneratePostButton";
 import { useApps } from "../../content/useApps";
 import { AppButton } from "./AppButton";
 import { useTemplates } from "../template/useTemplates";
+import { BiPhotoAlbum } from "react-icons/bi";
+import { CgProfile } from "react-icons/cg";
+import { HiOutlineUserGroup } from "react-icons/hi2";
+import { GrArticle } from "react-icons/gr";
+import { PrivateScope } from "../useScope";
+import { useCanvases } from "../useCanvas";
+import { useDraftSession } from "./draft/DraftSession";
 
-interface AppSelectPaneInlineProps {
-    onSelected: (app: SimpleWebManifest) => void;
-    className?: string;
-}
+export const TEMPATE_ICON_MAP: Record<string, JSX.Element> = {
+    "Photo album": <BiPhotoAlbum />,
+    "Personal profile": <CgProfile />,
+    Community: <HiOutlineUserGroup />,
+    Article: <GrArticle />,
+};
 
-const TemplateButton: React.FC<{
-    tpl: Template;
-    onClick: () => void;
-}> = ({ tpl, onClick }) => (
-    <button
-        className="btn btn-md border px-3 py-2 rounded-md hover:bg-gray-100 dark:hover:bg-gray-700"
-        onClick={onClick}
-        title={tpl.description}
-    >
-        {tpl.name}
-    </button>
-);
+const TemplateButton: React.FC<{ tpl: Template; onClick: () => void }> = ({ tpl, onClick }) => {
+    const icon = TEMPATE_ICON_MAP[tpl.name];
+    return (
+        <button className="btn btn-sm" onClick={onClick} title={tpl.description}>
+            {icon && <span className="mr-2">{icon}</span>}
+            {tpl.name}
+        </button>
+    );
+};
 
 interface Props {
     onSelected: (app: SimpleWebManifest) => void;
     className?: string;
 }
 
-export const AppSelectPaneInline: React.FC<Props> = ({
-    onSelected: _onSelected,
-    className,
-}) => {
+export const AppSelectPaneInline: React.FC<Props> = ({ onSelected: _onSelected, className }) => {
     /* ---------- data sources --------------------------- */
     const { apps, search: searchApps } = useApps();
     const { templates, search: searchTpls, insert: insertTpl } = useTemplates();
-    const { insertDefault, canvas: currentCanvas } = useCanvas(); // ← make sure `useCanvas` exposes the active canvas
+    const { insertDefault } = useCanvas(); // active draft canvas via CanvasWrapper
+    const privateScope = PrivateScope.useScope();
+    const { leaf } = useCanvases();
+
+    // Draft manager (use the current leaf as the sharing key)
+    const { publish, saveDebounced } = useDraftSession()
+    const canvasId = leaf?.idString;
 
     /* ---------- local state ---------------------------- */
     const [query, setQuery] = useState("");
@@ -50,31 +59,28 @@ export const AppSelectPaneInline: React.FC<Props> = ({
             setAppsFiltered(await searchApps(query));
             setTemplatesFiltered(await searchTpls(query));
         })();
-    }, [query, searchApps, searchTpls]);
+    }, [query, searchApps, searchTpls, templates]);
 
     /* split native / web apps --------------------------- */
-    const nativeApps = useMemo(
-        () => appsFiltered.filter((x) => x.isNative),
-        [appsFiltered]
-    );
-    const nonNativeApps = useMemo(
-        () => appsFiltered.filter((x) => !x.isNative),
-        [appsFiltered]
-    );
+    const nativeApps = useMemo(() => appsFiltered.filter((x) => x.isNative), [appsFiltered]);
+    const nonNativeApps = useMemo(() => appsFiltered.filter((x) => !x.isNative), [appsFiltered]);
 
     /* handlers ------------------------------------------ */
-    const onAppSelected = (
-        app: SimpleWebManifest,
-        insertDefaultValue: boolean
-    ) => {
+    const onAppSelected = async (app: SimpleWebManifest, insertDefaultValue: boolean) => {
         setQuery("");
-        insertDefaultValue && insertDefault({ app, increment: true });
+        if (insertDefaultValue) {
+            // Prefer inserting into the private scope if present
+            insertDefault({ app, increment: true, scope: privateScope });
+        }
+        // Debounced save for the shared draft of this view, if available
+        saveDebounced()
         _onSelected(app);
     };
 
     const onTemplateSelected = async (tpl: Template) => {
-        if (!currentCanvas) return;
-        await insertTpl(tpl, currentCanvas);
+        if (!privateScope) return;
+        await insertTpl(tpl, leaf); // insert relative to current leaf
+        await saveDebounced()
         setQuery("");
     };
 
@@ -86,7 +92,6 @@ export const AppSelectPaneInline: React.FC<Props> = ({
                 <AiOutlineSearch className="mr-2" />
                 <input
                     type="text"
-                    ref={React.useRef<HTMLInputElement>(null)}
                     placeholder="Search templates or apps"
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
@@ -102,11 +107,7 @@ export const AppSelectPaneInline: React.FC<Props> = ({
                         <span className="font-ganja">Templates</span>
                         <div className="flex flex-wrap gap-2">
                             {templatesFiltered.map((tpl) => (
-                                <TemplateButton
-                                    key={tpl.id.toString()}
-                                    tpl={tpl}
-                                    onClick={() => onTemplateSelected(tpl)}
-                                />
+                                <TemplateButton key={tpl.id.toString()} tpl={tpl} onClick={() => onTemplateSelected(tpl)} />
                             ))}
                         </div>
                     </>
@@ -117,17 +118,13 @@ export const AppSelectPaneInline: React.FC<Props> = ({
                     <>
                         <span className="font-ganja">Native apps</span>
                         <div className="flex gap-2">
-                            {window.location.hostname !== "giga.place" && (
-                                <DebugGeneratePostButton />
-                            )}
+                            {window.location.hostname !== "giga.place" && <DebugGeneratePostButton />}
                             {nativeApps.map((app) => (
                                 <AppButton
                                     key={app.url}
                                     app={app}
                                     className="btn btn-md"
-                                    onClick={(insertDefault) =>
-                                        onAppSelected(app, insertDefault)
-                                    }
+                                    onClick={(insertDefaultValue) => onAppSelected(app, insertDefaultValue)}
                                 />
                             ))}
                         </div>
@@ -145,9 +142,7 @@ export const AppSelectPaneInline: React.FC<Props> = ({
                                     app={app}
                                     showTitle
                                     className="btn btn-md"
-                                    onClick={(insertDefault) =>
-                                        onAppSelected(app, insertDefault)
-                                    }
+                                    onClick={(insertDefaultValue) => onAppSelected(app, insertDefaultValue)}
                                 />
                             ))}
                         </div>

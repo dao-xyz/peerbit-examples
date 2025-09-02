@@ -81,7 +81,6 @@ export const Frame = (properties: {
     fit?: "cover" | "contain";
     previewLines?: number;
     noPadding?: boolean;
-    onClick?: (e: Element<ElementContent>) => void;
     // edit related stuff
     inFullscreen?: boolean;
     canOpenFullscreen?: boolean;
@@ -89,6 +88,8 @@ export const Frame = (properties: {
     editControls?: React.ReactNode;
     editMode: boolean;
     className?: string;
+
+    requestPublish?: () => void | Promise<void>;
 }) => {
     const navigate = useNavigate();
     const { getCuratedWebApp } = useApps();
@@ -100,9 +101,10 @@ export const Frame = (properties: {
 
     const {
         mutate,
-        savePending,
-        onContentChange: onContentChangeContextTrigger,
     } = useCanvas();
+    const publish = () => {
+        return properties.requestPublish()
+    }
 
     const open = () => {
         const url = (properties.element.content as IFrameContent).src;
@@ -196,7 +198,7 @@ export const Frame = (properties: {
         );
     };
 
-    const onResize = useCallback(() => {}, []);
+    const onResize = useCallback(() => { }, []);
 
     const renderContent = ({ previewLines }: { previewLines?: number }) => {
         // For iframes, continue to use the iframe as before.
@@ -268,7 +270,6 @@ export const Frame = (properties: {
                         await mutate(
                             (element) => {
                                 element.content = newContent;
-                                onContentChangeContextTrigger(element);
                                 return true;
                             },
                             {
@@ -282,7 +283,8 @@ export const Frame = (properties: {
                         );
 
                         if (options?.save /* && properties.draft */) {
-                            await savePending();
+                            console.log("PUBLISH!")
+                            await publish();
                         }
                     }}
                     fit={properties.fit}
@@ -302,19 +304,16 @@ export const Frame = (properties: {
     return (
         <div
             key={properties.key}
-            className={`flex flex-row w-full h-full max-w-full group ${
-                properties.className || ""
-            }`}
+            className={`flex flex-row w-full h-full max-w-full group ${properties.className || ""}`}
         >
             {renderContent({ previewLines: properties.previewLines })}
 
             {!properties.active && (
                 <div
-                    className={`ml-auto h-full flex ${
-                        showCanvasControls
-                            ? "pointer-events-auto"
-                            : "pointer-events-none"
-                    }`}
+                    className={`ml-auto h-full flex ${showCanvasControls
+                        ? "pointer-events-auto"
+                        : "pointer-events-none"
+                        }`}
                 >
                     <div className="flex flex-col h-full">
                         {showCanvasControls && properties.editControls}

@@ -1,73 +1,41 @@
 import { ProgramClient } from "@peerbit/program";
 import path, { dirname } from "path";
 import fs from "fs";
-import {
-    Canvas,
-    Element,
-    Layout,
-    LOWEST_QUALITY,
-    MEDIUM_QUALITY,
-    HIGHEST_QUALITY,
-    HIGH_QUALITY,
-    StaticContent,
-    StaticImage,
-} from "@giga-app/interface";
-import { Profile, Profiles } from "@giga-app/interface";
+import { Profiles, ensureProfile } from "@giga-app/interface";
 import { fileURLToPath } from "url";
-import { sha256Sync } from "@peerbit/crypto";
+
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+/**
+ * Ensures this node has a profile:
+ * - Picks a random avatar from /resources (AIIcon1.jpg..AIIcon13.jpg)
+ * - Calls ensureProfile(client, imageBytes) which:
+ *   * opens the deterministic public profile scope
+ *   * creates/opens the profile Canvas in that scope
+ *   * writes the avatar (all qualities)
+ *   * stores the Profile record pointing to that Canvas
+ * - Returns the stored Profile record
+ */
 export const createProfile = async (client: ProgramClient) => {
+    // Quick check: if a profile already exists, just return it
     const profiles = await client.open(new Profiles(), { existing: "reuse" });
-    const profile = await profiles.get(client.identity.publicKey);
-    if (!profile) {
-        // create a profile!
-        const canvas = await client.open(
-            new Canvas({
-                parent: undefined,
-                publicKey: client.identity.publicKey,
-            })
-        );
+    const existing = await profiles.get(client.identity.publicKey);
+    if (existing) return existing;
 
-        // in the project folder we have AIIcon1.jpg to AIIcon13.jpg
-        // randomly select one
-        let iconFileName =
-            "AIIcon" + Math.floor(Math.random() * 13 + 1) + ".jpg";
-        let icon = path.join(__dirname, "resources", iconFileName);
-        if (!fs.existsSync(icon)) {
-            // look one folder up
-            icon = path.join(__dirname, "..", "resources", iconFileName);
-        }
-        const image = fs.readFileSync(icon);
-        const contentId = sha256Sync(image);
-        await Promise.all(
-            [LOWEST_QUALITY, MEDIUM_QUALITY, HIGH_QUALITY, HIGHEST_QUALITY].map(
-                (x) =>
-                    canvas.elements.put(
-                        new Element({
-                            location: Layout.zero(),
-                            content: new StaticContent({
-                                content: new StaticImage({
-                                    data: image,
-                                    mimeType: "image/jpeg",
-                                    width: 512,
-                                    height: 512,
-                                }),
-                                quality: x,
-                                contentId,
-                            }),
-                            canvasId: canvas.id,
-                            publicKey: client.identity.publicKey,
-                        })
-                    )
-            )
-        );
-
-        await profiles.profiles.put(
-            new Profile({
-                publicKey: client.identity.publicKey,
-                profile: canvas,
-            })
-        );
+    // Pick a random local avatar image
+    const pickName = () => `AIIcon${Math.floor(Math.random() * 13 + 1)}.jpg`;
+    let iconPath = path.join(__dirname, "resources", pickName());
+    if (!fs.existsSync(iconPath)) {
+        iconPath = path.join(__dirname, "..", "resources", pickName());
     }
+    if (!fs.existsSync(iconPath)) {
+        throw new Error("No avatar image found in resources/");
+    }
+
+    const imageBytes = new Uint8Array(fs.readFileSync(iconPath));
+
+    // This handles scope creation, canvas creation, avatar writes, and Profile storage
+    const { canvas, profile } = await ensureProfile(client, imageBytes);
+    console.log("Created profile for", client.identity.publicKey.toString(), "with canvas", canvas.idString);
+    return profile;
 };

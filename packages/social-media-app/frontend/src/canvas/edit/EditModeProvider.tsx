@@ -1,4 +1,5 @@
-import React, { createContext, useContext, ReactNode } from "react";
+import React, { createContext, useContext, ReactNode, useEffect } from "react";
+import { useToolbarVisibilityContext } from "./ToolbarVisibilityProvider";
 
 // Define the shape of the context value
 interface EditModeProviderType {
@@ -14,8 +15,27 @@ const EditModeContext = createContext<EditModeProviderType | undefined>(
 // Provider props accept optional thresholds and children
 export const EditModeProvider: React.FC<{
     children: ReactNode;
-}> = ({ children }) => {
-    const [editMode, setEditMode] = React.useState(false);
+    editable?: boolean; // Optional prop to enable edit mode by default
+}> = ({ children, editable }) => {
+    const [editMode, _setEditMode] = React.useState(editable ?? false);
+    const { setDisabled: setBottomToolbarDisabled } =
+        useToolbarVisibilityContext();
+
+    const setEditMode = (value: boolean | ((prev: boolean) => boolean)) => {
+        if (value) {
+            setBottomToolbarDisabled(true);
+        } else {
+            setBottomToolbarDisabled(false);
+        }
+        _setEditMode(value);
+    };
+
+    useEffect(() => {
+        if (editable) {
+            setEditMode(editable);
+        }
+    }, [editable]);
+
     return (
         <EditModeContext.Provider value={{ editMode, setEditMode }}>
             {children}

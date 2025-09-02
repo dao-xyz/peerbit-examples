@@ -1,41 +1,34 @@
 import { variant, field, vec, option } from "@dao-xyz/borsh";
-import { Canvas, CanvasAddressReference } from "./content.js";
+import { Canvas, AddressReference, IndexableCanvas } from "./content.js";
 import { Program } from "@peerbit/program";
-import {
-    And,
-    Documents,
-    Or,
-    SearchRequest,
-    StringMatch,
-} from "@peerbit/document";
-import { sha256Sync } from "@peerbit/crypto";
+import { ByteMatchQuery, Documents, Or, SearchRequest, StringMatch, WithIndexedContext } from "@peerbit/document";
+import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
-abstract class Filter {}
+abstract class Filter { }
 
 @variant(0)
 export class PinnedPosts extends Filter {
-    @field({ type: vec(CanvasAddressReference) })
-    pinned: CanvasAddressReference[];
+    @field({ type: vec(Uint8Array) })
+    pinned: Uint8Array[];
 
-    constructor(properties: { pinned: CanvasAddressReference[] }) {
+    constructor(properties: { pinned: Uint8Array[] }) {
         super();
         this.pinned = properties.pinned;
     }
 }
 
-export interface ViewModel {
+export interface FilterModel {
     id: string; // Key to identify the view.
     name: string; // Human-readable name for the view.
     index?: number; // where this view is in the list of views, useful for sorting or ordering.
-    query?: (from: Canvas) => SearchRequest; // The query associated with this view.
+    query?: (from: WithIndexedContext<Canvas, IndexableCanvas>) => SearchRequest; // The query associated with this view.
     settings: ViewSettings; // Extra settings for customization.
 }
 // Define the structure for each View Model.
 export interface ViewSettings {
     // These are placeholders, and you can expand them as necessary.
     layout: "grid" | "list" | "single";
-    focus: "first" | "last";
     paginationLimit?: number; // Define how many replies to show per page.
     showAuthorInfo?: boolean; // Whether or not to show author information.
     classNameContainer?: string; // Optional class name for the container.
@@ -43,21 +36,21 @@ export interface ViewSettings {
 }
 
 @variant(0)
-export class View {
+export class StreamSetting {
     @field({ type: "string" })
     id: string; // gallery, best, latest, etc
 
     @field({ type: option("u32") })
     index?: number; // Index of the view, useful for sorting or ordering.
 
-    @field({ type: CanvasAddressReference })
-    canvas: CanvasAddressReference;
+    @field({ type: option(Uint8Array) })
+    canvas?: Uint8Array;
 
     @field({ type: option(Filter) })
     filter?: Filter;
 
-    @field({ type: option(CanvasAddressReference) })
-    description?: CanvasAddressReference;
+    @field({ type: option(AddressReference) })
+    description?: AddressReference;
 
     /* @field({ type: option(Settings) })
     settings: Settings;
@@ -67,8 +60,8 @@ export class View {
  */
     constructor(properties: {
         id: string;
-        canvas: CanvasAddressReference;
-        description?: CanvasAddressReference;
+        canvas?: Uint8Array;
+        description?: AddressReference;
         filter?: Filter;
         index?: number;
     }) {
@@ -79,7 +72,7 @@ export class View {
         this.index = properties.index;
     }
 
-    toViewModel(): ViewModel {
+    toFilterModel(): FilterModel {
         return {
             id: this.id,
             name: this.id,
@@ -87,24 +80,23 @@ export class View {
             query:
                 this.filter && this.filter instanceof PinnedPosts
                     ? (from: Canvas) => {
-                          let pinned = this.filter as PinnedPosts;
-                          return new SearchRequest({
-                              query: new Or(
-                                  pinned.pinned.map(
-                                      (p) =>
-                                          new StringMatch({
-                                              key: "address",
-                                              value: p.address,
-                                          })
-                                  )
-                              ),
-                          });
-                      }
+                        let pinned = this.filter as PinnedPosts;
+                        return new SearchRequest({
+                            query: new Or(
+                                pinned.pinned.map(
+                                    (p) =>
+                                        new ByteMatchQuery({
+                                            key: "id",
+                                            value: p,
+                                        })
+                                )
+                            ),
+                        });
+                    }
                     : undefined,
             settings: {
                 // TODO
                 layout: "list",
-                focus: "first",
                 paginationLimit: 10,
                 showAuthorInfo: true,
             },
@@ -112,43 +104,49 @@ export class View {
     }
 }
 
-export class IndexableView {
+export class IndexableSettings {
     @field({ type: "string" })
     id: string; // gallery, best, latest, etc
 
     @field({ type: option("u32") })
     index: number | undefined;
 
-    constructor(properties: View) {
+    constructor(properties: StreamSetting) {
         this.id = properties.id;
         this.index = properties.index;
     }
 }
 
-@variant("views")
-export class Views extends Program {
-    @field({ type: Documents })
-    views: Documents<View, IndexableView>;
+@variant("filter-stream-settings")
+export class StreamSettings extends Program {
 
-    constructor(properties: { canvasId: Uint8Array }) {
+    @field({ type: PublicSignKey })
+    publicKey: PublicSignKey;
+
+    @field({ type: Documents })
+    settings: Documents<StreamSetting, IndexableSettings>;
+
+    constructor(properties: { publicKey: PublicSignKey, canvasId?: Uint8Array }) {
         super();
         const documentId = concat([
-            properties.canvasId,
-            new TextEncoder().encode("views"),
+            properties.publicKey.bytes,
+            properties.canvasId ? properties.canvasId : [],
+            new TextEncoder().encode("stream-settings"),
         ]);
-        this.views = new Documents({ id: sha256Sync(documentId) });
+        this.publicKey = properties.publicKey;
+        this.settings = new Documents({ id: sha256Sync(documentId) });
     }
 
     async open(): Promise<void> {
-        await this.views.open({
-            type: View,
+        await this.settings.open({
+            type: StreamSetting,
             keep: "self",
             replicate: { factor: 1 }, // TODO choose better
             canPerform: async (operation) => {
                 return true;
             },
             index: {
-                type: IndexableView,
+                type: IndexableSettings,
                 prefetch: {
                     strict: false,
                 },

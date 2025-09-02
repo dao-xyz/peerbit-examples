@@ -1,5 +1,3 @@
-// test/identity.spec.ts
-
 import { TestSession } from "@peerbit/test-utils";
 import { expect } from "chai";
 import { Identities } from "../identity.js";
