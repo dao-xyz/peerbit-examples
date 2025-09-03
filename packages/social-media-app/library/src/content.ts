@@ -461,7 +461,7 @@ export const getReplyKindQuery = (kind: Constructor<LinkKind>) => {
     } else if (kind === ViewKind) {
         tag = 1; // ViewKind
     } else {
-    /* TODO later else if (kind === BoardViewKind) {
+        /* TODO later else if (kind === BoardViewKind) {
          tag = 2; // BoardViewKind
      } */
         throw new Error(`Unknown kind: ${kind.name}`);

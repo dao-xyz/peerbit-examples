@@ -1,79 +1,116 @@
-import {
-    deserialize,
-    field,
-    fixedArray,
-    serialize,
-    variant,
-} from "@dao-xyz/borsh";
+import { field, fixedArray, variant } from "@dao-xyz/borsh";
 import { ProgramClient } from "@peerbit/program";
 import { WithIndexedContext } from "@peerbit/document";
 import { AddressReference, Canvas, IndexableCanvas, Scope } from "./content";
 
-/** Optional knobs for opening the underlying Scope */
+/** Options for opening the underlying Scope/Canvas */
 export type ScopeOpenOpts = {
-    existing?: "reuse" | "error" | "new";
-    args?: any; // whatever your Scope open args are (e.g. { replicate: boolean } )
+    /** How to handle existing scope instances (default 'reuse') */
+    existing?: "reuse" | undefined;
+    /** Whatever your Scope open args are (e.g. { replicate: boolean }) */
+    args?: any;
 };
 
-/** Common helper: open a scope by address with optional args */
+type IndexedReturn<Indexed extends boolean | undefined> = Indexed extends true
+    ? WithIndexedContext<Canvas, IndexableCanvas>
+    : Canvas;
+
+type IndexedOpt<Indexed extends boolean | undefined> = ScopeOpenOpts & {
+    indexed?: Indexed;
+};
+
+/** Open a scope by address with optional args */
 async function openScopeByAddress(
     node: ProgramClient,
     address: string,
     opts?: ScopeOpenOpts
 ): Promise<Scope> {
-    // If your Scope takes different ctor params, adapt here
     return node.open<Scope>(address, {
-        existing: "reuse",
+        existing: opts?.existing ?? "reuse",
         args: opts?.args,
     });
 }
 
-/** Common helper: open a Canvas in *its* home scope, then return indexed wrapper */
-async function openInHomeAndIndex(
+/** Open a Canvas in its home scope, optionally returning the indexed wrapper */
+// overloads for better inference
+async function openInHome(
     node: ProgramClient,
-    canvas: Canvas
-): Promise<WithIndexedContext<Canvas, IndexableCanvas>> {
+    canvas: Canvas,
+    opts: IndexedOpt<true>
+): Promise<WithIndexedContext<Canvas, IndexableCanvas>>;
+async function openInHome(
+    node: ProgramClient,
+    canvas: Canvas,
+    opts?: IndexedOpt<false | undefined>
+): Promise<Canvas>;
+async function openInHome<Idx extends boolean | undefined>(
+    node: ProgramClient,
+    canvas: Canvas,
+    opts?: IndexedOpt<Idx>
+): Promise<IndexedReturn<Idx>> {
     if (!canvas.selfScope) throw new Error("Canvas has no selfScope set");
-    const home = await openScopeByAddress(node, canvas.selfScope.address);
+    const home = await openScopeByAddress(node, canvas.selfScope.address, opts);
     const opened = await home.openWithSameSettings(canvas);
-    const indexed = await opened.getSelfIndexedCoerced();
-    if (!indexed) {
-        throw new Error(
-            "Failed get indexed Canvas after opening in home scope"
-        );
+
+    if (opts?.indexed) {
+        const indexed = await opened.getSelfIndexedCoerced();
+        if (!indexed) {
+            throw new Error(
+                "Failed to get indexed Canvas after opening in home scope"
+            );
+        }
+        if (!indexed.initialized) {
+            throw new Error("Indexed Canvas not initialized");
+        }
+        return indexed as IndexedReturn<Idx>;
     }
 
-    if (!indexed.initialized) {
-        throw new Error("Unexpected");
-    }
-
-    return indexed;
+    return opened as IndexedReturn<Idx>;
 }
 
 /** Base class for references that can resolve themselves. */
 export abstract class CanvasReference {
-    /** Resolve into an OPEN + INDEXED Canvas, using the reference’s home scope. */
+    /** Resolve into an OPEN Canvas; set indexed:true to get indexed wrapper. */
+    // overloads for precise typing
     abstract resolve(
         node: ProgramClient,
-        opts?: ScopeOpenOpts
+        opts: IndexedOpt<true>
     ): Promise<WithIndexedContext<Canvas, IndexableCanvas>>;
+    abstract resolve(
+        node: ProgramClient,
+        opts?: IndexedOpt<false | undefined>
+    ): Promise<Canvas>;
+    abstract resolve<Idx extends boolean | undefined>(
+        node: ProgramClient,
+        opts?: IndexedOpt<Idx>
+    ): Promise<IndexedReturn<Idx>>;
 
-    /** Batch convenience. */
-    static async resolveAll(
+    /** Batch convenience with per-call options. */
+    static resolveAll(
         node: ProgramClient,
         refs: (Canvas | CanvasReference)[],
-        opts?: ScopeOpenOpts
-    ): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]> {
+        opts: IndexedOpt<true>
+    ): Promise<WithIndexedContext<Canvas, IndexableCanvas>[]>;
+    static resolveAll(
+        node: ProgramClient,
+        refs: (Canvas | CanvasReference)[],
+        opts?: IndexedOpt<false | undefined>
+    ): Promise<Canvas[]>;
+    static async resolveAll<Idx extends boolean | undefined>(
+        node: ProgramClient,
+        refs: (Canvas | CanvasReference)[],
+        opts?: IndexedOpt<Idx>
+    ): Promise<IndexedReturn<Idx>[]> {
         return Promise.all(
             refs.map((r) =>
                 r instanceof Canvas
-                    ? openInHomeAndIndex(node, r)
-                    : r.resolve(node, opts)
+                    ? openInHome(node, r, opts as any)
+                    : r.resolve(node, opts as any)
             )
         );
     }
 
-    abstract get id();
+    abstract get id(): Uint8Array;
 }
 
 @variant(0)
@@ -90,11 +127,19 @@ export class CanvasAddressReference extends CanvasReference {
         this.scope = p.scope;
     }
 
-    /** Open the referenced scope, construct a stub Canvas, open & index it. */
+    // overloads
     async resolve(
         node: ProgramClient,
-        opts?: ScopeOpenOpts
-    ): Promise<WithIndexedContext<Canvas, IndexableCanvas>> {
+        opts: IndexedOpt<true>
+    ): Promise<WithIndexedContext<Canvas, IndexableCanvas>>;
+    async resolve(
+        node: ProgramClient,
+        opts?: IndexedOpt<false | undefined>
+    ): Promise<Canvas>;
+    async resolve<Idx extends boolean | undefined>(
+        node: ProgramClient,
+        opts?: IndexedOpt<Idx>
+    ): Promise<IndexedReturn<Idx>> {
         const home = await openScopeByAddress(node, this.scope.address, opts);
 
         // Minimal stub is enough; openWithSameSettings hydrates it.
@@ -105,16 +150,19 @@ export class CanvasAddressReference extends CanvasReference {
         });
 
         const opened = await home.openWithSameSettings(stub);
-        const indexed = await opened.getSelfIndexedCoerced();
-        if (!indexed) {
-            throw new Error(
-                "Failed to get indexed Canvas after opening in home scope"
-            );
+
+        if (opts?.indexed) {
+            const indexed = await opened.getSelfIndexedCoerced();
+            if (!indexed)
+                throw new Error(
+                    "Failed to get indexed Canvas after opening in home scope"
+                );
+            if (!indexed.initialized)
+                throw new Error("Indexed Canvas not initialized");
+            return indexed as IndexedReturn<Idx>;
         }
-        if (!indexed.initialized) {
-            throw new Error("Unexpected");
-        }
-        return indexed;
+
+        return opened as IndexedReturn<Idx>;
     }
 }
 
@@ -128,12 +176,20 @@ export class CanvasValueReference extends CanvasReference {
         this.value = p.value;
     }
 
-    /** Use the value’s selfScope to open & index. */
+    // overloads
     async resolve(
         node: ProgramClient,
-        _opts?: ScopeOpenOpts
-    ): Promise<WithIndexedContext<Canvas, IndexableCanvas>> {
-        return openInHomeAndIndex(node, this.value);
+        opts: IndexedOpt<true>
+    ): Promise<WithIndexedContext<Canvas, IndexableCanvas>>;
+    async resolve(
+        node: ProgramClient,
+        opts?: IndexedOpt<false | undefined>
+    ): Promise<Canvas>;
+    async resolve<Idx extends boolean | undefined>(
+        node: ProgramClient,
+        opts?: IndexedOpt<Idx>
+    ): Promise<IndexedReturn<Idx>> {
+        return openInHome(node, this.value, opts as any);
     }
 
     get id() {
@@ -141,14 +197,12 @@ export class CanvasValueReference extends CanvasReference {
     }
 }
 
-/* ---------- Optional ergonomic helpers on Canvas itself ---------- */
+/* ---------- Ergonomic helpers on Canvas itself ---------- */
 
-/** Convert a loaded Canvas into a value ref. */
 export function toValueReference(canvas: Canvas): CanvasValueReference {
     return new CanvasValueReference({ value: canvas });
 }
 
-/** Convert to an address ref (requires selfScope to be present). */
 export function toAddressReference(canvas: Canvas): CanvasAddressReference {
     if (!canvas.selfScope) throw new Error("Canvas has no selfScope set");
     return new CanvasAddressReference({
@@ -157,13 +211,24 @@ export function toAddressReference(canvas: Canvas): CanvasAddressReference {
     });
 }
 
-/** Fallback resolver for mixed inputs (Canvas | CanvasReference). */
-export async function resolveCanvas(
+/** Fallback resolver for mixed inputs (Canvas | CanvasReference) */
+// overloads
+export function resolveCanvas(
     node: ProgramClient,
     input: Canvas | CanvasReference,
-    opts?: ScopeOpenOpts
-): Promise<WithIndexedContext<Canvas, IndexableCanvas>> {
+    opts: IndexedOpt<true>
+): Promise<WithIndexedContext<Canvas, IndexableCanvas>>;
+export function resolveCanvas(
+    node: ProgramClient,
+    input: Canvas | CanvasReference,
+    opts?: IndexedOpt<false | undefined>
+): Promise<Canvas>;
+export async function resolveCanvas<Idx extends boolean | undefined>(
+    node: ProgramClient,
+    input: Canvas | CanvasReference,
+    opts?: IndexedOpt<Idx>
+): Promise<IndexedReturn<Idx>> {
     return input instanceof Canvas
-        ? openInHomeAndIndex(node, input)
-        : input.resolve(node, opts);
+        ? openInHome(node, input, opts as any)
+        : (input.resolve(node, opts as any) as Promise<IndexedReturn<Idx>>);
 }
