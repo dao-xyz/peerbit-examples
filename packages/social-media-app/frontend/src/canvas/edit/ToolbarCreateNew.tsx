@@ -144,6 +144,7 @@ export const ToolbarCreateNew = (props: {
                     fitWidth
                     fitHeight
                     draft
+                    editable
                     className="pt-2 rounded min-h-10 justify-center"
                     requestPublish={publish}
                 />

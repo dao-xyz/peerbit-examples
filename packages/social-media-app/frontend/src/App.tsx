@@ -101,7 +101,7 @@ export const Content = () => {
                                             className={clsx(
                                                 "sticky top-0 inset-x-0  z-30",
                                                 heightStyle[
-                                                String(headerVisible)
+                                                    String(headerVisible)
                                                 ]
                                             )} /* transition-transform duration-800 ease-in-out */
                                             style={
@@ -135,14 +135,14 @@ export const Content = () => {
 const networkConfig: NetworkOption =
     import.meta.env.MODE === "development"
         ? {
-            type: "local",
-        }
+              type: "local",
+          }
         : {
-            type: "remote",
-            bootstrap: [
-                "/dns4/ddeada6ca1ce579560a3a47e007ca8c538e3e639.peerchecker.com/tcp/4003/wss/p2p/12D3KooWHGB1koA32wdcYboRSkDdwpkq3q2Lr1FQJxnHXNP3o9rg",
-            ],
-        };
+              type: "remote",
+              bootstrap: [
+                  "/dns4/ddeada6ca1ce579560a3a47e007ca8c538e3e639.peerchecker.com/tcp/4003/wss/p2p/12D3KooWHGB1koA32wdcYboRSkDdwpkq3q2Lr1FQJxnHXNP3o9rg",
+              ],
+          };
 
 export const App = () => {
     return (

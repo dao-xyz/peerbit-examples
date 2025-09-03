@@ -1861,7 +1861,7 @@ export class Scope extends Program<ScopeArgs> {
             throw new Error(
                 `Multiple visualizations found for canvas ${sha256Base64Sync(
                     canvas.id
-                )}`
+                )} ${visualizations.length}`
             );
         }
         const first = visualizations[0];

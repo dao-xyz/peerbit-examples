@@ -26,6 +26,8 @@ type BaseProps = SizeProps & {
 } & ({ draft: true; inFullScreen?: boolean } | { draft: false }) & {
         className?: string;
         onLoad?: () => void;
+        /** Optional explicit editability override; defaults to context (often tied to `draft`) */
+        editable?: boolean;
     };
 
 // Configuration the wrappers pass down
@@ -67,9 +69,13 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
     } = useCanvas();
 
     const { editMode, setEditMode } = useEditModeContext();
+    // Only drive the shared edit mode context when explicitly requested
     useEffect(() => {
-        setEditMode(props.draft);
-    }, [props.draft, setEditMode]);
+        if (props.editable !== undefined) {
+            setEditMode(props.editable);
+        }
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [props.editable]);
 
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
@@ -93,7 +99,9 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
         props.fitWidth ? "w-full" : ""
     } ${props.draft ? (props.inFullScreen ? "" : "") : ""}`;
 
-    const effectiveEditMode = props.config.editModeEnabled(editMode);
+    // Allow explicit override via props.editable; otherwise use context
+    const rawEditable = props.editable ?? editMode;
+    const effectiveEditMode = props.config.editModeEnabled(rawEditable);
     const showControls = props.config.showEditControls(
         editMode,
         filteredRects.length
@@ -126,7 +134,6 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                                 <Spinner />
                             </div>
                         )}
-
                         {filteredRects.length > 0 && (
                             <>
                                 <Frame
