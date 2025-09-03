@@ -1,6 +1,17 @@
 import ollama from "ollama"; // For Node; use "ollama/browser" if needed
 import { DEEP_SEEK_R1_7b } from "./model.js";
 
+// Injectable client for testing
+let client: { chat: (args: any) => Promise<any> } = ollama as any;
+
+export const setOllamaClient = (c: { chat: (args: any) => Promise<any> }) => {
+    client = c;
+};
+
+export const resetOllamaClient = () => {
+    client = ollama as any;
+};
+
 /**
  * queryOllama sends a prompt to the locally running Ollama API.
  * @param {string} prompt - The prompt to send.
@@ -9,7 +20,7 @@ import { DEEP_SEEK_R1_7b } from "./model.js";
  */
 export const queryOllama = async (prompt, model = DEEP_SEEK_R1_7b) => {
     try {
-        const response = await ollama.chat({
+        const response = await client.chat({
             model,
             messages: [{ role: "user", content: prompt }],
             stream: false,

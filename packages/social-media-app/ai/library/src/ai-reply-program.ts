@@ -55,7 +55,7 @@ async function resolveCanvas(
         canvasOrRef instanceof CanvasReference
             ? canvasOrRef
             : new CanvasValueReference({ value: canvasOrRef });
-    return ref.resolve(node);
+    return ref.resolve(node, { indexed: true });
 }
 
 async function resolveCanvases(

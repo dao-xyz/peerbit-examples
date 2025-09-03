@@ -82,13 +82,13 @@ describe("AIResponseProgram", () => {
 
         // Server on peer[0]
         const server = await session.peers[0].open(new CanvasAIReply(), {
-            args: { server: true, llm: "ollama" },
+            args: { server: true, llm: "ollama", model: DEEP_SEEK_R1_1_5b },
         });
         // Client on peer[1]
         const client = await session.peers[1].open<CanvasAIReply>(
             server.address
         );
-        await client.waitForModel({ model: DEEP_SEEK_R1_7b });
+        await client.waitForModel({ model: DEEP_SEEK_R1_1_5b });
 
         const response = await client.query(canvas);
         expect(response).to.not.be.undefined;
