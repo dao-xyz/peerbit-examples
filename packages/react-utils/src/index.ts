@@ -12,4 +12,3 @@ export { useLocal } from "./useLocal.js";
 export { useQuery as useQuery } from "./useQuery.js";
 export { useOnline } from "./useOnline.js";
 export { useCount } from "./useCount.js";
-export { debounceLeadingTrailing } from "./utils.js";

@@ -1,6 +1,6 @@
-import { getAllKeyPairs, getFreeKeypair, releaseKey } from "../utils";
+import { getAllKeyPairs, getFreeKeypair, releaseKey } from "../utils.js";
 import nodelocalstorage from "node-localstorage";
-import { FastMutex } from "../lockstorage";
+import { FastMutex } from "../lockstorage.js";
 import { delay } from "@peerbit/time";
 import { default as sodium } from "libsodium-wrappers";
 import { v4 as uuid } from "uuid";

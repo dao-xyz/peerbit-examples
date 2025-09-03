@@ -1,4 +1,4 @@
-import { Canvas } from "../content";
+import { Canvas } from "../content.js";
 
 /** Ensure a chain root → ...segments; returns the canvases in order. */
 export async function ensurePath(

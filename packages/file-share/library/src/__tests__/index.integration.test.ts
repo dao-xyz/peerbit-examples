@@ -1,5 +1,5 @@
 import { Peerbit } from "peerbit";
-import { Files, LargeFile } from "..";
+import { Files, LargeFile } from "../index.js";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
 import { delay, waitForResolved } from "@peerbit/time";

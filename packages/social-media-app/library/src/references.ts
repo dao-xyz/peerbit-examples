@@ -1,7 +1,7 @@
 import { field, fixedArray, variant } from "@dao-xyz/borsh";
 import { ProgramClient } from "@peerbit/program";
 import { WithIndexedContext } from "@peerbit/document";
-import { AddressReference, Canvas, IndexableCanvas, Scope } from "./content";
+import { AddressReference, Canvas, IndexableCanvas, Scope } from "./content.js";
 
 /** Options for opening the underlying Scope/Canvas */
 export type ScopeOpenOpts = {

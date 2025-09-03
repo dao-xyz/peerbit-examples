@@ -1,7 +1,7 @@
 import { ClosedError, Documents, WithContext } from "@peerbit/document";
 import { useEffect, useRef, useState } from "react";
 import * as indexerTypes from "@peerbit/indexer-interface";
-import { debounceLeadingTrailing } from "./utils";
+import { debounceLeadingTrailing } from "./utils.js";
 
 type QueryOptons = {
     query: indexerTypes.Query[] | indexerTypes.QueryLike;

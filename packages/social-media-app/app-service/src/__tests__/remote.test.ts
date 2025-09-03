@@ -1,5 +1,5 @@
 import { TestSession } from "@peerbit/test-utils";
-import { AppPreview, resolveAppFromUrl } from "../remote";
+import { AppPreview, resolveAppFromUrl } from "../remote.js";
 import { v4 as uuid } from "uuid";
 import { expect } from "chai";
 describe("resolveAppFromUrl", () => {

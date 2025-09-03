@@ -6,6 +6,7 @@
     "types": "lib/esm/index.d.ts",
     "exports": {
         ".": {
+            "types": "./lib/esm/index.d.ts",
             "import": "./lib/esm/index.js"
         }
     },
@@ -21,10 +22,10 @@
         "react": "*"
     },
     "dependencies": {
+        "@peerbit/react": "^0.0.27",
         "@iframe-resizer/child": "^5",
         "@iframe-resizer/parent": "^5",
         "@peerbit/proxy-window": "^3",
-        "@peerbit/react": "^0.0.27",
         "@types/react": "^19.1.8",
         "@types/react-dom": "^19.1.6",
         "peerbit": "^4",

@@ -1,5 +1,5 @@
 import { Peerbit } from "peerbit";
-import { Name, Names } from "..";
+import { Name, Names } from "../index.js";
 import { Ed25519Keypair, PreHash } from "@peerbit/crypto";
 import { randomBytes } from "@peerbit/crypto";
 import { expect } from "chai";

@@ -14,13 +14,16 @@ const addressOrDefined = <A, B extends ProgramEvents, P extends Program<A, B>>(
 type ExtractArgs<T> = T extends Program<infer Args> ? Args : never;
 type ExtractEvents<T> = T extends Program<any, infer Events> ? Events : never;
 
-export const useProgram = <
+export function useProgram<
     P extends Program<ExtractArgs<P>, ExtractEvents<P>> &
         Program<any, ProgramEvents>
 >(
     addressOrOpen?: P | string,
-    options?: OpenOptions<P> & { id?: string; keepOpenOnUnmount?: boolean }
-) => {
+    options?: OpenOptions<P> & {
+        id?: string;
+        keepOpenOnUnmount?: boolean;
+    }
+) {
     const { peer } = usePeer();
     let [program, setProgram] = useState<P | undefined>();
     const [id, setId] = useState<string | undefined>(options?.id);
@@ -42,12 +45,15 @@ export const useProgram = <
 
         closingRef.current.then(() => {
             programLoadingRef.current = peer
-                ?.open(addressOrOpen, { ...options, existing: "reuse" })
-                .then((p) => {
+                ?.open(addressOrOpen as P | string, {
+                    ...options,
+                    existing: "reuse",
+                })
+                .then((p: P) => {
                     // if program has topics do change listening on peers
                     if (
                         [p, ...p.allPrograms].filter(
-                            (x) =>
+                            (x: any) =>
                                 x.closed === false &&
                                 x.getTopics &&
                                 x.getTopics?.().length > 0
@@ -56,17 +62,19 @@ export const useProgram = <
                         setPeers([peer.identity.publicKey]);
                     } else {
                         changeListener = () => {
-                            p.getReady().then((set) => {
-                                setPeers([...set.values()]);
-                            });
+                            p.getReady().then(
+                                (ready: Map<string, PublicSignKey>) => {
+                                    setPeers([...ready.values()]);
+                                }
+                            );
                         };
                         p.events.addEventListener("join", changeListener);
                         p.events.addEventListener("leave", changeListener);
                         p.getReady()
-                            .then((set) => {
-                                setPeers([...set.values()]);
+                            .then((ready: Map<string, PublicSignKey>) => {
+                                setPeers([...ready.values()]);
                             })
-                            .catch((e) => {
+                            .catch((e: any) => {
                                 console.log("Error getReady()", e);
                             });
                     }
@@ -78,7 +86,7 @@ export const useProgram = <
                     }
                     return p;
                 })
-                .catch((e) => {
+                .catch((e: unknown) => {
                     console.error("failed to open", e);
                     throw e;
                 })
@@ -110,7 +118,7 @@ export const useProgram = <
 
                         if (programLoadingRef.current === startRef) {
                             setProgram(undefined);
-                            programLoadingRef.current = undefined;
+                            programLoadingRef.current = undefined as any;
                         }
 
                         if (options?.keepOpenOnUnmount) {
@@ -127,7 +135,7 @@ export const useProgram = <
         options?.id,
         typeof addressOrOpen === "string"
             ? addressOrOpen
-            : addressOrDefined(addressOrOpen),
+            : addressOrDefined(addressOrOpen as P),
     ]);
     return {
         program,
@@ -137,4 +145,4 @@ export const useProgram = <
         peers,
         id,
     };
-};
+}

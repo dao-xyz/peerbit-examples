@@ -6,7 +6,7 @@ import {
     ModelResponse,
     QueryResponse,
     SuggestedReplyResponse,
-} from "../ai-reply-program";
+} from "../ai-reply-program.js";
 import { expect } from "chai";
 import { DEEP_SEEK_R1_1_5b, DEEP_SEEK_R1_7b } from "../model.js";
 import {

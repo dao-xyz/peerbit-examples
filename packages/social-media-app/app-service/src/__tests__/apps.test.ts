@@ -1,4 +1,4 @@
-import { CuratedWebApp, getApps } from "../apps";
+import { CuratedWebApp, getApps } from "../apps.js";
 import { expect } from "chai";
 
 describe("index", () => {

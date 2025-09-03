@@ -141,7 +141,7 @@ export class StreamSettings extends Program {
         super();
         const documentId = concat([
             properties.publicKey.bytes,
-            properties.canvasId ? properties.canvasId : [],
+            properties.canvasId ? properties.canvasId : new Uint8Array(0),
             new TextEncoder().encode("stream-settings"),
         ]);
         this.publicKey = properties.publicKey;

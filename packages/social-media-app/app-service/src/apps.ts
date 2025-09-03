@@ -13,7 +13,7 @@ import {
     Or,
     StringMatchMethod,
 } from "@peerbit/document";
-import { AppPreview } from "./remote";
+import { AppPreview } from "./remote.js";
 
 // External app URLs based on mode.
 const STREAMING_APP = (mode?: string) =>

@@ -1,6 +1,6 @@
 import { Peerbit } from "peerbit";
 import { waitFor, waitForResolved } from "@peerbit/time";
-import { Lobby, Post, Room } from "..";
+import { Lobby, Post, Room } from "../index.js";
 import { expect } from "chai";
 
 const loobyConfig = {

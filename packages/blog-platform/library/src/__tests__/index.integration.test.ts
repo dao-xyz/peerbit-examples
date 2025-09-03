@@ -1,5 +1,5 @@
 import { Peerbit } from "peerbit";
-import { Alias, BlogPosts, Post } from "..";
+import { Alias, BlogPosts, Post } from "../index.js";
 import {
     SearchRequest,
     StringMatchMethod,

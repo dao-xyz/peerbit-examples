@@ -1,6 +1,6 @@
 import { expect } from "chai";
 import sinon from "sinon";
-import * as ollamaModule from "../ollama";
+import * as ollamaModule from "../ollama.js";
 
 describe("queryOllama", () => {
     let ollamaChatStub: sinon.SinonStub;

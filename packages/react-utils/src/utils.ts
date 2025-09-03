@@ -1,6 +1,6 @@
 import { serialize, deserialize } from "@dao-xyz/borsh";
 import { Ed25519Keypair, toBase64, fromBase64 } from "@peerbit/crypto";
-import { FastMutex } from "./lockstorage";
+import { FastMutex } from "./lockstorage.js";
 import { v4 as uuid } from "uuid";
 import sodium from "libsodium-wrappers";
 
