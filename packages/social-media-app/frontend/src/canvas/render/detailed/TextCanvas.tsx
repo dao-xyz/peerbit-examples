@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
 import { useCanvas } from "../../CanvasWrapper";
 import { rectIsStaticMarkdownText } from "../../utils/rect";
 import { CanvasBase, type CanvasBaseConfig } from "./CanvasBase";
@@ -22,24 +22,29 @@ const config: CanvasBaseConfig = {
 
 export const TextCanvas = (props: Omit<Props, "config">) => {
     const privateScope = PrivateScope.useScope();
-    const { hasTextElement, insertDefault, canvas, pendingRects } = useCanvas();
+    const { hasTextElement, insertDefault, canvas } = useCanvas();
+
+    // Any text rect (committed or pending) in the current draft canvas?
+    // Prefer the provider's computed flag to avoid cross-module instanceof issues
+    const hasAnyText = hasTextElement;
+
+    // Prevent multiple insertions per canvas id
+    const insertedForCanvasRef = useRef<string | undefined>(undefined);
+    useEffect(() => {
+        insertedForCanvasRef.current = undefined;
+    }, [canvas?.idString]);
 
     useEffect(() => {
-        if (!hasTextElement && canvas && props.draft) {
-            console.log("Inserting default text element");
-            insertDefault({ once: true, scope: privateScope });
-        } else {
-            console.log("Not inserting default text element", {
-                hasTextElement,
-                canvas: !!canvas,
-                draft: !!props.draft,
-            });
-        }
+        if (!props.draft || !canvas) return;
+        if (hasAnyText) return;
+        if (insertedForCanvasRef.current === canvas.idString) return;
+        console.log("INSERT DEFAULT!");
+        insertDefault({ once: true, scope: privateScope }).catch(() => {});
+        insertedForCanvasRef.current = canvas.idString;
     }, [
         props.draft,
-        hasTextElement,
         canvas?.idString,
-        pendingRects.length,
+        hasAnyText,
         insertDefault,
         privateScope,
     ]);

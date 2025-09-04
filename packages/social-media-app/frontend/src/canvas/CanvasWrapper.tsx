@@ -219,7 +219,7 @@ const _CanvasWrapper = (
         };
     }, [canvasDB?.idString, canvasDB?.initialized, quality, typeFilter.key]);
 
-    const { items: rects, isLoading } = useQuery(
+    const { items: rawRects, isLoading } = useQuery(
         [privateScope.elements, publicScope.elements],
         {
             query,
@@ -245,6 +245,15 @@ const _CanvasWrapper = (
             },
         }
     );
+
+    // Defensive: only expose rects that belong to this canvas
+    const rects = useMemo(() => {
+        try {
+            return rawRects.filter((r) => canvasDB.isOwning(r));
+        } catch {
+            return rawRects;
+        }
+    }, [rawRects, canvasDB?.idString]);
 
     // 1) helper: what counts as “empty”?
     const isElementEmpty = (el: Element) => {
@@ -559,7 +568,11 @@ const _CanvasWrapper = (
                 canvasId: canvasDB.id,
             });
             if (options.pending) {
-                debugLog("Adding pending rect", element.idString);
+                debugLog(
+                    "Adding pending rect",
+                    canvasDB.idString,
+                    element.idString
+                );
                 setPendingRects((prev) => {
                     const already = prev.find(
                         (x) => x.idString === element.idString
@@ -579,7 +592,11 @@ const _CanvasWrapper = (
                     return [...prev, element];
                 });
             } else {
-                debugLog("Adding committed rect", element.idString);
+                debugLog(
+                    "Adding committed rect",
+                    canvasDB.idString,
+                    element.idString
+                );
                 await canvasDB.createElement(element);
             }
             await _onContentChange(element);
@@ -611,13 +628,22 @@ const _CanvasWrapper = (
             scope?: Scope;
             y?: number | "optimize" | "max";
         }) => {
+            debugLog("insert default into", canvasDB.idString);
             if (options?.once) {
                 if (
                     pendingRectsRef.current.length > 0 ||
                     rects.length > 0 ||
                     insertedDefault.current
-                )
+                ) {
+                    debugLog("Skipping insert default", {
+                        idString: canvasDB.idString,
+                        id: canvasDB.id,
+                        pendingRects: pendingRectsRef.current.length,
+                        rects: rects,
+                        insertedDefault: insertedDefault.current,
+                    });
                     return;
+                }
             }
             insertedDefault.current = true;
 
