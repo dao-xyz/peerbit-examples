@@ -602,7 +602,7 @@ const _CanvasWrapper = (
     };
 
     const insertDefault = useCallback(
-        (options?: {
+        async (options?: {
             app?: SimpleWebManifest;
             increment?: boolean;
             pending?: boolean;
@@ -809,7 +809,14 @@ const _CanvasWrapper = (
         }
         if (rectIsStaticMarkdownText(el)) {
             const parent = await canvasDB.loadParent();
-            announceReply(parent);
+            if (!parent) {
+                console.warn(
+                    "Canvas parent not found for element",
+                    el.idString
+                );
+            } else {
+                announceReply(parent);
+            }
         }
 
         onContentChange?.([el]);
