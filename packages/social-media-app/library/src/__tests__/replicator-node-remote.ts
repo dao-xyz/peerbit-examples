@@ -10,7 +10,9 @@ import { Peerbit } from "peerbit";
 import {
     Canvas,
     Element,
-    getOwnedElementsQuery,
+    getOwnedByCanvasQuery,
+    IndexableCanvas,
+    IndexableElement,
     StaticContent,
 } from "../content.js";
 import { StaticMarkdownText } from "../static/text.js";
@@ -19,6 +21,8 @@ import { Sort, SortDirection } from "@peerbit/document";
 import { createRoot } from "../root.js";
 console.log(
     Canvas,
+    IndexableCanvas,
+    IndexableElement,
     Element,
     StaticContent,
     StaticMarkdownText,
@@ -31,14 +35,14 @@ const { canvas: root, scope: capsule } = await createRoot(client, {
 });
 
 console.log(
-    "Connected to capsule: " +
+    "Connected to scope: " +
         capsule.address +
         " with root canvas " +
         root.idString
 );
 await root.replies.log.waitForReplicators();
 const iterator = root.replies.index.iterate({
-    query: getOwnedElementsQuery(root),
+    query: getOwnedByCanvasQuery(root),
     sort: new Sort({ key: "replies", direction: SortDirection.DESC }),
 });
 const tenMostCommented = await iterator.next(10);

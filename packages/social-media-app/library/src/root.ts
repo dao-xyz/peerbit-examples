@@ -5,6 +5,7 @@ import { ProgramClient } from "@peerbit/program";
 import { concat } from "uint8arrays";
 import { ViewKind } from "./link.js";
 import { orderKeyBetween } from "./order-key.js";
+import { delay } from "@peerbit/time";
 
 const ROOT_ID_SEED = new TextEncoder().encode("giga | place");
 

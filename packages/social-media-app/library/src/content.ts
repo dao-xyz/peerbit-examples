@@ -1847,33 +1847,76 @@ export class Scope extends Program<ScopeArgs> {
         BasicVisualization,
         IndexedVisualization
     > | null> {
-        const visualizations = await this.visualizations.index
+        // Tolerant read: if multiple rows exist (from older clients), prefer the canonical id and GC extras.
+        const list = (await this.visualizations.index
             .iterate({
                 query: {
                     canvasId: canvas.id,
                 },
             })
-            .all();
-        if (visualizations.length === 0) {
-            return null;
-        }
-        if (visualizations.length > 1) {
-            throw new Error(
-                `Multiple visualizations found for canvas ${sha256Base64Sync(
-                    canvas.id
-                )} ${visualizations.length}`
-            );
-        }
-        const first = visualizations[0];
-        if (first instanceof BasicVisualization) {
-            return first;
-        }
-        throw new Error(
-            `Unexpected visualization type for canvas ${sha256Base64Sync(
-                canvas.id
-            )}`
+            .all()) as WithIndexedContext<
+            BasicVisualization,
+            IndexedVisualization
+        >[];
+
+        if (!list.length) return null;
+
+        const canonicalId = sha256Sync(
+            concat([new Uint8Array([0x56, 0x49, 0x5a]), canvas.id]) // "VIZ" prefix
         );
+
+        // Prefer the one that matches our canonical scheme
+        let preferred = list.find((v) => equals(v.id, canonicalId)) ?? list[0];
+
+        // Best-effort cleanup of duplicates
+        if (list.length > 1) {
+            for (const v of list) {
+                if (!equals(v.id, preferred.id)) {
+                    try {
+                        await this.visualizations.del(v.id);
+                    } catch {}
+                }
+            }
+        }
+
+        return preferred;
     }
+
+    /* 
+    // Tolerant read: if multiple rows exist (from older clients), prefer the canonical id and GC extras.
+        const list = (await this.visualizations.index
+            .iterate({
+                query: {
+                    canvasId: canvas.id,
+                },
+            })
+            .all()) as WithIndexedContext<
+            BasicVisualization,
+            IndexedVisualization
+        >[];
+
+        if (!list.length) return null;
+
+        const canonicalId = sha256Sync(
+            concat([new Uint8Array([0x56, 0x49, 0x5a]), canvas.id]) // "VIZ" prefix
+        );
+
+        // Prefer the one that matches our canonical scheme
+        let preferred = list.find((v) => equals(v.id, canonicalId)) ?? list[0];
+
+        // Best-effort cleanup of duplicates
+        if (list.length > 1) {
+            for (const v of list) {
+                if (!equals(v.id, preferred.id)) {
+                    try {
+                        await this.visualizations.del(v.id);
+                    } catch {}
+                }
+            }
+        }
+
+        return preferred;
+        */
 
     async publish(
         this: Scope,
@@ -2234,24 +2277,94 @@ export class Scope extends Program<ScopeArgs> {
         canvas: { id: Uint8Array },
         visualization: BasicVisualization | null
     ): Promise<void> {
-        const visualizations = await this.visualizations.index
-            .iterate(
-                {
-                    query: {
-                        canvasId: canvas.id,
-                    },
-                },
-                { resolve: false }
-            )
-            .all();
-        for (const visualization of visualizations) {
-            await this.visualizations.del(visualization.id);
+        const canonicalId = sha256Sync(
+            concat([new Uint8Array([0x56, 0x49, 0x5a]), canvas.id])
+        );
+
+        // If clearing, remove any rows
+        if (!visualization) {
+            const list = await this.visualizations.index
+                .iterate({ query: { canvasId: canvas.id } }, { resolve: false })
+                .all();
+            for (const v of list) await this.visualizations.del(v.id);
+            return;
         }
 
-        if (visualization) {
+        // Upsert single row under canonical id
+        visualization.id = canonicalId;
+        visualization.canvasId = canvas.id;
+
+        const existing = await this.visualizations.index.get(canonicalId, {
+            resolve: true,
+            local: true,
+        });
+
+        if (!existing) {
             await this.visualizations.put(visualization);
         } else {
-            // previous visualization was removed
+            // Update in place if any field differs
+            const current = existing as unknown as BasicVisualization;
+            let changed = false;
+            if (
+                (current.view ?? undefined) !==
+                (visualization.view ?? undefined)
+            ) {
+                current.view = visualization.view;
+                changed = true;
+            }
+            if (
+                (current.previewHeight ?? undefined) !==
+                (visualization.previewHeight ?? undefined)
+            ) {
+                current.previewHeight = visualization.previewHeight;
+                changed = true;
+            }
+            if (
+                (current.font ?? undefined) !==
+                (visualization.font ?? undefined)
+            ) {
+                current.font = visualization.font;
+                changed = true;
+            }
+            if (
+                (current.showAuthorInfo ?? true) !==
+                (visualization.showAuthorInfo ?? true)
+            ) {
+                current.showAuthorInfo = visualization.showAuthorInfo ?? true;
+                changed = true;
+            }
+            if (
+                (current.background ? serialize(current.background) : null) !==
+                (visualization.background
+                    ? serialize(visualization.background)
+                    : null)
+            ) {
+                current.background = visualization.background;
+                changed = true;
+            }
+            if (
+                (current.palette ? serialize(current.palette) : null) !==
+                (visualization.palette
+                    ? serialize(visualization.palette)
+                    : null)
+            ) {
+                current.palette = visualization.palette;
+                changed = true;
+            }
+
+            if (changed) await this.visualizations.put(current);
+
+            // Remove any duplicates with non-canonical ids
+            const list = await this.visualizations.index
+                .iterate({ query: { canvasId: canvas.id } }, { resolve: false })
+                .all();
+            for (const v of list) {
+                if (!equals(v.id, canonicalId)) {
+                    try {
+                        await this.visualizations.del(v.id);
+                    } catch {}
+                }
+            }
         }
     }
 
