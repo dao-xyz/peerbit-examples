@@ -58,19 +58,6 @@ export const ToolbarCreateNew = (props: {
     const privateScope = PrivateScope.useScope();
 
     useEffect(() => {
-        if (!hasTextElement && canvas) {
-            console.log("Inserting default text element");
-            insertDefault({ once: true, scope: privateScope });
-        }
-    }, [
-        hasTextElement,
-        canvas?.idString,
-        pendingRects.length,
-        insertDefault,
-        privateScope,
-    ]);
-
-    useEffect(() => {
         const trimmed = text?.trim();
         if (trimmed) {
             search(trimmed).then((apps) => setResolvedApp(apps[0] || null));
