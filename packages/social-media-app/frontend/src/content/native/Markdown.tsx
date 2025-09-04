@@ -128,7 +128,10 @@ export const MarkdownContent = ({
 
         let suggestTimeout: ReturnType<typeof setTimeout> | null = null;
         if (parent) {
-            if (!equals(suggestedReplyForParent.current, parent)) {
+            if (
+                !suggestedReplyForParent.current ||
+                !equals(suggestedReplyForParent.current, parent)
+            ) {
                 suggestedReplyForParent.current = parent;
                 /*  let suggestStartRef = parent.id; */
                 suggestTimeout = setTimeout(async () => {

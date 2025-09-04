@@ -148,7 +148,6 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     // sync path with URL (id/scopes) and scope availability
     useEffect(() => {
         if (!root || !candidateScopes.length) {
-            console.log("no root or scopes yet");
             return;
         }
 
@@ -197,10 +196,6 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     // ensure a root exists (public root by default)
     useEffect(() => {
         if (!peer || !publicScope) {
-            console.log("no peer or public scope yet", {
-                peer: !!peer,
-                publicScope: !!publicScope,
-            });
             return;
         }
 

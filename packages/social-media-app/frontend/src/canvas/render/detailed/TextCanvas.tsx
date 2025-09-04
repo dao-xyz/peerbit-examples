@@ -28,6 +28,12 @@ export const TextCanvas = (props: Omit<Props, "config">) => {
         if (!hasTextElement && canvas && props.draft) {
             console.log("Inserting default text element");
             insertDefault({ once: true, scope: privateScope });
+        } else {
+            console.log("Not inserting default text element", {
+                hasTextElement,
+                canvas: !!canvas,
+                draft: !!props.draft,
+            });
         }
     }, [
         props.draft,
