@@ -10,7 +10,7 @@ import { Peerbit } from "peerbit";
 import {
     Canvas,
     Element,
-    getOwnedByCanvasQuery,
+    getRepliesQuery,
     IndexableCanvas,
     IndexableElement,
     StaticContent,
@@ -42,7 +42,7 @@ console.log(
 );
 await root.replies.log.waitForReplicators();
 const iterator = root.replies.index.iterate({
-    query: getOwnedByCanvasQuery(root),
+    query: getRepliesQuery(root),
     sort: new Sort({ key: "replies", direction: SortDirection.DESC }),
 });
 const tenMostCommented = await iterator.next(10);

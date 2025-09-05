@@ -799,7 +799,6 @@ const _CanvasWrapper = (
         if (savingRef.current) {
             return;
         }
-        console.trace("reset pending");
         debugLog("reset pending rects", pendingRects.length);
         setPendingRects([]);
         setSavedOnce(undefined);

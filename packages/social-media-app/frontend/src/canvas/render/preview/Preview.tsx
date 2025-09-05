@@ -956,41 +956,43 @@ export const CanvasPreview = ({
     className,
     onLoad,
     whenEmpty,
-    debug,
     classNameContent, // TODO is this property really needed?
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
+    // Fast path: indexed element count from the canvas row
+    const indexedEmpty = canvas?.__indexed.elements === 0n;
+
     const variantRects = useMemo(() => {
-        const out = getRectsForVariant(
+        if (indexedEmpty) return undefined as any;
+        return getRectsForVariant(
             separateAndSortRects([...rects, ...pendingRects]),
             variant
         );
-        return out;
-    }, [rects, pendingRects, variant]);
+    }, [indexedEmpty, rects, pendingRects, variant]);
 
     const isEmpty = useMemo(() => {
+        if (indexedEmpty) return true;
         return (
             !variantRects ||
             (variantRects instanceof Element === false &&
                 variantRects.other.length === 0 &&
                 !variantRects.text)
         );
-    }, [variantRects]);
+    }, [indexedEmpty, variantRects]);
 
-    /* TODO how to correctly handle empty?
-     useEffect(() => {
-        if (isEmpty) {
-            onLoad?.();
+    // Ensure empty canvases still signal readiness exactly once per canvas id
+    const firedEmptyForId = useRef<string | null>(null);
+    useEffect(() => {
+        if (!onLoad) return;
+        const id = canvas?.idString || "__unknown__";
+        if (isEmpty && firedEmptyForId.current !== id) {
+            firedEmptyForId.current = id;
+            onLoad();
         }
-    }, [isEmpty]); */
+    }, [isEmpty, onLoad, canvas?.idString]);
 
-    const onEmpty = useMemo(() => {
-        if (whenEmpty) {
-            whenEmpty;
-        }
-        return <></>;
-    }, [whenEmpty]);
+    const onEmpty = useMemo(() => whenEmpty ?? <></>, [whenEmpty]);
 
     if (isEmpty) {
         return onEmpty;

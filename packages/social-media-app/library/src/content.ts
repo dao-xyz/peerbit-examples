@@ -208,6 +208,9 @@ export class IndexableCanvas {
     @field({ type: "u64" })
     replies: bigint;
 
+    @field({ type: "u64" })
+    elements: bigint; // number of elements owned by this canvas
+
     @field({ type: vec(Uint8Array) })
     path: Uint8Array[]; // address path
 
@@ -231,6 +234,7 @@ export class IndexableCanvas {
         publicKey: PublicSignKey;
         context: string;
         replies: bigint;
+        elements: bigint;
         path: Uint8Array[]; // address path
         kind?: LinkKind[]; // ReplyKind, e.g. chat, feed, etc.
         view?: ChildVisualization;
@@ -240,6 +244,7 @@ export class IndexableCanvas {
         this.publicKey = properties.publicKey.bytes;
         this.context = properties.context;
         this.replies = properties.replies;
+        this.elements = properties.elements;
         this.path = properties.path;
         this.pathDepth = properties.path.length;
         this.kind = properties.kind;
@@ -317,10 +322,11 @@ export class IndexableCanvas {
             publicKey: canvas.publicKey,
             context,
             replies,
+            elements: BigInt(owned.length),
             path: pathIds,
             kind: allKinds,
             view: childrenVisualization,
-            contents: owned.map((e) => e.type),
+            contents: [...new Set(owned.map((e) => e.type))],
         });
     }
 
