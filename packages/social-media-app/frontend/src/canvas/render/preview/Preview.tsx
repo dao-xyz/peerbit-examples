@@ -12,6 +12,7 @@ import {
     useMemo,
     useRef,
     useState,
+    useCallback,
 } from "react";
 import { Frame } from "../../../content/Frame";
 import {
@@ -231,34 +232,46 @@ const BlurredBackground = ({
 const TinyPreview = ({
     rect,
     onClick,
-    onLoad,
+    onAllElementsLoaded,
     className,
 }: {
     rect: Element<ElementContent>;
     onClick?: (e: Element<ElementContent>) => void;
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
     className?: string | ((element: Element<ElementContent>) => string);
-}) => (
-    <PreviewFrame
-        element={rect}
-        fit="cover"
-        maximizeHeight
-        onClick={onClick}
-        onLoad={onLoad}
-        canOpenFullscreen={false}
-        className={className}
-    />
-);
+}) => {
+    const loadedRef = useRef(false);
+    useEffect(() => {
+        loadedRef.current = false;
+    }, [rect?.idString]);
+    const handleLoad = () => {
+        if (!loadedRef.current) {
+            loadedRef.current = true;
+            onAllElementsLoaded?.();
+        }
+    };
+    return (
+        <PreviewFrame
+            element={rect}
+            fit="cover"
+            maximizeHeight
+            onClick={onClick}
+            onLoad={handleLoad}
+            canOpenFullscreen={false}
+            className={className}
+        />
+    );
+};
 
 const BreadcrumbPreview = ({
     rect,
     onClick,
-    onLoad,
+    onAllElementsLoaded,
     className,
 }: {
     rect;
     onClick?: (e: Element<ElementContent>) => void;
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
     className?: string | ((element: Element<ElementContent>) => string);
 }) => {
     let isText = false;
@@ -267,6 +280,16 @@ const BreadcrumbPreview = ({
         isText = true;
         textLength = toString(fromMarkdown(rect.content.content.text)).length;
     }
+    const loadedRef = useRef(false);
+    useEffect(() => {
+        loadedRef.current = false;
+    }, [rect?.idString]);
+    const handleLoad = () => {
+        if (!loadedRef.current) {
+            loadedRef.current = true;
+            onAllElementsLoaded?.();
+        }
+    };
     return (
         <div
             className={clsx(
@@ -287,7 +310,7 @@ const BreadcrumbPreview = ({
                 noPadding={isText}
                 maximizeHeight
                 onClick={onClick}
-                onLoad={onLoad}
+                onLoad={handleLoad}
                 className={"w-full h-full flex items-center justify-center"}
             />
         </div>
@@ -298,24 +321,26 @@ const RowPreview = ({
     rects,
     onClick,
     className,
-    onLoad,
+    onAllElementsLoaded,
 }: {
     rects;
     className?: string;
     onClick?: (e: Element<ElementContent>) => void;
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
 }) => {
     const { other: apps, text } = rects;
-
-    const loadedSet: Set<string> = useMemo(() => new Set(), []);
-
-    const handleLoad = (element: Element<ElementContent>) => {
-        loadedSet.add(element.idString);
-        if (onLoad && loadedSet.size === rects.other.length + (text ? 1 : 0)) {
-            onLoad();
+    const expected = Math.min(2, apps.length) + (text ? 1 : 0);
+    const loadedIds = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        loadedIds.current.clear();
+    }, [apps, text]);
+    const handleLoad = (el: Element<ElementContent>) => {
+        if (!el?.idString) return;
+        loadedIds.current.add(el.idString);
+        if (loadedIds.current.size >= expected) {
+            onAllElementsLoaded?.();
         }
     };
-
     return (
         <div className={"flex flex-row   items-center " + (className ?? "")}>
             {apps.slice(0, 2).map((app, i) => (
@@ -356,24 +381,26 @@ const ExpandedBreadcrumbPreview = ({
     rects,
     onClick,
     forwardedRef,
-    onLoad,
+    onAllElementsLoaded,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: (e: Element<ElementContent>) => void;
     forwardedRef?: React.Ref<HTMLDivElement>;
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
 }) => {
     const { other: apps, text } = rects;
-
-    const loadedSet: Set<string> = useMemo(() => new Set(), []);
-
-    const handleLoad = (element: Element<ElementContent>) => {
-        loadedSet.add(element.idString);
-        if (onLoad && loadedSet.size === rects.other.length + (text ? 1 : 0)) {
-            onLoad();
+    const expected = Math.min(2, apps.length) + (text ? 1 : 0);
+    const loadedIds = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        loadedIds.current.clear();
+    }, [apps, text]);
+    const handleLoad = (el: Element<ElementContent>) => {
+        if (!el?.idString) return;
+        loadedIds.current.add(el.idString);
+        if (loadedIds.current.size >= expected) {
+            onAllElementsLoaded?.();
         }
     };
-
     return (
         <div
             className="col-span-full flex gap-1.5 items-start w-full rounded-lg"
@@ -418,7 +445,7 @@ const PostQuotePreview = ({
     onClick,
     author,
     forwardedRef,
-    onLoad,
+    onAllElementsLoaded,
 }: {
     rects: {
         text?: Element<StaticContent<StaticMarkdownText>>;
@@ -427,14 +454,19 @@ const PostQuotePreview = ({
     onClick?: (e: Element<ElementContent>) => void;
     author?: string;
     forwardedRef?: React.Ref<HTMLDivElement>;
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
 }) => {
     const { other: apps, text } = rects;
-    const loadedSet: Set<string> = useMemo(() => new Set(), []);
-    const handleLoad = (element: Element<ElementContent>) => {
-        loadedSet.add(element.idString);
-        if (onLoad && loadedSet.size === apps.length + (text ? 1 : 0)) {
-            onLoad();
+    const expected = Math.min(2, apps.length) + (text ? 1 : 0);
+    const loadedIds = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        loadedIds.current.clear();
+    }, [apps, text]);
+    const handleLoad = (el: Element<ElementContent>) => {
+        if (!el?.idString) return;
+        loadedIds.current.add(el.idString);
+        if (loadedIds.current.size >= expected) {
+            onAllElementsLoaded?.();
         }
     };
     return (
@@ -509,7 +541,7 @@ const PostPreview = ({
     forwardRef,
     className,
     classNameContent,
-    onLoad,
+    onAllElementsLoaded,
 }: {
     rects: {
         text?: Element<StaticContent<StaticMarkdownText>>;
@@ -519,20 +551,22 @@ const PostPreview = ({
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((el: Element<ElementContent>) => string);
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
 }) => {
     const { text, other: media } = rects;
-
-    /* aggregate child loads */
-    const loaded = useRef(new Set<string>());
-    const bubble = (el: Element<ElementContent>) => {
-        loaded.current.add(el.idString);
-        if (onLoad && loaded.current.size === media.length + (text ? 1 : 0))
-            onLoad();
+    const expected = (media?.length || 0) + (text ? 1 : 0);
+    const loadedIds = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        loadedIds.current.clear();
+    }, [media, text]);
+    const handleLoad = (el: Element<ElementContent>) => {
+        if (!el?.idString) return;
+        loadedIds.current.add(el.idString);
+        if (loadedIds.current.size >= expected) {
+            onAllElementsLoaded?.();
+        }
     };
-
     if (media.length === 0 && !text) return null;
-
     /* ─────────────── layout ─────────────── */
     return (
         <div
@@ -546,7 +580,7 @@ const PostPreview = ({
                     <MediaCarousel
                         elements={media}
                         onClick={onClick}
-                        onLoad={bubble}
+                        onLoad={handleLoad}
                         classNameContent={classNameContent + " min-h-0"}
                     />
                 </div>
@@ -558,7 +592,7 @@ const PostPreview = ({
                         element={text}
                         noPadding
                         onClick={onClick}
-                        onLoad={() => bubble(text)}
+                        onLoad={() => handleLoad(text)}
                         className={classNameContent}
                         canOpenFullscreen
                     />
@@ -794,7 +828,7 @@ export const DetailedPreview = ({
     forwardRef,
     className,
     classNameContent,
-    onLoad,
+    onAllElementsLoaded,
 }: {
     rects: {
         text?: Element<StaticContent<StaticMarkdownText>>;
@@ -804,20 +838,22 @@ export const DetailedPreview = ({
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((el: Element<ElementContent>) => string);
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
 }) => {
     const images = rects.other;
     const text = rects.text;
-
-    // track when everything has loaded (optional completion callback)
-    const loadedSet: Set<string> = useMemo(() => new Set(), []);
+    const expected = (images?.length || 0) + (text ? 1 : 0);
+    const loadedIds = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        loadedIds.current.clear();
+    }, [images, text]);
     const handleLoad = (el: Element<ElementContent>) => {
-        loadedSet.add(el.idString);
-        if (onLoad && loadedSet.size === images.length + (text ? 1 : 0)) {
-            onLoad();
+        if (!el?.idString) return;
+        loadedIds.current.add(el.idString);
+        if (loadedIds.current.size >= expected) {
+            onAllElementsLoaded?.();
         }
     };
-
     const allOthersAreImages =
         images.length > 0 &&
         images.every(
@@ -892,25 +928,28 @@ const ChatMessagePreview = ({
     forwardRef,
     className,
     classNameContent,
-    onLoad,
+    onAllElementsLoaded,
 }: {
     rects: { text?: Element<ElementContent>; other: Element<ElementContent>[] };
     onClick?: (e: Element<ElementContent>) => void;
     forwardRef?: React.Ref<any>;
     className?: string;
     classNameContent?: string | ((element: Element<ElementContent>) => string);
-    onLoad?: () => void;
+    onAllElementsLoaded?: () => void;
 }) => {
     const { other: apps, text } = rects;
-
-    const loadedSet: Set<string> = useMemo(() => new Set(), []);
-    const handleLoad = (element: Element<ElementContent>) => {
-        loadedSet.add(element.idString);
-        if (onLoad && loadedSet.size === apps.length + (text ? 1 : 0)) {
-            onLoad();
+    const expected = (apps?.length || 0) + (text ? 1 : 0);
+    const loadedIds = useRef<Set<string>>(new Set());
+    useEffect(() => {
+        loadedIds.current.clear();
+    }, [apps, text]);
+    const handleLoad = (el: Element<ElementContent>) => {
+        if (!el?.idString) return;
+        loadedIds.current.add(el.idString);
+        if (loadedIds.current.size >= expected) {
+            onAllElementsLoaded?.();
         }
     };
-
     return (
         <div className={"flex flex-col h-full " + className} ref={forwardRef}>
             {apps.map((app) => (
@@ -963,6 +1002,13 @@ export const CanvasPreview = ({
     // Fast path: indexed element count from the canvas row
     const indexedEmpty = canvas?.__indexed.elements === 0n;
 
+    // Special case: if indexedEmpty, fire onLoad immediately and render nothing
+    useEffect(() => {
+        if (indexedEmpty && onLoad) {
+            onLoad();
+        }
+    }, [indexedEmpty, onLoad]);
+
     const variantRects = useMemo(() => {
         if (indexedEmpty) return undefined as any;
         return getRectsForVariant(
@@ -981,19 +1027,28 @@ export const CanvasPreview = ({
         );
     }, [indexedEmpty, variantRects]);
 
-    // Ensure empty canvases still signal readiness exactly once per canvas id
-    const firedEmptyForId = useRef<string | null>(null);
+    // Bubble up when all elements loaded
+    const [allLoaded, setAllLoaded] = useState(false);
     useEffect(() => {
-        if (!onLoad) return;
-        const id = canvas?.idString || "__unknown__";
-        if (isEmpty && firedEmptyForId.current !== id) {
-            firedEmptyForId.current = id;
+        if (allLoaded && onLoad) {
             onLoad();
         }
-    }, [isEmpty, onLoad, canvas?.idString]);
+    }, [allLoaded, onLoad]);
+
+    // Reset on canvas/variant change
+    useEffect(() => {
+        setAllLoaded(false);
+    }, [canvas?.idString, variant]);
+
+    const onAllElementsLoaded = useCallback(() => {
+        setAllLoaded(true);
+    }, []);
 
     const onEmpty = useMemo(() => whenEmpty ?? <></>, [whenEmpty]);
 
+    if (indexedEmpty) {
+        return null;
+    }
     if (isEmpty) {
         return onEmpty;
     }
@@ -1005,7 +1060,7 @@ export const CanvasPreview = ({
                     className={className}
                     rect={variantRects as Element<ElementContent>}
                     onClick={onClick}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                 />
             );
 
@@ -1015,7 +1070,7 @@ export const CanvasPreview = ({
                     className={className}
                     rect={variantRects as Element<ElementContent>}
                     onClick={onClick}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                 />
             );
         case "expanded-breadcrumb":
@@ -1028,7 +1083,7 @@ export const CanvasPreview = ({
                         }
                     }
                     onClick={onClick}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                 />
             );
         case "row":
@@ -1042,7 +1097,7 @@ export const CanvasPreview = ({
                         }
                     }
                     onClick={onClick}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                 />
             );
         case "quote":
@@ -1056,7 +1111,7 @@ export const CanvasPreview = ({
                     }
                     onClick={onClick}
                     author={canvas?.publicKey.hashcode()}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                 />
             );
         case "post":
@@ -1071,7 +1126,7 @@ export const CanvasPreview = ({
                     onClick={onClick}
                     className={className}
                     forwardRef={forwardRef}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                     classNameContent={classNameContent}
                 />
             );
@@ -1088,7 +1143,7 @@ export const CanvasPreview = ({
                     className={className}
                     classNameContent={classNameContent}
                     forwardRef={forwardRef}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                 />
             );
         case "chat-message":
@@ -1104,7 +1159,7 @@ export const CanvasPreview = ({
                     className={className}
                     forwardRef={forwardRef}
                     classNameContent={classNameContent}
-                    onLoad={onLoad}
+                    onAllElementsLoaded={onAllElementsLoaded}
                 />
             );
         default:
