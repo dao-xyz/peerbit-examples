@@ -19,7 +19,13 @@ export const useRelativePath = (properties: {
 
         // get the path of the canvas that is unique to the viewRoot
 
-        if (!properties.canvas || !properties.canvas.initialized || !leaf) {
+        // TODO make initalized also to make sure indexed exist?
+        if (
+            !properties.canvas ||
+            !properties.canvas.initialized ||
+            !properties.canvas.__indexed ||
+            !leaf
+        ) {
             return setPath([] as Canvas[]);
         }
 
@@ -48,6 +54,7 @@ export const useRelativePath = (properties: {
     }, [
         properties.canvas,
         properties?.canvas?.initialized,
+        properties?.canvas?.__indexed,
         leaf,
         properties.disabled,
     ]);
