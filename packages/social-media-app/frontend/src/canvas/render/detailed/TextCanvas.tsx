@@ -38,8 +38,13 @@ export const TextCanvas = (props: Omit<Props, "config">) => {
         if (!props.draft || !canvas) return;
         if (hasAnyText) return;
         if (insertedForCanvasRef.current === canvas.idString) return;
-        console.log("INSERT DEFAULT!");
-        insertDefault({ once: true, scope: privateScope }).catch(() => {});
+        console.log("INSERT DEFAULT (no text present)!");
+        // Important: do NOT use `once:true` here. We want to ensure that
+        // a text editor appears even if there are already other pending
+        // rects (e.g. an image uploaded first). Using `once:true` would
+        // skip insertion when images are present, which hides the textarea
+        // and breaks tests and UX.
+        insertDefault({ scope: privateScope }).catch(() => {});
         insertedForCanvasRef.current = canvas.idString;
     }, [
         props.draft,

@@ -8,7 +8,7 @@ export const ImageUploadTrigger = (properties?: {
     onFileChange?: (files: File[]) => void;
     onClick?: (insertDefault: boolean) => void;
 }) => {
-    const { insertImage } = useCanvas();
+    const { insertImage, insertDefault, hasTextElement } = useCanvas();
     const handleFileChange = async (
         event: React.ChangeEvent<HTMLInputElement>
     ) => {
@@ -21,6 +21,14 @@ export const ImageUploadTrigger = (properties?: {
             // Optionally, loop to support multiple images
             for (const file of fileArray) {
                 await insertImage(file, { pending: true });
+            }
+            // Ensure a text editor placeholder exists after queuing images
+            try {
+                if (!hasTextElement) {
+                    await insertDefault();
+                }
+            } catch {
+                // non-fatal; UI can still function without auto-insert
             }
             // Clear the input value so the same file can be uploaded again if needed.
             event.target.value = "";

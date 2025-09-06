@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useCanvas } from "../CanvasWrapper";
 import { Canvas } from "../render/detailed/Canvas";
 import { ImageUploadTrigger } from "../../content/native/image/ImageUploadToCanvas";
@@ -26,6 +26,7 @@ import { PrivateScope } from "../useScope";
 import { useDraftSession } from "./draft/DraftSession";
 import { ImageCanvas } from "../render/detailed/ImageCanvas";
 import { TextCanvas } from "../render/detailed/TextCanvas";
+import { rectIsStaticImage, rectIsStaticPartialImage } from "../utils/rect";
 
 export const ToolbarCreateNew = (props: {
     showProfile?: boolean;
@@ -42,6 +43,8 @@ export const ToolbarCreateNew = (props: {
         insertDefault,
         canvas,
         pendingRects,
+        rects,
+        reduceElementsForViewing,
         requestAIReply,
         setRequestAIReply,
     } = useCanvas();
@@ -107,12 +110,37 @@ export const ToolbarCreateNew = (props: {
     const colorStyle =
         "dark:bg-neutral-700 " + (isChat ? "bg-neutral-200" : "bg-neutral-50");
 
+    // Compute whether we have any images (pending or committed) to decide if we show the
+    // ImageUploadTrigger tile inside the ImageCanvas (appended to the right of images).
+    const hasImages = useMemo(() => {
+        try {
+            const all = reduceElementsForViewing
+                ? reduceElementsForViewing([
+                      ...(rects || []),
+                      ...(pendingRects || []),
+                  ])
+                : [...(rects || []), ...(pendingRects || [])];
+            return all.some(
+                (r) => rectIsStaticImage(r) || rectIsStaticPartialImage(r)
+            );
+        } catch {
+            return false;
+        }
+    }, [rects, pendingRects, reduceElementsForViewing]);
+
     return (
         <div
             className={`flex flex-col z-20 w-full left-0  ${colorStyle} ${
                 props.className || ""
             }`}
+            data-testid="toolbarcreatenew"
+            data-parent-id={props.parent.idString}
         >
+            {/* Always-mounted hidden file input so tests can attach files before any images exist */}
+            <ImageUploadTrigger
+                onFileChange={() => onToggleAppSelect(false)}
+                className="sr-only"
+            />
             {/* Top area: (unchanged) images canvas above toolbar */}
 
             {/* First row: input */}
@@ -150,12 +178,15 @@ export const ToolbarCreateNew = (props: {
                 }
             >
                 <ImageCanvas draft={false} requestPublish={publish}>
-                    <ImageUploadTrigger
-                        onFileChange={() => onToggleAppSelect(false)}
-                        className="btn-elevated btn-icon btn-icon-md btn-toggle flex items-center justify-center bg-white dark:bg-black"
-                    >
-                        <FaPlus className="btn-icon-md" />
-                    </ImageUploadTrigger>
+                    {hasImages && (
+                        <ImageUploadTrigger
+                            /* test id is on the hidden input */
+                            onFileChange={() => onToggleAppSelect(false)}
+                            className="bg-white dark:bg-black rounded-md btn-elevated btn-icon btn-toggle w-auto  border border-neutral-800 flex items-center justify-center"
+                        >
+                            <FaPlus className="btn-icon-md " />
+                        </ImageUploadTrigger>
+                    )}
                 </ImageCanvas>
             </div>
 

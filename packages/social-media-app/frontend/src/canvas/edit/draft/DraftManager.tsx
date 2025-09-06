@@ -14,6 +14,8 @@ import { WithIndexedContext } from "@peerbit/document";
 import { randomBytes } from "@peerbit/crypto";
 import debounce from "lodash/debounce";
 import type { DebouncedFunc } from "lodash";
+import { useDebugConfig } from "../../../debug/DebugConfig";
+import { emitDebugEvent } from "../../../debug/debug";
 
 export type CanvasIx = WithIndexedContext<Canvas, IndexableCanvas>;
 export type CanvasKey = Uint8Array;
@@ -80,8 +82,30 @@ export const DraftManagerProvider: React.FC<{
     const privateScope = PrivateScope.useScope();
     const publicScope = PublicScope.useScope();
 
+    // Centralized debug options from DebugConfigProvider with backwards compatibility
+    const debugOpts = useDebugConfig();
+    const debugEnabled = debug || debugOpts.enabled;
+    const parentFilter = debugOpts.parent;
+    // Capture events if provider prop debug=true or if DebugConfig explicitly enables it.
+    const captureEvents = debugEnabled || !!debugOpts.captureEvents;
+
+    const shouldLogForParent = (parentId?: string) => {
+        if (!debugEnabled) return false;
+        if (!parentFilter) return true;
+        return !!parentId && parentId === parentFilter;
+    };
+
     const log = (...args: unknown[]) => {
-        if (debug) console.debug("[DraftManager]", ...args);
+        if (debugEnabled) console.debug("[DraftManager]", ...args);
+    };
+
+    const logEvt = (name: string, payload: Record<string, unknown>) => {
+        if (!shouldLogForParent(payload.parentId as string | undefined)) return;
+        try {
+            console.debug("[DraftManager]", name, JSON.stringify(payload));
+        } catch {}
+        if (captureEvents)
+            emitDebugEvent({ source: "DraftManager", name, ...payload });
     };
     const toBucket = (key: CanvasKey) => Canvas.createIdString(key);
     const genKey = (): CanvasKey => randomBytes(32);
@@ -160,6 +184,11 @@ export const DraftManagerProvider: React.FC<{
             const createdIx = await created.getSelfIndexedCoerced();
             if (!createdIx)
                 throw new Error("Failed to index newly created draft");
+            log("createDraftPersisted: created", {
+                draftId: createdIx.idString,
+                parentId: options?.replyTo?.idString,
+                scope: home.address,
+            });
             return createdIx;
         } catch (e) {
             // Creation failed → remove optimistic flag
@@ -238,6 +267,7 @@ export const DraftManagerProvider: React.FC<{
                     log("ensure(id): created", {
                         bucket,
                         draftId: created.idString,
+                        parentId: args.replyTo?.idString,
                     });
                     return created;
                 })().finally(() => {
@@ -381,29 +411,52 @@ export const DraftManagerProvider: React.FC<{
                         });
 
                         const toPublish = rec.canvas;
+                        log("publish: rotate", {
+                            bucket,
+                            oldDraftId: toPublish.idString,
+                            newDraftId: fresh.idString,
+                            parentId: rec.replyTo?.idString,
+                        });
                         retireActiveSlowly(toPublish.idString);
                         records.current.set(bucket, { ...rec, canvas: fresh });
 
                         // flush any pending local save
                         debouncers.current.get(bucket)?.flush?.();
 
+                        log("publish: hasParent?", {
+                            hasParent: !!rec.replyTo,
+                        });
                         if (rec.replyTo) {
-                            await rec.canvas.nearestScope.reIndexDebouncer.flush();
-                            log(
-                                "publish: syncing draft to parent with elements: " +
-                                    (await rec.canvas.countOwnedElements())
-                            );
-
-                            const parent = rec.replyTo;
-                            await parent.upsertReply(toPublish, {
-                                type: "sync",
-                                targetScope: parent.nearestScope,
-                                updateHome: "set",
-                                visibility: "both",
-                                kind: new ReplyKind(),
-                                debug,
-                            });
-                            await parent.nearestScope.reIndexDebouncer.flush();
+                            try {
+                                await rec.canvas.nearestScope.reIndexDebouncer.flush();
+                                const parent = rec.replyTo;
+                                log("publish: syncing draft to parent", {
+                                    elements:
+                                        await rec.canvas.countOwnedElements(),
+                                    draftId: toPublish.idString,
+                                    parentId: parent.idString,
+                                });
+                                await parent.upsertReply(toPublish, {
+                                    type: "sync",
+                                    targetScope: parent.nearestScope,
+                                    updateHome: "set",
+                                    visibility: "both",
+                                    kind: new ReplyKind(),
+                                    debug,
+                                });
+                                await parent.nearestScope.reIndexDebouncer.flush();
+                                // Emit debug event immediately; tests now capture
+                                // baseline before triggering actions to avoid races.
+                                logEvt("replyPublished", {
+                                    replyId: toPublish.idString,
+                                    parentId: parent.idString,
+                                });
+                            } catch (e) {
+                                console.error(
+                                    "[DraftManager] publish: sync error",
+                                    e
+                                );
+                            }
                         } else {
                             log("publish: no parent to sync to");
                         }
@@ -418,6 +471,7 @@ export const DraftManagerProvider: React.FC<{
                             publishQueue.current.delete(bucket);
                         // 🔔 let subscribers recompute isPublishing=false
                         notify();
+                        log("publish: done", { bucket });
                     });
 
                 publishQueue.current.set(bucket, next);

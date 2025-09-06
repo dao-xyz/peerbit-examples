@@ -34,6 +34,9 @@ import {
     ScopeRegistryProvider,
 } from "./canvas/useScope";
 import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
+import { setupPrettyConsole } from "./debug/debug";
+import { DebugConfigProvider } from "./debug/DebugConfig";
+import { DebugOverlay } from "./debug/DebugOverlay";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 
 const HEADER_EXPANDED_HEIGHT = 12;
@@ -145,39 +148,44 @@ const networkConfig: NetworkOption =
           };
 
 export const App = () => {
+    // Initialize debug console once per app load
+    setupPrettyConsole();
     return (
         <HashRouter basename="/">
             <ErrorProvider>
                 <ThemeProvider>
-                    <PeerProvider
-                        network={networkConfig}
-                        iframe={{ type: "proxy", targetOrigin: "*" }}
-                        waitForConnnected={false}
-                        inMemory={false}
-                        singleton
-                    >
-                        <IdentitiesProvider>
-                            <AppProvider>
-                                <HeaderVisibilityProvider>
-                                    <BlurOnOutsidePointerProvider>
-                                        <ScopeRegistryProvider>
-                                            <CanvasProvider>
-                                                <ReplyProgressProvider>
-                                                    <ProfileProvider>
-                                                        <AIReplyProvider>
-                                                            <HostRegistryProvider>
-                                                                <Content />
-                                                            </HostRegistryProvider>
-                                                        </AIReplyProvider>
-                                                    </ProfileProvider>
-                                                </ReplyProgressProvider>
-                                            </CanvasProvider>
-                                        </ScopeRegistryProvider>
-                                    </BlurOnOutsidePointerProvider>
-                                </HeaderVisibilityProvider>
-                            </AppProvider>
-                        </IdentitiesProvider>
-                    </PeerProvider>
+                    <DebugConfigProvider>
+                        <PeerProvider
+                            network={networkConfig}
+                            iframe={{ type: "proxy", targetOrigin: "*" }}
+                            waitForConnnected={false}
+                            inMemory={false}
+                            singleton
+                        >
+                            <IdentitiesProvider>
+                                <AppProvider>
+                                    <HeaderVisibilityProvider>
+                                        <BlurOnOutsidePointerProvider>
+                                            <ScopeRegistryProvider>
+                                                <CanvasProvider>
+                                                    <ReplyProgressProvider>
+                                                        <ProfileProvider>
+                                                            <AIReplyProvider>
+                                                                <HostRegistryProvider>
+                                                                    <Content />
+                                                                    <DebugOverlay />
+                                                                </HostRegistryProvider>
+                                                            </AIReplyProvider>
+                                                        </ProfileProvider>
+                                                    </ReplyProgressProvider>
+                                                </CanvasProvider>
+                                            </ScopeRegistryProvider>
+                                        </BlurOnOutsidePointerProvider>
+                                    </HeaderVisibilityProvider>
+                                </AppProvider>
+                            </IdentitiesProvider>
+                        </PeerProvider>
+                    </DebugConfigProvider>
                 </ThemeProvider>
             </ErrorProvider>
         </HashRouter>

@@ -176,6 +176,9 @@ export const Reply = ({
                         : "items-start mr-10"
                     : ""
             } ${styleFromFromMode} ${className}`}
+            data-canvas-id={canvas.idString}
+            data-variant={variant}
+            data-align={align}
         >
             {/* {lineType && lineType !== "none" && (
                 <div className="absolute left-0 top-0 bottom-0 pointer-events-none z-[-1]">

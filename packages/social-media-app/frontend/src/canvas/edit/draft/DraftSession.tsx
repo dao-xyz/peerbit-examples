@@ -11,6 +11,7 @@ import type { Canvas, IndexableCanvas } from "@giga-app/interface";
 import type { WithIndexedContext } from "@peerbit/document";
 import { randomBytes } from "@peerbit/crypto";
 import { useDraftManager } from "./DraftManager";
+import { debugLog, isDebugEnabled } from "../../../debug/debug";
 import { PrivateScope } from "../../useScope";
 import {
     CanvasHandleRegistryContext,
@@ -101,6 +102,17 @@ export const DraftSessionProvider: React.FC<{
         (async () => {
             const ensured = await mgr.ensure({ replyTo, key: keyRef.current! });
             if (!cancelled) {
+                debugLog("[DraftSession] ensure", {
+                    parentId: pid,
+                    draftId: ensured.idString,
+                    bucket: keyRef.current
+                        ? (window as any).Buffer
+                            ? (window as any).Buffer.from(
+                                  keyRef.current
+                              ).toString("hex")
+                            : undefined
+                        : undefined,
+                });
                 setDraft(ensured);
                 mgr.setReplyTarget(keyRef.current!, replyTo);
             }
@@ -120,6 +132,15 @@ export const DraftSessionProvider: React.FC<{
             if (!k) return;
             const current = mgr.get(k);
             if (!current) return;
+            if (
+                expectedIdRef.current &&
+                current.idString !== expectedIdRef.current
+            ) {
+                debugLog("[DraftSession] rotate", {
+                    oldDraftId: expectedIdRef.current,
+                    newDraftId: current.idString,
+                });
+            }
             setDraft(current);
         });
         return unsub;
@@ -137,12 +158,18 @@ export const DraftSessionProvider: React.FC<{
     const publish = async () => {
         const k = keyRef.current!;
         try {
+            debugLog("[DraftSession] publish:start", {
+                draftId: draft?.idString,
+            });
             await handleRef.current!.savePending(privateScope);
             await mgr.save(k);
         } catch (error) {
             console.error("Failed to publish draft", error);
         } finally {
             await mgr.publish(k);
+            debugLog("[DraftSession] publish:queued-rotate", {
+                draftId: draft?.idString,
+            });
             // No need to setDraft here; subscription above handles rotation asap.
         }
     };

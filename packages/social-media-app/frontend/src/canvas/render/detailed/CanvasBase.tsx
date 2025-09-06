@@ -293,16 +293,18 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
             );
         });
 
-    return filteredRects.length > 0 ? (
+    const hasChildren = !!props.children;
+    if (!hasChildren && filteredRects.length === 0) {
+        return <></>;
+    }
+    return (
         <div
             className={`flex ${
                 props.config.containerClass
             } ${sizingClassNames} ${props.className ?? ""}`}
         >
-            {renderRects(filteredRects)}
-            {filteredRects.length > 0 ? props.children : null}
+            {filteredRects.length > 0 ? renderRects(filteredRects) : null}
+            {props.children}
         </div>
-    ) : (
-        <></>
     );
 };

@@ -25,6 +25,7 @@ export const SaveButton = ({
             }}
             className={"btn btn-icon btn-icon-md " + className}
             aria-label="Send"
+            data-testid="send-button"
             disabled={isEmpty}
         >
             <Icon size={30} />
