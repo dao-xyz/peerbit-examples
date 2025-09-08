@@ -165,7 +165,7 @@ const _CanvasWrapper = (
         () =>
             debug
                 ? (...args: any[]) => console.log("[Canvas]", ...args)
-                : () => { },
+                : () => {},
         [debug]
     );
 
@@ -210,7 +210,7 @@ const _CanvasWrapper = (
                     before: before.map(toInfo),
                     after: after.map(toInfo),
                 });
-            } catch { }
+            } catch {}
         },
         [debug]
     );
@@ -322,7 +322,7 @@ const _CanvasWrapper = (
                 ),
                 rectKinds: rects.map((r) => r.content?.constructor?.name),
             });
-        } catch { }
+        } catch {}
     }, [derivedIsEmpty, pendingRects, rects]);
 
     // 2b). derived hasTextElement (used to figure out whether to insert a default text box)
@@ -897,7 +897,7 @@ const _CanvasWrapper = (
                 // Ensure indexes are up to date before navigation/reload
                 try {
                     await canvas.nearestScope.reIndexDebouncer.flush();
-                } catch { }
+                } catch {}
                 // No local snapshotting: rely solely on private scope persistence
                 const t1 = performance.now();
                 emitDebugEvent({

@@ -23,7 +23,7 @@ test.describe("Draft recovery", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
-            } catch { }
+            } catch {}
         });
     });
 

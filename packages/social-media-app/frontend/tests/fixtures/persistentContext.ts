@@ -3,7 +3,7 @@ import { chromium, test as base } from "@playwright/test";
 const USER_DATA_DIR = "./.pw-user-data";
 
 export const test = base.extend({
-    context: async ({ }, use) => {
+    context: async ({}, use) => {
         const context = await chromium.launchPersistentContext(USER_DATA_DIR, {
             headless: true,
             viewport: { width: 1280, height: 800 },
