@@ -76,10 +76,16 @@ type IFrameOptions = {
     targetOrigin: string;
 };
 
-export type NetworkOption = {
-    type: "local" | "remote";
-    bootstrap?: (Multiaddr | string)[];
-};
+/**
+ * Network configuration for the node client.
+ *
+ * Prefer the bootstrap form when you want to dial explicit addresses.
+ * If bootstrap is provided, it takes precedence over any implicit defaults.
+ */
+export type NetworkOption =
+    | { type: "local" }
+    | { type: "remote" }
+    | { type?: "explicit"; bootstrap: (Multiaddr | string)[] };
 
 type NodeOptions = {
     type?: "node";
@@ -258,20 +264,20 @@ export const PeerProvider = (options: PeerOptions) => {
                         connectionMonitor: { enabled: false },
                         ...(nodeOptions.network === "local"
                             ? {
-                                connectionGater: {
-                                    denyDialMultiaddr: () => false,
-                                },
-                                transports: [
-                                    webSockets({ filter: filters.all }) /* ,
+                                  connectionGater: {
+                                      denyDialMultiaddr: () => false,
+                                  },
+                                  transports: [
+                                      webSockets({ filter: filters.all }) /* ,
                                     circuitRelayTransport(), */,
-                                ],
-                            }
+                                  ],
+                              }
                             : {
-                                transports: [
-                                    webSockets() /* ,
+                                  transports: [
+                                      webSockets() /* ,
                                     circuitRelayTransport(), */,
-                                ],
-                            }) /* 
+                                  ],
+                              }) /* 
                         services: {
                             pubsub: (c) =>
                                 new DirectSub(c, { canRelayMessage: true }),
@@ -296,17 +302,32 @@ export const PeerProvider = (options: PeerOptions) => {
                             detail: (window as any).__peerInfo,
                         })
                     );
-                } catch { }
+                } catch {}
 
                 setConnectionState("connecting");
 
                 const connectFn = async () => {
                     try {
                         const network = nodeOptions.network;
+
+                        // 1) Explicit bootstrap addresses take precedence
                         if (
+                            typeof network !== "string" &&
+                            (network as any)?.bootstrap &&
+                            (network as any).bootstrap.length
+                        ) {
+                            for (const addr of (network as any).bootstrap as (
+                                | Multiaddr
+                                | string
+                            )[]) {
+                                await newPeer.dial(addr as any);
+                            }
+                        }
+                        // 2) Local development: dial local relay service
+                        else if (
                             network === "local" ||
-                            ((network as NetworkOption).type === "local" &&
-                                !(network as NetworkOption).bootstrap)
+                            (typeof network !== "string" &&
+                                (network as any)?.type === "local")
                         ) {
                             const localAddress =
                                 "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
@@ -315,16 +336,10 @@ export const PeerProvider = (options: PeerOptions) => {
                                 ).text());
                             console.log("Dialing local address", localAddress);
                             await newPeer.dial(localAddress);
-                        } else if (
-                            !network ||
-                            network === "remote" ||
-                            (network.type === "remote" && !network.bootstrap)
-                        ) {
+                        }
+                        // 3) Remote default: use bootstrap service (no explicit bootstrap provided)
+                        else {
                             await newPeer["bootstrap"]?.();
-                        } else {
-                            for (const addr of network.bootstrap!) {
-                                await newPeer.dial(addr);
-                            }
                         }
                         setConnectionState("connected");
                     } catch (err: any) {
@@ -362,7 +377,7 @@ export const PeerProvider = (options: PeerOptions) => {
                             detail: (window as any).__peerInfo,
                         })
                     );
-                } catch { }
+                } catch {}
             }
 
             setPeer(newPeer);

@@ -155,7 +155,6 @@ const networkConfig: NetworkOption =
               type: "local",
           }
         : {
-              type: "remote",
               bootstrap: [
                   "/dns4/a38df1e3d3434aba1dc726964c2601b02d4b1b1e.peerchecker.com/tcp/4003/wss/p2p/12D3KooWGJj8WMFnXydrpjHPctWJim4wfqdEsChRJup5YLrYdWNa",
               ],
@@ -164,16 +163,35 @@ const networkConfig: NetworkOption =
 export const App = () => {
     // Initialize debug console once per app load
     setupPrettyConsole();
+    const params = new URLSearchParams(window.location.search);
+    const flagTrue = (val: string | null) =>
+        val == null || val === "" || val === "true" || val === "1";
+    // Single canonical flag for non-persistent mode
+    const inMemory = flagTrue(params.get("ephemeral"));
+    const bootstrapParam = params.get("bootstrap");
+    const bootstrapAddrs = bootstrapParam
+        ? bootstrapParam
+              .split(",")
+              .map((s) => s.trim())
+              .filter(Boolean)
+        : undefined;
     return (
         <HashRouter basename="/">
             <ErrorProvider>
                 <ThemeProvider>
                     <DebugConfigProvider>
                         <PeerProvider
-                            network={networkConfig}
+                            network={
+                                bootstrapAddrs
+                                    ? ({
+                                          type: "explicit",
+                                          bootstrap: bootstrapAddrs,
+                                      } as any)
+                                    : networkConfig
+                            }
                             iframe={{ type: "proxy", targetOrigin: "*" }}
                             waitForConnnected={false}
-                            inMemory={false}
+                            inMemory={inMemory}
                             singleton
                         >
                             <IdentitiesProvider>
