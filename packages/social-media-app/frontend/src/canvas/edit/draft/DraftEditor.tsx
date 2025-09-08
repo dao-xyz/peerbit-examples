@@ -9,7 +9,7 @@ import { PrivateScope } from "../../useScope";
 const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({ enabled }) => {
     const session = useDraftSession(); // for DraftManager.saveDebounced()
     const privateScope = PrivateScope.useScope();
-    const { subscribeContentChange, savePending } = useCanvas();
+    const { subscribeContentChange, savePending, pendingRects } = useCanvas();
 
     const flush = useMemo(
         () =>
@@ -37,6 +37,33 @@ const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({ enabled }) => {
             if (!el.content.isEmpty) flush();
         });
     }, [enabled, subscribeContentChange, flush]);
+
+    // Flush on unmount (e.g., reload) if there are pending changes
+    useEffect(() => {
+        return () => {
+            if (!enabled || !privateScope) return;
+            savePending(privateScope).catch(() => void 0);
+        };
+    }, [enabled, privateScope, savePending]);
+
+    // Ensure we don't miss the initial save if privateScope becomes ready after first edits
+    useEffect(() => {
+        if (!enabled || !privateScope) return;
+        const hasNonEmptyPendings = pendingRects?.some(
+            (p) => !p.content.isEmpty
+        );
+        if (hasNonEmptyPendings) {
+            (async () => {
+                try {
+                    await savePending(privateScope);
+                    session.saveDebounced();
+                } catch (e) {
+                    console.error("AutoSaveBridge: initial flush failed", e);
+                }
+            })();
+        }
+        // re-check when scope changes or pendings length changes
+    }, [enabled, privateScope?.address, pendingRects?.length]);
 
     return null;
 };

@@ -16,6 +16,7 @@ import {
 import { ChangeCallback } from "./types";
 import { sha256Sync } from "@peerbit/crypto";
 import { useCanvas } from "../../canvas/CanvasWrapper";
+import { PrivateScope } from "../../canvas/useScope";
 import { useAIReply } from "../../ai/AIReployContext";
 import { usePeer } from "@peerbit/react";
 import { FaCheck } from "react-icons/fa";
@@ -58,7 +59,8 @@ export const MarkdownContent = ({
     // Local state for the markdown text.
     const [text, setText] = useState(content.text);
 
-    const { canvas, placeholder, classNameContent } = useCanvas();
+    const { canvas, placeholder, classNameContent, savePending } = useCanvas();
+    const privateScope = PrivateScope.useScope();
     const { suggest, isReady } = useAIReply();
     const { peer } = usePeer();
     const [loadingSuggestedReply, setLoadingSuggestedReply] = useState(false);
@@ -84,9 +86,25 @@ export const MarkdownContent = ({
         )
     ).current;
 
+    // Debounced saver to persist text changes deterministically
+    const debouncedSave = useRef(
+        debounce(async () => {
+            try {
+                if (privateScope) {
+                    await savePending(privateScope);
+                }
+            } catch (e) {
+                console.error("MarkdownContent: save failed", e);
+            }
+        }, 200)
+    ).current;
+
     useEffect(() => {
-        return () => debouncedPropChange.cancel();
-    }, [debouncedPropChange]);
+        return () => {
+            debouncedPropChange.cancel();
+            debouncedSave.cancel();
+        };
+    }, [debouncedPropChange, debouncedSave]);
 
     //   Helper: is the caret at the logical end?
     const caretIsAtEnd = () =>
@@ -327,6 +345,9 @@ export const MarkdownContent = ({
         setText(newText);
         autoResize();
         debouncedPropChange(newText);
+        if (editable && newText.trim().length > 0) {
+            debouncedSave();
+        }
     };
 
     const handleBlur = () => {

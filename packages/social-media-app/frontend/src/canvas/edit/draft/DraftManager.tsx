@@ -154,14 +154,24 @@ export const DraftManagerProvider: React.FC<{
         }
     };
 
+    // Wait deterministically for private scope to be ready
+    const waitForPrivateScope = async (timeoutMs = 5000) => {
+        const start = performance.now();
+        while (performance.now() - start < timeoutMs) {
+            if (privateScope?.address) return privateScope;
+            await new Promise((r) => setTimeout(r, 60));
+        }
+        throw new Error("Private scope not ready");
+    };
+
     /** Create a persisted draft, but flag it active *before* persistence hits indexes. */
     const createDraftPersisted = async (options?: {
         replyTo?: CanvasIx;
         id?: Uint8Array;
     }): Promise<CanvasIx> => {
         if (!peer) throw new Error("Peer not ready");
-        const home: Scope | undefined = privateScope || publicScope;
-        if (!home) throw new Error("No available scope");
+        // Drafts must live in PRIVATE scope only
+        const home: Scope = await waitForPrivateScope();
 
         // Pre-reserve id so lists filter it out immediately
         const id = options?.id ?? randomBytes(32);
@@ -202,17 +212,22 @@ export const DraftManagerProvider: React.FC<{
         parent: CanvasIx
     ): Promise<CanvasIx | undefined> => {
         try {
+            // Ensure private scope is ready
+            const home = await waitForPrivateScope().catch(() => undefined);
+            // Open parent in PRIVATE scope context to ensure match
+            const parentInPrivate = home
+                ? await home.openWithSameSettings(parent)
+                : parent;
             const children: CanvasIx[] = await privateScope.replies.index
-                .iterate({ query: getImmediateRepliesQuery(parent) })
+                .iterate({ query: getImmediateRepliesQuery(parentInPrivate) })
                 .all();
-            const mine = children.filter((c) =>
-                c.publicKey.equals(peer.identity.publicKey)
-            );
-            mine.sort(
+            // In private scope, replies are authored by the current user; avoid strict key match to prevent
+            // recovery failures if the identity re-initializes between reloads.
+            children.sort(
                 (a, b) =>
                     Number(a.__context.modified) - Number(b.__context.modified)
             );
-            const latest = mine.at(-1);
+            const latest = children.at(-1);
             log("recoverLatestForParent ->", latest?.idString);
             return latest;
         } catch (e) {
@@ -224,6 +239,7 @@ export const DraftManagerProvider: React.FC<{
     const api = useMemo<
         DraftAPI & { saveRaw: (bucket: string) => Promise<void> }
     >(() => {
+        // no localStorage draft pointers; rely on private scope only
         const API: DraftAPI & { saveRaw: (bucket: string) => Promise<void> } = {
             async ensure(args) {
                 if ("replyTo" in args && args.replyTo) {
@@ -282,6 +298,8 @@ export const DraftManagerProvider: React.FC<{
 
             async ensureForParent(parent, key) {
                 const pid = parent.idString;
+                captureEvents &&
+                    logEvt("ensureForParent:start", { parentId: pid });
 
                 const existingBucket = parentIndex.current.get(pid);
                 if (existingBucket) {
@@ -293,7 +311,14 @@ export const DraftManagerProvider: React.FC<{
                 if (inflight) return inflight;
 
                 const p = (async () => {
-                    const recovered = await recoverLatestForParent(parent);
+                    // Deterministically wait for private scope and its latest reply (up to 4s)
+                    let recovered = await recoverLatestForParent(parent);
+                    captureEvents &&
+                        logEvt("recover:result", {
+                            parentId: pid,
+                            recoveredId: recovered?.idString,
+                        });
+                    // no pointer hinting
                     if (recovered) {
                         const bucket =
                             existingBucket ??
@@ -315,6 +340,12 @@ export const DraftManagerProvider: React.FC<{
                         parentIndex.current.set(pid, bucket);
                         primeDebouncer(bucket, API);
                         notify();
+                        captureEvents &&
+                            logEvt("ensureForParent:recovered", {
+                                parentId: pid,
+                                bucket,
+                                draftId: recovered.idString,
+                            });
                         log("ensure(parent): recovered", {
                             parentId: pid,
                             bucket,
@@ -346,11 +377,21 @@ export const DraftManagerProvider: React.FC<{
                     parentIndex.current.set(pid, bucket);
                     primeDebouncer(bucket, API);
                     notify();
+                    captureEvents &&
+                        logEvt("ensureForParent:created", {
+                            parentId: pid,
+                            bucket,
+                            draftId: created.idString,
+                        });
                     log("ensure(parent): created", {
                         parentId: pid,
                         bucket,
                         draftId: created.idString,
                     });
+                    // no pointer persistence
+
+                    // No background switching; decisions are made before creation
+
                     return created;
                 })().finally(() => {
                     if (inflightEnsureByParent.current.get(pid) === p) {
@@ -411,6 +452,13 @@ export const DraftManagerProvider: React.FC<{
                         });
 
                         const toPublish = rec.canvas;
+                        captureEvents &&
+                            logEvt("publish:rotate", {
+                                bucket,
+                                oldDraftId: toPublish.idString,
+                                newDraftId: fresh.idString,
+                                parentId: rec.replyTo?.idString,
+                            });
                         log("publish: rotate", {
                             bucket,
                             oldDraftId: toPublish.idString,
@@ -419,6 +467,7 @@ export const DraftManagerProvider: React.FC<{
                         });
                         retireActiveSlowly(toPublish.idString);
                         records.current.set(bucket, { ...rec, canvas: fresh });
+                        // no pointer persistence
 
                         // flush any pending local save
                         debouncers.current.get(bucket)?.flush?.();
@@ -481,6 +530,7 @@ export const DraftManagerProvider: React.FC<{
             async save(key) {
                 const bucket = toBucket(key);
                 await API.saveRaw(bucket);
+                // no pointer persistence on save
             },
 
             saveDebounced(key) {

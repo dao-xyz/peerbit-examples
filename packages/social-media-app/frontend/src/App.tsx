@@ -46,7 +46,7 @@ const heightStyle: { [expanded: string]: string } = {
 };
 
 export const Content = () => {
-    const { error: peerError } = usePeer();
+    const { error: peerError, peer, persisted } = usePeer();
     const { showError } = useErrorDialog();
 
     useEffect(() => {
@@ -86,6 +86,20 @@ export const Content = () => {
             setHeaderHeight(headerRef.current.offsetHeight);
         }
     }, []);
+
+    // Expose peer identity & persistence info for tests/debugging across reloads
+    useEffect(() => {
+        try {
+            const peerHash = peer?.identity?.publicKey?.hashcode?.();
+            if (!peerHash) return;
+            (window as any).__peerInfo = { peerHash, persisted };
+            window.dispatchEvent(
+                new CustomEvent("peer:ready", {
+                    detail: (window as any).__peerInfo,
+                })
+            );
+        } catch {}
+    }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
     return (
         <CustomizationProvider>

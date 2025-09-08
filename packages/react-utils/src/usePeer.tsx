@@ -177,6 +177,8 @@ export const PeerProvider = (options: PeerOptions) => {
         const fn = async () => {
             await sodium.ready;
             let newPeer: ProgramClient;
+            // Track resolved persistence status during client creation
+            let persistedResolved = false;
 
             if (nodeOptions.type !== "proxy") {
                 const releaseFirstLock = cookiesWhereClearedJustNow();
@@ -231,6 +233,7 @@ export const PeerProvider = (options: PeerOptions) => {
                 ) {
                     const persisted = await navigator.storage.persist();
                     setPersisted(persisted);
+                    persistedResolved = persisted;
                     if (!persisted) {
                         setPersisted(false);
                         console.error(
@@ -255,20 +258,20 @@ export const PeerProvider = (options: PeerOptions) => {
                         connectionMonitor: { enabled: false },
                         ...(nodeOptions.network === "local"
                             ? {
-                                  connectionGater: {
-                                      denyDialMultiaddr: () => false,
-                                  },
-                                  transports: [
-                                      webSockets({ filter: filters.all }) /* ,
+                                connectionGater: {
+                                    denyDialMultiaddr: () => false,
+                                },
+                                transports: [
+                                    webSockets({ filter: filters.all }) /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }
+                                ],
+                            }
                             : {
-                                  transports: [
-                                      webSockets() /* ,
+                                transports: [
+                                    webSockets() /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }) /* 
+                                ],
+                            }) /* 
                         services: {
                             pubsub: (c) =>
                                 new DirectSub(c, { canRelayMessage: true }),
@@ -283,6 +286,17 @@ export const PeerProvider = (options: PeerOptions) => {
                     network:
                         nodeOptions.network === "local" ? "local" : "remote",
                 });
+                try {
+                    (window as any).__peerInfo = {
+                        peerHash: newPeer?.identity.publicKey.hashcode(),
+                        persisted: persistedResolved,
+                    };
+                    window.dispatchEvent(
+                        new CustomEvent("peer:ready", {
+                            detail: (window as any).__peerInfo,
+                        })
+                    );
+                } catch { }
 
                 setConnectionState("connecting");
 
@@ -338,6 +352,17 @@ export const PeerProvider = (options: PeerOptions) => {
                 newPeer = await createClient(
                     (nodeOptions as IFrameOptions).targetOrigin
                 );
+                try {
+                    (window as any).__peerInfo = {
+                        peerHash: newPeer?.identity.publicKey.hashcode(),
+                        persisted: false,
+                    };
+                    window.dispatchEvent(
+                        new CustomEvent("peer:ready", {
+                            detail: (window as any).__peerInfo,
+                        })
+                    );
+                } catch { }
             }
 
             setPeer(newPeer);

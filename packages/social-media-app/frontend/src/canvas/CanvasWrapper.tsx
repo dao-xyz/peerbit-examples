@@ -46,6 +46,7 @@ import { useRegisterCanvasHandle } from "./edit/CanvasHandleRegistry.js";
 import { PrivateScope, PublicScope } from "./useScope.js";
 import { useInitializeCanvas } from "./useInitializedCanvas.js";
 import { useSyncedStateRef } from "../utils/useSyncedStateRef.js";
+import { emitDebugEvent } from "../debug/debug.js";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Public types
@@ -164,7 +165,7 @@ const _CanvasWrapper = (
         () =>
             debug
                 ? (...args: any[]) => console.log("[Canvas]", ...args)
-                : () => {},
+                : () => { },
         [debug]
     );
 
@@ -209,7 +210,7 @@ const _CanvasWrapper = (
                     before: before.map(toInfo),
                     after: after.map(toInfo),
                 });
-            } catch {}
+            } catch { }
         },
         [debug]
     );
@@ -321,7 +322,7 @@ const _CanvasWrapper = (
                 ),
                 rectKinds: rects.map((r) => r.content?.constructor?.name),
             });
-        } catch {}
+        } catch { }
     }, [derivedIsEmpty, pendingRects, rects]);
 
     // 2b). derived hasTextElement (used to figure out whether to insert a default text box)
@@ -353,6 +354,7 @@ const _CanvasWrapper = (
         if (idsInQuery.size === 0) return;
         setPendingRects((prev) => {
             const next = prev.filter((p) => !idsInQuery.has(p.idString));
+            if (next.length === prev.length) return prev; // avoid no-op updates
             logPendingDiff(
                 prev as any,
                 next as any,
@@ -361,6 +363,44 @@ const _CanvasWrapper = (
             return next;
         });
     }, [rects]);
+
+    // If a non-empty text rect exists (recovered or pending), drop any empty pending text placeholders
+    useEffect(() => {
+        if (pendingRects.length === 0) return;
+        const hasNonEmptyText =
+            rects.some(
+                (r) =>
+                    r.content instanceof StaticContent &&
+                    r.content.content instanceof StaticMarkdownText &&
+                    r.content.content.isEmpty === false
+            ) ||
+            pendingRects.some(
+                (p) =>
+                    p.content instanceof StaticContent &&
+                    p.content.content instanceof StaticMarkdownText &&
+                    p.content.content.isEmpty === false
+            );
+
+        if (!hasNonEmptyText) return;
+
+        setPendingRects((prev) => {
+            const next = prev.filter(
+                (p) =>
+                    !(
+                        p.content instanceof StaticContent &&
+                        p.content.content instanceof StaticMarkdownText &&
+                        p.content.content.isEmpty === true
+                    )
+            );
+            if (next.length === prev.length) return prev; // avoid no-op updates
+            logPendingDiff(
+                prev as any,
+                next as any,
+                "remove-empty-text-placeholder-because-non-empty-exists"
+            );
+            return next;
+        });
+    }, [rects, pendingRects]);
 
     // subscription registry
     const contentChangeSubscribers = useRef(
@@ -675,6 +715,14 @@ const _CanvasWrapper = (
                 added: newElements.length,
                 kinds: newElements.map((e) => e.content?.constructor?.name),
             });
+            // Persist immediately if drafted pending
+            try {
+                if (options?.pending) {
+                    await savePending(privateScope ?? canvasDB.nearestScope);
+                }
+            } catch (e) {
+                console.error("insertImage: immediate save failed", e);
+            }
             onContentChange?.(newElements);
         } catch (e) {
             showError({ message: "Failed to insert image", error: e });
@@ -781,7 +829,7 @@ const _CanvasWrapper = (
 
     // ── stable savePending that reads latest values via refs
     const savePending = useCallback(
-        async (scope: Scope) => {
+        async (_scope: Scope) => {
             const canvas = canvasRef.current;
             const pendings = pendingRectsRef.current;
             debugLog(
@@ -835,8 +883,30 @@ const _CanvasWrapper = (
 
                 // Optionally: optimistic clear to avoid double-saving on quick subsequent calls
                 // setPendingRects((prev) => prev.filter(p => !toSave.some(s => s.idString === p.idString)));
-
-                await Promise.all(toSave.map((x) => scope.elements.put(x)));
+                const t0 = performance.now();
+                emitDebugEvent({
+                    source: "CanvasWrapper",
+                    name: "save:start",
+                    canvasId: canvas.idString,
+                    count: toSave.length,
+                });
+                // Persist through the Canvas DB so ownership/indexing is correct
+                for (const el of toSave) {
+                    await canvas.createElement(el);
+                }
+                // Ensure indexes are up to date before navigation/reload
+                try {
+                    await canvas.nearestScope.reIndexDebouncer.flush();
+                } catch { }
+                // No local snapshotting: rely solely on private scope persistence
+                const t1 = performance.now();
+                emitDebugEvent({
+                    source: "CanvasWrapper",
+                    name: "save:done",
+                    canvasId: canvas.idString,
+                    count: toSave.length,
+                    ms: Math.round(t1 - t0),
+                });
                 debugLog("Saved", toSave.length, "rects");
                 return toSave;
             } catch (error) {
@@ -889,6 +959,8 @@ const _CanvasWrapper = (
         canvasDB?.idString,
         publicScope?.idString,
     ]);
+
+    // No local hydration; empty UI will be decided by TextCanvas once queries are ready
 
     const _onContentChange = async (el: Element) => {
         if (
