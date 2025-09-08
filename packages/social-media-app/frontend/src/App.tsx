@@ -165,7 +165,8 @@ export const App = () => {
     setupPrettyConsole();
     const params = new URLSearchParams(window.location.search);
     const flagTrue = (val: string | null) =>
-        val == null || val === "" || val === "true" || val === "1";
+        (val == null || val === "") ? undefined :
+            (val === "true" || val === "1");
     // Single canonical flag for non-persistent mode
     const inMemory = flagTrue(params.get("ephemeral"));
     const bootstrapParam = params.get("bootstrap");
@@ -175,6 +176,7 @@ export const App = () => {
             .map((s) => s.trim())
             .filter(Boolean)
         : undefined;
+
     return (
         <HashRouter basename="/">
             <ErrorProvider>
