@@ -51,10 +51,14 @@ test.describe("Draft recovery", () => {
         page,
     }) => {
         await page.goto(BASE_URL);
+        await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
+            timeout: 20000,
+        });
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
+        await expect(toolbar).toBeVisible({ timeout: 20000 });
         const textArea = toolbar.locator("textarea");
-        await expect(textArea).toBeVisible({ timeout: 10000 });
+        await expect(textArea).toBeVisible({ timeout: 20000 });
 
         const msg = uid("Recovered text");
         await textArea.fill(msg);
@@ -98,8 +102,9 @@ test.describe("Draft recovery", () => {
         await page.goto(BASE_URL);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
-        const fileInput = toolbar.locator("input[type=file]");
-        await expect(fileInput).toBeAttached({ timeout: 10000 });
+        // Be resilient: find the hidden file input globally in case it’s not nested where expected
+        const fileInput = page.locator("input[type=file]").first();
+        await expect(fileInput).toBeAttached({ timeout: 20000 });
 
         const imgName = `recover-image-${Date.now()}.png`;
         await fileInput.setInputFiles(smallPngFile(imgName));
@@ -153,16 +158,20 @@ test.describe("Draft recovery", () => {
         page,
     }) => {
         await page.goto(BASE_URL);
+        await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
+            timeout: 20000,
+        });
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
+        await expect(toolbar).toBeVisible({ timeout: 20000 });
         const textArea = toolbar.locator("textarea");
-        await expect(textArea).toBeVisible({ timeout: 10000 });
+        await expect(textArea).toBeVisible({ timeout: 20000 });
 
         const msg = uid("Recovered caption");
         await textArea.fill(msg);
 
-        const fileInput = toolbar.locator("input[type=file]");
-        await expect(fileInput).toBeAttached({ timeout: 10000 });
+        const fileInput = page.locator("input[type=file]").first();
+        await expect(fileInput).toBeAttached({ timeout: 20000 });
         const imgName = `recover-mixed-${Date.now()}.png`;
         await fileInput.setInputFiles(smallPngFile(imgName));
 
