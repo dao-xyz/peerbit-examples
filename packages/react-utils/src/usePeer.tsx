@@ -264,20 +264,20 @@ export const PeerProvider = (options: PeerOptions) => {
                         connectionMonitor: { enabled: false },
                         ...(nodeOptions.network === "local"
                             ? {
-                                  connectionGater: {
-                                      denyDialMultiaddr: () => false,
-                                  },
-                                  transports: [
-                                      webSockets({ filter: filters.all }) /* ,
+                                connectionGater: {
+                                    denyDialMultiaddr: () => false,
+                                },
+                                transports: [
+                                    webSockets({ filter: filters.all }) /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }
+                                ],
+                            }
                             : {
-                                  transports: [
-                                      webSockets() /* ,
+                                transports: [
+                                    webSockets() /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }) /* 
+                                ],
+                            }) /* 
                         services: {
                             pubsub: (c) =>
                                 new DirectSub(c, { canRelayMessage: true }),
@@ -302,7 +302,7 @@ export const PeerProvider = (options: PeerOptions) => {
                             detail: (window as any).__peerInfo,
                         })
                     );
-                } catch {}
+                } catch { }
 
                 setConnectionState("connecting");
 
@@ -377,7 +377,7 @@ export const PeerProvider = (options: PeerOptions) => {
                             detail: (window as any).__peerInfo,
                         })
                     );
-                } catch {}
+                } catch { }
             }
 
             setPeer(newPeer);

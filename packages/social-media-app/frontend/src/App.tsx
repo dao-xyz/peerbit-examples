@@ -98,7 +98,7 @@ export const Content = () => {
                     detail: (window as any).__peerInfo,
                 })
             );
-        } catch {}
+        } catch { }
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
     return (
@@ -118,7 +118,7 @@ export const Content = () => {
                                             className={clsx(
                                                 "sticky top-0 inset-x-0  z-30",
                                                 heightStyle[
-                                                    String(headerVisible)
+                                                String(headerVisible)
                                                 ]
                                             )} /* transition-transform duration-800 ease-in-out */
                                             style={
@@ -152,13 +152,13 @@ export const Content = () => {
 const networkConfig: NetworkOption =
     import.meta.env.MODE === "development"
         ? {
-              type: "local",
-          }
+            type: "local",
+        }
         : {
-              bootstrap: [
-                  "/dns4/a38df1e3d3434aba1dc726964c2601b02d4b1b1e.peerchecker.com/tcp/4003/wss/p2p/12D3KooWGJj8WMFnXydrpjHPctWJim4wfqdEsChRJup5YLrYdWNa",
-              ],
-          };
+            bootstrap: [
+                "/dns4/a38df1e3d3434aba1dc726964c2601b02d4b1b1e.peerchecker.com/tcp/4003/wss/p2p/12D3KooWGJj8WMFnXydrpjHPctWJim4wfqdEsChRJup5YLrYdWNa",
+            ],
+        };
 
 export const App = () => {
     // Initialize debug console once per app load
@@ -171,9 +171,9 @@ export const App = () => {
     const bootstrapParam = params.get("bootstrap");
     const bootstrapAddrs = bootstrapParam
         ? bootstrapParam
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean)
         : undefined;
     return (
         <HashRouter basename="/">
@@ -184,9 +184,9 @@ export const App = () => {
                             network={
                                 bootstrapAddrs
                                     ? ({
-                                          type: "explicit",
-                                          bootstrap: bootstrapAddrs,
-                                      } as any)
+                                        type: "explicit",
+                                        bootstrap: bootstrapAddrs,
+                                    } as any)
                                     : networkConfig
                             }
                             iframe={{ type: "proxy", targetOrigin: "*" }}
