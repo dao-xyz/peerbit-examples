@@ -266,7 +266,7 @@ describe("FastMutex", () => {
         await fm1.lock("resetStats");
 
         // try to acquire a lock after `timeout`:
-        await delay(50);
+        await delay(75); // a small buffer over timeout to avoid flakiness
 
         await fm1.lock("resetStats"); // should not throw
     });

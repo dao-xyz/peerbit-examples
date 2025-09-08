@@ -185,6 +185,8 @@ export const PeerProvider = (options: PeerOptions) => {
             let newPeer: ProgramClient;
             // Track resolved persistence status during client creation
             let persistedResolved = false;
+            // Controls how long we keep locks alive; flipped to false on close/hidden
+            const keepAliveRef = { current: true } as { current: boolean };
 
             if (nodeOptions.type !== "proxy") {
                 const releaseFirstLock = cookiesWhereClearedJustNow();
@@ -199,13 +201,30 @@ export const PeerProvider = (options: PeerOptions) => {
                     try {
                         const lockKey = localId + "-singleton";
                         subscribeToUnload(function () {
+                            // Immediate release on page close
+                            keepAliveRef.current = false;
                             mutex.release(lockKey);
                         });
+                        // Also release when page is hidden to reduce flakiness between sequential tests
+                        const onVisibility = () => {
+                            if (document.visibilityState === "hidden") {
+                                keepAliveRef.current = false;
+                                // Mark expired and remove proactively
+                                try {
+                                    mutex.release(lockKey);
+                                } catch {}
+                            }
+                        };
+                        document.addEventListener(
+                            "visibilitychange",
+                            onVisibility
+                        );
                         if (isInStandaloneMode()) {
                             // PWA issue fix (? TODO is this needed ?
+                            keepAliveRef.current = false;
                             mutex.release(lockKey);
                         }
-                        await mutex.lock(lockKey, () => true, {
+                        await mutex.lock(lockKey, () => keepAliveRef.current, {
                             replaceIfSameClient: true,
                         });
                     } catch (error) {
@@ -220,11 +239,17 @@ export const PeerProvider = (options: PeerOptions) => {
                 if (nodeOptions.keypair) {
                     nodeId = nodeOptions.keypair;
                 } else {
-                    const kp = await getFreeKeypair("", mutex, undefined, {
-                        releaseFirstLock,
-                        releaseLockIfSameId: true,
-                    });
+                    const kp = await getFreeKeypair(
+                        "",
+                        mutex,
+                        () => keepAliveRef.current,
+                        {
+                            releaseFirstLock,
+                            releaseLockIfSameId: true,
+                        }
+                    );
                     subscribeToUnload(function () {
+                        keepAliveRef.current = false;
                         mutex.release(kp.path);
                     });
                     nodeId = kp.key;
@@ -354,10 +379,32 @@ export const PeerProvider = (options: PeerOptions) => {
                     }
                 };
 
+                const perfEnabled = new URLSearchParams(
+                    window.location.search
+                ).get("perf");
+                const t0 = performance.now();
+                const marks: Record<string, number> = {};
+                const perfMark = (label: string) => {
+                    marks[label] = performance.now() - t0;
+                };
+
                 console.log("Bootstrap start...");
-                const promise = connectFn();
+                const promise = connectFn().then(() => {
+                    perfMark("dialComplete");
+                });
                 promise.then(() => {
                     console.log("Bootstrap done");
+                    try {
+                        if (perfEnabled) {
+                            const payload = { ...marks } as any;
+                            console.info("[Perf] peer bootstrap", payload);
+                            window.dispatchEvent(
+                                new CustomEvent("perf:peer", {
+                                    detail: payload,
+                                })
+                            );
+                        }
+                    } catch {}
                 });
                 if (nodeOptions.waitForConnnected !== false) {
                     await promise;
