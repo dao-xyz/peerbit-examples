@@ -19,6 +19,7 @@ import {
     IntegerCompare,
     Or,
     Query,
+    QueryOptions,
     SearchRequest,
     StringMatch,
     StringMatchMethod,
@@ -409,7 +410,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             approximate: true,
         });
         return BigInt(n);
-    } catch { }
+    } catch {}
 
     // Fallback: aggregate children’s cached totals (Σ (1 + childDeep))
     try {
@@ -450,7 +451,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             }
         }
         return total;
-    } catch { }
+    } catch {}
 
     // Last resort: BFS traversal (with loop guards)
     return await canvas.countRepliesBFS({ immediate: false });
@@ -483,13 +484,13 @@ export const getImmediateRepliesQueryByDepth = (
     parentId: Uint8Array,
     parentDepth: number
 ) => [
-        new ByteMatchQuery({ key: "path", value: parentId }),
-        new IntegerCompare({
-            key: "pathDepth",
-            value: parentDepth + 1,
-            compare: Compare.Equal,
-        }),
-    ];
+    new ByteMatchQuery({ key: "path", value: parentId }),
+    new IntegerCompare({
+        key: "pathDepth",
+        value: parentDepth + 1,
+        compare: Compare.Equal,
+    }),
+];
 
 // If you already fetched the parent indexed doc, you can write:
 export const getImmediateRepliesQuery = (
@@ -522,7 +523,7 @@ export const getQualityEqualsQuery = (quality: number) => {
     ];
 };
 
-export const getOwnedElementsQuery = (to: Canvas) => {
+export const getOwnedElementsQuery = (to: { id: Uint8Array }) => {
     return [
         new ByteMatchQuery({
             key: "canvasId",
@@ -906,8 +907,8 @@ async function unlink(
     const shouldDelete: (l: Link) => boolean = ks.includes("all")
         ? anyKind
         : (l) =>
-            (ks.includes("reply") && isReply(l)) ||
-            (ks.includes("view") && isView(l));
+              (ks.includes("reply") && isReply(l)) ||
+              (ks.includes("view") && isView(l));
 
     // 1) remove mirrors first (parent + any extra scopes)
     for (const s of mirrorScopes) {
@@ -1071,7 +1072,7 @@ async function deleteChildLinksForCanvasInScope(scope: Scope, canvas: Canvas) {
     for (const l of links) await scope.links.del(l.id);
 }
 
-export abstract class CanvasMessage { }
+export abstract class CanvasMessage {}
 
 @variant(0)
 export class ReplyingInProgresss extends CanvasMessage {
@@ -1103,7 +1104,7 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
 
 /* -------------- STYLING ------------------ */
 
-export abstract class AbstractBackground { }
+export abstract class AbstractBackground {}
 
 @variant(0)
 export class ModedBackground {
@@ -1397,9 +1398,9 @@ export class Link<TKind extends LinkKind = LinkKind> {
         const enc = (r: NodeRef) =>
             r instanceof ScopedRef
                 ? concat([
-                    new TextEncoder().encode(r.scope.address),
-                    r.canvasId,
-                ])
+                      new TextEncoder().encode(r.scope.address),
+                      r.canvasId,
+                  ])
                 : (r as LocalRef).canvasId;
         return sha256Sync(
             concat([new Uint8Array([tag]), enc(parent), enc(child)])
@@ -1845,7 +1846,7 @@ export class Scope extends Program<ScopeArgs> {
             topic: sha256Base64Sync(
                 concat([this.id, new TextEncoder().encode("messages")])
             ),
-            responseHandler: async () => { }, // need an empty response handle to make response events to emit TODO fix this?
+            responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
         });
     }
 
@@ -1863,9 +1864,9 @@ export class Scope extends Program<ScopeArgs> {
                 },
             })
             .all()) as WithIndexedContext<
-                BasicVisualization,
-                IndexedVisualization
-            >[];
+            BasicVisualization,
+            IndexedVisualization
+        >[];
 
         if (!list.length) return null;
 
@@ -1882,7 +1883,7 @@ export class Scope extends Program<ScopeArgs> {
                 if (!equals(v.id, preferred.id)) {
                     try {
                         await this.visualizations.del(v.id);
-                    } catch { }
+                    } catch {}
                 }
             }
         }
@@ -2039,13 +2040,13 @@ export class Scope extends Program<ScopeArgs> {
             const dst = existing
                 ? await dest.openWithSameSettings(existing)
                 : new Canvas({
-                    id: src.id,
-                    publicKey: dest.node.identity.publicKey,
-                    selfScope:
-                        updateHome === "set"
-                            ? new AddressReference({ address: dest.address })
-                            : src.selfScope,
-                });
+                      id: src.id,
+                      publicKey: dest.node.identity.publicKey,
+                      selfScope:
+                          updateHome === "set"
+                              ? new AddressReference({ address: dest.address })
+                              : src.selfScope,
+                  });
 
             const created = !existing;
             if (!existing) {
@@ -2060,15 +2061,15 @@ export class Scope extends Program<ScopeArgs> {
             // (debug) count elements owned by dst in dest scope before copy
             const preIds = debug
                 ? (
-                    await dest.elements.index
-                        .iterate(
-                            { query: getOwnedByCanvasQuery(dst) },
-                            { resolve: false }
-                        )
-                        .all()
-                )
-                    .map((e) => e.idString)
-                    .sort()
+                      await dest.elements.index
+                          .iterate(
+                              { query: getOwnedByCanvasQuery(dst) },
+                              { resolve: false }
+                          )
+                          .all()
+                  )
+                      .map((e) => e.idString)
+                      .sort()
                 : undefined;
 
             // Copy payload over
@@ -2122,15 +2123,15 @@ export class Scope extends Program<ScopeArgs> {
             // (debug) count elements owned by dst in dest scope after copy
             const postIds = debug
                 ? (
-                    await dest.elements.index
-                        .iterate(
-                            { query: getOwnedByCanvasQuery(dst) },
-                            { resolve: false }
-                        )
-                        .all()
-                )
-                    .map((e) => e.idString)
-                    .sort()
+                      await dest.elements.index
+                          .iterate(
+                              { query: getOwnedByCanvasQuery(dst) },
+                              { resolve: false }
+                          )
+                          .all()
+                  )
+                      .map((e) => e.idString)
+                      .sort()
                 : undefined;
 
             if (debug) {
@@ -2376,31 +2377,84 @@ export class Scope extends Program<ScopeArgs> {
                 if (!equals(v.id, canonicalId)) {
                     try {
                         await this.visualizations.del(v.id);
-                    } catch { }
+                    } catch {}
                 }
             }
         }
     }
 
-    async createContext(canvas: Canvas): Promise<string> {
-        const elements = await this.elements.index
-            .iterate(
-                { query: getOwnedElementsQuery(canvas) },
-                {
-                    resolve: false,
-                    local: true,
-                    remote: { strategy: "fallback", timeout: 2e4 },
-                }
-            )
+    async createContext(
+        canvas:
+            | Canvas
+            | WithIndexedContext<Canvas, IndexableCanvas>
+            | IndexableCanvas,
+        opts?: { localOnly?: boolean; timeoutMs?: number }
+    ): Promise<string> {
+        // Helper: get expected element count from an indexed row if available
+        const expectedCount = (() => {
+            const anyCanvas = canvas as any;
+            if (anyCanvas instanceof IndexableCanvas) {
+                return Number(anyCanvas.elements);
+            }
+            if (anyCanvas && anyCanvas.__indexed instanceof IndexableCanvas) {
+                return Number(anyCanvas.__indexed.elements);
+            }
+            return undefined;
+        })();
+
+        const iterateOptsBase: QueryOptions<false, any, false> = {
+            resolve: false,
+            local: true,
+            remote: false,
+        };
+
+        // First pass: local-only for performance
+        let elements = await this.elements.index
+            .iterate({ query: getOwnedElementsQuery(canvas) }, iterateOptsBase)
             .all();
+
+        // If caller requires completeness and we know the expected count, optionally try a bounded remote fallback
+        if (
+            !opts?.localOnly &&
+            expectedCount != null &&
+            elements.length < expectedCount
+        ) {
+            // Try a bounded remote fallback fetch once
+            const iterateWithRemote: QueryOptions<false, any, false> = {
+                resolve: false,
+                local: true,
+                remote: {
+                    strategy: "fallback",
+                    timeout: opts?.timeoutMs ?? 2000,
+                },
+            };
+            elements = await this.elements.index
+                .iterate(
+                    { query: getOwnedElementsQuery(canvas) },
+                    iterateWithRemote
+                )
+                .all();
+
+            // If still incomplete, poll until background prefetch warms up or timeout
+            const deadline = Date.now() + (opts?.timeoutMs ?? 2000);
+            while (elements.length < expectedCount && Date.now() < deadline) {
+                await new Promise((r) => setTimeout(r, 50));
+                elements = await this.elements.index
+                    .iterate(
+                        { query: getOwnedElementsQuery(canvas) },
+                        iterateWithRemote
+                    )
+                    .all();
+            }
+        }
+
+        // Build string context from available elements
         let concat = "";
         for (const element of elements) {
-            if (element.type !== "canvas") {
-                if (concat.length > 0) {
-                    concat += "\n";
-                }
-                concat += element.content;
+            if (concat.length > 0) {
+                concat += "\n";
             }
+            concat += element.content;
         }
         return concat;
     }
@@ -2429,13 +2483,14 @@ export class Scope extends Program<ScopeArgs> {
     async getOwnedElements(
         canvas: Canvas
     ): Promise<WithIndexedContext<Element, IndexableElement>[]> {
+        // Local-only to avoid remote fallback delays on non-replicating clients.
         return this.elements.index
             .iterate(
                 { query: getOwnedElementsQuery(canvas) },
                 {
                     resolve: true,
                     local: true,
-                    remote: { strategy: "fallback", timeout: 2e4 },
+                    remote: false,
                 }
             )
             .all();
@@ -2847,7 +2902,8 @@ export class Scope extends Program<ScopeArgs> {
             });
             if (!canvas) {
                 throw new Error(
-                    `Canvas ${sha256Base64Sync(target)} not found in scope ${this.address
+                    `Canvas ${sha256Base64Sync(target)} not found in scope ${
+                        this.address
                     }`
                 );
             }
@@ -3472,8 +3528,8 @@ export class Canvas {
             const ctx = idxRow?.context as string | undefined;
             const matches = ctx
                 ? ctx.localeCompare(name, undefined, {
-                    sensitivity: "accent",
-                }) === 0
+                      sensitivity: "accent",
+                  }) === 0
                 : (await child.createContext()) === name;
 
             if (matches) out.push(child);
@@ -3730,8 +3786,8 @@ export class Canvas {
             i === 0
                 ? orderKeyBetween(undefined, afterKey) // strictly before first
                 : i === ordered.length
-                    ? orderKeyBetween(beforeKey, undefined) // strictly after last
-                    : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
+                ? orderKeyBetween(beforeKey, undefined) // strictly after last
+                : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
 
         await this.upsertViewPlacement(child, newKey);
         return newKey;

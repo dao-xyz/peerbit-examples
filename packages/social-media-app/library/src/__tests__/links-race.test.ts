@@ -78,7 +78,9 @@ describe("links: cross-scope resolution race", () => {
 
             // Indexing is async; validate final correctness via link traversal across scopes
             await waitForResolved(async () => {
-                const kids = await root.getChildren({ scopes: [scopeA, scopeB] });
+                const kids = await root.getChildren({
+                    scopes: [scopeA, scopeB],
+                });
                 expect(kids.map((k) => k.idString)).to.include(child.idString);
             });
 
