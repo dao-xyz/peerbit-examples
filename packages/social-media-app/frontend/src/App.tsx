@@ -151,7 +151,7 @@ const networkConfig: NetworkOption =
           }
         : {
               bootstrap: [
-                  "/dns4/a38df1e3d3434aba1dc726964c2601b02d4b1b1e.peerchecker.com/tcp/4003/wss/p2p/12D3KooWGJj8WMFnXydrpjHPctWJim4wfqdEsChRJup5YLrYdWNa",
+                  "/dns4/70bba9867f56685a64486af189c9929cf8783c65.peerchecker.com/tcp/4003/wss/p2p/12D3KooWM4P75UCxjryarazRdhymDHryRcYujUyV1VKJtq7R1htf",
               ],
           };
 
