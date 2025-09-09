@@ -250,7 +250,9 @@ const _CanvasWrapper = (
     }, [canvasDB?.idString, canvasDB?.initialized, quality, typeFilter.key]);
 
     const { items: rawRects, isLoading } = useQuery(
-        [privateScope.elements, publicScope.elements],
+        privateScope && publicScope
+            ? [privateScope?.elements, publicScope?.elements]
+            : undefined,
         {
             query,
             debounce: 123,
