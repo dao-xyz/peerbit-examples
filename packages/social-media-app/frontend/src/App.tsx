@@ -28,11 +28,7 @@ import { CanvasProvider } from "./canvas/useCanvas";
 import { StreamProvider } from "./canvas/feed/StreamContext";
 import { EditModeProvider } from "./canvas/edit/EditModeProvider";
 import { ToolbarVisibilityProvider } from "./canvas/edit/ToolbarVisibilityProvider";
-import {
-    PrivateScope,
-    PublicScope,
-    ScopeRegistryProvider,
-} from "./canvas/useScope";
+import { ScopeRegistryProvider } from "./canvas/useScope";
 import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
 import { setupPrettyConsole } from "./debug/debug";
 import { DebugConfigProvider } from "./debug/DebugConfig";
