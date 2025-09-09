@@ -3451,7 +3451,7 @@
 
 "@radix-ui/react-dialog@^1.1.2":
   version "1.1.15"
-  resolved "https://registry.npmjs.org/@radix-ui/react-dialog/-/react-dialog-1.1.15.tgz"
+  resolved "https://registry.yarnpkg.com/@radix-ui/react-dialog/-/react-dialog-1.1.15.tgz#1de3d7a7e9a17a9874d29c07f5940a18a119b632"
   integrity sha512-TCglVRtzlffRNxRMEyR36DGBLJpeusFcgMVD9PZEzAKnUs1lKCgX5u9BmC2Yg+LL9MgZDugFFs1Vl+Jp4t/PGw==
   dependencies:
     "@radix-ui/primitive" "1.1.3"
@@ -4618,6 +4618,11 @@
   version "0.0.70"
   resolved "https://registry.npmjs.org/@types/audioworklet/-/audioworklet-0.0.70.tgz"
   integrity sha512-Hdrt4J7rOQrIiigxh3zkCiicVxIy7AVH5R5QhoLVjBP7HywkvMLNkGZEVAO4frNF6Gk7phFQr7ZdJgIy/EbnyA==
+
+"@types/audioworklet@^0.0.83":
+  version "0.0.83"
+  resolved "https://registry.yarnpkg.com/@types/audioworklet/-/audioworklet-0.0.83.tgz#c6538634bb326384fc20b7eb2ed82ea8c1c25e1c"
+  integrity sha512-kSHTPEJteKcw8TVRPl5mReiH/R7KXSEP54av44wt7YqptougV/pchY3M63J45pM1RW8kINu41oqb9RQn1s2Wjw==
 
 "@types/babel__core@^7.20.5":
   version "7.20.5"
@@ -6842,9 +6847,9 @@ detect-node-es@^1.1.0:
   resolved "https://registry.npmjs.org/detect-node-es/-/detect-node-es-1.1.0.tgz"
   integrity sha512-ypdmJU/TbBby2Dxibuv7ZLW3Bs1QEmM7nHjEANfohJLvE0XVujisn1qPJcZxg+qDucsr+bP6fLD1rPS3AhJ7EQ==
 
-detectincognitojs@^1.3.0:
+detectincognitojs@^1.6.1:
   version "1.6.1"
-  resolved "https://registry.npmjs.org/detectincognitojs/-/detectincognitojs-1.6.1.tgz"
+  resolved "https://registry.yarnpkg.com/detectincognitojs/-/detectincognitojs-1.6.1.tgz#2e02ef4ac5142e6f73e940e3aa40acc902b29aad"
   integrity sha512-MsCRvFnUcmBb3HDNu26K9RFRwvM1egb/RaPRJXfZNtnZ37XTvqoHpTm04teQC2qqmU7V2l421/zr2FR0tTATSw==
 
 devalue@^5.3.2:
