@@ -38,7 +38,7 @@
         "p-queue": "^8.0.1"
     },
     "devDependencies": {
-        "@types/audioworklet": "^0.0.70",
+        "@types/audioworklet": "^0.0.83",
         "@types/dom-mediacapture-transform": "^0.1.10",
         "@webgpu/types": "^0.1.44",
         "@types/dom-webcodecs": "^0.1.11",
