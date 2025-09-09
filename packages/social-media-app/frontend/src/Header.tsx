@@ -1,4 +1,4 @@
-import { ReactNode, useEffect, useLayoutEffect, useRef } from "react";
+import { ReactNode, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { MdOutlineDarkMode, MdOutlineLightMode } from "react-icons/md";
 import { ProfileButton } from "./profile/ProfileButton";
 import { usePeer } from "@peerbit/react";
@@ -20,6 +20,8 @@ import { VscCommentDraft } from "react-icons/vsc";
 import { MdSwitchAccount } from "react-icons/md";
 import { TbPlugConnected } from "react-icons/tb";
 import { ToggleEditModeButton } from "./canvas/edit/ToggleEditModeButton";
+import { DeveloperPanel } from "./debug/DeveloperPanel";
+import { MdBuild } from "react-icons/md";
 
 // Define props interface
 interface HeaderProps {
@@ -45,6 +47,16 @@ export const Header = (props: HeaderProps) => {
     const isOwner = peer?.identity.publicKey.equals(viewRoot?.publicKey);
 
     const { scrollToTop, focused } = useFocusProvider();
+    const [devOpen, setDevOpen] = useState(false);
+
+    // fix for https://github.com/radix-ui/primitives/issues/3445
+    useEffect(() => {
+        if (devOpen) return;
+        // The setTimeout is necessary because otherwise it might fire before the component is closed
+        setTimeout(() => {
+            document.body.style.pointerEvents = "auto";
+        }, 1);
+    }, [devOpen]);
 
     return (
         <div
@@ -77,7 +89,10 @@ export const Header = (props: HeaderProps) => {
                         {(visualization?.view !== ChildVisualization.CHAT ||
                             !focused) &&
                             showProfileButton && (
-                                <div className="  z-4 col-start-10 flex items-center ">
+                                <div
+                                    className="  z-4 col-start-10 flex items-center "
+                                    data-testid="header-profile-area"
+                                >
                                     {" "}
                                     {/*  last class is needed to prevent max-h-[inherit] to be applied to the menu*/}
                                     {peer ? (
@@ -161,6 +176,18 @@ export const Header = (props: HeaderProps) => {
                                                     </div>
                                                 </DropdownMenu.Item>
 
+                                                <DropdownMenu.Item
+                                                    className="menu-item"
+                                                    onSelect={() =>
+                                                        setDevOpen(true)
+                                                    }
+                                                >
+                                                    <div className="flex items-center gap-2">
+                                                        <MdBuild />
+                                                        <span>Developer</span>
+                                                    </div>
+                                                </DropdownMenu.Item>
+
                                                 <hr className="my-1" />
                                                 {/* Custom theme toggle that prevents menu closing */}
                                                 <DropdownMenu.Item asChild>
@@ -215,6 +242,7 @@ export const Header = (props: HeaderProps) => {
                 ></div>
             )} */}
             {props.children}
+            <DeveloperPanel open={devOpen} onOpenChange={setDevOpen} />
         </div>
     );
 };

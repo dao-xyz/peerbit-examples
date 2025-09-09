@@ -438,10 +438,23 @@ export const DraftManagerProvider: React.FC<{
                 const prev =
                     publishQueue.current.get(bucket) ?? Promise.resolve();
 
+                // Perf state shared between phases
+                let perfStart: number = 0;
+                let perfMarks: Record<string, number> | undefined;
+
                 const next = prev
                     .then(async () => {
                         const rec = records.current.get(bucket);
                         if (!rec?.canvas) return;
+
+                        if (debugOpts.perfEnabled) {
+                            perfStart = performance.now();
+                            perfMarks = {};
+                        }
+                        const perfMark = (label: string) => {
+                            if (!perfMarks) return;
+                            perfMarks[label] = performance.now() - perfStart;
+                        };
 
                         publishingFlags.current.add(bucket);
                         notify();
@@ -450,6 +463,7 @@ export const DraftManagerProvider: React.FC<{
                         const fresh = await createDraftPersisted({
                             replyTo: rec.replyTo,
                         });
+                        perfMark("rotate");
 
                         const toPublish = rec.canvas;
                         captureEvents &&
@@ -471,6 +485,7 @@ export const DraftManagerProvider: React.FC<{
 
                         // flush any pending local save
                         debouncers.current.get(bucket)?.flush?.();
+                        perfMark("flushLocal");
 
                         log("publish: hasParent?", {
                             hasParent: !!rec.replyTo,
@@ -478,6 +493,7 @@ export const DraftManagerProvider: React.FC<{
                         if (rec.replyTo) {
                             try {
                                 await rec.canvas.nearestScope.reIndexDebouncer.flush();
+                                perfMark("preParentFlush");
                                 const parent = rec.replyTo;
                                 log("publish: syncing draft to parent", {
                                     elements:
@@ -493,7 +509,9 @@ export const DraftManagerProvider: React.FC<{
                                     kind: new ReplyKind(),
                                     debug,
                                 });
+                                perfMark("upsertReply");
                                 await parent.nearestScope.reIndexDebouncer.flush();
+                                perfMark("postParentFlush");
                                 // Emit debug event immediately; tests now capture
                                 // baseline before triggering actions to avoid races.
                                 logEvt("replyPublished", {
@@ -521,6 +539,27 @@ export const DraftManagerProvider: React.FC<{
                         // 🔔 let subscribers recompute isPublishing=false
                         notify();
                         log("publish: done", { bucket });
+                        try {
+                            if (debugOpts.perfEnabled && perfMarks) {
+                                const payload = {
+                                    bucket,
+                                    ...perfMarks,
+                                    total: Object.keys(perfMarks).length
+                                        ? perfMarks[
+                                              Object.keys(
+                                                  perfMarks
+                                              ).pop() as string
+                                          ]
+                                        : 0,
+                                } as any;
+                                console.info("[Perf] publish timings", payload);
+                                window.dispatchEvent(
+                                    new CustomEvent("perf:publish", {
+                                        detail: payload,
+                                    })
+                                );
+                            }
+                        } catch {}
                     });
 
                 publishQueue.current.set(bucket, next);
@@ -693,6 +732,7 @@ export const DraftManagerProvider: React.FC<{
         privateScope?.address,
         publicScope?.address,
         debug,
+        debugOpts.perfEnabled,
     ]);
 
     return (

@@ -1,4 +1,10 @@
-import React, { createContext, useContext, useMemo } from "react";
+import React, {
+    createContext,
+    useContext,
+    useEffect,
+    useMemo,
+    useState,
+} from "react";
 import { isDebugEnabled } from "./debug";
 
 export type DebugOptions = {
@@ -6,6 +12,7 @@ export type DebugOptions = {
     parent?: string; // only log events for this parent canvas id
     captureEvents?: boolean; // push structured events into window.__DBG_EVENTS
     tags?: string[]; // optional future use for filtering
+    perfEnabled?: boolean; // enable perf instrumentation
 };
 
 type Ctx = {
@@ -19,12 +26,11 @@ export const useDebugConfig = () => useContext(DebugConfigCtx).options;
 export const DebugConfigProvider: React.FC<{ children: React.ReactNode }> = ({
     children,
 }) => {
-    const options = useMemo<DebugOptions>(() => {
+    const compute = (): DebugOptions => {
         const g: any = typeof window !== "undefined" ? (window as any) : {};
         const globalDbg = (g.__DBG || {}) as Partial<DebugOptions> & {
             parent?: string;
         };
-        // Back-compat alias: __DBG_PARENT
         const parent = globalDbg.parent || g.__DBG_PARENT;
         const enabled =
             typeof globalDbg.enabled === "boolean"
@@ -35,7 +41,38 @@ export const DebugConfigProvider: React.FC<{ children: React.ReactNode }> = ({
                 ? globalDbg.captureEvents
                 : enabled;
         const tags = Array.isArray(globalDbg.tags) ? globalDbg.tags : undefined;
-        return { enabled, parent, captureEvents, tags };
+        const searchPerf = (() => {
+            try {
+                return new URLSearchParams(window.location.search).has("perf");
+            } catch {
+                return false;
+            }
+        })();
+        const perfEnabled =
+            typeof (globalDbg as any).perfEnabled === "boolean"
+                ? (globalDbg as any).perfEnabled
+                : typeof (globalDbg as any).perf === "boolean"
+                ? (globalDbg as any).perf
+                : searchPerf;
+        g.__DBG = {
+            ...globalDbg,
+            enabled,
+            parent,
+            captureEvents,
+            tags,
+            perfEnabled,
+            perf: perfEnabled,
+        };
+        return { enabled, parent, captureEvents, tags, perfEnabled };
+    };
+
+    const [options, setOptions] = useState<DebugOptions>(() => compute());
+
+    useEffect(() => {
+        const onChange = () => setOptions(compute());
+        window.addEventListener("__DBG:changed", onChange as any);
+        return () =>
+            window.removeEventListener("__DBG:changed", onChange as any);
     }, []);
 
     return (

@@ -5,8 +5,10 @@ export default defineConfig({
     timeout: 60_000,
     expect: { timeout: 10_000 },
     retries: 0,
+
     use: {
-        baseURL: process.env.BASE_URL || "http://localhost:5173",
+        // Default: persistent mode; tests explicitly opt into ephemeral via URL when needed
+        baseURL: process.env.BASE_URL || "http://localhost:5173#/",
         trace: "retain-on-failure",
         video: "retain-on-failure",
         screenshot: "only-on-failure",
@@ -17,4 +19,5 @@ export default defineConfig({
         url: "http://localhost:5173",
         reuseExistingServer: true,
     },
+    workers: 1,
 });

@@ -100,11 +100,16 @@ test.describe("Draft recovery", () => {
         page,
     }) => {
         await page.goto(BASE_URL);
-
+        // Ensure peer/session is ready so the composer can mount
+        await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
+            timeout: 30000,
+        });
         const toolbar = page.getByTestId("toolbarcreatenew").first();
-        // Be resilient: find the hidden file input globally in case it’s not nested where expected
-        const fileInput = page.locator("input[type=file]").first();
-        await expect(fileInput).toBeAttached({ timeout: 20000 });
+        // Wait for toolbar to mount and be visible
+        await expect(toolbar).toBeVisible({ timeout: 30000 });
+        // Target the file input within the toolbar to avoid cross-component races
+        const fileInput = toolbar.locator("input[type=file]").first();
+        await expect(fileInput).toBeAttached({ timeout: 30000 });
 
         const imgName = `recover-image-${Date.now()}.png`;
         await fileInput.setInputFiles(smallPngFile(imgName));
@@ -158,9 +163,6 @@ test.describe("Draft recovery", () => {
         page,
     }) => {
         await page.goto(BASE_URL);
-        await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
-            timeout: 20000,
-        });
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
         await expect(toolbar).toBeVisible({ timeout: 20000 });
@@ -170,22 +172,16 @@ test.describe("Draft recovery", () => {
         const msg = uid("Recovered caption");
         await textArea.fill(msg);
 
-        const fileInput = page.locator("input[type=file]").first();
-        await expect(fileInput).toBeAttached({ timeout: 20000 });
+        const fileInput = toolbar.locator("input[type=file]").first();
+        await expect(fileInput).toBeAttached({ timeout: 30000 });
         const imgName = `recover-mixed-${Date.now()}.png`;
         await fileInput.setInputFiles(smallPngFile(imgName));
 
         // Allow autosave to persist both
-        await page.waitForTimeout(3000);
 
-        await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
-            timeout: 20000,
-        });
+        // Read identity info opportunistically (don’t block the test on it)
         const first = await page.evaluate(() => (window as any).__peerInfo);
         await page.reload();
-        await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
-            timeout: 20000,
-        });
         const second = await page.evaluate(() => (window as any).__peerInfo);
 
         const toolbar2 = page.getByTestId("toolbarcreatenew").first();

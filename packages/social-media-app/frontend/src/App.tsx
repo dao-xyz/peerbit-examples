@@ -36,7 +36,6 @@ import {
 import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
 import { setupPrettyConsole } from "./debug/debug";
 import { DebugConfigProvider } from "./debug/DebugConfig";
-import { DebugOverlay } from "./debug/DebugOverlay";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 
 const HEADER_EXPANDED_HEIGHT = 12;
@@ -167,7 +166,9 @@ export const App = () => {
     const flagTrue = (val: string | null) =>
         val == null || val === "" ? undefined : val === "true" || val === "1";
     // Single canonical flag for non-persistent mode
-    const inMemory = flagTrue(params.get("ephemeral"));
+    // Default behavior: persistent (inMemory=false). Override with ?ephemeral=true when desired.
+    const eph = flagTrue(params.get("ephemeral"));
+    const inMemory = eph === undefined ? false : eph;
     const bootstrapParam = params.get("bootstrap");
     const bootstrapAddrs = bootstrapParam
         ? bootstrapParam
@@ -206,7 +207,7 @@ export const App = () => {
                                                             <AIReplyProvider>
                                                                 <HostRegistryProvider>
                                                                     <Content />
-                                                                    <DebugOverlay />
+                                                                    {/* <DebugOverlay /> */}
                                                                 </HostRegistryProvider>
                                                             </AIReplyProvider>
                                                         </ProfileProvider>
