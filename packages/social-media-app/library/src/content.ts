@@ -409,7 +409,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             approximate: true,
         });
         return BigInt(n);
-    } catch {}
+    } catch { }
 
     // Fallback: aggregate children’s cached totals (Σ (1 + childDeep))
     try {
@@ -450,7 +450,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             }
         }
         return total;
-    } catch {}
+    } catch { }
 
     // Last resort: BFS traversal (with loop guards)
     return await canvas.countRepliesBFS({ immediate: false });
@@ -483,13 +483,13 @@ export const getImmediateRepliesQueryByDepth = (
     parentId: Uint8Array,
     parentDepth: number
 ) => [
-    new ByteMatchQuery({ key: "path", value: parentId }),
-    new IntegerCompare({
-        key: "pathDepth",
-        value: parentDepth + 1,
-        compare: Compare.Equal,
-    }),
-];
+        new ByteMatchQuery({ key: "path", value: parentId }),
+        new IntegerCompare({
+            key: "pathDepth",
+            value: parentDepth + 1,
+            compare: Compare.Equal,
+        }),
+    ];
 
 // If you already fetched the parent indexed doc, you can write:
 export const getImmediateRepliesQuery = (
@@ -906,8 +906,8 @@ async function unlink(
     const shouldDelete: (l: Link) => boolean = ks.includes("all")
         ? anyKind
         : (l) =>
-              (ks.includes("reply") && isReply(l)) ||
-              (ks.includes("view") && isView(l));
+            (ks.includes("reply") && isReply(l)) ||
+            (ks.includes("view") && isView(l));
 
     // 1) remove mirrors first (parent + any extra scopes)
     for (const s of mirrorScopes) {
@@ -1071,7 +1071,7 @@ async function deleteChildLinksForCanvasInScope(scope: Scope, canvas: Canvas) {
     for (const l of links) await scope.links.del(l.id);
 }
 
-export abstract class CanvasMessage {}
+export abstract class CanvasMessage { }
 
 @variant(0)
 export class ReplyingInProgresss extends CanvasMessage {
@@ -1103,7 +1103,7 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
 
 /* -------------- STYLING ------------------ */
 
-export abstract class AbstractBackground {}
+export abstract class AbstractBackground { }
 
 @variant(0)
 export class ModedBackground {
@@ -1397,9 +1397,9 @@ export class Link<TKind extends LinkKind = LinkKind> {
         const enc = (r: NodeRef) =>
             r instanceof ScopedRef
                 ? concat([
-                      new TextEncoder().encode(r.scope.address),
-                      r.canvasId,
-                  ])
+                    new TextEncoder().encode(r.scope.address),
+                    r.canvasId,
+                ])
                 : (r as LocalRef).canvasId;
         return sha256Sync(
             concat([new Uint8Array([tag]), enc(parent), enc(child)])
@@ -1623,6 +1623,8 @@ export class Scope extends Program<ScopeArgs> {
 
     public debug: boolean = false;
     private closeController: AbortController | null = null;
+    // Deduplicate transient missing-resolution logs per link/side
+    private _missingResolveOnce = new Set<string>();
     reIndexDebouncer: ReturnType<
         typeof debouncedAccumulatorMap<{
             canvas: Canvas;
@@ -1843,7 +1845,7 @@ export class Scope extends Program<ScopeArgs> {
             topic: sha256Base64Sync(
                 concat([this.id, new TextEncoder().encode("messages")])
             ),
-            responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
+            responseHandler: async () => { }, // need an empty response handle to make response events to emit TODO fix this?
         });
     }
 
@@ -1861,9 +1863,9 @@ export class Scope extends Program<ScopeArgs> {
                 },
             })
             .all()) as WithIndexedContext<
-            BasicVisualization,
-            IndexedVisualization
-        >[];
+                BasicVisualization,
+                IndexedVisualization
+            >[];
 
         if (!list.length) return null;
 
@@ -1880,7 +1882,7 @@ export class Scope extends Program<ScopeArgs> {
                 if (!equals(v.id, preferred.id)) {
                     try {
                         await this.visualizations.del(v.id);
-                    } catch {}
+                    } catch { }
                 }
             }
         }
@@ -1978,6 +1980,11 @@ export class Scope extends Program<ScopeArgs> {
                 });
                 await publish.parent.addReply(dst, kind, visibility);
 
+                // If the link is mirrored in the parent (visibility === "both"),
+                // also ensure the parent scope has a replies row for the child so
+                // parent-side index queries (e.g., immediate replies) can resolve without races.
+                // Note: Do not register a replies row in the parent's scope; the canonical row lives in the child's home.
+
                 if (publish.view != null) {
                     dlog("finalize: setExperience", {
                         child: dst.idString,
@@ -1989,6 +1996,7 @@ export class Scope extends Program<ScopeArgs> {
                 }
 
                 await dst.nearestScope.reIndexDebouncer.flush();
+                // Parent-side indexes will converge via link listeners; no explicit flush needed here.
             } else {
                 if (publish.view != null) {
                     dlog("finalize: top-level setExperience", {
@@ -2031,13 +2039,13 @@ export class Scope extends Program<ScopeArgs> {
             const dst = existing
                 ? await dest.openWithSameSettings(existing)
                 : new Canvas({
-                      id: src.id,
-                      publicKey: dest.node.identity.publicKey,
-                      selfScope:
-                          updateHome === "set"
-                              ? new AddressReference({ address: dest.address })
-                              : src.selfScope,
-                  });
+                    id: src.id,
+                    publicKey: dest.node.identity.publicKey,
+                    selfScope:
+                        updateHome === "set"
+                            ? new AddressReference({ address: dest.address })
+                            : src.selfScope,
+                });
 
             const created = !existing;
             if (!existing) {
@@ -2052,15 +2060,15 @@ export class Scope extends Program<ScopeArgs> {
             // (debug) count elements owned by dst in dest scope before copy
             const preIds = debug
                 ? (
-                      await dest.elements.index
-                          .iterate(
-                              { query: getOwnedByCanvasQuery(dst) },
-                              { resolve: false }
-                          )
-                          .all()
-                  )
-                      .map((e) => e.idString)
-                      .sort()
+                    await dest.elements.index
+                        .iterate(
+                            { query: getOwnedByCanvasQuery(dst) },
+                            { resolve: false }
+                        )
+                        .all()
+                )
+                    .map((e) => e.idString)
+                    .sort()
                 : undefined;
 
             // Copy payload over
@@ -2114,15 +2122,15 @@ export class Scope extends Program<ScopeArgs> {
             // (debug) count elements owned by dst in dest scope after copy
             const postIds = debug
                 ? (
-                      await dest.elements.index
-                          .iterate(
-                              { query: getOwnedByCanvasQuery(dst) },
-                              { resolve: false }
-                          )
-                          .all()
-                  )
-                      .map((e) => e.idString)
-                      .sort()
+                    await dest.elements.index
+                        .iterate(
+                            { query: getOwnedByCanvasQuery(dst) },
+                            { resolve: false }
+                        )
+                        .all()
+                )
+                    .map((e) => e.idString)
+                    .sort()
                 : undefined;
 
             if (debug) {
@@ -2368,7 +2376,7 @@ export class Scope extends Program<ScopeArgs> {
                 if (!equals(v.id, canonicalId)) {
                     try {
                         await this.visualizations.del(v.id);
-                    } catch {}
+                    } catch { }
                 }
             }
         }
@@ -2599,21 +2607,45 @@ export class Scope extends Program<ScopeArgs> {
             ] as Link[];
 
             for (const l of changed) {
-                const child = await resolveChild(l, this, {
-                    local: true,
-                    remote: false,
-                    waitFor: 0,
-                });
-                if (!child) {
-                    console.warn("Child not found for link");
-                }
+                // Identify if this link row is a mirror (stored in the parent's scope)
+                const childScopeAddr =
+                    l.child instanceof ScopedRef
+                        ? l.child.scope.address
+                        : this.address;
+                const isMirrorRow = childScopeAddr !== this.address;
+
+                // Resolve parent locally (should be local for mirror rows)
                 const parent = await resolveParent(l, this, {
                     local: true,
                     remote: false,
                     waitFor: 0,
                 });
+
+                // Only resolve child when we are on the canonical child scope; for mirror rows skip and avoid transient warnings
+                const child = isMirrorRow
+                    ? null
+                    : await resolveChild(l, this, {
+                          local: true,
+                          remote: false,
+                          waitFor: 0,
+                      });
+
+                const warnOnce = (side: "child" | "parent", msg: string) => {
+                    const key = (l.idString || "?") + ":" + side;
+                    if (!this._missingResolveOnce.has(key)) {
+                        this._missingResolveOnce.add(key);
+                        console.warn(msg, l.idString || "?");
+                    } else {
+                        console.debug(msg, l.idString || "?");
+                    }
+                };
+
+                if (!child && !isMirrorRow) {
+                    // Only warn about missing child when handling the canonical row
+                    warnOnce("child", "Child not found for link");
+                }
                 if (!parent) {
-                    console.warn("Parent not found for link");
+                    warnOnce("parent", "Parent not found for link");
                 }
 
                 if (child) {
@@ -2815,8 +2847,7 @@ export class Scope extends Program<ScopeArgs> {
             });
             if (!canvas) {
                 throw new Error(
-                    `Canvas ${sha256Base64Sync(target)} not found in scope ${
-                        this.address
+                    `Canvas ${sha256Base64Sync(target)} not found in scope ${this.address
                     }`
                 );
             }
@@ -3441,8 +3472,8 @@ export class Canvas {
             const ctx = idxRow?.context as string | undefined;
             const matches = ctx
                 ? ctx.localeCompare(name, undefined, {
-                      sensitivity: "accent",
-                  }) === 0
+                    sensitivity: "accent",
+                }) === 0
                 : (await child.createContext()) === name;
 
             if (matches) out.push(child);
@@ -3699,8 +3730,8 @@ export class Canvas {
             i === 0
                 ? orderKeyBetween(undefined, afterKey) // strictly before first
                 : i === ordered.length
-                ? orderKeyBetween(beforeKey, undefined) // strictly after last
-                : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
+                    ? orderKeyBetween(beforeKey, undefined) // strictly after last
+                    : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
 
         await this.upsertViewPlacement(child, newKey);
         return newKey;
