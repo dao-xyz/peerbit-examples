@@ -338,14 +338,21 @@ export const PeerProvider = (options: PeerOptions) => {
                         // 1) Explicit bootstrap addresses take precedence
                         if (
                             typeof network !== "string" &&
-                            (network as any)?.bootstrap &&
-                            (network as any).bootstrap.length
+                            (network as any)?.bootstrap !== undefined
                         ) {
-                            for (const addr of (network as any).bootstrap as (
+                            const list = (network as any).bootstrap as (
                                 | Multiaddr
                                 | string
-                            )[]) {
-                                await newPeer.dial(addr as any);
+                            )[];
+                            if (list.length === 0) {
+                                // Explicit offline mode: skip dialing and mark as connected (no relays)
+                                console.log(
+                                    "Offline bootstrap: skipping relay dialing"
+                                );
+                            } else {
+                                for (const addr of list) {
+                                    await newPeer.dial(addr as any);
+                                }
                             }
                         }
                         // 2) Local development: dial local relay service

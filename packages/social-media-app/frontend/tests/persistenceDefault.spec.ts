@@ -1,12 +1,11 @@
 import { test, expect } from "@playwright/test";
-
-const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+import { OFFLINE_BASE } from "./utils/url";
 
 test.describe("Default persistence", () => {
     test("peer identity persists across reload by default (no ?ephemeral)", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
             timeout: 30000,
         });

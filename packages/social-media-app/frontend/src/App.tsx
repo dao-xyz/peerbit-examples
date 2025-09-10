@@ -147,7 +147,10 @@ export const Content = () => {
 const networkConfig: NetworkOption =
     import.meta.env.MODE === "development"
         ? {
-              type: "local",
+              /*   type: "local", */
+              bootstrap: [
+                  "/ip4/127.0.0.1/tcp/58933/ws/p2p/12D3KooWCbuSbm4HowQnpSEf21bfrFtGYLashKBVhxRJoZkqSC7R",
+              ],
           }
         : {
               bootstrap: [
@@ -166,12 +169,20 @@ export const App = () => {
     const eph = flagTrue(params.get("ephemeral"));
     const inMemory = eph === undefined ? false : eph;
     const bootstrapParam = params.get("bootstrap");
-    const bootstrapAddrs = bootstrapParam
-        ? bootstrapParam
-              .split(",")
-              .map((s) => s.trim())
-              .filter(Boolean)
-        : undefined;
+    // Support an "offline" mode (or empty ?bootstrap=) for tests/e2e to avoid dialing any relays
+    // If bootstrap is explicitly provided (even if empty or 'offline'), we pass an explicit network option
+    const offline =
+        bootstrapParam !== null &&
+        bootstrapParam.trim().toLowerCase() === "offline";
+    const bootstrapAddrs =
+        bootstrapParam !== null
+            ? offline
+                ? [] // explicit offline sentinel
+                : bootstrapParam
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean)
+            : undefined; // not provided at all => use default network config
 
     return (
         <HashRouter basename="/">
@@ -180,11 +191,12 @@ export const App = () => {
                     <DebugConfigProvider>
                         <PeerProvider
                             network={
-                                bootstrapAddrs
-                                    ? ({
+                                bootstrapAddrs !== undefined
+                                    ? {
+                                          // Explicit override: if empty we stay offline
                                           type: "explicit",
                                           bootstrap: bootstrapAddrs,
-                                      } as any)
+                                      }
                                     : networkConfig
                             }
                             iframe={{ type: "proxy", targetOrigin: "*" }}

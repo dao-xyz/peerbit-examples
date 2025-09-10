@@ -1,7 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { attachConsoleHooks } from "./utils/consoleHooks";
-
-const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+import { OFFLINE_BASE } from "./utils/url";
 
 function uid(prefix: string) {
     const rand = Math.random().toString(36).slice(2, 8);
@@ -21,7 +20,7 @@ test.describe("Developer panel / debug signals", () => {
         page,
     }) => {
         const hook = attachConsoleHooks(page, { echoErrors: true });
-        await page.goto(BASE_URL + "/#/");
+        await page.goto(OFFLINE_BASE);
         await page.waitForLoadState("domcontentloaded");
         // Ensure app providers mounted (toolbar present)
         await expect
@@ -108,7 +107,7 @@ test.describe("Developer panel / debug signals", () => {
         page,
     }) => {
         const hook = attachConsoleHooks(page, { echoErrors: true });
-        await page.goto(BASE_URL + "/#/");
+        await page.goto(OFFLINE_BASE);
 
         // Wait for the toolbar to ensure app/providers are fully mounted
         const toolbar = page.getByTestId("toolbarcreatenew").first();

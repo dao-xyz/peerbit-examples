@@ -1,6 +1,5 @@
 import { test, expect } from "./fixtures/persistentContext";
-
-const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+import { OFFLINE_BASE } from "./utils/url";
 
 const PNG_BASE64 =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
@@ -28,7 +27,7 @@ test.describe("Draft recovery", () => {
     });
 
     test("peer identity persists across reload (debug)", async ({ page }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
             timeout: 20000,
         });
@@ -50,7 +49,7 @@ test.describe("Draft recovery", () => {
     test("recovers text only: one text element (no empty placeholder)", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
             timeout: 20000,
         });
@@ -99,7 +98,7 @@ test.describe("Draft recovery", () => {
     test("recovers image only: one empty text element + image", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
         // Ensure peer/session is ready so the composer can mount
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
             timeout: 30000,
@@ -162,7 +161,7 @@ test.describe("Draft recovery", () => {
     test("recovers text + image: one text element (the recovered one) + image", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
         await expect(toolbar).toBeVisible({ timeout: 20000 });

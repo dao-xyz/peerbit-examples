@@ -1,6 +1,5 @@
 import { test, expect } from "./fixtures/persistentContext";
-
-const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+import { OFFLINE_BASE } from "./utils/url";
 
 function uid(prefix: string) {
     const rand = Math.random().toString(36).slice(2, 8);
@@ -23,7 +22,7 @@ test.describe("Draft recovery privacy", () => {
     test("does not recover from public scope (published replies)", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         // Fill a message and publish it (to create a public reply)
         const toolbar = page.getByTestId("toolbarcreatenew").first();

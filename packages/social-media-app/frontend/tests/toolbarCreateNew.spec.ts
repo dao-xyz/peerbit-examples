@@ -1,6 +1,5 @@
 import { test, expect } from "@playwright/test";
-
-const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+import { OFFLINE_BASE } from "./utils/url";
 
 const PNG_BASE64 =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
@@ -119,7 +118,7 @@ test.describe("ToolbarCreateNew", () => {
         await expect(page).toHaveURL(/#\/c\//);
     }
     test("can type text before and after image upload", async ({ page }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         // Anchor to the first toolbar instance
         const toolbar = page.getByTestId("toolbarcreatenew").first();
@@ -148,7 +147,7 @@ test.describe("ToolbarCreateNew", () => {
     test("can send two subsequent text messages and input clears between sends", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
         // leave __DBG_PARENT unset to collect all debug events
@@ -211,7 +210,7 @@ test.describe("ToolbarCreateNew", () => {
     });
 
     test("upload image, then send a text message", async ({ page }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
         // leave __DBG_PARENT unset to collect all debug events
@@ -255,7 +254,7 @@ test.describe("ToolbarCreateNew", () => {
     });
 
     test("uploaded image appears in grid by alt", async ({ page }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
 
@@ -279,7 +278,7 @@ test.describe("ToolbarCreateNew", () => {
     test("placeholder remains after queuing an image (before send)", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
 
@@ -303,7 +302,7 @@ test.describe("ToolbarCreateNew", () => {
     test("create text post, navigate to it, and see content in detail view", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
         const textArea = toolbar.locator("textarea");
@@ -353,7 +352,7 @@ test.describe("ToolbarCreateNew", () => {
     test("create image+text post, navigate to it, and see both in detail view", async ({
         page,
     }) => {
-        await page.goto(BASE_URL);
+        await page.goto(OFFLINE_BASE);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();
         await page.evaluate(() => {

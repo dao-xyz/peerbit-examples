@@ -1,9 +1,8 @@
 import { test, expect } from "@playwright/test";
-
-const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+import { OFFLINE_BASE } from "./utils/url";
 
 test("renders toolbar and disables send when empty", async ({ page }) => {
-    await page.goto(BASE_URL);
+    await page.goto(OFFLINE_BASE);
     const toolbar = page.getByTestId("toolbarcreatenew").first();
     await expect(toolbar).toBeVisible({ timeout: 30000 });
 
@@ -25,7 +24,7 @@ test("debug overlay toggle appears with localStorage.debug", async ({
             localStorage.setItem("debug", "true");
         } catch {}
     });
-    await page.goto(BASE_URL + "/#/");
+    await page.goto(OFFLINE_BASE);
     // Verify debug console was initialized
     const patched = await page.evaluate(
         () => (window as any).__pretty_console_patched__ === true

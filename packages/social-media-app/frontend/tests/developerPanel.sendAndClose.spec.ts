@@ -1,7 +1,8 @@
 import { test, expect } from "@playwright/test";
 import { attachConsoleHooks } from "./utils/consoleHooks";
 
-const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+import { OFFLINE_BASE } from "./utils/url";
+// const BASE_URL = process.env.BASE_URL || "http://localhost:5173"; // Keeping BASE_URL for reference
 
 function uid(prefix: string) {
     const rand = Math.random().toString(36).slice(2, 8);
@@ -22,7 +23,7 @@ test.describe("DeveloperPanel: enable logs, close, then send message", () => {
         page,
     }) => {
         const hook = attachConsoleHooks(page, { echoErrors: true });
-        await page.goto(BASE_URL + "/#/");
+        await page.goto(OFFLINE_BASE);
 
         // Wait for the toolbar (peer/session ready)
         const toolbar = page.getByTestId("toolbarcreatenew").first();
