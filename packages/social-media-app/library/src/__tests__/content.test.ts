@@ -25,6 +25,7 @@ import { orderKeyBetween } from "../order-key.js";
 import { ensurePath } from "./utils.js";
 import { Layout, ViewKind } from "../link.js";
 import { randomBytes } from "@peerbit/crypto";
+import { describe, it } from "vitest";
 
 /* ----------------------- helpers (public APIs only) ----------------------- */
 

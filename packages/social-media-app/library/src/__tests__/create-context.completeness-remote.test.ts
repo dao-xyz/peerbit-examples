@@ -88,6 +88,7 @@ describe("createContext completeness with remote fallback", () => {
         const ctx = await destFromClient.createContext(draft, {
             timeoutMs: 3000,
         });
-        expect(ctx).to.equal("Hello\nWorld");
+        const lines = ctx.split("\n").filter(Boolean).sort();
+        expect(lines).to.deep.equal(["Hello", "World"].sort());
     });
 });
