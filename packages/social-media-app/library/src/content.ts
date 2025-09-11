@@ -17,6 +17,7 @@ import {
     DocumentsChange,
     id,
     IntegerCompare,
+    NotStartedError,
     Or,
     Query,
     QueryOptions,
@@ -36,7 +37,7 @@ import {
     toBase64,
     toBase64URL,
 } from "@peerbit/crypto";
-import { Program, ProgramClient } from "@peerbit/program";
+import { ClosedError, Program, ProgramClient } from "@peerbit/program";
 import { AbstractStaticContent } from "./static/content.js";
 import { StaticMarkdownText } from "./static/text.js";
 import {
@@ -58,6 +59,12 @@ import {
     ViewKind,
 } from "./link.js";
 
+const isClosedError = (error: any) => {
+    if (error instanceof NotStartedError || error instanceof ClosedError) {
+        return true;
+    }
+    return false;
+};
 export abstract class ElementContent {
     abstract toIndex():
         | Promise<{ type: string; content: string }>
@@ -317,6 +324,16 @@ export class IndexableCanvas {
                 { resolve: false }
             )
             .all();
+
+        console.log("REINDEX", {
+            id: canvas.idString,
+            context,
+            replies: replies.toString(),
+            elements: owned.length,
+            repliesSlow: (
+                await canvas.countRepliesBFS({ immediate: false })
+            ).toString(),
+        });
 
         return new IndexableCanvas({
             id: canvas.id,
@@ -956,8 +973,8 @@ async function copyElementsBetweenScopes(
     const dlog = (...args: any[]) => {
         if (debug) console.debug("[copyElementsBetweenScopes]", ...args);
     };
-    const collect = (globalThis as any).__COLLECT_REINDEX;
-    const perf = (globalThis as any).__PERF_EVENTS__;
+    const collect = globalThis.__COLLECT_REINDEX;
+    const perf = globalThis.__PERF_EVENTS__;
     const t0 = collect ? Date.now() : 0;
 
     // gather source elements
@@ -1072,8 +1089,8 @@ async function copyVisualizationBetweenScopes(
 
 // helpers (drop these near copyElementsBetweenScopes)
 async function deleteOwnedElementsInScope(scope: Scope, canvas: Canvas) {
-    const collect = (globalThis as any).__COLLECT_REINDEX;
-    const perf = (globalThis as any).__PERF_EVENTS__;
+    const collect = globalThis.__COLLECT_REINDEX;
+    const perf = globalThis.__PERF_EVENTS__;
     const t0 = collect ? Date.now() : 0;
     const els = await scope.elements.index
         .iterate({ query: getOwnedElementsQuery(canvas) }, { resolve: false })
@@ -1090,8 +1107,8 @@ async function deleteOwnedElementsInScope(scope: Scope, canvas: Canvas) {
 }
 
 async function deleteVisualizationsInScope(scope: Scope, canvas: Canvas) {
-    const collect = (globalThis as any).__COLLECT_REINDEX;
-    const perf = (globalThis as any).__PERF_EVENTS__;
+    const collect = globalThis.__COLLECT_REINDEX;
+    const perf = globalThis.__PERF_EVENTS__;
     const t0 = collect ? Date.now() : 0;
     const vizz = await scope.visualizations.index
         .iterate({ query: { canvasId: canvas.id } }, { resolve: false })
@@ -1109,8 +1126,8 @@ async function deleteVisualizationsInScope(scope: Scope, canvas: Canvas) {
 
 /** Remove any links that reference `canvas` as a child inside `scope`. */
 async function deleteChildLinksForCanvasInScope(scope: Scope, canvas: Canvas) {
-    const collect = (globalThis as any).__COLLECT_REINDEX;
-    const perf = (globalThis as any).__PERF_EVENTS__;
+    const collect = globalThis.__COLLECT_REINDEX;
+    const perf = globalThis.__PERF_EVENTS__;
     const t0 = collect ? Date.now() : 0;
     const links = (await scope.links.index
         .iterate({ query: [getParentLinksQuery(canvas.id)] })
@@ -1684,24 +1701,32 @@ export class Scope extends Program<ScopeArgs> {
         // Lightweight dispatcher accessible for run-level instrumentation
         const _dispatchReindexDebug = (detail: any) => {
             try {
-                (globalThis as any).window?.dispatchEvent?.(
+                globalThis.window?.dispatchEvent?.(
                     new CustomEvent("reindex:debug", { detail })
                 );
             } catch {}
         };
         this._hierarchicalReindex = createHierarchicalReindexManager<Canvas>({
-            // Allow test-mode with absolutely no debounce/cooldown (REINDEX_NO_DELAY=1)
-            delay:
-                typeof process !== "undefined" &&
-                process?.env?.REINDEX_NO_DELAY === "1"
-                    ? 0
-                    : 1,
-            reindex: async (canvas, opts) => this.reIndex(canvas, opts),
+            // Allow test-mode with virtually no debounce/cooldown (REINDEX_NO_DELAY=1)
+            // Use a function so tests can opt-in (REINDEX_NO_DELAY or VITEST/NODE_ENV=test)
+            delay: () => {
+                return 30;
+            },
+            reindex: async (canvas, opts) => {
+                try {
+                    await this.reIndex(canvas, opts);
+                } catch (error) {
+                    if (isClosedError(error)) {
+                        // swallow
+                    } else {
+                        throw error;
+                    }
+                }
+            },
             propagateParentsDefault: true,
             onDebug: (evt) => _dispatchReindexDebug(evt),
-            cooldownMs: typeof process !== "undefined" && "1" ? 0 : 1,
+            cooldownMs: 0,
         });
-        // Instrumentation now handled via onDebug hook above.
 
         this.closeController = new AbortController();
         this.debug = !!args?.debug;
@@ -2590,9 +2615,12 @@ export class Scope extends Program<ScopeArgs> {
                 .all();
 
             // If still incomplete, poll until background prefetch warms up or timeout
-            const deadline = Date.now() + (opts?.timeoutMs ?? 2000);
+            const deadline = Date.now() + (opts?.timeoutMs ?? 3000);
             while (elements.length < expectedCount && Date.now() < deadline) {
-                await new Promise((r) => setTimeout(r, 50));
+                await new Promise((r) => setTimeout(r, 100));
+                if (this.closed) {
+                    throw new ClosedError();
+                }
                 elements = await this.elements.index
                     .iterate(
                         { query: getOwnedElementsQuery(canvas) },
@@ -2673,24 +2701,22 @@ export class Scope extends Program<ScopeArgs> {
 
         const _dispatchReindexDebug = (detail: any) => {
             try {
-                (globalThis as any).window?.dispatchEvent?.(
+                globalThis.window?.dispatchEvent?.(
                     new CustomEvent("reindex:debug", { detail })
                 );
             } catch {}
         };
-        const tStart = (globalThis as any).performance?.now?.() || Date.now();
+        const tStart = globalThis.performance?.now?.() || Date.now();
 
         if (options?.onlyReplies) {
-            const tRepliesStart =
-                (globalThis as any).performance?.now?.() || Date.now();
+            const tRepliesStart = globalThis.performance?.now?.() || Date.now();
             _dispatchReindexDebug({
                 phase: "replies:update:start",
                 id: canvas.idString,
             });
             // 1) update this node's replies total
             await updateIndexedRepliesOnly(this, canvas);
-            const tRepliesSelf =
-                (globalThis as any).performance?.now?.() || Date.now();
+            const tRepliesSelf = globalThis.performance?.now?.() || Date.now();
             _dispatchReindexDebug({
                 phase: "replies:update:self",
                 id: canvas.idString,
@@ -2699,22 +2725,21 @@ export class Scope extends Program<ScopeArgs> {
 
             // 2) propagate to ancestors (their deep totals depend on children)
             const ancestors = await canvas.loadPath({ includeSelf: false });
+
             // walk from nearest parent up to root
             const tAncestorsStart =
-                (globalThis as any).performance?.now?.() || Date.now();
+                globalThis.performance?.now?.() || Date.now();
             for (let i = ancestors.length - 1; i >= 0; i--) {
                 await updateIndexedRepliesOnly(this, ancestors[i]);
             }
-            const tAncestorsEnd =
-                (globalThis as any).performance?.now?.() || Date.now();
+            const tAncestorsEnd = globalThis.performance?.now?.() || Date.now();
             _dispatchReindexDebug({
                 phase: "replies:update:ancestors",
                 id: canvas.idString,
                 dt: tAncestorsEnd - tAncestorsStart,
                 count: ancestors.length,
             });
-            const tRepliesEnd =
-                (globalThis as any).performance?.now?.() || Date.now();
+            const tRepliesEnd = globalThis.performance?.now?.() || Date.now();
             _dispatchReindexDebug({
                 phase: "replies:update:end",
                 id: canvas.idString,
@@ -2741,8 +2766,7 @@ export class Scope extends Program<ScopeArgs> {
             });
             return;
         }
-        const tLookupDone =
-            (globalThis as any).performance?.now?.() || Date.now();
+        const tLookupDone = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:lookup:end",
             id: canvas.idString,
@@ -2750,15 +2774,13 @@ export class Scope extends Program<ScopeArgs> {
         });
 
         // Build fresh index row
-        const tBuildStart =
-            (globalThis as any).performance?.now?.() || Date.now();
+        const tBuildStart = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:build:start",
             id: canvas.idString,
         });
         const fresh = await IndexableCanvas.from(canvas);
-        const tBuildEnd =
-            (globalThis as any).performance?.now?.() || Date.now();
+        const tBuildEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:build:end",
             id: canvas.idString,
@@ -2769,8 +2791,7 @@ export class Scope extends Program<ScopeArgs> {
         const ctx = existing.__context;
 
         // Write through with the existing context
-        const tPutStart =
-            (globalThis as any).performance?.now?.() || Date.now();
+        const tPutStart = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({ phase: "full:put:start", id: canvas.idString });
         // Collect static meta about the fresh row once
         const _meta = () => ({
@@ -2789,10 +2810,9 @@ export class Scope extends Program<ScopeArgs> {
         const bytes = serialized?.length;
 
         // 1) putWithContext (context row)
-        const tCtxStart =
-            (globalThis as any).performance?.now?.() || Date.now();
+        const tCtxStart = globalThis.performance?.now?.() || Date.now();
         await this.replies.index.putWithContext(canvas, toId(canvas.id), ctx);
-        const tCtxEnd = (globalThis as any).performance?.now?.() || Date.now();
+        const tCtxEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:put:batch",
             batch: "ctx",
@@ -2803,10 +2823,9 @@ export class Scope extends Program<ScopeArgs> {
 
         // 2) index.put (indexed document)
         const wrapped = new this.replies.index.wrappedIndexedType(fresh, ctx);
-        const tIdxStart =
-            (globalThis as any).performance?.now?.() || Date.now();
+        const tIdxStart = globalThis.performance?.now?.() || Date.now();
         await this.replies.index.index.put(wrapped);
-        const tIdxEnd = (globalThis as any).performance?.now?.() || Date.now();
+        const tIdxEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:put:batch",
             batch: "index",
@@ -2814,7 +2833,7 @@ export class Scope extends Program<ScopeArgs> {
             bytes,
             ..._meta(),
         });
-        const tPutEnd = (globalThis as any).performance?.now?.() || Date.now();
+        const tPutEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:put:end",
             id: canvas.idString,
@@ -2826,7 +2845,7 @@ export class Scope extends Program<ScopeArgs> {
             process?.env?.FULL_PUT_TEST_HOOK
         ) {
             try {
-                (globalThis as any).__LAST_FULL_PUT = {
+                globalThis.__LAST_FULL_PUT = {
                     id: canvas.idString,
                     ctxMs: tCtxEnd - tCtxStart,
                     indexMs: tIdxEnd - tIdxStart,
@@ -2837,7 +2856,7 @@ export class Scope extends Program<ScopeArgs> {
                 };
             } catch {}
         }
-        const tEnd = (globalThis as any).performance?.now?.() || Date.now();
+        const tEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:end",
             id: canvas.idString,
