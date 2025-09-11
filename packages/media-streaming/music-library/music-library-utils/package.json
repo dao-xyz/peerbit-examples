@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/music-library-utils",
-    "version": "0.0.4",
+    "version": "0.0.5",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -42,7 +42,7 @@
     },
     "dependencies": {
         "@peerbit/document": "^9",
-        "@peerbit/media-streaming": "^0.0.3",
+        "@peerbit/media-streaming": "^0.0.4",
         "peerbit": "^4",
         "uuid": "^10.0.0"
     }

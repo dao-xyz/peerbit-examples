@@ -1,6 +1,6 @@
 {
     "name": "@giga-app/sdk",
-    "version": "0.0.17",
+    "version": "0.0.18",
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "module": "lib/esm/index.js",
     "types": "lib/esm/index.d.ts",
@@ -25,7 +25,7 @@
         "@iframe-resizer/child": "^5",
         "@iframe-resizer/parent": "^5",
         "@peerbit/proxy-window": "^3",
-        "@peerbit/react": "^0.0.29",
+        "@peerbit/react": "^0.0.30",
         "@types/react": "^19.1.8",
         "@types/react-dom": "^19.1.6",
         "peerbit": "^4",
