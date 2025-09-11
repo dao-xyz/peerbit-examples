@@ -898,7 +898,7 @@ const _CanvasWrapper = (
                 }
                 // Ensure indexes are up to date before navigation/reload
                 try {
-                    await canvas.nearestScope.reIndexDebouncer.flush();
+                    await canvas.nearestScope._hierarchicalReindex!.flush();
                 } catch {}
                 // No local snapshotting: rely solely on private scope persistence
                 const t1 = performance.now();

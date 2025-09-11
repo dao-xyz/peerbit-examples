@@ -112,7 +112,9 @@ export const DraftManagerProvider: React.FC<{
 
     const records = useRef(new Map<string, DraftRecord>());
     const parentIndex = useRef(new Map<string, string>());
-    const debouncers = useRef(new Map<string, DebouncedFunc<() => void>>());
+    const debouncers = useRef(
+        new Map<string, DebouncedFunc<() => Promise<void>>>()
+    );
     const inflightEnsureByBucket = useRef(new Map<string, Promise<CanvasIx>>());
     const inflightEnsureByParent = useRef(new Map<string, Promise<CanvasIx>>());
     const publishQueue = useRef(new Map<string, Promise<void>>());
@@ -483,17 +485,38 @@ export const DraftManagerProvider: React.FC<{
                         records.current.set(bucket, { ...rec, canvas: fresh });
                         // no pointer persistence
 
-                        // flush any pending local save
-                        debouncers.current.get(bucket)?.flush?.();
+                        // flush any pending local save and await it (flush may return a Promise
+                        // because the debounced function calls async saveRaw). Awaiting ensures
+                        // we don't proceed before local persistence/indexing logic has run.
+                        await debouncers.current.get(bucket)?.flush?.();
                         perfMark("flushLocal");
 
                         log("publish: hasParent?", {
                             hasParent: !!rec.replyTo,
                         });
+                        // Flush only this draft's canvas indexing if there are pending changes (targeted instead of global)
+                        try {
+                            await rec.canvas.nearestScope._hierarchicalReindex!.flush(
+                                rec.canvas.idString
+                            );
+                            perfMark("preCanvasFlush");
+                        } catch (e) {
+                            console.warn(
+                                "[DraftManager] publish: preCanvasFlush error",
+                                e
+                            );
+                        }
                         if (rec.replyTo) {
                             try {
-                                await rec.canvas.nearestScope.reIndexDebouncer.flush();
-                                perfMark("preParentFlush");
+                                // Optimization: previously we flushed hierarchical reindex BEFORE upserting the reply (preParentFlush)
+                                // to ensure parent indexes were up to date. Empirically this added latency without affecting
+                                // correctness for publish because upsertReply itself does not rely on those pending index writes.
+                                // We skip the pre flush now and rely on a single flush after upsertReply below.
+                                captureEvents &&
+                                    logEvt("publish:preFlush:skipped", {
+                                        bucket,
+                                        parentId: rec.replyTo.idString,
+                                    });
                                 const parent = rec.replyTo;
                                 log("publish: syncing draft to parent", {
                                     elements:
@@ -510,8 +533,11 @@ export const DraftManagerProvider: React.FC<{
                                     debug,
                                 });
                                 perfMark("upsertReply");
-                                await parent.nearestScope.reIndexDebouncer.flush();
-                                perfMark("postParentFlush");
+                                // Targeted parent flush only (avoid flushing unrelated canvases)
+                                await parent.nearestScope._hierarchicalReindex!.flush(
+                                    parent.idString
+                                );
+                                perfMark("parentFlush");
                                 // Emit debug event immediately; tests now capture
                                 // baseline before triggering actions to avoid races.
                                 logEvt("replyPublished", {

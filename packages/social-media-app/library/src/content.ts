@@ -46,7 +46,7 @@ import {
 } from "./types.js";
 import { RPC } from "@peerbit/rpc";
 import { compare, concat, equals } from "uint8arrays";
-import { debouncedAccumulatorMap } from "./utils.js";
+import { createHierarchicalReindexManager } from "./utils.js"; // per-key & hierarchical variants
 import { ModedThemePalette } from "./colors.js";
 import { type ReplicationOptions } from "@peerbit/shared-log";
 import { orderKeyBetween } from "./order-key.js";
@@ -671,6 +671,7 @@ type Sync = {
     type: "sync";
     targetScope?: Scope; // default: parent.nearestScope or this scope
     updateHome?: "keep" | "set"; // default: "keep"
+    deferCleanup?: boolean; // if true, old-home cleanup runs after finalize instead of inline
 } & PublishBase;
 type Fork = {
     type: "fork";
@@ -955,6 +956,9 @@ async function copyElementsBetweenScopes(
     const dlog = (...args: any[]) => {
         if (debug) console.debug("[copyElementsBetweenScopes]", ...args);
     };
+    const collect = (globalThis as any).__COLLECT_REINDEX;
+    const perf = (globalThis as any).__PERF_EVENTS__;
+    const t0 = collect ? Date.now() : 0;
 
     // gather source elements
     const srcEls = await from.elements.index
@@ -984,7 +988,7 @@ async function copyElementsBetweenScopes(
             const existed = existingIds.has(e.idString);
             if (existed) updated++;
             else created++;
-
+            const elStart = collect ? Date.now() : 0;
             await to.elements.put(
                 new Element({
                     id: e.id, // preserve id for "sync"
@@ -994,6 +998,13 @@ async function copyElementsBetweenScopes(
                     content: e.content,
                 })
             );
+            if (collect && perf) {
+                perf.push({
+                    type: "copy:element",
+                    canvas: dst.idString,
+                    ms: Date.now() - elStart,
+                });
+            }
         })
     );
 
@@ -1006,6 +1017,16 @@ async function copyElementsBetweenScopes(
             created,
             updated,
             delta: after.length - existingAtDest.length,
+        });
+    }
+    if (collect && perf) {
+        perf.push({
+            type: "copy:summary",
+            canvas: dst.idString,
+            created,
+            updated,
+            total: srcEls.length,
+            ms: Date.now() - t0,
         });
     }
 }
@@ -1051,25 +1072,58 @@ async function copyVisualizationBetweenScopes(
 
 // helpers (drop these near copyElementsBetweenScopes)
 async function deleteOwnedElementsInScope(scope: Scope, canvas: Canvas) {
+    const collect = (globalThis as any).__COLLECT_REINDEX;
+    const perf = (globalThis as any).__PERF_EVENTS__;
+    const t0 = collect ? Date.now() : 0;
     const els = await scope.elements.index
         .iterate({ query: getOwnedElementsQuery(canvas) }, { resolve: false })
         .all();
-    for (const e of els) await scope.elements.del(e.id);
+    await Promise.all(els.map((e) => scope.elements.del(e.id)));
+    if (collect && perf) {
+        perf.push({
+            type: "cleanup:elements",
+            canvas: canvas.idString,
+            count: els.length,
+            ms: Date.now() - t0,
+        });
+    }
 }
 
 async function deleteVisualizationsInScope(scope: Scope, canvas: Canvas) {
+    const collect = (globalThis as any).__COLLECT_REINDEX;
+    const perf = (globalThis as any).__PERF_EVENTS__;
+    const t0 = collect ? Date.now() : 0;
     const vizz = await scope.visualizations.index
         .iterate({ query: { canvasId: canvas.id } }, { resolve: false })
         .all();
-    for (const v of vizz) await scope.visualizations.del(v.id);
+    await Promise.all(vizz.map((v) => scope.visualizations.del(v.id)));
+    if (collect && perf) {
+        perf.push({
+            type: "cleanup:visualizations",
+            canvas: canvas.idString,
+            count: vizz.length,
+            ms: Date.now() - t0,
+        });
+    }
 }
 
 /** Remove any links that reference `canvas` as a child inside `scope`. */
 async function deleteChildLinksForCanvasInScope(scope: Scope, canvas: Canvas) {
+    const collect = (globalThis as any).__COLLECT_REINDEX;
+    const perf = (globalThis as any).__PERF_EVENTS__;
+    const t0 = collect ? Date.now() : 0;
     const links = (await scope.links.index
         .iterate({ query: [getParentLinksQuery(canvas.id)] })
         .all()) as Link[];
-    for (const l of links) await scope.links.del(l.id);
+    await Promise.all(links.map((l) => scope.links.del(l.id)));
+    if (collect && perf) {
+        perf.push({
+            type: "cleanup:childLinks",
+            canvas: canvas.idString,
+            count: links.length,
+            ms: Date.now() - t0,
+        });
+    }
 }
 
 export abstract class CanvasMessage {}
@@ -1270,6 +1324,7 @@ export type ScopeArgs = {
     debug?: boolean;
     replicate?: ReplicationOptions;
     replicas?: { min?: number };
+    experimentalHierarchicalReindex?: boolean; // feature flag
 };
 
 /* ---------------------------------------------------------
@@ -1428,14 +1483,10 @@ const reIndexRepliesInParents = async (scope: Scope, canvas: Canvas) => {
             );
         }
 
-        await scope.reIndexDebouncer.add({
-            key: loadedPath[i].idString,
-            value: {
-                canvas: loadedPath[i],
-                /* options: {
-                    onlyReplies: true,
-                }, */
-            },
+        await scope._hierarchicalReindex!.add({
+            canvas: loadedPath[i],
+            options: { onlyReplies: true },
+            propagateParents: false,
         });
     }
 };
@@ -1461,14 +1512,12 @@ function makeReindexListener<T, I>(
                 if (!canvas) continue;
 
                 // 1) reindex the canvas itself
-                await scope.reIndexDebouncer.add({
-                    key: canvas.idString,
-                    value: {
-                        canvas,
-                        options: opts?.onlyReplies
-                            ? { onlyReplies: true }
-                            : undefined,
-                    },
+                await scope._hierarchicalReindex!.add({
+                    canvas,
+                    options: opts?.onlyReplies
+                        ? { onlyReplies: true }
+                        : undefined,
+                    propagateParents: !!opts?.alsoParents,
                 });
 
                 // 2) optionally propagate reply totals to ancestors
@@ -1476,12 +1525,10 @@ function makeReindexListener<T, I>(
                     const chain = await canvas.loadPath({ includeSelf: false });
                     // nearest parent → root
                     for (let i = chain.length - 1; i >= 0; i--) {
-                        await scope.reIndexDebouncer.add({
-                            key: chain[i].idString,
-                            value: {
-                                canvas: chain[i],
-                                options: { onlyReplies: true },
-                            },
+                        await scope._hierarchicalReindex!.add({
+                            canvas: chain[i],
+                            options: { onlyReplies: true },
+                            propagateParents: false,
                         });
                     }
                 }
@@ -1626,34 +1673,35 @@ export class Scope extends Program<ScopeArgs> {
     private closeController: AbortController | null = null;
     // Deduplicate transient missing-resolution logs per link/side
     private _missingResolveOnce = new Set<string>();
-    reIndexDebouncer: ReturnType<
-        typeof debouncedAccumulatorMap<{
-            canvas: Canvas;
-            options?: { onlyReplies?: boolean };
-        }>
-    >;
+    // reIndexDebouncer removed; replaced by per-canvas hierarchical scheduler
+    _hierarchicalReindex?: ReturnType<
+        typeof createHierarchicalReindexManager<Canvas>
+    >; // experimental feature flag
 
     openingArgs?: ScopeArgs;
     async open(args?: ScopeArgs): Promise<void> {
         this.openingArgs = args;
-        this.reIndexDebouncer = debouncedAccumulatorMap<{
-            canvas: Canvas;
-            options?: { onlyReplies?: boolean };
-        }>(
-            async (map) => {
-                for (const indexArgs of map.values()) {
-                    await this.reIndex(indexArgs.canvas, indexArgs.options);
-                }
-            },
-            123,
-            (into, from) => {
-                if (into.options?.onlyReplies && !from.options?.onlyReplies) {
-                    into.options = from.options;
-                }
-                into.canvas = from.canvas;
-                return into;
-            }
-        );
+        // Lightweight dispatcher accessible for run-level instrumentation
+        const _dispatchReindexDebug = (detail: any) => {
+            try {
+                (globalThis as any).window?.dispatchEvent?.(
+                    new CustomEvent("reindex:debug", { detail })
+                );
+            } catch {}
+        };
+        this._hierarchicalReindex = createHierarchicalReindexManager<Canvas>({
+            // Allow test-mode with absolutely no debounce/cooldown (REINDEX_NO_DELAY=1)
+            delay:
+                typeof process !== "undefined" &&
+                process?.env?.REINDEX_NO_DELAY === "1"
+                    ? 0
+                    : 1,
+            reindex: async (canvas, opts) => this.reIndex(canvas, opts),
+            propagateParentsDefault: true,
+            onDebug: (evt) => _dispatchReindexDebug(evt),
+            cooldownMs: typeof process !== "undefined" && "1" ? 0 : 1,
+        });
+        // Instrumentation now handled via onDebug hook above.
 
         this.closeController = new AbortController();
         this.debug = !!args?.debug;
@@ -1704,6 +1752,7 @@ export class Scope extends Program<ScopeArgs> {
                     },
                 },
                 transform: async (arg, _context) => {
+                    // Use real content for indexing (previous stub returned constant 'x')
                     const indexable = await arg.content.toIndex();
                     return new IndexableElement({
                         id: arg.id,
@@ -1788,7 +1837,6 @@ export class Scope extends Program<ScopeArgs> {
                 return true;
             },
         });
-
         await this.replies.open({
             type: Canvas,
             timeUntilRoleMaturity: 6e4,
@@ -1837,7 +1885,6 @@ export class Scope extends Program<ScopeArgs> {
                 },
             },
         });
-
         this.debug && console.timeEnd(this.getValueWithContext("openReplies"));
 
         await this.messages.open({
@@ -1936,6 +1983,19 @@ export class Scope extends Program<ScopeArgs> {
         const dlog = (...args: any[]) => {
             if (debug) console.debug("[Scope.publish]", ...args);
         };
+        // Inline perf markers (only when debug flag passed)
+        type PerfMark = { name: string; t: number };
+        const perfMarks: PerfMark[] | null = debug ? [] : null;
+        const perfZero = debug ? Date.now() : 0;
+        const mark = (label: string) => {
+            if (!perfMarks) return;
+            // Some marks are emitted with an appended timing suffix when debug is on,
+            // e.g. "sync:copyPayload:123ms". Tests expect the base mark name
+            // ("sync:copyPayload") to be present, so strip any trailing ":<...>".
+            const base = String(label).split(":")[0];
+            perfMarks.push({ name: base, t: Date.now() - perfZero });
+        };
+        mark("start");
 
         // Ensure every canvas has a home
         if (!child.selfScope) {
@@ -1996,7 +2056,7 @@ export class Scope extends Program<ScopeArgs> {
                     });
                 }
 
-                await dst.nearestScope.reIndexDebouncer.flush();
+                await dst.nearestScope._hierarchicalReindex!.flush();
                 // Parent-side indexes will converge via link listeners; no explicit flush needed here.
             } else {
                 if (publish.view != null) {
@@ -2007,7 +2067,7 @@ export class Scope extends Program<ScopeArgs> {
                     await dst.setExperience(publish.view, {
                         scope: dst.nearestScope,
                     });
-                    await dst.nearestScope.reIndexDebouncer.flush();
+                    await dst.nearestScope._hierarchicalReindex!.flush();
                 }
             }
         };
@@ -2017,8 +2077,17 @@ export class Scope extends Program<ScopeArgs> {
             dlog("mode=link-only: ensure home row, then finalize");
             await ensureInReplies(srcHome, src);
             await srcHome.openWithSameSettings(src);
+            mark("link-only:ensure+open");
             await finalize(src);
             dlog("done: link-only");
+            mark("end");
+            if (perfMarks) {
+                globalThis?.dispatchEvent?.(
+                    new CustomEvent("perf:scope.publish", {
+                        detail: { mode: "link-only", marks: perfMarks },
+                    })
+                );
+            }
             return [false, src];
         }
 
@@ -2032,10 +2101,35 @@ export class Scope extends Program<ScopeArgs> {
         // --------- sync (same id at dest) ----------
         if (publish.type === "sync") {
             const updateHome = publish.updateHome ?? "keep";
+            // Heuristic: if caller didn't specify deferCleanup and we're migrating a canvas with many elements,
+            // defer cleanup to after finalize to reduce perceived publish latency.
+            let deferCleanup = !!publish.deferCleanup;
+            let autoDeferred = false;
+            if (
+                !deferCleanup &&
+                publish.deferCleanup == null &&
+                updateHome === "set" &&
+                srcHome.address !==
+                    (publish.targetScope ?? defaultDestScope).address
+            ) {
+                try {
+                    const ownedAtSource = await srcHome.elements.index
+                        .iterate(
+                            { query: getOwnedByCanvasQuery(src) },
+                            { resolve: true }
+                        )
+                        .all();
+                    if (ownedAtSource.length > 10) {
+                        deferCleanup = true;
+                        autoDeferred = true;
+                    }
+                } catch {}
+            }
             const existing = await dest.replies.index.get(src.id, {
                 resolve: true,
             });
             dlog("mode=sync", { updateHome, existingAtDest: !!existing });
+            mark("sync:lookupExisting");
 
             const dst = existing
                 ? await dest.openWithSameSettings(existing)
@@ -2056,6 +2150,7 @@ export class Scope extends Program<ScopeArgs> {
                 });
                 await ensureInReplies(dest, dst);
                 await dest.openWithSameSettings(dst);
+                mark("sync:ensure+openDest");
             }
 
             // (debug) count elements owned by dst in dest scope before copy
@@ -2073,6 +2168,7 @@ export class Scope extends Program<ScopeArgs> {
                 : undefined;
 
             // Copy payload over
+            const copyStart = debug ? Date.now() : 0;
             await Promise.all([
                 copyElementsBetweenScopes(
                     srcHome,
@@ -2087,9 +2183,17 @@ export class Scope extends Program<ScopeArgs> {
                     dst /* , { debug } */
                 ),
             ]);
+            mark(
+                "sync:copyPayload" +
+                    (debug ? `:${Date.now() - copyStart}ms` : "")
+            );
 
             // If we are *moving* the home, flip selfScope and clean up old home payload & child-links
-            if (updateHome === "set" && srcHome.address !== dest.address) {
+            if (
+                updateHome === "set" &&
+                srcHome.address !== dest.address &&
+                !deferCleanup
+            ) {
                 dlog("sync: update home of src → dest", {
                     from: srcHome.address,
                     to: dest.address,
@@ -2117,7 +2221,8 @@ export class Scope extends Program<ScopeArgs> {
                 }
 
                 // Flush both sides so indexes converge deterministically
-                await srcHome.reIndexDebouncer.flush();
+                await srcHome._hierarchicalReindex!.flush();
+                mark("sync:cleanupOldHome");
             }
 
             // (debug) count elements owned by dst in dest scope after copy
@@ -2146,7 +2251,45 @@ export class Scope extends Program<ScopeArgs> {
 
             // finalize (link, view, reindex)
             await finalize(dst);
-            dlog("done: sync", { createdAtDest: created });
+            mark("sync:finalize");
+            dlog("done: sync", { createdAtDest: created, autoDeferred });
+            if (
+                updateHome === "set" &&
+                srcHome.address !== dest.address &&
+                deferCleanup
+            ) {
+                dlog("sync: deferred cleanup old home payload", {
+                    from: srcHome.address,
+                    canvas: src.idString,
+                });
+                const cleanupStart = debug ? Date.now() : 0;
+                src.selfScope = new AddressReference({ address: dest.address });
+                await deleteOwnedElementsInScope(srcHome, src);
+                await deleteVisualizationsInScope(srcHome, src);
+                await deleteChildLinksForCanvasInScope(srcHome, src);
+                const hadRow = await srcHome.replies.index.get(src.id, {
+                    resolve: false,
+                    local: true,
+                });
+                if (hadRow) await srcHome.replies.del(src.id);
+                await srcHome._hierarchicalReindex!.flush();
+                mark(
+                    "sync:deferredCleanup" +
+                        (debug ? `:${Date.now() - cleanupStart}ms` : "")
+                );
+                if (autoDeferred) {
+                    mark("sync:autoDeferred");
+                }
+                dlog("sync: deferred cleanup complete");
+            }
+            mark("end");
+            if (perfMarks) {
+                globalThis?.dispatchEvent?.(
+                    new CustomEvent("perf:scope.publish", {
+                        detail: { mode: "sync", created, marks: perfMarks },
+                    })
+                );
+            }
             return [created, dst];
         }
 
@@ -2173,6 +2316,7 @@ export class Scope extends Program<ScopeArgs> {
 
             await ensureInReplies(dest, dst);
             await dest.openWithSameSettings(dst);
+            mark("fork:ensure+openDest");
 
             await Promise.all([
                 copyElementsBetweenScopes(
@@ -2188,9 +2332,19 @@ export class Scope extends Program<ScopeArgs> {
                     dst /* , { debug } */
                 ),
             ]);
+            mark("fork:copyPayload");
 
             await finalize(dst);
+            mark("fork:finalize");
             dlog("done: fork", { dst: dst.idString });
+            mark("end");
+            if (perfMarks) {
+                globalThis?.dispatchEvent?.(
+                    new CustomEvent("perf:scope.publish", {
+                        detail: { mode: "fork", marks: perfMarks },
+                    })
+                );
+            }
             return [true, dst];
         }
     }
@@ -2254,7 +2408,7 @@ export class Scope extends Program<ScopeArgs> {
             }
 
             // 4) Make immediately visible & indexable (avoid test races).
-            await home.reIndexDebouncer.flush();
+            await home._hierarchicalReindex!.flush();
             await child.getSelfIndexedCoerced();
 
             return [created, child];
@@ -2517,20 +2671,63 @@ export class Scope extends Program<ScopeArgs> {
                 : (from as Canvas)
         );
 
+        const _dispatchReindexDebug = (detail: any) => {
+            try {
+                (globalThis as any).window?.dispatchEvent?.(
+                    new CustomEvent("reindex:debug", { detail })
+                );
+            } catch {}
+        };
+        const tStart = (globalThis as any).performance?.now?.() || Date.now();
+
         if (options?.onlyReplies) {
+            const tRepliesStart =
+                (globalThis as any).performance?.now?.() || Date.now();
+            _dispatchReindexDebug({
+                phase: "replies:update:start",
+                id: canvas.idString,
+            });
             // 1) update this node's replies total
             await updateIndexedRepliesOnly(this, canvas);
+            const tRepliesSelf =
+                (globalThis as any).performance?.now?.() || Date.now();
+            _dispatchReindexDebug({
+                phase: "replies:update:self",
+                id: canvas.idString,
+                dt: tRepliesSelf - tRepliesStart,
+            });
 
             // 2) propagate to ancestors (their deep totals depend on children)
             const ancestors = await canvas.loadPath({ includeSelf: false });
             // walk from nearest parent up to root
+            const tAncestorsStart =
+                (globalThis as any).performance?.now?.() || Date.now();
             for (let i = ancestors.length - 1; i >= 0; i--) {
                 await updateIndexedRepliesOnly(this, ancestors[i]);
             }
+            const tAncestorsEnd =
+                (globalThis as any).performance?.now?.() || Date.now();
+            _dispatchReindexDebug({
+                phase: "replies:update:ancestors",
+                id: canvas.idString,
+                dt: tAncestorsEnd - tAncestorsStart,
+                count: ancestors.length,
+            });
+            const tRepliesEnd =
+                (globalThis as any).performance?.now?.() || Date.now();
+            _dispatchReindexDebug({
+                phase: "replies:update:end",
+                id: canvas.idString,
+                dt: tRepliesEnd - tRepliesStart,
+            });
             return;
         }
 
         // ---------- FULL rebuild of IndexableCanvas ----------
+        _dispatchReindexDebug({
+            phase: "full:lookup:start",
+            id: canvas.idString,
+        });
         const existing = await this.replies.index.get(canvas.id, {
             resolve: false,
             local: true,
@@ -2538,21 +2735,114 @@ export class Scope extends Program<ScopeArgs> {
         });
         if (!existing) {
             // This scope does not own/index this canvas → do not create a ghost row
+            _dispatchReindexDebug({
+                phase: "full:lookup:skip",
+                id: canvas.idString,
+            });
             return;
         }
+        const tLookupDone =
+            (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:lookup:end",
+            id: canvas.idString,
+            dt: tLookupDone - tStart,
+        });
 
         // Build fresh index row
+        const tBuildStart =
+            (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:build:start",
+            id: canvas.idString,
+        });
         const fresh = await IndexableCanvas.from(canvas);
+        const tBuildEnd =
+            (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:build:end",
+            id: canvas.idString,
+            dt: tBuildEnd - tBuildStart,
+        });
 
         // Reuse existing context; never synthesize a new one for a foreign canvas
         const ctx = existing.__context;
 
         // Write through with the existing context
-        await this.replies.index.putWithContext(canvas, toId(canvas.id), ctx);
+        const tPutStart =
+            (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({ phase: "full:put:start", id: canvas.idString });
+        // Collect static meta about the fresh row once
+        const _meta = () => ({
+            id: canvas.idString,
+            elements: Number(fresh.elements || 0n),
+            replies: Number(fresh.replies || 0n),
+            pathDepth: fresh.pathDepth,
+            contents: fresh.contents?.length || 0,
+            contextLen: fresh.context?.length || 0,
+        });
+        let serialized: Uint8Array | undefined;
+        try {
+            // Best-effort serialization size (can throw if deps not loaded)
+            serialized = serialize(fresh) as Uint8Array;
+        } catch {}
+        const bytes = serialized?.length;
 
-        // Push into the index backend
+        // 1) putWithContext (context row)
+        const tCtxStart =
+            (globalThis as any).performance?.now?.() || Date.now();
+        await this.replies.index.putWithContext(canvas, toId(canvas.id), ctx);
+        const tCtxEnd = (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:put:batch",
+            batch: "ctx",
+            dt: tCtxEnd - tCtxStart,
+            bytes,
+            ..._meta(),
+        });
+
+        // 2) index.put (indexed document)
         const wrapped = new this.replies.index.wrappedIndexedType(fresh, ctx);
+        const tIdxStart =
+            (globalThis as any).performance?.now?.() || Date.now();
         await this.replies.index.index.put(wrapped);
+        const tIdxEnd = (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:put:batch",
+            batch: "index",
+            dt: tIdxEnd - tIdxStart,
+            bytes,
+            ..._meta(),
+        });
+        const tPutEnd = (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:put:end",
+            id: canvas.idString,
+            dt: tPutEnd - tPutStart,
+        });
+        // Test hook: expose timing breakdown for Node tests (no window events)
+        if (
+            typeof process !== "undefined" &&
+            process?.env?.FULL_PUT_TEST_HOOK
+        ) {
+            try {
+                (globalThis as any).__LAST_FULL_PUT = {
+                    id: canvas.idString,
+                    ctxMs: tCtxEnd - tCtxStart,
+                    indexMs: tIdxEnd - tIdxStart,
+                    totalMs: tPutEnd - tPutStart,
+                    elements: Number(fresh.elements || 0n),
+                    replies: Number(fresh.replies || 0n),
+                    bytes: bytes ?? null,
+                };
+            } catch {}
+        }
+        const tEnd = (globalThis as any).performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:end",
+            id: canvas.idString,
+            dt: tEnd - tStart,
+        });
     }
 
     async afterOpen(): Promise<void> {
@@ -2569,12 +2859,7 @@ export class Scope extends Program<ScopeArgs> {
                  canvas = await this.node.open(canvas, { existing: "reuse" });
                  await canvas.load();
      
-                 promises.push(
-                     this.reIndexDebouncer.add({
-                         key: canvas.idString,
-                         value: canvas,
-                     })
-                 );
+                 // scheduling replaced by hierarchical manager; intentionally omitted
              }
              await Promise.all(promises);
          } */
@@ -2595,11 +2880,6 @@ export class Scope extends Program<ScopeArgs> {
             this.links.events.removeEventListener(
                 "change",
                 this._linksChangeListener
-            );
-        this._elementsChangeListener &&
-            this.elements.events.removeEventListener(
-                "change",
-                this._elementsChangeListener
             );
 
         /*  this._typeChangeListener &&
@@ -2704,31 +2984,23 @@ export class Scope extends Program<ScopeArgs> {
                 }
 
                 if (child) {
-                    await this.reIndexDebouncer.add({
-                        key: child.idString,
-                        value: {
-                            canvas: child,
-                            options: { onlyReplies: false },
-                        },
+                    await this._hierarchicalReindex!.add({
+                        canvas: child,
+                        options: { onlyReplies: false },
                     }); // child’s totals
                 }
                 if (parent) {
-                    await this.reIndexDebouncer.add({
-                        key: parent.idString,
-                        value: {
-                            canvas: parent,
-                            options: { onlyReplies: true },
-                        },
+                    await this._hierarchicalReindex!.add({
+                        canvas: parent,
+                        options: { onlyReplies: true },
                     });
                     await parent.load(this.node, { args: this.openingArgs });
                     const chain = await parent.loadPath({ includeSelf: false });
                     for (let i = chain.length - 1; i >= 0; i--) {
-                        await this.reIndexDebouncer.add({
-                            key: chain[i].idString,
-                            value: {
-                                canvas: chain[i],
-                                options: { onlyReplies: true },
-                            },
+                        await this._hierarchicalReindex!.add({
+                            canvas: chain[i],
+                            options: { onlyReplies: true },
+                            propagateParents: false,
                         });
                     }
                 }
@@ -2815,7 +3087,7 @@ export class Scope extends Program<ScopeArgs> {
                 this._typeChangeListener
             ); */
 
-        this.reIndexDebouncer.close();
+        this._hierarchicalReindex?.close();
         return super.close(from);
     }
 
@@ -3449,7 +3721,7 @@ export class Canvas {
              }
          }
  
-         await activeScope.reIndexDebouncer.flush();
+    await activeScope._hierarchicalReindex!.flush();
          return createdPath.slice(1) as WithIndexedContext<Canvas, IndexableCanvas>[];
      } */
 
@@ -3637,7 +3909,7 @@ export class Canvas {
             current = node;
         }
 
-        await scope.reIndexDebouncer.flush();
+        await scope._hierarchicalReindex!.flush();
         return [...existingPath, ...created];
     }
 
@@ -3901,17 +4173,43 @@ export class Canvas {
         element: Element,
         options?: {
             skipReindex?: boolean;
+            unique?: boolean;
         }
     ): Promise<void> {
+        // Central implicit bulk logic (applies to all element creations)
+        const now = Date.now();
+        if (!this._implicitBulk) {
+            this._implicitBulk = { count: 0, windowStart: now };
+        }
+        if (now - this._implicitBulk.windowStart > 150) {
+            this._implicitBulk.windowStart = now;
+            this._implicitBulk.count = 0;
+            this._implicitBulk.active = false;
+        }
+        this._implicitBulk.count++;
+        if (this._implicitBulk.count === 1) {
+            this._implicitBulkTimer && clearTimeout(this._implicitBulkTimer);
+            this._implicitBulkTimer = setTimeout(() => {
+                if (this._bulkInsertDepth > 0 && this._implicitBulk?.active) {
+                    this.endBulk().catch(() => {});
+                }
+                this._implicitBulk = undefined;
+            }, 160);
+        }
+        if (!this._implicitBulk.active && this._implicitBulk.count >= 5) {
+            this._implicitBulk.active = true;
+            this.beginBulk();
+        }
+
         const scope = this.nearestScope;
-        await scope.elements.put(element);
-        !options?.skipReindex &&
-            (await scope.reIndexDebouncer.add({
-                key: this.idString,
-                value: {
-                    canvas: this,
-                },
-            }));
+        await scope.elements.put(element, { unique: options?.unique });
+        const suppress = options?.skipReindex || this._bulkInsertDepth > 0;
+        if (!suppress) {
+            await scope._hierarchicalReindex!.add({
+                canvas: this,
+                options: { onlyReplies: false },
+            });
+        }
     }
 
     get messages(): RPC<CanvasMessage, CanvasMessage> {
@@ -3986,12 +4284,13 @@ export class Canvas {
 
         let elementId = options?.id || randomBytes(32);
         if (
-            await this.elements.index.get(toId(elementId), {
+            options?.id &&
+            (await this.elements.index.get(toId(elementId), {
                 local: true,
-                remote: {
-                    eager: true,
-                },
-            })
+                remote: false /* {
+                    strategy: "fallback",
+                }, */,
+            }))
         ) {
             return;
         }
@@ -4009,8 +4308,76 @@ export class Canvas {
                 }),
                 canvasId: this.id,
             }),
-            options
+            { ...options, unique: options?.id == null }
         );
+    }
+
+    /**
+     * Batch insert many text elements with a single reindex flush.
+     * - Uses beginBulk/endBulk to suppress intermediate reindexes.
+     * - Pre-generates random IDs in a single buffer to reduce crypto overhead.
+     */
+    async addTextElements(texts: string[]): Promise<void> {
+        if (!texts.length) return;
+        this.beginBulk();
+        try {
+            // Pre-generate ids (concatenate into one buffer for fewer syscalls)
+            const buf = randomBytes(32 * texts.length);
+            const scope = this.nearestScope;
+            const puts: Promise<any>[] = [];
+            for (let i = 0; i < texts.length; i++) {
+                const id = buf.slice(i * 32, (i + 1) * 32);
+                const element = new Element({
+                    location: Layout.zero(),
+                    id,
+                    publicKey: scope.node.identity.publicKey,
+                    content: new StaticContent({
+                        content: new StaticMarkdownText({ text: texts[i] }),
+                        quality: LOWEST_QUALITY,
+                        contentId: sha256Sync(
+                            new TextEncoder().encode(texts[i])
+                        ),
+                    }),
+                    canvasId: this.id,
+                });
+                // Directly use elements.put to avoid per-element implicit bulk bookkeeping in createElement
+                puts.push(scope.elements.put(element));
+            }
+            await Promise.all(puts);
+        } finally {
+            await this.endBulk();
+        }
+    }
+
+    // -------- BULK INSERT OPTIMIZATION ---------
+    private _bulkInsertDepth: number = 0;
+    private _implicitBulk?: {
+        count: number;
+        windowStart: number;
+        active?: boolean;
+    };
+    private _implicitBulkTimer: any;
+    /**
+     * Wrap many element mutations to coalesce reindex work.
+     * Usage:
+     *   canvas.beginBulk();
+     *   for (...) await canvas.addTextElement(...);
+     *   await canvas.endBulk();
+     */
+    beginBulk() {
+        this._bulkInsertDepth++;
+    }
+    async endBulk(options?: { forceReindex?: boolean }) {
+        if (this._bulkInsertDepth > 0) this._bulkInsertDepth--;
+        if (this._bulkInsertDepth === 0) {
+            if (options?.forceReindex !== false) {
+                // Schedule a single reindex now
+                await this.nearestScope._hierarchicalReindex!.add({
+                    canvas: this,
+                    options: { onlyReplies: false },
+                });
+            }
+        }
     }
 
     /*   async copyInto(

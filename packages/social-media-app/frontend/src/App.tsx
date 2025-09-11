@@ -147,10 +147,7 @@ export const Content = () => {
 const networkConfig: NetworkOption =
     import.meta.env.MODE === "development"
         ? {
-              /*   type: "local", */
-              bootstrap: [
-                  "/ip4/127.0.0.1/tcp/58933/ws/p2p/12D3KooWCbuSbm4HowQnpSEf21bfrFtGYLashKBVhxRJoZkqSC7R",
-              ],
+              type: "local",
           }
         : {
               bootstrap: [
@@ -161,7 +158,24 @@ const networkConfig: NetworkOption =
 export const App = () => {
     // Initialize debug console once per app load
     setupPrettyConsole();
-    const params = new URLSearchParams(window.location.search);
+    // Parse query params from both traditional search (?foo=bar) and hash segment (/#/path?foo=bar)
+    const params = (() => {
+        const merged = new URLSearchParams(window.location.search);
+        const hash = window.location.hash || ""; // e.g. #/path?bootstrap=offline&v=feed
+        const qIndex = hash.indexOf("?");
+        if (qIndex !== -1) {
+            const hashQuery = hash.substring(qIndex + 1); // after the ? to end (before potential # but hash won't contain another # normally)
+            // Remove potential fragment-only routing prefixes like #/ or #//
+            const clean = hashQuery.replace(/^\/?/, "");
+            const hashParams = new URLSearchParams(clean);
+            for (const [k, v] of hashParams.entries()) {
+                if (!merged.has(k)) {
+                    merged.set(k, v);
+                }
+            }
+        }
+        return merged;
+    })();
     const flagTrue = (val: string | null) =>
         val == null || val === "" ? undefined : val === "true" || val === "1";
     // Single canonical flag for non-persistent mode
@@ -183,7 +197,10 @@ export const App = () => {
                       .map((s) => s.trim())
                       .filter(Boolean)
             : undefined; // not provided at all => use default network config
-
+    if (typeof window !== "undefined") {
+        (window as any).__DBG_BOOTSTRAP = bootstrapAddrs; // aid tests/debug
+    }
+    console.log(bootstrapAddrs, bootstrapParam);
     return (
         <HashRouter basename="/">
             <ErrorProvider>

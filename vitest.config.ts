@@ -30,6 +30,5 @@ export default defineConfig({
             ? { junit: "reports/vitest-junit.xml" }
             : undefined,
         coverage: { enabled: false },
-
     },
 });

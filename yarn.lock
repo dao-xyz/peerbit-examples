@@ -1749,25 +1749,25 @@
   integrity sha512-QPcGmICAPbGLGb6F/yNf/KzKqvFx8z5qx3D1yFqVAjoFmXK35EgyW+cJ57Te3CNsmzblwtzakLGFqHPqrfb4Tw==
 
 "@iframe-resizer/child@^5":
-  version "5.5.5"
-  resolved "https://registry.yarnpkg.com/@iframe-resizer/child/-/child-5.5.5.tgz#a7c70048a1b135cc10c193b71b9c06dc542beb21"
-  integrity sha512-8fucPk6CMwNy4YJ2ZpX/m6JJI938EImj/qJIzgi3iuXxsSJ7LWe8A+plb+13E/IvcnQBEUCf6bBDGmeV23YWgQ==
+  version "5.5.6"
+  resolved "https://registry.yarnpkg.com/@iframe-resizer/child/-/child-5.5.6.tgz#9fced2235d990ace2462d39e443c5d97370ea7df"
+  integrity sha512-d9B02yNSbmjRNZkmcemTLLojo6/RHduELSERmBEcjfKXgWAEBheQporkYeWq1dI8Nar9bFQyKAAI3k3U9tVTFg==
   dependencies:
     auto-console-group "1.2.11"
 
-"@iframe-resizer/core@5.5.5":
-  version "5.5.5"
-  resolved "https://registry.yarnpkg.com/@iframe-resizer/core/-/core-5.5.5.tgz#f79cf5c630561e5e12c3814bbfd9f2e1b4939449"
-  integrity sha512-rJpVl5DMPumuNmQVl9O8CoiqdAhaF0eszrQc36vm5f8gDcm0nmBi/XyDFd8UmN3rGOlFUOSJLUHTTp8uZtQdMA==
+"@iframe-resizer/core@5.5.6":
+  version "5.5.6"
+  resolved "https://registry.yarnpkg.com/@iframe-resizer/core/-/core-5.5.6.tgz#2739b75ef2bab48bd0fab77f0a509e7c0133dbc2"
+  integrity sha512-a4TbuzsNFC8BZ9+AWkcud5ev7lOzftSMeUoaQhYEfQLCH5Ky+on+Y9Ll6/OEHmvHQg6gLw9r6r0US2zZ7lT4lQ==
   dependencies:
     auto-console-group "1.2.11"
 
 "@iframe-resizer/parent@^5":
-  version "5.5.5"
-  resolved "https://registry.yarnpkg.com/@iframe-resizer/parent/-/parent-5.5.5.tgz#26fc5f97c8616d998a0662f7fc33b02c9962f0e1"
-  integrity sha512-BalyZSWdbwnFuOG57f+51PGW0mzKFU8/N7SCoilk+k18hDEBoVnkhKz6XYiEgTxd2Qyh2hMcDFqiLkQdNpoa1g==
+  version "5.5.6"
+  resolved "https://registry.yarnpkg.com/@iframe-resizer/parent/-/parent-5.5.6.tgz#2845b5852c9607bcb81c6d8c612bb9870c7678c5"
+  integrity sha512-lEK9Bf/JsM6wIMWnHIVhtqOU+UAdCybENLJ/7NOCYbaBi7sH6v3lteQJas3W9KqIKf5r7Kx7/c5o22uADB7rJA==
   dependencies:
-    "@iframe-resizer/core" "5.5.5"
+    "@iframe-resizer/core" "5.5.6"
     auto-console-group "1.2.11"
 
 "@inquirer/core@^9.1.0":
@@ -1936,9 +1936,9 @@
     "@jridgewell/sourcemap-codec" "^1.4.10"
 
 "@jridgewell/trace-mapping@^0.3.24", "@jridgewell/trace-mapping@^0.3.25", "@jridgewell/trace-mapping@^0.3.28":
-  version "0.3.30"
-  resolved "https://registry.yarnpkg.com/@jridgewell/trace-mapping/-/trace-mapping-0.3.30.tgz#4a76c4daeee5df09f5d3940e087442fb36ce2b99"
-  integrity sha512-GQ7Nw5G2lTu/BtHTKfXhKHok2WGetd4XYcVKGx00SjAk8GMwgJM3zr6zORiPGuOE+/vkc90KtTosSSvaCjKb2Q==
+  version "0.3.31"
+  resolved "https://registry.yarnpkg.com/@jridgewell/trace-mapping/-/trace-mapping-0.3.31.tgz#db15d6781c931f3a251a3dac39501c98a6082fd0"
+  integrity sha512-zzNR+SdQSDJzc8joaeP8QQoCQr8NuYx2dIIytl1QeBEZHJ9uW6hebsrYgbz8hJwUQao3TWCMtmfV8Nu1twOLAw==
   dependencies:
     "@jridgewell/resolve-uri" "^3.1.0"
     "@jridgewell/sourcemap-codec" "^1.4.14"
@@ -4315,9 +4315,9 @@
   integrity sha512-shOuLI5D2s+0zTv2ab5M5PqfknXqWbKi+0UwB9yLTRIdzsK1R93JOO8jNhIYSHdW+IYXIYnLniu+JZqXs7h9Wg==
 
 "@sveltejs/kit@^2.0.0":
-  version "2.37.1"
-  resolved "https://registry.yarnpkg.com/@sveltejs/kit/-/kit-2.37.1.tgz#de858dc43933081fdc0a0ef778f8064f890ae1ea"
-  integrity sha512-4T9rF2Roe7RGvHfcn6+n92Yc2NF88k7ljFz9+wE0jWxyencqRpadr2/CvlcQbbTXf1ozmFxgMO6af+qm+1mPFw==
+  version "2.38.1"
+  resolved "https://registry.yarnpkg.com/@sveltejs/kit/-/kit-2.38.1.tgz#cd66f617de6d04964130971ffe857ab12fc6ae8e"
+  integrity sha512-5JJBPu3U2KXpRwc+e/D2Pl+DJM9oBcCl6XtWenrb6xc6H4lFa0XIJaSch4wMiADrhX512sVIUf13VnEp7aWO1w==
   dependencies:
     "@standard-schema/spec" "^1.0.0"
     "@sveltejs/acorn-typescript" "^1.0.5"
@@ -7030,9 +7030,9 @@ ejs@^3.1.7:
     jake "^10.8.5"
 
 electron-to-chromium@^1.5.211:
-  version "1.5.215"
-  resolved "https://registry.yarnpkg.com/electron-to-chromium/-/electron-to-chromium-1.5.215.tgz#200c8d69b1270af6126837b6b1f95077c3a347b1"
-  integrity sha512-TIvGp57UpeNetj/wV/xpFNpWGb0b/ROw372lHPx5Aafx02gjTBtWnEEcaSX3W2dLM3OSdGGyHX/cHl01JQsLaQ==
+  version "1.5.217"
+  resolved "https://registry.yarnpkg.com/electron-to-chromium/-/electron-to-chromium-1.5.217.tgz#71285850356ef48bc08275b26f0f355721e0f17d"
+  integrity sha512-Pludfu5iBxp9XzNl0qq2G87hdD17ZV7h5T4n6rQXDi3nCyloBV3jreE9+8GC6g4X/5yxqVgXEURpcLtM0WS4jA==
 
 elliptic@6.6.1:
   version "6.6.1"
@@ -12475,9 +12475,9 @@ regexp.prototype.flags@^1.5.3, regexp.prototype.flags@^1.5.4:
     set-function-name "^2.0.2"
 
 regexpu-core@^6.2.0:
-  version "6.3.0"
-  resolved "https://registry.yarnpkg.com/regexpu-core/-/regexpu-core-6.3.0.tgz#ebdc3ec610146d01fd64871333d34b0200e00145"
-  integrity sha512-ulzJYRb0qgR4t8eTgHeL7nnKL/4ul2yjnuTBEDIpYG7cSs8CcADE1q18RFFChXLP8WwRgPrHThGbYplvASdujw==
+  version "6.3.1"
+  resolved "https://registry.yarnpkg.com/regexpu-core/-/regexpu-core-6.3.1.tgz#fb8b707d0efe18e9464d3ae76ae1e3c96c8467ae"
+  integrity sha512-DzcswPr252wEr7Qz8AyAVbfyBDKLoYp6eRA1We2Fa9qirRFSdtkP5sHr3yglDKy2BbA0fd2T+j/CUSKes3FeVQ==
   dependencies:
     regenerate "^1.4.2"
     regenerate-unicode-properties "^10.2.2"
@@ -13477,9 +13477,9 @@ svelte-check@^4.3.1:
     sade "^1.7.4"
 
 svelte@^5.38.6:
-  version "5.38.8"
-  resolved "https://registry.yarnpkg.com/svelte/-/svelte-5.38.8.tgz#9d6f48f3d05a0ec569de1a04b3d7dc908bfa6556"
-  integrity sha512-UDpTbM/iuZ4MaMnn4ODB3rf5JKDyPOi5oJcopP0j7YHQ9BuJtsAqsR71r2N6AnJf7ygbalTJU5y8eSWGAQZjlQ==
+  version "5.38.9"
+  resolved "https://registry.yarnpkg.com/svelte/-/svelte-5.38.9.tgz#65ff3f56154d391c13a28243996240b0c026abd5"
+  integrity sha512-enpmouVYRlrCJh1T176A+8LgqRVf4Qgin2k6EZ8iU9SpqgmrIidm2M5tBwJttjNcxWjvZzs3rLu33NJoUTsF+Q==
   dependencies:
     "@jridgewell/remapping" "^2.3.4"
     "@jridgewell/sourcemap-codec" "^1.5.0"

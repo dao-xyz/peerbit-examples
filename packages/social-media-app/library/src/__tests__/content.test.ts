@@ -17,8 +17,8 @@ import {
 } from "../content.js";
 import { Sort, SortDirection, WithIndexedContext } from "@peerbit/document";
 import { expect } from "chai";
-import { delay, waitForResolved } from "@peerbit/time";
-import { sha256Base64Sync, sha256Sync, toBase64 } from "@peerbit/crypto";
+import { waitForResolved } from "@peerbit/time";
+import { sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { StaticImage } from "../static/image.js";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { orderKeyBetween } from "../order-key.js";
@@ -317,17 +317,17 @@ describe("canvas (updated)", () => {
         await viewer.replies.log.waitForReplicators({ waitForNewPeers: true });
 
         const rootIdx = await root.getSelfIndexed();
-        const sorted = await viewer.replies.index
-            .iterate({
-                query: getImmediateRepliesQuery(rootIdx!),
-                sort: new Sort({
-                    key: "replies",
-                    direction: SortDirection.DESC,
-                }),
-            })
-            .all();
 
         await waitForResolved(async () => {
+            const sorted = await viewer.replies.index
+                .iterate({
+                    query: getImmediateRepliesQuery(rootIdx!),
+                    sort: new Sort({
+                        key: "replies",
+                        direction: SortDirection.DESC,
+                    }),
+                })
+                .all();
             expect(
                 await Promise.all(sorted.map((x) => contextOf(viewer, x)))
             ).to.deep.eq(["a", "b", "c"]);
@@ -473,7 +473,7 @@ describe("canvas (updated)", () => {
         expect(moved.selfScope.address).to.eq(rootScope.address); // home updated
 
         // Ensure indexes have flushed/settled in root
-        await rootScope.reIndexDebouncer.flush();
+        await rootScope._hierarchicalReindex!.flush();
 
         // Node should exist in rootScope.replies
         await waitForResolved(async () => {
@@ -892,7 +892,7 @@ describe("privacy / scope mixing", () => {
         });
 
         // Let indexes settle in public
-        await rootScope.reIndexDebouncer.flush();
+        await rootScope._hierarchicalReindex!.flush();
 
         // It should appear as a child of publicReply1 from the PUBLIC scope
         await waitForResolved(async () => {
