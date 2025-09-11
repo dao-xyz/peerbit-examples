@@ -1,11 +1,12 @@
 import { expect } from "chai";
 import nodelocalstorage from "node-localstorage";
 import { FastMutex } from "../lockstorage.js";
+import { beforeAll, beforeEach, afterEach, describe, it } from "vitest";
 
 describe("FastMutex singleton semantics", () => {
     let localStorage: any;
 
-    before(() => {
+    beforeAll(() => {
         const LocalStorage = nodelocalstorage!.LocalStorage;
         localStorage = new LocalStorage("./tmp/FastMutex-singleton");
         globalThis.localStorage = localStorage as any;

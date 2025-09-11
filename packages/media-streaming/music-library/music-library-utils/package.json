@@ -31,7 +31,8 @@
     "scripts": {
         "clean": "shx rm -rf lib/*",
         "build": "yarn clean && tsc -p tsconfig.json",
-        "test": "mocha",
+        "test": "vitest run",
+        "test:watch": "vitest",
         "test-replicator": "npm run build && node ./lib/esm/__tests__/replicator-node.js",
         "test-replicator-remote": "npm run build && node ./lib/esm/__tests__/replicator-node-remote.js"
     },

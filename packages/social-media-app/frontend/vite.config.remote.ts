@@ -22,6 +22,11 @@ export default defineConfig({
         ),
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
+    resolve: {
+        alias: {
+            process: "process/browser",
+        },
+    },
     server: fs.existsSync("./.cert/key.pem")
         ? {
               https: {

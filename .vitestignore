@@ -1,0 +1,3 @@
+# Files the Vitest VSCode extension should ignore
+**/*.timestamp-*.mjs
+packages/svelte-example/node_modules/**

@@ -18,7 +18,7 @@
         "@types/uuid": "^8",
         "@sveltejs/adapter-auto": "^6.1.0",
         "@sveltejs/kit": "^2.0.0",
-        "@sveltejs/vite-plugin-svelte": "^6.1.4",
+        "@sveltejs/vite-plugin-svelte": "^6.2.0",
         "svelte": "^5.38.6",
         "svelte-check": "^4.3.1",
         "typescript": "^5.0.0",

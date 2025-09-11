@@ -15,6 +15,7 @@ export default defineConfig({
     build: {
         target: "esnext",
     },
+
     define: {
         "globalThis.COMMIT_HASH": JSON.stringify(
             process.env.SHORT_SHA || "unknown"

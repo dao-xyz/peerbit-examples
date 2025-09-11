@@ -20,18 +20,26 @@ import sinon from "sinon";
 import nodelocalstorage from "node-localstorage";
 import { expect } from "chai";
 import { delay } from "@peerbit/time";
+import {
+    beforeAll,
+    afterAll,
+    beforeEach,
+    afterEach,
+    describe,
+    it,
+} from "vitest";
 
 describe("FastMutex", () => {
     let sandbox;
 
-    before(() => {
+    beforeAll(() => {
         var LocalStorage = nodelocalstorage!.LocalStorage;
         var localStorage = new LocalStorage("./tmp/FastMutex");
         localStorage.clear();
         globalThis.localStorage = localStorage;
     });
 
-    after(() => {
+    afterAll(() => {
         globalThis.localStorage.clear();
     });
 
@@ -201,16 +209,20 @@ describe("FastMutex", () => {
             });
     });
 
-    it("should throw if lock is never acquired after set time period", () => {
+    it("should throw if lock is never acquired after set time period", async () => {
         const fm1 = new FastMutex({ localStorage: localStorage, timeout: 50 });
         const fm2 = new FastMutex({ localStorage: localStorage, timeout: 50 });
-
-        const p = fm1.lock("timeoutTest").then(() => {
-            // fm2 will never get a lock as we're not releasing fm1's lock:
-            return fm2.lock("timeoutTest");
-        });
-
-        expect(p).eventually.to.throw();
+        await fm1.lock("timeoutTest");
+        const start = Date.now();
+        let threw = false;
+        try {
+            await fm2.lock("timeoutTest");
+        } catch (e) {
+            threw = true;
+        }
+        const elapsed = Date.now() - start;
+        expect(threw).to.be.true;
+        expect(elapsed).to.be.greaterThan(0);
     });
 
     it("should ignore expired locks", async () => {

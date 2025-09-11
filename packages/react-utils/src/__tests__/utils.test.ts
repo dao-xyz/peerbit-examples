@@ -5,9 +5,10 @@ import { delay } from "@peerbit/time";
 import { default as sodium } from "libsodium-wrappers";
 import { v4 as uuid } from "uuid";
 import { expect } from "chai";
+import { beforeAll, afterAll, describe, it } from "vitest";
 
 describe("getKeypair", () => {
-    before(async () => {
+    beforeAll(async () => {
         await sodium.ready;
 
         var LocalStorage = nodelocalstorage.LocalStorage;
@@ -15,7 +16,7 @@ describe("getKeypair", () => {
         globalThis.localStorage = localStorage;
     });
 
-    after(() => {
+    afterAll(() => {
         globalThis.localStorage.clear();
     });
 
