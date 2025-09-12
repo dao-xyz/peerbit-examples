@@ -384,6 +384,13 @@ export const MarkdownContent = ({
             ? { maxHeight: "200px", overflowY: "auto" as const }
             : {};
 
+    // Auto-enter editing mode when editable and there is no text content yet.
+    useEffect(() => {
+        if (editable && (!content?.text || content.text.length === 0)) {
+            setIsEditing(true);
+        }
+    }, [editable, content?.text]);
+
     const displayText = isEditing ? text : content.text;
 
     return (

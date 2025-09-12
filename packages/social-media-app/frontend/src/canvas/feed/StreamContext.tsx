@@ -231,7 +231,8 @@ function useStreamContextHook() {
         debug: false,
         local: true,
         remote: {
-            joining: { waitFor: 5e3 },
+            // Avoid blocking initial list hydration on remote joining; rely on link visibility
+            joining: { waitFor: 0 },
         },
         onChange: {
             merge: async (e) => {

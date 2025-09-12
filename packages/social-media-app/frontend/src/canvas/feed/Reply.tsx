@@ -3,8 +3,6 @@ import {
     Canvas as CanvasDB,
     Element,
     ElementContent,
-    getImmediateRepliesQuery,
-    getRepliesQuery,
     IndexableCanvas,
     MEDIUM_QUALITY,
 } from "@giga-app/interface";
@@ -13,6 +11,7 @@ import { usePeer } from "@peerbit/react";
 import { CanvasPreview } from "../render/preview/Preview.js";
 import { WithIndexedContext } from "@peerbit/document";
 import { useNavigate } from "react-router";
+import { toBase64URL } from "@peerbit/crypto";
 import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
@@ -176,7 +175,7 @@ export const Reply = ({
                         : "items-start mr-10"
                     : ""
             } ${styleFromFromMode} ${className}`}
-            data-canvas-id={canvas.idString}
+            data-canvas-id={toBase64URL(canvas.id)}
             data-variant={variant}
             data-align={align}
         >

@@ -24,6 +24,9 @@ import clsx from "clsx";
 import { fromMarkdown } from "mdast-util-from-markdown";
 import { toString } from "mdast-util-to-string";
 import { useCanvas } from "../../CanvasWrapper";
+import { equals } from "uint8arrays";
+import { emitDebugEvent } from "../../../debug/debug";
+import { toBase64URL } from "@peerbit/crypto";
 import { FaChevronLeft, FaChevronRight } from "react-icons/fa";
 import { isTouchDevice } from "../../../utils/device";
 import { on } from "events";
@@ -999,33 +1002,65 @@ export const CanvasPreview = ({
 }: CanvasPreviewProps) => {
     const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
 
-    // Fast path: indexed element count from the canvas row
-    const indexedEmpty = canvas?.__indexed.elements === 0n;
-
-    // Special case: if indexedEmpty, fire onLoad immediately and render nothing
-    useEffect(() => {
-        if (indexedEmpty && onLoad) {
-            onLoad();
-        }
-    }, [indexedEmpty, onLoad]);
+    // Prefer actual element presence over potentially stale index metadata.
+    // Some publishes can momentarily report elements=0 in the index row even
+    // after elements are persisted; rely on rect queries for visibility.
+    const hasLocalRects =
+        (rects?.length ?? 0) + (pendingRects?.length ?? 0) > 0;
 
     const variantRects = useMemo(() => {
-        if (indexedEmpty) return undefined as any;
-        return getRectsForVariant(
-            separateAndSortRects([...rects, ...pendingRects]),
-            variant
-        );
-    }, [indexedEmpty, rects, pendingRects, variant]);
+        // Defensive: only render elements that belong to THIS canvas id
+        const cid = canvas?.id;
+        const own = cid
+            ? [...rects, ...pendingRects].filter((e) => equals(e.canvasId, cid))
+            : [...rects];
+        return getRectsForVariant(separateAndSortRects(own), variant);
+    }, [canvas?.idString, rects, pendingRects, variant]);
+
+    // Debug: log what text we are about to render for this canvas
+    useEffect(() => {
+        try {
+            const cid = canvas?.id ? toBase64URL(canvas.id) : undefined;
+            const texts: string[] = [];
+            const collectText = (els: Element<ElementContent>[]) => {
+                els.forEach((e) => {
+                    if (
+                        e.content instanceof StaticContent &&
+                        e.content.content instanceof StaticMarkdownText
+                    ) {
+                        texts.push(e.content.content.text);
+                    }
+                });
+            };
+            if (variantRects instanceof Element) {
+                collectText([variantRects as any]);
+            } else if (variantRects) {
+                const vr = variantRects as any;
+                if (vr.text) collectText([vr.text]);
+                if (vr.other) collectText(vr.other);
+            }
+            emitDebugEvent({
+                source: "CanvasPreview",
+                name: "render",
+                canvasId: cid,
+                texts,
+                rects: rects.length,
+                pending: pendingRects.length,
+                variant,
+            });
+        } catch (e) {
+            // safe to ignore debug issues
+        }
+    }, [canvas?.idString, rects.length, pendingRects.length, variant]);
 
     const isEmpty = useMemo(() => {
-        if (indexedEmpty) return true;
         return (
             !variantRects ||
             (variantRects instanceof Element === false &&
                 variantRects.other.length === 0 &&
                 !variantRects.text)
         );
-    }, [indexedEmpty, variantRects]);
+    }, [variantRects]);
 
     // Bubble up when all elements loaded
     const [allLoaded, setAllLoaded] = useState(false);
@@ -1046,7 +1081,8 @@ export const CanvasPreview = ({
 
     const onEmpty = useMemo(() => whenEmpty ?? <></>, [whenEmpty]);
 
-    if (indexedEmpty) {
+    // If we truly have nothing yet, allow placeholder/empty.
+    if (!hasLocalRects && isEmpty) {
         return null;
     }
     if (isEmpty) {

@@ -34,14 +34,62 @@ describe("HierarchicalReindexManager", () => {
 
         await mgr.add({ canvas: child }); // full by default, parents replies-only
 
-        // Expect a run for child (full) and parent (replies). Order not strictly guaranteed; sort for assertions
-        const sorted = calls.sort((a, b) => a.id.localeCompare(b.id));
-        assert.deepEqual(sorted, [
-            { id: "child", onlyReplies: false },
-            { id: "parent", onlyReplies: true },
-        ]);
+        // Current manager schedules only the target canvas; ancestor aggregation happens in reIndex.
+        // With our stubbed reindex (no ancestor work), expect only the child run here.
+        assert.deepEqual(calls, [{ id: "child", onlyReplies: false }]);
     });
 
+    it("propagates skipAncestors flag to reindex", async () => {
+        const root = new StubCanvas("root", []);
+        const child = new StubCanvas("child", [root]);
+
+        const seen: {
+            id: string;
+            onlyReplies: boolean;
+            skipAncestors?: boolean;
+        }[] = [];
+        const mgr = createHierarchicalReindexManager<StubCanvas>({
+            delay: 0,
+            reindex: async (canvas, opts) => {
+                seen.push({
+                    id: canvas.idString,
+                    onlyReplies: !!opts?.onlyReplies,
+                    skipAncestors: !!(opts as any)?.skipAncestors,
+                });
+            },
+        });
+
+        await mgr.add({
+            canvas: child,
+            options: { onlyReplies: false, skipAncestors: true },
+        });
+        // child run should carry skipAncestors true
+        const childRun = seen.find((c) => c.id === "child");
+        assert.ok(childRun, "expected child run");
+        assert.equal(childRun!.skipAncestors, true);
+    });
+
+    it("coalesces rapid upgrades under cooldown", async () => {
+        const root = new StubCanvas("root", []);
+        const c = new StubCanvas("x", [root]);
+        const calls: { onlyReplies: boolean }[] = [];
+        const mgr = createHierarchicalReindexManager<StubCanvas>({
+            delay: 0,
+            cooldownMs: 50,
+            adaptiveCooldownMinMs: 10,
+            reindex: async (_c, opts) => {
+                calls.push({ onlyReplies: !!opts?.onlyReplies });
+            },
+        });
+
+        // Burst of schedules/upgrades
+        await mgr.add({ canvas: c, options: { onlyReplies: true } });
+        await mgr.add({ canvas: c, options: { onlyReplies: false } });
+        await mgr.add({ canvas: c, options: { onlyReplies: false } });
+
+        // Should not exceed 2 runs under burst (cooldown coalesces upgrades)
+        assert.ok(calls.length <= 2, `expected <=2 runs, got ${calls.length}`);
+    });
     it("separate runs for replies then full upgrade on same canvas", async () => {
         const root = new StubCanvas("root", []);
         const canvas = new StubCanvas("c1", [root]);

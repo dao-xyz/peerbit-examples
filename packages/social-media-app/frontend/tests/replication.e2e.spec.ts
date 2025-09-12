@@ -4,6 +4,7 @@ import { startReplicator } from "./replicator/replicatorNode";
 const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
 
 test.describe("Replication via node replicator relay", () => {
+    test.setTimeout(30000);
     let stop: (() => Promise<void>) | undefined;
     let bootstrap: string[] | undefined;
 
@@ -23,29 +24,48 @@ test.describe("Replication via node replicator relay", () => {
         bootstrap = undefined;
     });
 
+    test.afterAll(async () => {
+        if (stop) {
+            try {
+                await stop();
+            } catch {}
+        }
+        stop = undefined;
+        bootstrap = undefined;
+    });
+
     test("post, reload (new client), still see message from replicator", async ({
         page,
     }) => {
         const url = `${BASE_URL}?ephemeral=true&bootstrap=${encodeURIComponent(
             (bootstrap || []).join(",")
         )}`;
-        await page.goto(url);
+        try {
+            await page.goto(url);
 
-        const toolbar = page.getByTestId("toolbarcreatenew").first();
-        const textArea = toolbar.locator("textarea");
-        await expect(textArea).toBeVisible({ timeout: 10000 });
-        const msg = `Replicated ${Date.now()}`;
-        await textArea.fill(msg);
+            const toolbar = page.getByTestId("toolbarcreatenew").first();
+            const textArea = toolbar.locator("textarea");
+            await expect(textArea).toBeVisible({ timeout: 10000 });
+            const msg = `Replicated ${Date.now()}`;
+            await textArea.fill(msg);
 
-        // Publish the message so it is stored in the public scope replicated by the node
-        await toolbar.getByTestId("send-button").click();
-        await page.waitForTimeout(3000);
+            // Publish the message so it is stored in the public scope replicated by the node
+            await toolbar.getByTestId("send-button").click();
+            await page.waitForTimeout(2000);
 
-        await page.reload();
+            await page.reload();
 
-        // Expect the published message to be visible on the page (fetched from replicator)
-        await expect(page.getByText(msg, { exact: true })).toBeVisible({
-            timeout: 20000,
-        });
+            // Expect the published message to be visible on the page (fetched from replicator)
+            await expect(page.getByText(msg, { exact: true })).toBeVisible({
+                timeout: 15000,
+            });
+        } finally {
+            if (stop) {
+                try {
+                    await stop();
+                } catch {}
+                stop = undefined;
+            }
+        }
     });
 });

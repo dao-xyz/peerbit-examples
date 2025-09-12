@@ -47,6 +47,14 @@ test.describe("Draft recovery privacy", () => {
         // Composer should show exactly one empty text area (fresh draft),
         // not the previously published message recovered.
         await expect(areas).toHaveCount(1, { timeout: 10000 });
-        await expect(areas.first()).toHaveValue("", { timeout: 10000 });
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            { timeout: 10000 }
+        );
     });
 });

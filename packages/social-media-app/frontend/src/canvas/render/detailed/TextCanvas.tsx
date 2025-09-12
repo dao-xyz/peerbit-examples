@@ -43,7 +43,7 @@ export const TextCanvas = (props: Omit<Props, "config">) => {
         // rects (e.g. an image uploaded first). Using `once:true` would
         // skip insertion when images are present, which hides the textarea
         // and breaks tests and UX.
-        insertDefault({ scope: privateScope }).catch(() => {});
+        insertDefault({ scope: privateScope });
         insertedForCanvasRef.current = canvas.idString;
     }, [
         props.draft,

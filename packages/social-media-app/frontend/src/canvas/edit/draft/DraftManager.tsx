@@ -16,6 +16,7 @@ import debounce from "lodash/debounce";
 import type { DebouncedFunc } from "lodash";
 import { useDebugConfig } from "../../../debug/DebugConfig";
 import { emitDebugEvent } from "../../../debug/debug";
+import { toBase64URL } from "@peerbit/crypto";
 
 export type CanvasIx = WithIndexedContext<Canvas, IndexableCanvas>;
 export type CanvasKey = Uint8Array;
@@ -118,6 +119,8 @@ export const DraftManagerProvider: React.FC<{
     const inflightEnsureByBucket = useRef(new Map<string, Promise<CanvasIx>>());
     const inflightEnsureByParent = useRef(new Map<string, Promise<CanvasIx>>());
     const publishQueue = useRef(new Map<string, Promise<void>>());
+    // Track most recently published reply per parent to avoid recovering it as an editable draft
+    const lastPublishedByParent = useRef(new Map<string, string>());
     const listeners = useRef(new Set<() => void>());
     const publishingFlags = useRef(new Set<string>());
     const retiringActive = useRef(
@@ -303,7 +306,61 @@ export const DraftManagerProvider: React.FC<{
                 captureEvents &&
                     logEvt("ensureForParent:start", { parentId: pid });
 
+                const requestedBucket = key ? toBucket(key) : undefined;
                 const existingBucket = parentIndex.current.get(pid);
+
+                // If caller explicitly requests a different bucket (optimistic rotation),
+                // honor it by creating/returning a draft for that bucket and re-pointing
+                // the parentIndex to it. This lets DraftSession rotate immediately.
+                if (
+                    requestedBucket &&
+                    existingBucket &&
+                    existingBucket !== requestedBucket
+                ) {
+                    // If we already have a record for the requested bucket, reuse it
+                    const already =
+                        records.current.get(requestedBucket)?.canvas;
+                    if (already) {
+                        parentIndex.current.set(pid, requestedBucket);
+                        notify();
+                        captureEvents &&
+                            logEvt("ensureForParent:reuseRequested", {
+                                parentId: pid,
+                                bucket: requestedBucket,
+                                draftId: already.idString,
+                            });
+                        return already;
+                    }
+
+                    // Otherwise create a fresh draft under the requested bucket
+                    const created = await createDraftPersisted({
+                        replyTo: parent,
+                    });
+                    records.current.set(requestedBucket, {
+                        canvas: created,
+                        replyTo: parent,
+                        isSaving: false,
+                    });
+                    ephemeralActive.current.delete(created.idString);
+                    parentIndex.current.set(pid, requestedBucket);
+                    primeDebouncer(requestedBucket, API);
+                    notify();
+                    captureEvents &&
+                        logEvt("ensureForParent:createdRequested", {
+                            parentId: pid,
+                            bucket: requestedBucket,
+                            draftId: created.idString,
+                        });
+                    log("ensure(parent): created for requested bucket", {
+                        parentId: pid,
+                        bucket: requestedBucket,
+                        draftId: created.idString,
+                    });
+                    return created;
+                }
+
+                // If we already have a bucket for this parent (and no different requested bucket),
+                // return it as before.
                 if (existingBucket) {
                     const found = records.current.get(existingBucket)?.canvas;
                     if (found) return found;
@@ -313,15 +370,18 @@ export const DraftManagerProvider: React.FC<{
                 if (inflight) return inflight;
 
                 const p = (async () => {
-                    // Deterministically wait for private scope and its latest reply (up to 4s)
-                    let recovered = await recoverLatestForParent(parent);
+                    // Try to recover latest draft in PRIVATE scope so refresh continues editing.
+                    const recovered = await recoverLatestForParent(parent);
                     captureEvents &&
                         logEvt("recover:result", {
                             parentId: pid,
                             recoveredId: recovered?.idString,
                         });
-                    // no pointer hinting
-                    if (recovered) {
+                    // Avoid recovering the most recently published reply (not a draft)
+                    const lastPub = lastPublishedByParent.current.get(pid);
+                    const useRecovered =
+                        recovered && recovered.idString !== lastPub;
+                    if (useRecovered) {
                         const bucket =
                             existingBucket ??
                             (key ? toBucket(key) : toBucket(genKey()));
@@ -336,8 +396,6 @@ export const DraftManagerProvider: React.FC<{
                             replyTo: parent,
                             isSaving: false,
                         });
-                        // ensure recovered id isn’t stuck in ephemeral (it won’t be, but for symmetry)
-
                         ephemeralActive.current.delete(recovered.idString);
                         parentIndex.current.set(pid, bucket);
                         primeDebouncer(bucket, API);
@@ -356,6 +414,7 @@ export const DraftManagerProvider: React.FC<{
                         return recovered;
                     }
 
+                    // No recovered draft; create fresh draft in PRIVATE scope
                     const bucket =
                         existingBucket ??
                         (key ? toBucket(key) : toBucket(genKey()));
@@ -390,9 +449,7 @@ export const DraftManagerProvider: React.FC<{
                         bucket,
                         draftId: created.idString,
                     });
-                    // no pointer persistence
-
-                    // No background switching; decisions are made before creation
+                    // no pointer persistence; no background switching
 
                     return created;
                 })().finally(() => {
@@ -533,17 +590,29 @@ export const DraftManagerProvider: React.FC<{
                                     debug,
                                 });
                                 perfMark("upsertReply");
-                                // Targeted parent flush only (avoid flushing unrelated canvases)
+                                // Targeted flushes to make both the parent and the reply readable immediately
                                 await parent.nearestScope._hierarchicalReindex!.flush(
                                     parent.idString
                                 );
-                                perfMark("parentFlush");
-                                // Emit debug event immediately; tests now capture
-                                // baseline before triggering actions to avoid races.
+                                try {
+                                    await parent.nearestScope._hierarchicalReindex!.flush(
+                                        toPublish.idString
+                                    );
+                                } catch {}
+                                // Emit debug event after flush to ensure the consumer can navigate and read
+                                // Use base64url(canvas.id) so tests can use it for both URL and DOM selectors
                                 logEvt("replyPublished", {
-                                    replyId: toPublish.idString,
+                                    replyId: toBase64URL(toPublish.id),
                                     parentId: parent.idString,
                                 });
+                                // Remember last published for this parent to not recover it as draft
+                                try {
+                                    lastPublishedByParent.current.set(
+                                        parent.idString,
+                                        toPublish.idString
+                                    );
+                                } catch {}
+                                perfMark("parentFlush");
                             } catch (e) {
                                 console.error(
                                     "[DraftManager] publish: sync error",

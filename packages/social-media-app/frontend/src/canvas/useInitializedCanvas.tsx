@@ -25,12 +25,6 @@ function stableKey(
 ): string | undefined {
     if (!input) return undefined;
 
-    // Indexed canvas → use its id
-    if ((input as WithIndexedContext<Canvas, IndexableCanvas>).__indexed?.id) {
-        const id: Uint8Array = (input as any).__indexed.id;
-        return `indexed:${(input as Canvas).idString}`;
-    }
-
     // Raw Canvas → idString if available, else base64 of id
     if (input instanceof Canvas) {
         return `canvas:${(input as Canvas).idString}`;

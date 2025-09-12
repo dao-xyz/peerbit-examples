@@ -161,16 +161,25 @@ export const DraftSessionProvider: React.FC<{
             debugLog("[DraftSession] publish:start", {
                 draftId: draft?.idString,
             });
+            // Flush any UI edits to the draft and persist them
             await handleRef.current!.savePending(privateScope);
             await mgr.save(k);
+
+            // Optimistic UX: rotate to a fresh draft immediately so the input clears
+            // without waiting for the (potentially slower) publish pipeline.
+            const newKey = randomBytes(32);
+            keyRef.current = newKey;
+            const nextDraft = await mgr.ensure({ replyTo, key: newKey });
+            setDraft(nextDraft);
+            mgr.setReplyTarget(newKey, replyTo);
         } catch (error) {
             console.error("Failed to publish draft", error);
         } finally {
+            // Kick off publish of the previous draft; UI already rotated.
             await mgr.publish(k);
             debugLog("[DraftSession] publish:queued-rotate", {
                 draftId: draft?.idString,
             });
-            // No need to setDraft here; subscription above handles rotation asap.
         }
     };
 

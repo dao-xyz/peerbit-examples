@@ -13,13 +13,14 @@ import {
     useEditModeContext,
 } from "../../edit/EditModeProvider";
 import { useCanvases } from "../../useCanvas";
+import { toBase64URL } from "@peerbit/crypto";
 
 const DetailedViewInner: React.FC = () => {
     const { viewRoot } = useCanvases();
     const { editMode, setEditMode } = useEditModeContext();
 
     const shouldShowMetaInfo = (viewRoot?.__indexed.path.length ?? 0) > 0;
-    const canvasId = viewRoot?.idString ?? "view-root";
+    const canvasId = viewRoot ? toBase64URL(viewRoot.id) : "view-root";
 
     return (
         <div className="mx-auto w-full">
@@ -34,7 +35,10 @@ const DetailedViewInner: React.FC = () => {
                     </CloseableAppPane>
                 </CanvasEditorProvider>
             ) : (
-                <CanvasPreview variant="detail" />
+                // Expose data-canvas-id on the detailed container so tests can target it reliably
+                <div data-canvas-id={canvasId}>
+                    <CanvasPreview variant="detail" />
+                </div>
             )}
 
             {shouldShowMetaInfo && (

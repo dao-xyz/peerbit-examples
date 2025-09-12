@@ -66,7 +66,7 @@ export interface ReindexCanvasLike {
 
 export type ReindexFn<C extends ReindexCanvasLike> = (
     canvas: C,
-    options?: { onlyReplies?: boolean }
+    options?: { onlyReplies?: boolean; skipAncestors?: boolean }
 ) => Promise<void>;
 
 type Mode = "replies" | "full"; // 'full' dominates 'replies'
@@ -87,7 +87,7 @@ interface CanvasEntry<C extends ReindexCanvasLike> {
 export interface HierarchicalReindexManager<C extends ReindexCanvasLike> {
     add(args: {
         canvas: C;
-        options?: { onlyReplies?: boolean };
+        options?: { onlyReplies?: boolean; skipAncestors?: boolean };
         propagateParents?: boolean; // default true
     }): Promise<void>;
     flush(canvasId?: string): Promise<void>;
@@ -142,6 +142,8 @@ export const createHierarchicalReindexManager = <
                     const mode = entry.mode;
                     // Reset mode to minimal so subsequent upgrades during execution schedule another run if needed
                     entry.mode = "replies";
+                    const skipAncestors = (entry as any).skipAncestors === true;
+                    (entry as any).skipAncestors = false;
                     const startT =
                         globalThis.performance?.now?.() || Date.now();
                     // Compute schedule delay (time spent idle between scheduling and run start)
@@ -199,12 +201,10 @@ export const createHierarchicalReindexManager = <
                         });
                     }
                     try {
-                        await reindex(
-                            entry.canvas,
-                            mode === "replies"
-                                ? { onlyReplies: true }
-                                : undefined
-                        );
+                        await reindex(entry.canvas, {
+                            onlyReplies: mode === "replies",
+                            skipAncestors,
+                        });
                         entry.runs = (entry.runs || 0) + 1;
                     } finally {
                         const endT =
@@ -397,27 +397,15 @@ export const createHierarchicalReindexManager = <
             propagateParents,
         }: {
             canvas: C;
-            options?: { onlyReplies?: boolean };
+            options?: { onlyReplies?: boolean; skipAncestors?: boolean };
             propagateParents?: boolean;
         }) => {
             const mode: Mode = options?.onlyReplies ? "replies" : "full";
-            const promises: Promise<void>[] = [schedule(canvas, mode)];
-
-            const doPropagate = propagateParents ?? propagateParentsDefault;
-            if (doPropagate) {
-                try {
-                    const chain = await canvas.loadPath({ includeSelf: false });
-                    // chain = [root, ..., parent]; skip root (index 0) and iterate from last (nearest parent) down to 1 inclusive
-                    for (let i = chain.length - 1; i >= 1; i--) {
-                        const ancestor = chain[i] as C;
-                        // Ancestors get replies-only aggregation (never promote to full from child change propagation)
-                        promises.push(schedule(ancestor, "replies"));
-                    }
-                } catch {
-                    /* swallow path errors; non-critical */
-                }
-            }
-            await Promise.all(promises);
+            // Mark skipAncestors intent for this canvas run
+            const entry = ensureEntry(canvas);
+            if (options?.skipAncestors) (entry as any).skipAncestors = true;
+            // Always schedule the target canvas; ancestor aggregation is handled inside reIndex
+            await schedule(canvas, mode);
         },
         flush: async (canvasId?: string) => {
             if (canvasId) {

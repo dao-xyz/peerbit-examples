@@ -4,12 +4,19 @@ export type ConsoleCaptureOptions = {
     printAll?: boolean; // echo everything to test runner
     failOnError?: boolean; // throw when a console error happens
     ignorePatterns?: (string | RegExp)[]; // do not fail/print when matching
+    capturePageErrors?: boolean; // also capture window "Uncaught" exceptions
+    captureWebErrors?: boolean; // BrowserContext 'weberror' (if supported by PW version)
 };
 
 export function setupConsoleCapture(
     page: Page,
     testInfo: TestInfo,
-    opts: ConsoleCaptureOptions = { printAll: true, failOnError: false }
+    opts: ConsoleCaptureOptions = {
+        printAll: true,
+        failOnError: false,
+        capturePageErrors: true,
+        captureWebErrors: true,
+    }
 ) {
     const ignore = opts.ignorePatterns || [];
     const shouldIgnore = (text: string) =>
@@ -39,4 +46,47 @@ export function setupConsoleCapture(
             }
         }
     });
+
+    if (opts.capturePageErrors) {
+        page.on("pageerror", (err) => {
+            const text = (err && (err.stack || err.message)) || String(err);
+            testInfo
+                .attach(`pageerror`, {
+                    body: Buffer.from(text, "utf8"),
+                    contentType: "text/plain",
+                })
+                .catch(() => {});
+            // eslint-disable-next-line no-console
+            console.error(`Page error: ${text}`);
+            if (opts.failOnError && !shouldIgnore(text)) {
+                throw new Error(`Page error: ${text}`);
+            }
+        });
+    }
+
+    if (opts.captureWebErrors) {
+        const ctx: any = page.context?.();
+        try {
+            ctx?.on?.("weberror", (event: any) => {
+                // Shape is PW-version dependent; do best-effort extraction
+                const err = (event && (event.error || event)) as any;
+                const text =
+                    (err && (err.stack || err.message)) ||
+                    JSON.stringify(event);
+                testInfo
+                    .attach("weberror", {
+                        body: Buffer.from(String(text), "utf8"),
+                        contentType: "text/plain",
+                    })
+                    .catch(() => {});
+                // eslint-disable-next-line no-console
+                console.error(`Web error: ${text}`);
+                if (opts.failOnError && !shouldIgnore(String(text))) {
+                    throw new Error(`Web error: ${text}`);
+                }
+            });
+        } catch {
+            // ignore if not supported
+        }
+    }
 }

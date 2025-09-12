@@ -168,7 +168,16 @@ test.describe("ToolbarCreateNew", () => {
         await sendBtn.click();
 
         // After send, input should clear (Markdown component clears after save)
-        await expect(textArea).toHaveValue("", { timeout: 10000 });
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            null,
+            { timeout: 3000 }
+        );
 
         // Wait for first publish event and verify reply appears by id
         await expect
@@ -183,17 +192,44 @@ test.describe("ToolbarCreateNew", () => {
             page.locator(`[data-canvas-id="${firstEvt.replyId}"]`).first()
         ).toBeVisible({ timeout: 60000 });
 
-        // 2) Write a new message; send may be temporarily disabled while previous publishes
+        // 2) Write a new message; draft rotates after first publish so reacquire textarea
         const secondMsg = uid("Second message");
-        await textArea.fill(secondMsg);
+        // Nudge editor into editing mode if needed
+        try {
+            const textContainer = toolbar
+                .getByTestId("composer-textarea")
+                .first();
+            await textContainer.click({ timeout: 800 });
+        } catch {}
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !!el;
+            },
+            null,
+            { timeout: 5000 }
+        );
+        const textArea2 = toolbar.locator("textarea");
+        await textArea2.fill(secondMsg, { timeout: 3000 });
 
         // Wait until send is enabled again, then click
-        await expect(sendBtn).toBeEnabled({ timeout: 30000 });
+        await expect(sendBtn).toBeEnabled({ timeout: 5000 });
         const base2 = (await getReplyPublishedEvents(page)).length;
         await sendBtn.click();
 
         // Input should clear again
-        await expect(textArea).toHaveValue("", { timeout: 10000 });
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            null,
+            { timeout: 3000 }
+        );
 
         // 3) Wait for second publish event and verify by id
         await expect
@@ -238,7 +274,17 @@ test.describe("ToolbarCreateNew", () => {
         const prev = (await getReplyPublishedEvents(page)).length;
         await sendBtn.click();
 
-        await expect(textArea).toHaveValue("", { timeout: 10000 });
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            null,
+            { timeout: 3000 }
+        );
+
         // Verify publish event (text reply) and check by canvas id
         await expect
             .poll(
@@ -291,7 +337,7 @@ test.describe("ToolbarCreateNew", () => {
         // After a short delay, a text editor should be available to type into
         await page.waitForTimeout(3000);
         // If the editor isn't already focused, click the text area container to start editing
-        const textContainer = toolbar.locator('[class*="min-h-10"]').first();
+        const textContainer = toolbar.getByTestId("composer-textarea").first();
         try {
             await textContainer.click({ timeout: 2000 });
         } catch {}
@@ -319,7 +365,16 @@ test.describe("ToolbarCreateNew", () => {
         await expect(sendBtn).toBeEnabled({ timeout: 30000 });
         const base = (await getReplyPublishedEvents(page)).length;
         await sendBtn.click();
-        await expect(textArea).toHaveValue("", { timeout: 10000 });
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            null,
+            { timeout: 3000 }
+        );
 
         // Wait for publish event and capture the reply id
         await expect
@@ -374,7 +429,16 @@ test.describe("ToolbarCreateNew", () => {
         await expect(sendBtn).toBeEnabled({ timeout: 30000 });
         const base = (await getReplyPublishedEvents(page)).length;
         await sendBtn.click();
-        await expect(textArea).toHaveValue("", { timeout: 10000 });
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            null,
+            { timeout: 3000 }
+        );
 
         // Wait for publish event and capture id
         await expect

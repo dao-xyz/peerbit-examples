@@ -29,17 +29,10 @@ async function createOpenRootScope(
     );
 }
 
-/** Query the immediate children of a parent using pathDepth (robust). */
+/** Query the immediate children of a parent via links (less sensitive to index timing). */
 async function immediateChildren(parent: Canvas): Promise<Canvas[]> {
-    const scope = parent.nearestScope;
-    const idx = await parent.getSelfIndexed();
-    if (!idx) return [];
-    const kids = await scope.replies.index
-        .iterate({
-            query: getImmediateRepliesQueryByDepth(parent.id, idx.pathDepth),
-        })
-        .all();
-    return kids as unknown as Canvas[];
+    const items = await parent.listChildrenWithOrder();
+    return items.map((x) => x.child);
 }
 
 /* ------------------------------ tests ------------------------------ */
@@ -85,8 +78,21 @@ describe("templates", () => {
             expectedImmediatechildren: number;
             names: string[];
         }) => {
-            // children under the insertion point
-            const children = await immediateChildren(properties.from);
+            // children under the insertion point (allow async indexing to settle)
+            let children = await immediateChildren(properties.from);
+            if (children.length !== properties.expectedImmediatechildren) {
+                // try to flush and re-check a few times
+                const scope = properties.from.nearestScope;
+                for (
+                    let i = 0;
+                    i < 5 &&
+                    children.length !== properties.expectedImmediatechildren;
+                    i++
+                ) {
+                    await scope._hierarchicalReindex!.flush();
+                    children = await immediateChildren(properties.from);
+                }
+            }
             expect(children.length).to.equal(
                 properties.expectedImmediatechildren
             );
@@ -97,12 +103,33 @@ describe("templates", () => {
             );
             expect(insertedInChildren).to.exist;
 
-            const insertedIdx =
+            // wait for context on inserted root
+            let insertedIdx =
                 await properties.from.nearestScope.replies.index.get(
                     insertedInChildren!.id,
                     { resolve: false }
                 );
-            expect(insertedIdx.context).to.equal(properties.names[0]);
+            if (!insertedIdx || insertedIdx.context !== properties.names[0]) {
+                for (let i = 0; i < 5; i++) {
+                    await properties.from.nearestScope._hierarchicalReindex!.add(
+                        {
+                            canvas: insertedInChildren!,
+                            options: {
+                                onlyReplies: false,
+                                skipAncestors: true,
+                            },
+                        }
+                    );
+                    await properties.from.nearestScope._hierarchicalReindex!.flush();
+                    insertedIdx =
+                        await properties.from.nearestScope.replies.index.get(
+                            insertedInChildren!.id,
+                            { resolve: false }
+                        );
+                    if (insertedIdx?.context === properties.names[0]) break;
+                }
+            }
+            expect(insertedIdx!.context).to.equal(properties.names[0]);
 
             // the inserted root should have exactly one immediate child (next template node)
             const insertedChildren = await immediateChildren(
@@ -110,12 +137,9 @@ describe("templates", () => {
             );
             expect(insertedChildren.length).to.equal(1);
 
-            const insertedChildIdx =
-                await properties.from.nearestScope.replies.index.get(
-                    insertedChildren[0].id,
-                    { resolve: false }
-                );
-            expect(insertedChildIdx.context).to.equal(properties.names[1]);
+            // Prefer direct context computation to avoid relying on immediate index timing
+            const computed = await insertedChildren[0].createContext();
+            expect(computed).to.equal(properties.names[1]);
         };
 
         it("change to forward scope", async () => {

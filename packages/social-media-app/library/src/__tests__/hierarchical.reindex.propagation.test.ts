@@ -1,8 +1,8 @@
 import { describe, it, expect } from "vitest";
 import { createHierarchicalReindexManager } from "../utils";
 
-describe("hierarchical reindex propagation", () => {
-    it("preserves parent propagation when a child is upgraded to full", async () => {
+describe("hierarchical reindex (manager semantics)", () => {
+    it("schedules only the target canvas; upgrades to full are preserved", async () => {
         type C = {
             idString: string;
             loadPath: ({
@@ -39,7 +39,7 @@ describe("hierarchical reindex propagation", () => {
             cooldownMs: 0,
         });
 
-        // Schedule replies-only with propagation
+        // Schedule replies-only with propagation request (ignored by manager; reIndex handles ancestors)
         await mgr.add({
             canvas: child,
             options: { onlyReplies: true },
@@ -56,12 +56,10 @@ describe("hierarchical reindex propagation", () => {
         const childFull = calls.some(
             (c) => c.id === "child" && c.onlyReplies === false
         );
-        // Expect parent to have been scheduled for replies-only
-        const parentReplies = calls.some(
-            (c) => c.id === "parent" && c.onlyReplies === true
-        );
+        // Manager no longer propagates to parents; parent scheduling is performed inside reIndex
+        const parentAny = calls.some((c) => c.id === "parent");
 
         expect(childFull).toBe(true);
-        expect(parentReplies).toBe(true);
+        expect(parentAny).toBe(false);
     });
 });

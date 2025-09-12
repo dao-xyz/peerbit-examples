@@ -373,6 +373,7 @@ export const CanvasAndReplies = () => {
                                                                     setInlineEditorActive={
                                                                         setShowInlineEditor
                                                                     }
+                                                                    debug
                                                                 />
                                                             </EditModeProvider>
                                                             <CloseableAppPane className="rounded-xl mt-2" />

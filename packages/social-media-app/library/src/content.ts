@@ -144,6 +144,10 @@ export class Element<T extends ElementContent = ElementContent> {
     get idString() {
         return this._idString || (this._idString = sha256Base64Sync(this.id));
     }
+
+    clone(): Element<T> {
+        return deserialize(serialize(this), Element) as Element<T>;
+    }
 }
 
 export class IndexableElement {
@@ -306,7 +310,6 @@ export class IndexableCanvas {
         // Text context
         const context = await canvas.createContext();
 
-        // Deep replies (use your counting logic w/ cache or traversal)
         const replies = await countRepliesFast(canvas);
 
         // Child experience + hasLayout
@@ -324,16 +327,6 @@ export class IndexableCanvas {
                 { resolve: false }
             )
             .all();
-
-        console.log("REINDEX", {
-            id: canvas.idString,
-            context,
-            replies: replies.toString(),
-            elements: owned.length,
-            repliesSlow: (
-                await canvas.countRepliesBFS({ immediate: false })
-            ).toString(),
-        });
 
         return new IndexableCanvas({
             id: canvas.id,
@@ -446,20 +439,32 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             .all();
 
         let total = 0n;
-        for (const e of edges as Link[]) {
-            const childIndexed = await scope.replies.index.get(
-                e.child.canvasId,
-                { resolve: false, local: true }
-            );
-            const deep = (childIndexed as any)?.__indexed?.replies;
+        for (const l of edges as Link[]) {
+            // Resolve the child canvas across scopes so we can read its own indexed row
+            let deep: bigint | number | undefined;
+            try {
+                const child = await resolveChild(l, scope, {
+                    // allow remote resolution with a small timeout to warm non-replicators
+                    waitFor: 2000,
+                });
+                if (child) {
+                    const childIndexed = await child.getSelfIndexed();
+                    deep = (childIndexed as any)?.__indexed?.replies as
+                        | bigint
+                        | number
+                        | undefined;
+                }
+            } catch {}
+
             if (typeof deep === "bigint") total += 1n + deep;
             else if (typeof deep === "number") total += 1n + BigInt(deep);
             else {
+                // As a last attempt, count using the current scope’s replies index (may be partial for non-replicators)
                 const n = await scope.replies.count({
                     query: [
                         new ByteMatchQuery({
                             key: "path",
-                            value: e.child.canvasId,
+                            value: l.child.canvasId,
                         }),
                     ],
                     approximate: true,
@@ -1489,22 +1494,20 @@ const reIndexRepliesInParents = async (scope: Scope, canvas: Canvas) => {
     const opened = await ensureOpenedInScope(scope, canvas);
 
     const loadedPath = await opened.loadPath({ includeSelf: false });
-    // i = 1 start to skip the root, -1 to skip the current canvas
-    // (we only want to-re-index parents)
-    for (let i = loadedPath.length - 1; i >= 1; i--) {
-        // don't load the last element because that is the root which does not need to be re-indexed
-        //  await loadedPath[i].load();
-        if (!loadedPath[i]) {
-            throw new Error(
-                "Loaded path is empty, cannot re-index replies in parents"
-            );
-        }
-
-        await scope._hierarchicalReindex!.add({
-            canvas: loadedPath[i],
-            options: { onlyReplies: true },
-            propagateParents: false,
-        });
+    // Reindex only the immediate parent replies, and defer it out of the current frame
+    const parent = loadedPath.length
+        ? loadedPath[loadedPath.length - 1]
+        : undefined;
+    if (parent) {
+        globalThis.setTimeout?.(() => {
+            scope
+                ._hierarchicalReindex!.add({
+                    canvas: parent,
+                    options: { onlyReplies: true, skipAncestors: true },
+                    propagateParents: false,
+                })
+                .catch(() => {});
+        }, 0);
     }
 };
 
@@ -1516,7 +1519,11 @@ const reIndexRepliesInParents = async (scope: Scope, canvas: Canvas) => {
 function makeReindexListener<T, I>(
     scope: Scope,
     resolveIds: (doc: T) => Uint8Array[],
-    opts?: { onlyReplies?: boolean; alsoParents?: boolean }
+    opts?: {
+        onlyReplies?: boolean;
+        alsoParents?: boolean;
+        skipAncestors?: boolean;
+    }
 ) {
     return async (evt: CustomEvent<DocumentsChange<T, I>>) => {
         // handle added + removed symmetrically
@@ -1528,27 +1535,17 @@ function makeReindexListener<T, I>(
                 const canvas = await scope.replies.index.get(id);
                 if (!canvas) continue;
 
-                // 1) reindex the canvas itself
+                // 1) reindex the canvas itself; reIndex will update ancestors
                 await scope._hierarchicalReindex!.add({
                     canvas,
                     options: opts?.onlyReplies
-                        ? { onlyReplies: true }
-                        : undefined,
-                    propagateParents: !!opts?.alsoParents,
+                        ? {
+                              onlyReplies: true,
+                              skipAncestors: opts?.skipAncestors,
+                          }
+                        : { skipAncestors: opts?.skipAncestors },
+                    propagateParents: false,
                 });
-
-                // 2) optionally propagate reply totals to ancestors
-                if (opts?.alsoParents) {
-                    const chain = await canvas.loadPath({ includeSelf: false });
-                    // nearest parent → root
-                    for (let i = chain.length - 1; i >= 0; i--) {
-                        await scope._hierarchicalReindex!.add({
-                            canvas: chain[i],
-                            options: { onlyReplies: true },
-                            propagateParents: false,
-                        });
-                    }
-                }
             }
         }
     };
@@ -1656,6 +1653,7 @@ export class Scope extends Program<ScopeArgs> {
 
         this.messages = new RPC();
         this.acl = 0;
+        this._suppressReindexCount = 0;
     }
 
     private _idString: string;
@@ -1686,6 +1684,40 @@ export class Scope extends Program<ScopeArgs> {
         return this.address + ":" + value;
     }
 
+    // Reindex suppression to coalesce heavy operations (e.g., during publish)
+    private _suppressReindexCount: number;
+    get isReindexSuppressed(): boolean {
+        return (this._suppressReindexCount || 0) > 0;
+    }
+    async suppressReindex<T>(fn: () => Promise<T>): Promise<T> {
+        this._suppressReindexCount++;
+        try {
+            try {
+                globalThis.window?.dispatchEvent?.(
+                    new CustomEvent("reindex:debug", {
+                        detail: {
+                            phase: "suppress:enter",
+                            scope: this.address,
+                        },
+                    })
+                );
+            } catch {}
+            return await fn();
+        } finally {
+            this._suppressReindexCount = Math.max(
+                0,
+                this._suppressReindexCount - 1
+            );
+            try {
+                globalThis.window?.dispatchEvent?.(
+                    new CustomEvent("reindex:debug", {
+                        detail: { phase: "suppress:exit", scope: this.address },
+                    })
+                );
+            } catch {}
+        }
+    }
+
     public debug: boolean = false;
     private closeController: AbortController | null = null;
     // Deduplicate transient missing-resolution logs per link/side
@@ -1710,7 +1742,8 @@ export class Scope extends Program<ScopeArgs> {
             // Allow test-mode with virtually no debounce/cooldown (REINDEX_NO_DELAY=1)
             // Use a function so tests can opt-in (REINDEX_NO_DELAY or VITEST/NODE_ENV=test)
             delay: () => {
-                return 30;
+                // Slightly larger delay to further fuse bursts
+                return 120;
             },
             reindex: async (canvas, opts) => {
                 try {
@@ -1725,7 +1758,9 @@ export class Scope extends Program<ScopeArgs> {
             },
             propagateParentsDefault: true,
             onDebug: (evt) => _dispatchReindexDebug(evt),
-            cooldownMs: 0,
+            // Add a small cooldown to coalesce rapid consecutive schedules
+            cooldownMs: 150,
+            adaptiveCooldownMinMs: 50,
         });
 
         this.closeController = new AbortController();
@@ -2014,10 +2049,9 @@ export class Scope extends Program<ScopeArgs> {
         const perfZero = debug ? Date.now() : 0;
         const mark = (label: string) => {
             if (!perfMarks) return;
-            // Some marks are emitted with an appended timing suffix when debug is on,
-            // e.g. "sync:copyPayload:123ms". Tests expect the base mark name
-            // ("sync:copyPayload") to be present, so strip any trailing ":<...>".
-            const base = String(label).split(":")[0];
+            // If debug adds a trailing time suffix like ":123ms", strip only that suffix.
+            // Preserve semantic prefixes like "sync:lookupExisting".
+            const base = String(label).replace(/:\d+ms$/, "");
             perfMarks.push({ name: base, t: Date.now() - perfZero });
         };
         mark("start");
@@ -2064,35 +2098,103 @@ export class Scope extends Program<ScopeArgs> {
                     kind: (kind as any).constructor?.name,
                     view: publish.view,
                 });
-                await publish.parent.addReply(dst, kind, visibility);
-
-                // If the link is mirrored in the parent (visibility === "both"),
-                // also ensure the parent scope has a replies row for the child so
-                // parent-side index queries (e.g., immediate replies) can resolve without races.
-                // Note: Do not register a replies row in the parent's scope; the canonical row lives in the child's home.
+                const parentScope = publish.parent!.nearestScope;
+                await parentScope.suppressReindex(async () => {
+                    await publish.parent!.addReply(dst, kind, visibility);
+                });
+                // Note: do not add a replies row in the parent's scope; the canonical row
+                // lives in the child's home scope. Parent-side visibility is derived via links.
 
                 if (publish.view != null) {
                     dlog("finalize: setExperience", {
                         child: dst.idString,
                         view: publish.view,
                     });
-                    await dst.setExperience(publish.view, {
-                        scope: dst.nearestScope,
+                    await dst.nearestScope.suppressReindex(async () => {
+                        await dst.setExperience(publish.view!, {
+                            scope: dst.nearestScope,
+                        });
                     });
                 }
 
-                await dst.nearestScope._hierarchicalReindex!.flush();
+                // Targeted flush: only ensure the child's indexes are current.
+                // Do not force a reindex flush inline; allow manager to coalesce
                 // Parent-side indexes will converge via link listeners; no explicit flush needed here.
+
+                // Schedule child full reindex without ancestor refresh
+                // Defer child full reindex so content can appear before heavy work
+                try {
+                    const child = dst;
+                    const scopeRef = dst.nearestScope; // capture now while loaded
+                    const ms =
+                        typeof process !== "undefined" && process?.env?.VITEST
+                            ? 0
+                            : 300;
+                    globalThis.setTimeout?.(() => {
+                        try {
+                            scopeRef
+                                ._hierarchicalReindex!.add({
+                                    canvas: child,
+                                    options: {
+                                        onlyReplies: false,
+                                        skipAncestors: true,
+                                    },
+                                })
+                                .catch(() => {});
+                        } catch {}
+                    }, ms);
+                } catch {}
+
+                // Defer parent replies-only refresh
+                try {
+                    const parent = publish.parent!;
+                    globalThis.setTimeout?.(() => {
+                        parent.nearestScope
+                            ._hierarchicalReindex!.add({
+                                canvas: parent,
+                                options: {
+                                    onlyReplies: true,
+                                    skipAncestors: true,
+                                },
+                            })
+                            .catch(() => {});
+                    }, 0);
+                } catch {}
             } else {
                 if (publish.view != null) {
                     dlog("finalize: top-level setExperience", {
                         child: dst.idString,
                         view: publish.view,
                     });
-                    await dst.setExperience(publish.view, {
-                        scope: dst.nearestScope,
+                    await dst.nearestScope.suppressReindex(async () => {
+                        await dst.setExperience(publish.view!, {
+                            scope: dst.nearestScope,
+                        });
                     });
-                    await dst.nearestScope._hierarchicalReindex!.flush();
+                    // Targeted flush for the child only
+                    // Do not force a reindex flush inline; allow manager to coalesce
+                    try {
+                        const child = dst;
+                        const scopeRef = dst.nearestScope;
+                        const ms =
+                            typeof process !== "undefined" &&
+                            process?.env?.VITEST
+                                ? 0
+                                : 300;
+                        globalThis.setTimeout?.(() => {
+                            try {
+                                scopeRef
+                                    ._hierarchicalReindex!.add({
+                                        canvas: child,
+                                        options: {
+                                            onlyReplies: false,
+                                            skipAncestors: true,
+                                        },
+                                    })
+                                    .catch(() => {});
+                            } catch {}
+                        }, ms);
+                    } catch {}
                 }
             }
         };
@@ -2194,20 +2296,22 @@ export class Scope extends Program<ScopeArgs> {
 
             // Copy payload over
             const copyStart = debug ? Date.now() : 0;
-            await Promise.all([
-                copyElementsBetweenScopes(
-                    srcHome,
-                    dest,
-                    src,
-                    dst /* , { debug } */
-                ),
-                copyVisualizationBetweenScopes(
-                    srcHome,
-                    dest,
-                    src,
-                    dst /* , { debug } */
-                ),
-            ]);
+            await dest.suppressReindex(async () => {
+                await Promise.all([
+                    copyElementsBetweenScopes(
+                        srcHome,
+                        dest,
+                        src,
+                        dst /* , { debug } */
+                    ),
+                    copyVisualizationBetweenScopes(
+                        srcHome,
+                        dest,
+                        src,
+                        dst /* , { debug } */
+                    ),
+                ]);
+            });
             mark(
                 "sync:copyPayload" +
                     (debug ? `:${Date.now() - copyStart}ms` : "")
@@ -2343,20 +2447,22 @@ export class Scope extends Program<ScopeArgs> {
             await dest.openWithSameSettings(dst);
             mark("fork:ensure+openDest");
 
-            await Promise.all([
-                copyElementsBetweenScopes(
-                    srcHome,
-                    dest,
-                    src,
-                    dst /* , { debug } */
-                ),
-                copyVisualizationBetweenScopes(
-                    srcHome,
-                    dest,
-                    src,
-                    dst /* , { debug } */
-                ),
-            ]);
+            await dest.suppressReindex(async () => {
+                await Promise.all([
+                    copyElementsBetweenScopes(
+                        srcHome,
+                        dest,
+                        src,
+                        dst /* , { debug } */
+                    ),
+                    copyVisualizationBetweenScopes(
+                        srcHome,
+                        dest,
+                        src,
+                        dst /* , { debug } */
+                    ),
+                ]);
+            });
             mark("fork:copyPayload");
 
             await finalize(dst);
@@ -2432,8 +2538,8 @@ export class Scope extends Program<ScopeArgs> {
                 created = true;
             }
 
-            // 4) Make immediately visible & indexable (avoid test races).
-            await home._hierarchicalReindex!.flush();
+            // 4) Make immediately visible & indexable (avoid test races) — targeted flush.
+            await home._hierarchicalReindex!.flush(child.idString);
             await child.getSelfIndexedCoerced();
 
             return [created, child];
@@ -2708,7 +2814,7 @@ export class Scope extends Program<ScopeArgs> {
         };
         const tStart = globalThis.performance?.now?.() || Date.now();
 
-        if (options?.onlyReplies) {
+        if ((options as any)?.onlyReplies) {
             const tRepliesStart = globalThis.performance?.now?.() || Date.now();
             _dispatchReindexDebug({
                 phase: "replies:update:start",
@@ -2724,7 +2830,9 @@ export class Scope extends Program<ScopeArgs> {
             });
 
             // 2) propagate to ancestors (their deep totals depend on children)
-            const ancestors = await canvas.loadPath({ includeSelf: false });
+            const ancestors = (options as any)?.skipAncestors
+                ? []
+                : await canvas.loadPath({ includeSelf: false });
 
             // walk from nearest parent up to root
             const tAncestorsStart =
@@ -2839,6 +2947,24 @@ export class Scope extends Program<ScopeArgs> {
             id: canvas.idString,
             dt: tPutEnd - tPutStart,
         });
+
+        // After committing this canvas, refresh ancestors' replies totals unless skipped
+        if (!(options as any)?.skipAncestors) {
+            try {
+                const ancestors = await canvas.loadPath({ includeSelf: false });
+                const tAncStart = globalThis.performance?.now?.() || Date.now();
+                for (let i = ancestors.length - 1; i >= 0; i--) {
+                    await updateIndexedRepliesOnly(this, ancestors[i]);
+                }
+                const tAncEnd = globalThis.performance?.now?.() || Date.now();
+                _dispatchReindexDebug({
+                    phase: "replies:update:ancestors",
+                    id: canvas.idString,
+                    dt: tAncEnd - tAncStart,
+                    count: ancestors.length,
+                });
+            } catch {}
+        }
         // Test hook: expose timing breakdown for Node tests (no window events)
         if (
             typeof process !== "undefined" &&
@@ -2911,6 +3037,7 @@ export class Scope extends Program<ScopeArgs> {
         this._repliesChangeListener = async (
             evt: CustomEvent<DocumentsChange<Canvas, IndexableCanvas>>
         ) => {
+            if (this.isReindexSuppressed) return;
             // assume added/remove changed, in this case we want to update the parent so the parent indexed canvas knows that the reply count has changes
 
             for (let added of evt.detail.added) {
@@ -2928,14 +3055,41 @@ export class Scope extends Program<ScopeArgs> {
             this._repliesChangeListener
         );
 
-        const onVisualizationChange = makeReindexListener<
-            Visualization,
-            IndexedVisualization
-        >(
-            this,
-            (v: any) => [v.canvasId], // your IndexedVisualization has canvasId
-            { onlyReplies: false, alsoParents: false }
-        );
+        // Defer child full reindex from visualization changes to avoid blocking initial paint
+        const onVisualizationChange = async (
+            evt: CustomEvent<
+                DocumentsChange<Visualization, IndexedVisualization>
+            >
+        ) => {
+            const changed = [...evt.detail.added, ...evt.detail.removed];
+            for (const v of changed as any[]) {
+                const ids = [(v as any).canvasId] as Uint8Array[];
+                for (const id of ids) {
+                    const canvas = await this.replies.index.get(id);
+                    if (!canvas) continue;
+                    const c = canvas;
+                    const scopeRef = this; // we are already in the right Scope context
+                    const ms =
+                        typeof process !== "undefined" && process?.env?.VITEST
+                            ? 0
+                            : 300;
+                    globalThis.setTimeout?.(() => {
+                        try {
+                            scopeRef
+                                ._hierarchicalReindex!.add({
+                                    canvas: c,
+                                    options: {
+                                        onlyReplies: false,
+                                        skipAncestors: true,
+                                    },
+                                    propagateParents: false,
+                                })
+                                .catch(() => {});
+                        } catch {}
+                    }, ms);
+                }
+            }
+        };
         this.visualizations.events.addEventListener(
             "change",
             onVisualizationChange
@@ -2944,17 +3098,48 @@ export class Scope extends Program<ScopeArgs> {
         // One small discriminator
         const isReplyKind = (l: Link) => (l.kind as any).tag === 0;
 
-        // Child-only full reindex for view placements
-        const onViewLinkChange = makeReindexListener<Link, Link>(
-            this,
-            (l) => [l.child.canvasId],
-            { onlyReplies: false, alsoParents: false }
-        );
+        // Child-only full reindex for view placements (deferred)
+        const onViewLinkChange = async (
+            evt: CustomEvent<DocumentsChange<Link, Link>>
+        ) => {
+            const changed = [
+                ...evt.detail.added,
+                ...evt.detail.removed,
+            ] as Link[];
+            for (const l of changed) {
+                const ids = [l.child.canvasId];
+                for (const id of ids) {
+                    const canvas = await this.replies.index.get(id);
+                    if (!canvas) continue;
+                    const c = canvas;
+                    const scopeRef = this;
+                    const ms =
+                        typeof process !== "undefined" && process?.env?.VITEST
+                            ? 0
+                            : 300;
+                    globalThis.setTimeout?.(() => {
+                        try {
+                            scopeRef
+                                ._hierarchicalReindex!.add({
+                                    canvas: c,
+                                    options: {
+                                        onlyReplies: false,
+                                        skipAncestors: true,
+                                    },
+                                    propagateParents: false,
+                                })
+                                .catch(() => {});
+                        } catch {}
+                    }, ms);
+                }
+            }
+        };
 
         // Child full + parent/ancestors onlyReplies
         const onSemanticLinkChange = async (
             evt: CustomEvent<DocumentsChange<Link, Link>>
         ) => {
+            if (this.isReindexSuppressed) return;
             const changed = [
                 ...evt.detail.added,
                 ...evt.detail.removed,
@@ -3003,30 +3188,69 @@ export class Scope extends Program<ScopeArgs> {
                 }
 
                 if (child) {
-                    await this._hierarchicalReindex!.add({
-                        canvas: child,
-                        options: { onlyReplies: false },
-                    }); // child’s totals
+                    try {
+                        globalThis.window?.dispatchEvent?.(
+                            new CustomEvent("reindex:debug", {
+                                detail: {
+                                    phase: "queue:add",
+                                    id: child.idString,
+                                    source: "link:child(deferred)",
+                                    onlyReplies: false,
+                                    skipAncestors: true,
+                                },
+                            })
+                        );
+                    } catch {}
+                    // Defer child full to avoid blocking initial content paint
+                    const c = child;
+                    const scopeRef = this; // use current Scope
+                    globalThis.setTimeout?.(() => {
+                        try {
+                            scopeRef
+                                ._hierarchicalReindex!.add({
+                                    canvas: c,
+                                    options: {
+                                        onlyReplies: false,
+                                        skipAncestors: true,
+                                    },
+                                })
+                                .catch(() => {});
+                        } catch {}
+                    }, 300);
                 }
                 if (parent) {
-                    await this._hierarchicalReindex!.add({
-                        canvas: parent,
-                        options: { onlyReplies: true },
-                    });
-                    await parent.load(this.node, { args: this.openingArgs });
-                    const chain = await parent.loadPath({ includeSelf: false });
-                    for (let i = chain.length - 1; i >= 0; i--) {
-                        await this._hierarchicalReindex!.add({
-                            canvas: chain[i],
-                            options: { onlyReplies: true },
-                            propagateParents: false,
-                        });
-                    }
+                    // Defer parent replies-only refresh out of the current frame
+                    const p = parent;
+                    globalThis.setTimeout?.(() => {
+                        try {
+                            globalThis.window?.dispatchEvent?.(
+                                new CustomEvent("reindex:debug", {
+                                    detail: {
+                                        phase: "queue:add",
+                                        id: p.idString,
+                                        source: "link:parent(deferred)",
+                                        onlyReplies: true,
+                                        skipAncestors: true,
+                                    },
+                                })
+                            );
+                        } catch {}
+                        p.nearestScope
+                            ._hierarchicalReindex!.add({
+                                canvas: p,
+                                options: {
+                                    onlyReplies: true,
+                                    skipAncestors: true,
+                                },
+                            })
+                            .catch(() => {});
+                    }, 0);
                 }
             }
         };
 
         this._linksChangeListener = async (evt) => {
+            if (this.isReindexSuppressed) return;
             // Fast path: split by kind once to avoid redundant fetches
             const added = evt.detail.added;
             const removed = evt.detail.removed;
@@ -3062,17 +3286,40 @@ export class Scope extends Program<ScopeArgs> {
             this._linksChangeListener
         );
 
-        this._elementsChangeListener = makeReindexListener<
-            Element,
-            IndexableElement
-        >(this, (e: any) => [e.canvasId], {
-            onlyReplies: false,
-            alsoParents: false,
+        // Defer full reindex from element changes (child-only) to avoid blocking paint
+        this._elementsChangeListener = async (
+            evt: CustomEvent<DocumentsChange<Element, IndexableElement>>
+        ) => {
+            const changed = [...evt.detail.added, ...evt.detail.removed];
+            for (const e of changed as any[]) {
+                const ids = [(e as any).canvasId] as Uint8Array[];
+                for (const id of ids) {
+                    const canvas = await this.replies.index.get(id);
+                    if (!canvas) continue;
+                    const c = canvas;
+                    const scopeRef = this;
+                    globalThis.setTimeout?.(() => {
+                        try {
+                            scopeRef
+                                ._hierarchicalReindex!.add({
+                                    canvas: c,
+                                    options: {
+                                        onlyReplies: false,
+                                        skipAncestors: true,
+                                    },
+                                    propagateParents: false,
+                                })
+                                .catch(() => {});
+                        } catch {}
+                    }, 300);
+                }
+            }
+        };
+        const _elementsHandler = this._elementsChangeListener;
+        this.elements.events.addEventListener("change", (e: any) => {
+            if (this.isReindexSuppressed) return;
+            return _elementsHandler(e);
         });
-        this.elements.events.addEventListener(
-            "change",
-            this._elementsChangeListener
-        );
     }
 
     close(from?: Program): Promise<boolean> {
@@ -3778,7 +4025,7 @@ export class Canvas {
         // 1) Fast path: use materialized path + depth (immediate children only)
         const selfIdx = await this.getSelfIndexed();
         if (selfIdx) {
-            const results = await scope.replies.index.search(
+            const results = (await scope.replies.index.search(
                 new SearchRequest({
                     query: [
                         new StringMatch({
@@ -3794,8 +4041,11 @@ export class Canvas {
                         ),
                     ],
                 })
-            );
-            return results as WithIndexedContext<Canvas, IndexableCanvas>[];
+            )) as WithIndexedContext<Canvas, IndexableCanvas>[];
+            if (results.length > 0) {
+                return results;
+            }
+            // Fall through to link-scan fallback when index isn't warm yet
         }
 
         // 2) Fallback: traverse *all* outgoing links from this parent (no kind filter),
@@ -3923,6 +4173,22 @@ export class Canvas {
             if (options?.type)
                 ops.push(node.setExperience(options.type, { scope }));
             await Promise.all(ops);
+
+            // Update parent and ancestors replies-only totals after linking
+            await scope._hierarchicalReindex!.add({
+                canvas: current,
+                options: { onlyReplies: true, skipAncestors: false },
+            });
+
+            // Ensure the new node gets indexed (context, counts) even when element put skipped reindex
+            await scope._hierarchicalReindex!.add({
+                canvas: node,
+                options: { onlyReplies: false, skipAncestors: true },
+            });
+            await scope._hierarchicalReindex!.add({
+                canvas: node,
+                options: { onlyReplies: true, skipAncestors: false },
+            });
 
             created.push(node);
             current = node;
@@ -4222,11 +4488,14 @@ export class Canvas {
 
         const scope = this.nearestScope;
         await scope.elements.put(element, { unique: options?.unique });
-        const suppress = options?.skipReindex || this._bulkInsertDepth > 0;
+        const suppress =
+            options?.skipReindex ||
+            this._bulkInsertDepth > 0 ||
+            scope.isReindexSuppressed;
         if (!suppress) {
             await scope._hierarchicalReindex!.add({
                 canvas: this,
-                options: { onlyReplies: false },
+                options: { onlyReplies: false, skipAncestors: true },
             });
         }
     }
@@ -4393,7 +4662,7 @@ export class Canvas {
                 // Schedule a single reindex now
                 await this.nearestScope._hierarchicalReindex!.add({
                     canvas: this,
-                    options: { onlyReplies: false },
+                    options: { onlyReplies: false, skipAncestors: true },
                 });
             }
         }
@@ -4418,7 +4687,7 @@ export class Canvas {
          });
      } */
 
-    clone() {
+    clone(): Canvas {
         return deserialize(serialize(this), Canvas);
     }
 

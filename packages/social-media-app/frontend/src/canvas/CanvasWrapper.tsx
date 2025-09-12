@@ -47,6 +47,7 @@ import { PrivateScope, PublicScope } from "./useScope.js";
 import { useInitializeCanvas } from "./useInitializedCanvas.js";
 import { useSyncedStateRef } from "../utils/useSyncedStateRef.js";
 import { emitDebugEvent } from "../debug/debug.js";
+import { toBase64URL } from "@peerbit/crypto";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Public types
@@ -156,6 +157,7 @@ const _CanvasWrapper = (
         placeholder,
         classNameContent,
         debug,
+        draft,
     }: CanvasWrapperProps,
     ref: React.Ref<CanvasHandle>
 ) => {
@@ -260,8 +262,9 @@ const _CanvasWrapper = (
             prefetch: true,
             debug,
             remote: {
+                // Do not block local rendering on remote joining; keep eager but with zero wait
                 eager: true,
-                joining: { waitFor: 5e3 },
+                joining: { waitFor: 0 },
             },
             onChange: {
                 merge: (change) => {
@@ -342,12 +345,15 @@ const _CanvasWrapper = (
 
     // View calculations
     const visibleRects = useMemo<Element[]>(() => {
+        // Only merge in pending rects for draft editors. Feed/detail views should
+        // render committed content exclusively to avoid cross-draft leakage.
+        if (!draft) return rects;
         const idsInQuery = new Set(rects.map((r) => r.idString));
         const stillPending = pendingRects.filter(
             (p) => !idsInQuery.has(p.idString)
         );
         return [...rects, ...stillPending];
-    }, [rects, pendingRects]);
+    }, [rects, pendingRects, draft]);
 
     // prune pending that made it into the index
     useEffect(() => {
@@ -448,7 +454,7 @@ const _CanvasWrapper = (
                             (r) => r.content.content as StaticPartialImage
                         )
                     );
-                    const rep = partial[0] as Element<StaticContent>;
+                    const rep = partial[0] as Element<StaticContent<any>>;
                     best = new Element({
                         publicKey: rep.publicKey,
                         id: rep.id,
@@ -458,7 +464,7 @@ const _CanvasWrapper = (
                             content: merged,
                             contentId: rep.content.contentId,
                         }),
-                        canvasId: rep.parent.id,
+                        canvasId: rep.canvasId,
                     });
                 } else {
                     best = partial[0];
@@ -480,7 +486,10 @@ const _CanvasWrapper = (
             other: [] as Element[],
         };
         grouped.forEach((r) => {
-            if (rectIsStaticMarkdownText(r)) out.text.push(r);
+            if (rectIsStaticMarkdownText(r))
+                out.text.push(
+                    r as unknown as Element<StaticContent<StaticMarkdownText>>
+                );
             else out.other.push(r);
         });
         out.text.sort((a, b) => a.location.y - b.location.y);
@@ -535,15 +544,16 @@ const _CanvasWrapper = (
             }
         }
 
-        // mutate committed rects (copy into pending if needed)
+        // mutate committed rects (copy into pending; do NOT mutate originals)
         for (let i = 0; i < rects.length; i++) {
             const el = rects[i];
             if (updated.some((e) => e.idString === el.idString)) continue;
             if (options?.filter && !options.filter(el)) continue;
-            if (fn(el, i)) {
-                const clone = el; // same reference is fine; we keep it in pending to stage edits
+            // Deep clone using schema clone to avoid shared references
+            const clone = el.clone();
+            if (fn(clone as any, i)) {
                 (clone as any)._changed = true;
-                updated.push(clone);
+                updated.push(clone as any);
                 mutated = true;
             }
         }
@@ -841,18 +851,12 @@ const _CanvasWrapper = (
                 "in canvas",
                 canvas.idString
             );
-            console.log("Saving pending rects", {
-                count: pendings.length,
-                count2: pendingRects.length,
-                canvas: canvas.idString,
-            });
+
             if (!pendings.length) {
-                console.log("No pending rects to save");
                 debugLog("No pending rects to save");
                 return;
             }
             if (savingRef.current) {
-                console.log("Save already in-flight, skipping");
                 debugLog("Save already in-flight, skipping");
                 return;
             }
@@ -982,6 +986,16 @@ const _CanvasWrapper = (
             } else {
                 announceReply(parent);
             }
+            try {
+                emitDebugEvent({
+                    source: "CanvasWrapper",
+                    name: "contentChange",
+                    canvasId: toBase64URL(canvasDB.id),
+                    elementId: el.idString,
+                    text: el.content.content.text,
+                    draft: !!draft,
+                });
+            } catch {}
         }
 
         onContentChange?.([el]);
@@ -1018,7 +1032,8 @@ const _CanvasWrapper = (
         () => ({
             active,
             setActive,
-            pendingRects,
+            // Only expose pending rects to children when acting as a draft editor.
+            pendingRects: (draft ? pendingRects : ([] as Element[])) as any,
             setPendingRects,
             savePending, // stable
             rects: visibleRects,
@@ -1061,6 +1076,7 @@ const _CanvasWrapper = (
             placeholder,
             classNameContent,
             debug,
+            draft,
         ]
     );
 

@@ -18,12 +18,16 @@ type SizeProps = {
     fitHeight?: boolean;
     fitWidth?: boolean;
 };
-
-type BaseProps = SizeProps & {
-    children?: ReactNode;
-    bgBlur?: boolean;
-    requestPublish?: () => void | Promise<void>;
-} & ({ draft: true; inFullScreen?: boolean } | { draft: false }) & {
+type TestProps = {
+    "data-testid"?: string;
+    "data-draft-id"?: string;
+};
+type BaseProps = TestProps &
+    SizeProps & {
+        children?: ReactNode;
+        bgBlur?: boolean;
+        requestPublish?: () => void | Promise<void>;
+    } & ({ draft: true; inFullScreen?: boolean } | { draft: false }) & {
         className?: string;
         onLoad?: () => void;
         /** Optional explicit editability override; defaults to context (often tied to `draft`) */
@@ -299,6 +303,8 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
     }
     return (
         <div
+            data-draft-id={props["data-draft-id"]}
+            data-testid={props["data-testid"]}
             className={`flex ${
                 props.config.containerClass
             } ${sizingClassNames} ${props.className ?? ""}`}

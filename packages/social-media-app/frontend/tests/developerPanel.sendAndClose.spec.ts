@@ -91,9 +91,17 @@ test.describe("DeveloperPanel: enable logs, close, then send message", () => {
             await sendBtn.click({ force: true });
         }
 
-        // Assert that input is cleared and button disabled again (optional but confirms the click worked)
-        await expect(textArea).toHaveValue("");
-        await expect(sendBtn).toBeDisabled();
+        // Assert input cleared or draft rotated (textarea removed)
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            { timeout: 10000 }
+        );
+        // Button may re-enable quickly due to immediate draft rotation; input clearing/unmount is the primary signal
         hook.stop();
     });
 });

@@ -1,4 +1,4 @@
-export const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+export const BASE_URL = process.env.BASE_URL || "http://localhost:5190";
 
 export const OFFLINE_BASE = (() => {
     const base = BASE_URL.replace(/\/+$/, "");

@@ -91,7 +91,15 @@ test.describe("Draft recovery", () => {
                 })
                 .toBe(msg);
         } else {
-            await expect(textAreas.first()).toHaveValue("", { timeout: 20000 });
+            await page.waitForFunction(
+                () => {
+                    const el = document.querySelector(
+                        '[data-testid="toolbarcreatenew"] textarea'
+                    ) as HTMLTextAreaElement | null;
+                    return !el || el.value === "";
+                },
+                { timeout: 20000 }
+            );
         }
     });
 
@@ -152,9 +160,25 @@ test.describe("Draft recovery", () => {
             second?.peerHash &&
             first.peerHash === second.peerHash
         ) {
-            await expect(textAreas.first()).toHaveValue("", { timeout: 20000 });
+            await page.waitForFunction(
+                () => {
+                    const el = document.querySelector(
+                        '[data-testid="toolbarcreatenew"] textarea'
+                    ) as HTMLTextAreaElement | null;
+                    return !el || el.value === "";
+                },
+                { timeout: 20000 }
+            );
         } else {
-            await expect(textAreas.first()).toHaveValue("", { timeout: 20000 });
+            await page.waitForFunction(
+                () => {
+                    const el = document.querySelector(
+                        '[data-testid="toolbarcreatenew"] textarea'
+                    ) as HTMLTextAreaElement | null;
+                    return !el || el.value === "";
+                },
+                { timeout: 20000 }
+            );
         }
     });
 
@@ -215,7 +239,15 @@ test.describe("Draft recovery", () => {
                 .toBe(msg);
         } else {
             // Identity changed ⇒ new composer: expect empty placeholder
-            await expect(textAreas.first()).toHaveValue("", { timeout: 20000 });
+            await page.waitForFunction(
+                () => {
+                    const el = document.querySelector(
+                        '[data-testid="toolbarcreatenew"] textarea'
+                    ) as HTMLTextAreaElement | null;
+                    return !el || el.value === "";
+                },
+                { timeout: 20000 }
+            );
         }
     });
 });

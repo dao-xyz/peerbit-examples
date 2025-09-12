@@ -27,6 +27,7 @@ import { useDraftSession } from "./draft/DraftSession";
 import { ImageCanvas } from "../render/detailed/ImageCanvas";
 import { TextCanvas } from "../render/detailed/TextCanvas";
 import { rectIsStaticImage, rectIsStaticPartialImage } from "../utils/rect";
+import { toBase64URL } from "@peerbit/crypto";
 
 export const ToolbarCreateNew = (props: {
     showProfile?: boolean;
@@ -128,6 +129,15 @@ export const ToolbarCreateNew = (props: {
         }
     }, [rects, pendingRects, reduceElementsForViewing]);
 
+    // Ensure a default text element is available promptly for typing
+    useEffect(() => {
+        if (!hasTextElement) {
+            insertDefault({ scope: privateScope }).catch(() => {
+                /* no-op */
+            });
+        }
+    }, [hasTextElement, insertDefault, privateScope]);
+
     return (
         <div
             className={`flex flex-col z-20 w-full left-0  ${colorStyle} ${
@@ -156,6 +166,10 @@ export const ToolbarCreateNew = (props: {
                     )}
                 </div>
                 <TextCanvas
+                    data-testid="composer-textarea"
+                    data-draft-id={
+                        canvas?.id ? toBase64URL(canvas.id) : undefined
+                    }
                     fitWidth
                     fitHeight
                     draft
@@ -244,6 +258,11 @@ export const ToolbarCreateNew = (props: {
                     onClick={() => props.setInlineEditorActive(false)}
                     icon={BsSend}
                 />
+                {props.debug && (
+                    <div className="text-xs ">
+                        {canvas?.idString?.substring(0, 8)}
+                    </div>
+                )}
             </div>
         </div>
     );
