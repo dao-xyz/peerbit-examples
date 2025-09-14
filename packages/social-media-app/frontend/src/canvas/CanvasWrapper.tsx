@@ -48,7 +48,6 @@ import { useInitializeCanvas } from "./useInitializedCanvas.js";
 import { useSyncedStateRef } from "../utils/useSyncedStateRef.js";
 import { emitDebugEvent } from "../debug/debug.js";
 import { toBase64URL } from "@peerbit/crypto";
-
 /* ────────────────────────────────────────────────────────────────────────────
  * Public types
  * ──────────────────────────────────────────────────────────────────────────── */
@@ -116,7 +115,6 @@ export interface CanvasContextType {
     isSaving: boolean;
     placeholder?: string;
     classNameContent?: string | ((el: Element<ElementContent>) => string);
-    debug?: boolean;
 }
 
 export const CanvasContext = createContext<CanvasContextType | undefined>(
@@ -140,7 +138,7 @@ interface CanvasWrapperProps {
     onLoad?: () => void;
     placeholder?: string;
     classNameContent?: string | ((el: Element<ElementContent>) => string);
-    debug?: boolean; // debug console logs
+    debug?: boolean | string; // debug console logs
 }
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -163,13 +161,16 @@ const _CanvasWrapper = (
 ) => {
     // -------------------------------------------------- basic hooks ----
     const { peer } = usePeer();
-    const debugLog = useMemo(
-        () =>
-            debug
-                ? (...args: any[]) => console.log("[Canvas]", ...args)
-                : () => {},
-        [debug]
-    );
+    const debugLog = useMemo(() => {
+        if (debug) {
+            let logTag = "[Canvas]";
+            if (typeof debug === "string") {
+                logTag += ` [${debug}]`;
+            }
+            return (...args: any[]) => console.log(logTag, ...args);
+        }
+        return () => {};
+    }, [debug]);
 
     const privateScope = PrivateScope.useScope();
     const publicScope = PublicScope.useScope();
@@ -205,7 +206,7 @@ const _CanvasWrapper = (
                 const aIds = new Set(after.map((e) => e.idString));
                 const added = after.filter((e) => !bIds.has(e.idString));
                 const removed = before.filter((e) => !aIds.has(e.idString));
-                console.log("[CanvasWrapper][pendingRects diff]", {
+                debugLog("[pendingRefs diff]", {
                     reason,
                     added: added.map(toInfo),
                     removed: removed.map(toInfo),
@@ -260,7 +261,7 @@ const _CanvasWrapper = (
             debounce: 123,
             local: true,
             prefetch: true,
-            debug,
+            debug: !!debug,
             remote: {
                 // Do not block local rendering on remote joining; keep eager but with zero wait
                 eager: true,
