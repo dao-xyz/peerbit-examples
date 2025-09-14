@@ -1,4 +1,6 @@
+import exp from "constants";
 import { test, expect } from "./fixtures/persistentContext";
+import { expectPersistent } from "./utils/persistence";
 import { OFFLINE_BASE } from "./utils/url";
 
 const PNG_BASE64 =
@@ -32,7 +34,6 @@ test.describe("Draft recovery", () => {
             timeout: 20000,
         });
         const first = await page.evaluate(() => (window as any).__peerInfo);
-
         await page.reload();
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
             timeout: 20000,
@@ -40,10 +41,8 @@ test.describe("Draft recovery", () => {
         const second = await page.evaluate(() => (window as any).__peerInfo);
 
         expect(first?.peerHash).toBeTruthy();
-        // If the browser granted persistence, identity should match across reloads
-        if (first?.persisted && second?.persisted) {
-            expect(second?.peerHash).toBe(first?.peerHash);
-        }
+        await expectPersistent(page);
+        expect(second?.peerHash).toBe(first?.peerHash);
     });
 
     test("recovers text only: one text element (no empty placeholder)", async ({
@@ -79,28 +78,13 @@ test.describe("Draft recovery", () => {
         const toolbar2 = page.getByTestId("toolbarcreatenew").first();
         const textAreas = toolbar2.locator("textarea");
         await expect(textAreas).toHaveCount(1, { timeout: 20000 });
-        if (
-            first?.peerHash &&
-            second?.peerHash &&
-            first.peerHash === second.peerHash
-        ) {
-            await expect
-                .poll(async () => await textAreas.first().inputValue(), {
-                    timeout: 20000,
-                    message: "Waiting for recovered text to appear",
-                })
-                .toBe(msg);
-        } else {
-            await page.waitForFunction(
-                () => {
-                    const el = document.querySelector(
-                        '[data-testid="toolbarcreatenew"] textarea'
-                    ) as HTMLTextAreaElement | null;
-                    return !el || el.value === "";
-                },
-                { timeout: 20000 }
-            );
-        }
+        await expectPersistent(page);
+        await expect
+            .poll(async () => await textAreas.first().inputValue(), {
+                timeout: 20000,
+                message: "Waiting for recovered text to appear",
+            })
+            .toBe(msg);
     });
 
     test("recovers image only: one empty text element + image", async ({
@@ -155,31 +139,16 @@ test.describe("Draft recovery", () => {
         // Exactly one text editor, expected to be empty placeholder
         const textAreas = toolbar2.locator("textarea");
         await expect(textAreas).toHaveCount(1, { timeout: 20000 });
-        if (
-            first?.peerHash &&
-            second?.peerHash &&
-            first.peerHash === second.peerHash
-        ) {
-            await page.waitForFunction(
-                () => {
-                    const el = document.querySelector(
-                        '[data-testid="toolbarcreatenew"] textarea'
-                    ) as HTMLTextAreaElement | null;
-                    return !el || el.value === "";
-                },
-                { timeout: 20000 }
-            );
-        } else {
-            await page.waitForFunction(
-                () => {
-                    const el = document.querySelector(
-                        '[data-testid="toolbarcreatenew"] textarea'
-                    ) as HTMLTextAreaElement | null;
-                    return !el || el.value === "";
-                },
-                { timeout: 20000 }
-            );
-        }
+        await expectPersistent(page);
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            { timeout: 20000 }
+        );
     });
 
     test("recovers text + image: one text element (the recovered one) + image", async ({
@@ -209,45 +178,19 @@ test.describe("Draft recovery", () => {
 
         const toolbar2 = page.getByTestId("toolbarcreatenew").first();
         // Image present only if identity stable
-        if (
-            first?.peerHash &&
-            second?.peerHash &&
-            first.peerHash === second.peerHash
-        ) {
-            await expect(
-                toolbar2.getByRole("img", { name: imgName }).first()
-            ).toBeVisible({ timeout: 20000 });
-        } else {
-            await expect(
-                toolbar2.getByRole("img", { name: imgName }).first()
-            ).toHaveCount(0, { timeout: 20000 } as any);
-        }
+        await expectPersistent(page);
+        await expect(
+            toolbar2.getByRole("img", { name: imgName }).first()
+        ).toBeVisible({ timeout: 20000 });
 
         // Exactly one text editor with recovered text
         const textAreas = toolbar2.locator("textarea");
         await expect(textAreas).toHaveCount(1, { timeout: 20000 });
-        if (
-            first?.peerHash &&
-            second?.peerHash &&
-            first.peerHash === second.peerHash
-        ) {
-            await expect
-                .poll(async () => await textAreas.first().inputValue(), {
-                    timeout: 20000,
-                    message: "Waiting for recovered text with image to appear",
-                })
-                .toBe(msg);
-        } else {
-            // Identity changed ⇒ new composer: expect empty placeholder
-            await page.waitForFunction(
-                () => {
-                    const el = document.querySelector(
-                        '[data-testid="toolbarcreatenew"] textarea'
-                    ) as HTMLTextAreaElement | null;
-                    return !el || el.value === "";
-                },
-                { timeout: 20000 }
-            );
-        }
+        await expect
+            .poll(async () => await textAreas.first().inputValue(), {
+                timeout: 20000,
+                message: "Waiting for recovered text with image to appear",
+            })
+            .toBe(msg);
     });
 });

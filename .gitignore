@@ -16,3 +16,4 @@ nginx
 .env
 /dist
 **/.pw-user-data/*
+test-results

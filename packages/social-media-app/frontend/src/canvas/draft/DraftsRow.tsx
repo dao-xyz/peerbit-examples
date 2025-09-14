@@ -21,7 +21,7 @@ export const DraftsRow = (properties: {
             <div className="flex flex-row  items-center mb-1">
                 <div className="flex items-center gap-2">
                     <VscCommentDraft />
-                    <span className="text-sm text-neutral-800 dark:text-neutral-200">
+                    <span test-className="text-sm text-neutral-800 dark:text-neutral-200">
                         Pending drafts ({drafts.length})
                     </span>
                 </div>
@@ -33,7 +33,11 @@ export const DraftsRow = (properties: {
                     <MdClear />
                 </button>
             </div>
-            <div className="flex flex-wrap">
+            <div
+                className="flex flex-wrap"
+                data-pending-drafts
+                id="pending-drafts"
+            >
                 {drafts.map((post) => (
                     <div
                         key={post.idString}

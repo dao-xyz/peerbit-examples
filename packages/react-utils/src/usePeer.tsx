@@ -317,17 +317,16 @@ export const PeerProvider = (options: PeerOptions) => {
                     network:
                         nodeOptions.network === "local" ? "local" : "remote",
                 });
-                try {
-                    (window as any).__peerInfo = {
-                        peerHash: newPeer?.identity.publicKey.hashcode(),
-                        persisted: persistedResolved,
-                    };
-                    window.dispatchEvent(
-                        new CustomEvent("peer:ready", {
-                            detail: (window as any).__peerInfo,
-                        })
-                    );
-                } catch {}
+
+                (window as any).__peerInfo = {
+                    peerHash: newPeer?.identity.publicKey.hashcode(),
+                    persisted: persistedResolved,
+                };
+                window.dispatchEvent(
+                    new CustomEvent("peer:ready", {
+                        detail: (window as any).__peerInfo,
+                    })
+                );
 
                 setConnectionState("connecting");
 

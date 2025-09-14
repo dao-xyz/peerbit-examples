@@ -1,7 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
 // Use a non-default port to avoid clashing with local dev
-const PORT = Number(process.env.PORT || 5190);
+const PORT = Number(process.env.PORT || 5173);
 const HOST = process.env.HOST || "localhost";
 const BASE_HTTP = `http://${HOST}:${PORT}`;
 
@@ -21,12 +21,13 @@ export default defineConfig({
         video: "retain-on-failure",
         screenshot: "only-on-failure",
     },
+
     projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
     webServer: {
         // Use package script with forwarded flag to respect local vite config
         command: `yarn start -- --port ${PORT}`,
         url: BASE_HTTP,
-        reuseExistingServer: true,
+        /* reuseExistingServer: true, */
     },
     workers: 1,
 });
