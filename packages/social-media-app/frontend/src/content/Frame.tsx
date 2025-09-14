@@ -11,6 +11,7 @@ import { useApps } from "./useApps";
 import { CuratedWebApp } from "@giga-app/app-service";
 import { HostProvider as GigaHost, HostProvider, useHost } from "@giga-app/sdk";
 import { useCanvas } from "../canvas/CanvasWrapper";
+import { StaticMarkdownText } from "@giga-app/interface";
 import { useThemeContext } from "../theme/useTheme";
 
 const ThemedIframe = (properties: {
@@ -90,6 +91,7 @@ export const Frame = (properties: {
     className?: string;
 
     requestPublish?: () => void | Promise<void>;
+    disableAutoPublish?: boolean;
 }) => {
     const navigate = useNavigate();
     const { getCuratedWebApp } = useApps();
@@ -281,7 +283,20 @@ export const Frame = (properties: {
                         );
 
                         if (options?.save /* && properties.draft */) {
-                            console.log("PUBLISH!");
+                            if (properties.disableAutoPublish) {
+                                return; // rotation or caller-specified suppression
+                            }
+                            // Guard: only auto-publish when the new content is clearly non-empty
+                            // (aligns with disabled state of the send button)
+                            const isNonEmptyText =
+                                newContent instanceof StaticContent &&
+                                newContent.content instanceof
+                                    StaticMarkdownText &&
+                                newContent.content.isEmpty !== true;
+                            if (!isNonEmptyText) {
+                                // Skip auto-publish on Enter if content is empty
+                                return;
+                            }
                             await publish();
                         }
                     }}
