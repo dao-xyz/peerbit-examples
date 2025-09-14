@@ -705,7 +705,7 @@ export const DraftManagerProvider: React.FC<{
                             draftId: id,
                         });
                         try {
-                            await rec.canvas.nearestScope?.remove(rec.canvas, {
+                            await rec.canvas.nearestScope.remove(rec.canvas, {
                                 drop: true,
                             });
                         } catch (error) {
