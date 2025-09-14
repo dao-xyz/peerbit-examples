@@ -119,7 +119,7 @@ describe("reindex publish loop profiling", () => {
             const hook2 = (globalThis as any).__LAST_FULL_PUT;
             expect(hook2).to.be.ok;
 
-            const afterKids = (await root.getChildren()).length;
+            /* const afterKids = (await root.getChildren()).length;
 
             console.log(
                 `FULL_PUT_PUBLISH_LOOP iter=${iter} draftElems=${DRAFT_ELEMS} ctxMs=${hook2.ctxMs?.toFixed(
@@ -137,7 +137,7 @@ describe("reindex publish loop profiling", () => {
                 } t4-5=${t5 - t4} t5-6=${t6 - t5} t6-7=${t7 - t6} t7-8=${
                     t8 - t7
                 } t8-9=${t9 - t8}`
-            );
+            ); */
         }
         // Aggregate idle metrics if collected
         if (process.env.REINDEX_IDLE_TRACE === "1") {
