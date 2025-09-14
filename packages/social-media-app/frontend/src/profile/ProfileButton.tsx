@@ -1,18 +1,12 @@
 import { forwardRef, useEffect, useState } from "react";
 import { PublicSignKey } from "@peerbit/crypto";
-import {
-    Canvas,
-    IndexableCanvas,
-    LOWEST_QUALITY,
-    Profile as ProfileData,
-} from "@giga-app/interface";
+import { LOWEST_QUALITY } from "@giga-app/interface";
 import { IndexedProfileRow, useProfiles } from "./useProfiles";
 import { CanvasPreview } from "../canvas/render/preview/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";
 import { debounceLeadingTrailing } from "@peerbit/react";
-import { WithIndexedContext } from "@peerbit/document";
 import { useInitializeCanvas } from "../canvas/useInitializedCanvas";
 
 function pxToRem(px: number) {
@@ -96,7 +90,11 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
                             "overflow-hidden " + (rounded ? "rounded-md" : "")
                         }
                     >
-                        <CanvasWrapper quality={LOWEST_QUALITY} canvas={canvas}>
+                        <CanvasWrapper
+                            quality={LOWEST_QUALITY}
+                            canvas={canvas}
+                            debug="profile"
+                        >
                             <CanvasPreview onClick={onClick} variant="tiny" />
                         </CanvasWrapper>
                     </div>

@@ -1,6 +1,6 @@
 import { Program, OpenOptions, ProgramEvents } from "@peerbit/program";
 import { PublicSignKey } from "@peerbit/crypto";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 const addressOrDefined = <A, B extends ProgramEvents, P extends Program<A, B>>(
     p?: P
 ) => {
@@ -18,18 +18,37 @@ export const useOnline = <
         Program<any, ProgramEvents>
 >(
     program?: P,
-    options?: { id?: string }
+    options?: { id?: string; debug?: boolean }
 ) => {
     const [peers, setPeers] = useState<PublicSignKey[]>([]);
 
+    const log: (...args: any) => void = useCallback(() => {
+        if (!program) {
+            return (...args: any[]) => {};
+        }
+        if (options?.debug) {
+            return (...args: any[]) => {
+                console.log(
+                    `[useOnline ${options?.id ? options.id + " " : ""}${
+                        addressOrDefined(program) || "no-address"
+                    }]`,
+                    ...args
+                );
+            };
+        }
+        return () => {};
+    }, [program, options?.debug, options?.id]);
+
     useEffect(() => {
         if (!program || program.closed) {
+            log("No program or closed");
             return;
         }
         let changeListener: () => void;
 
         let closed = false;
         const p = program;
+        log("Subscribing to online peers");
         changeListener = () => {
             p.getReady()
                 .then((set) => {
@@ -59,7 +78,7 @@ export const useOnline = <
             p.events.removeEventListener("join", changeListener);
             p.events.removeEventListener("leave", changeListener);
         };
-    }, [options?.id, addressOrDefined(program)]);
+    }, [log, options?.id, addressOrDefined(program)]);
     return {
         peers,
     };

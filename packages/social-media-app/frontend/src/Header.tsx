@@ -93,7 +93,6 @@ export const Header = (props: HeaderProps) => {
                                     className="  z-4 col-start-10 flex items-center "
                                     data-testid="header-profile-area"
                                 >
-                                    {" "}
                                     {/*  last class is needed to prevent max-h-[inherit] to be applied to the menu*/}
                                     {peer ? (
                                         <DropdownMenu.Root>
