@@ -36,7 +36,9 @@
         "build": "yarn clean && tsc -p tsconfig.json && yarn cp-images",
         "cp-images": "shx cp -r ./resources ./lib/esm/",
         "test": "vitest run",
-        "test:watch": "vitest"
+        "test:watch": "vitest",
+        "test-ai": "npm run build && node ./lib/esm/__tests__/ai-node.js",
+        "test-ai-dial": "DIAL_LOCAL=true npm run build && node ./lib/esm/__tests__/ai-node.js"
     },
     "devDependencies": {
         "@peerbit/test-utils": "^2",
