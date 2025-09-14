@@ -923,6 +923,7 @@ describe("privacy / scope mixing", () => {
             selfScope: privateScope,
         });
         await privateScope.getOrCreateReply(publicReply1, draft1);
+        expect(await privateScope.replies.count()).to.eq(1);
         await draft1.addTextElement("hello-from-draft-1");
 
         // "Publish": convert/migrate draft1 to PUBLIC and keep it as a reply to publicReply1
@@ -933,6 +934,7 @@ describe("privacy / scope mixing", () => {
             updateHome: "set",
             visibility: "both",
         });
+        expect(await privateScope.replies.count()).to.eq(0);
 
         // Let indexes settle in public
         await rootScope._hierarchicalReindex!.flush();

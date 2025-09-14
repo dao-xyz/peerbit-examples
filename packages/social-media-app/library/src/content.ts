@@ -17,6 +17,7 @@ import {
     DocumentsChange,
     id,
     IntegerCompare,
+    NotFoundError,
     NotStartedError,
     Or,
     Query,
@@ -840,7 +841,7 @@ async function addReply(
     }
 
     // optional mirror in PARENT scope
-    if (visibility === "both") {
+    if (visibility === "both" && parentScope.address !== childScope.address) {
         if (
             !(await parentScope.links.index.get(linkId, {
                 resolve: false,
@@ -2337,16 +2338,13 @@ export class Scope extends Program<ScopeArgs> {
                 await deleteVisualizationsInScope(srcHome, src);
                 await deleteChildLinksForCanvasInScope(srcHome, src);
 
-                // Optional: remove the replies row in the old home to avoid ghosts
-                const hadRow = await srcHome.replies.index.get(src.id, {
-                    resolve: false,
-                    local: true,
-                });
-                if (hadRow) {
+                try {
                     await srcHome.replies.del(src.id);
                     dlog("sync: removed old replies row", {
                         oldHome: srcHome.address,
                     });
+                } catch {
+                    // ignore
                 }
 
                 // Flush both sides so indexes converge deterministically
@@ -2396,11 +2394,18 @@ export class Scope extends Program<ScopeArgs> {
                 await deleteOwnedElementsInScope(srcHome, src);
                 await deleteVisualizationsInScope(srcHome, src);
                 await deleteChildLinksForCanvasInScope(srcHome, src);
-                const hadRow = await srcHome.replies.index.get(src.id, {
-                    resolve: false,
-                    local: true,
-                });
-                if (hadRow) await srcHome.replies.del(src.id);
+                try {
+                    await srcHome.replies.del(src.id);
+                } catch (error) {
+                    if (error instanceof NotFoundError) {
+                        // ignore
+                    } else {
+                        dlog("sync: error removing old replies row", {
+                            oldHome: srcHome.address,
+                            error,
+                        });
+                    }
+                }
                 await srcHome._hierarchicalReindex!.flush();
                 mark(
                     "sync:deferredCleanup" +
@@ -3235,15 +3240,15 @@ export class Scope extends Program<ScopeArgs> {
                                 })
                             );
                         } catch {}
-                        p.nearestScope
-                            ._hierarchicalReindex!.add({
-                                canvas: p,
-                                options: {
-                                    onlyReplies: true,
-                                    skipAncestors: true,
-                                },
-                            })
-                            .catch(() => {});
+                        /*  TODO is this needed?  p.nearestScope
+                              ._hierarchicalReindex!.add({
+                                  canvas: p,
+                                  options: {
+                                      onlyReplies: true,
+                                      skipAncestors: true,
+                                  },
+                              })
+                              .catch(() => { }); */
                     }, 0);
                 }
             }
