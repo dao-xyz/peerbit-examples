@@ -153,14 +153,15 @@ describe("AIResponseProgram", () => {
         const { canvas: clientCanvasRoot } = await createRoot(
             session.peers[1],
             {
-                persisted: true,
+                persisted: false,
             }
         );
 
         await clientCanvasRoot.replies.log.waitForReplicators();
-        expect([
-            ...(await clientCanvasRoot.replies.log.getReplicators()),
-        ]).to.deep.eq([session.peers[0].identity.publicKey.hashcode()]);
+        let replicators = await clientCanvasRoot.replies.log.getReplicators();
+        expect([...replicators]).to.deep.eq([
+            session.peers[0].identity.publicKey.hashcode(),
+        ]);
     });
 
     it("has a reasonable timeout", async () => {
