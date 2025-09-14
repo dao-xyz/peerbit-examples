@@ -73,11 +73,7 @@ export const DraftSessionProvider: React.FC<{
     // Helper: abandon a bucket/key safely (supports old manager without .abandon)
     const abandon = (k?: CanvasKey) => {
         if (!k) return;
-        if (typeof (mgr as any).abandon === "function") {
-            (mgr as any).abandon(k);
-        } else if (mgr.debug?.clear) {
-            mgr.debug.clear(k);
-        }
+        mgr.abandon(k);
     };
 
     // Ensure/recover for this *parent*; rotate key on parent change.
@@ -180,6 +176,10 @@ export const DraftSessionProvider: React.FC<{
             debugLog("[DraftSession] publish:queued-rotate", {
                 draftId: draft?.idString,
             });
+
+            // Clean up the extra empty draft created by DraftManager.publish() rotation
+            // since we already rotated optimistically above
+            abandon(k);
         }
     };
 
