@@ -20,6 +20,7 @@ import { TabsOrList } from "../navigation/Collections";
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
 import { useCanvases } from "../useCanvas";
 import { ExperienceDropdownButton } from "../custom/ExperienceDropdown";
+import { OnlineProfiles } from "../../profile/OnlinePeersButton";
 
 interface SubHeaderProps {
     collapsable?: boolean; // if true, the header can be collapsed
@@ -361,6 +362,7 @@ export const BottomControls = (props: {
 
             <ViewSelectorSubheader onViewChange={props?.onViewChange} />
             {/*  <People /> */}
+            <OnlineProfiles />
             {
                 <>
                     {/* <SortDropdown/>
