@@ -9,6 +9,26 @@ export const test = base.extend({
             viewport: { width: 1280, height: 800 },
             args: ["--enable-features=FileSystemAccessAPI"],
         });
+        await context.addInitScript(() => {
+            Object.defineProperty(navigator, "storage", {
+                value: {
+                    ...navigator.storage,
+                    persist: async () => true,
+                    persisted: async () => true,
+                },
+                configurable: true,
+            });
+        });
+
+        const baseURL =
+            testInfo.project.use.baseURL ||
+            process.env.BASE_URL ||
+            "http://localhost:5173";
+
+        const origin = new URL(baseURL).origin; // e.g. "http://localhost:5173"
+        await context.grantPermissions(["storage-access"], {
+            origin,
+        });
         await use(context);
         await context.close();
     },
