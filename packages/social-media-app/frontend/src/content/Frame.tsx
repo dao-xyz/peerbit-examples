@@ -288,6 +288,7 @@ export const Frame = (properties: {
                             }
                             // Guard: only auto-publish when the new content is clearly non-empty
                             // (aligns with disabled state of the send button)
+                            // TODO make requestPublish to be resilient to avoid publishing when not needed, expected
                             const isNonEmptyText =
                                 newContent instanceof StaticContent &&
                                 newContent.content instanceof

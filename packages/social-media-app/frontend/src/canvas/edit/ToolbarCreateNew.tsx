@@ -50,7 +50,7 @@ export const ToolbarCreateNew = (props: {
         setRequestAIReply,
     } = useCanvas();
 
-    const { publish } = useDraftSession();
+    const { publish, isPublishing } = useDraftSession();
     const { isReady } = useAIReply();
     const { replyTo, disable: disableAutoReply } = useAutoReply();
     const { visualization } = useVisualizationContext();
@@ -132,7 +132,7 @@ export const ToolbarCreateNew = (props: {
     // Ensure a default text element is available promptly for typing
     useEffect(() => {
         if (!hasTextElement) {
-            insertDefault({ scope: privateScope }).catch(() => {
+            insertDefault({ scope: privateScope, pending: true }).catch(() => {
                 /* no-op */
             });
         }
@@ -174,6 +174,7 @@ export const ToolbarCreateNew = (props: {
                     fitHeight
                     draft
                     editable
+                    disableAutoPublish={isPublishing}
                     className="pt-2 rounded min-h-10 justify-center"
                     requestPublish={publish}
                 />
@@ -191,7 +192,11 @@ export const ToolbarCreateNew = (props: {
                         : {}
                 }
             >
-                <ImageCanvas draft={false} requestPublish={publish}>
+                <ImageCanvas
+                    draft={false}
+                    disableAutoPublish={isPublishing}
+                    requestPublish={publish}
+                >
                     {hasImages && (
                         <ImageUploadTrigger
                             /* test id is on the hidden input */
@@ -258,11 +263,6 @@ export const ToolbarCreateNew = (props: {
                     onClick={() => props.setInlineEditorActive(false)}
                     icon={BsSend}
                 />
-                {props.debug && (
-                    <div className="text-xs ">
-                        {canvas?.idString?.substring(0, 8)}
-                    </div>
-                )}
             </div>
         </div>
     );

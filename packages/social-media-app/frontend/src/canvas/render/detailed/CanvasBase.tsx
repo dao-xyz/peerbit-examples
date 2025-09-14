@@ -32,6 +32,8 @@ type BaseProps = TestProps &
         onLoad?: () => void;
         /** Optional explicit editability override; defaults to context (often tied to `draft`) */
         editable?: boolean;
+        /** When true, suppress implicit Enter-to-send auto publish */
+        disableAutoPublish?: boolean;
     };
 
 // Configuration the wrappers pass down
@@ -142,6 +144,9 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
                             <>
                                 <Frame
                                     requestPublish={props.requestPublish}
+                                    disableAutoPublish={
+                                        props.disableAutoPublish
+                                    }
                                     thumbnail={asThumbnail}
                                     active={active.has(rect.id)}
                                     className="z-1"
