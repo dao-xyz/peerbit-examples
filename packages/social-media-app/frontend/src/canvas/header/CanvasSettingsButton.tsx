@@ -159,33 +159,66 @@ export const CanvasSettingsButton = ({
                             backdropFilter: "blur(4px)",
                         }}
                     />
-                    <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-6 rounded-lg shadow-lg w-11/12 max-w-md bg-neutral-100 dark:bg-neutral-900 z-30">
+                    <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-6 rounded-lg shadow-lg w-11/12 max-w-lg bg-neutral-100 dark:bg-neutral-900 z-30">
                         <Dialog.Title className="text-lg font-bold mb-4">
                             Canvas Details
                         </Dialog.Title>
 
-                        <p className="mb-2">
-                            Element Count: {elementsInfo.elements.length}
-                            Expected Element Count:{" "}
-                            {elementsInfo.expectedElementCount}
-                        </p>
-                        <ul className="space-y-1 mb-6">
-                            {elementsInfo.elements.map((info, idx) => (
-                                <li key={idx}>
-                                    Type: {info.type}
-                                    {info.url && (
-                                        <a
-                                            href={info.url}
-                                            target="_blank"
-                                            rel="noopener noreferrer"
-                                            className="block break-all text-blue-500 underline"
-                                        >
-                                            {info.url}
-                                        </a>
-                                    )}
-                                </li>
-                            ))}
-                        </ul>
+                        <div className="grid grid-cols-2 gap-3 mb-6">
+                            <div className="rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-800 p-3">
+                                <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                                    Elements
+                                </div>
+                                <div className="text-2xl font-semibold">
+                                    {elementsInfo.elements.length}
+                                </div>
+                            </div>
+                            <div className="rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-800 p-3">
+                                <div className="text-xs text-neutral-500 dark:text-neutral-400">
+                                    Expected elements
+                                </div>
+                                <div className="text-2xl font-semibold">
+                                    {elementsInfo.expectedElementCount}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="mb-2 font-semibold">Elements</div>
+                        <div className="rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-800 max-h-64 overflow-auto divide-y divide-neutral-200 dark:divide-neutral-700 mb-6">
+                            {elementsInfo.elements.length === 0 ? (
+                                <div className="p-3 text-sm text-neutral-500">
+                                    No elements found
+                                </div>
+                            ) : (
+                                elementsInfo.elements.map((info, idx) => (
+                                    <div
+                                        key={idx}
+                                        className="p-3 flex items-start justify-between gap-3"
+                                    >
+                                        <div className="flex items-center gap-2 min-w-0">
+                                            <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-neutral-100 dark:bg-neutral-700 text-neutral-700 dark:text-neutral-200">
+                                                {info.type}
+                                            </span>
+                                        </div>
+                                        {info.url ? (
+                                            <a
+                                                href={info.url}
+                                                target="_blank"
+                                                rel="noopener noreferrer"
+                                                className="text-xs text-blue-600 dark:text-blue-400 hover:underline break-all max-w-[60%] text-right"
+                                                title={info.url}
+                                            >
+                                                {info.url}
+                                            </a>
+                                        ) : (
+                                            <span className="text-xs text-neutral-500">
+                                                —
+                                            </span>
+                                        )}
+                                    </div>
+                                ))
+                            )}
+                        </div>
 
                         <Dialog.Close asChild>
                             <button className="btn btn-secondary w-full">
