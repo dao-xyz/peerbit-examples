@@ -163,6 +163,14 @@ export const CanvasSettingsButton = ({
                         <Dialog.Title className="text-lg font-bold mb-4">
                             Canvas Details
                         </Dialog.Title>
+                        <div className="mb-4">
+                            <div className="text-xs text-neutral-500 dark:text-neutral-400 mb-1">
+                                Canvas ID
+                            </div>
+                            <div className="font-mono text-sm break-all bg-white dark:bg-neutral-800 border border-neutral-200 dark:border-neutral-800 rounded px-2 py-1">
+                                {canvas.idString}
+                            </div>
+                        </div>
 
                         <div className="grid grid-cols-2 gap-3 mb-6">
                             <div className="rounded-md border border-neutral-200 dark:border-neutral-800 bg-white dark:bg-neutral-800 p-3">
