@@ -162,7 +162,10 @@ export const useFeedHooks = (props: {
         }
 
         loadTimeoutRef.current = setTimeout(() => {
-            console.log("REVEAL AFTER TIMEOUT");
+            // print the canvases that where not loaded
+            console.log("Reveal after timeout. Canvases that were not loaded", [
+                ...hiddenToLoadRef.current,
+            ]);
             reveal();
         }, revealTimeout);
 
