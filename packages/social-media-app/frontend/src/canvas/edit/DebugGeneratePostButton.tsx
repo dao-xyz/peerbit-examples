@@ -69,6 +69,7 @@ export const DebugGeneratePostButton = () => {
             // Create a post (canvas) that references its parent.
             const canvas = new Canvas({
                 publicKey: publicKeyTuse,
+                selfScope: leaf.nearestScope,
             });
 
             // Open the canvas so we can insert elements.
