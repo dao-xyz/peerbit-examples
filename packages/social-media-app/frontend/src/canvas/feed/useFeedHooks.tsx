@@ -15,12 +15,13 @@ import {
     useRestoreFeed,
     FeedSnapshot,
 } from "./feedRestoration";
+import { useDeveloperConfig } from "../../debug/DeveloperConfig";
 import { Canvas, ChildVisualization } from "@giga-app/interface";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { useCanvases } from "../useCanvas";
 import { useStream } from "./StreamContext";
 
-const LOAD_TIMEOUT = 3e3;
+const DEFAULT_REVEAL_TIMEOUT = 3e3;
 
 interface HiddenState {
     head: number; // hidden items at start
@@ -35,6 +36,8 @@ export const useFeedHooks = (props: {
     disableLoadMore?: boolean; // if true, will not load more items
     provider: typeof useStream;
 }) => {
+    const dev = useDeveloperConfig();
+    const revealTimeout = dev.revealTimeoutMs ?? DEFAULT_REVEAL_TIMEOUT;
     const {
         loadMore: _loadMore,
         loading: isLoadingView,
@@ -161,7 +164,7 @@ export const useFeedHooks = (props: {
         loadTimeoutRef.current = setTimeout(() => {
             console.log("REVEAL AFTER TIMEOUT");
             reveal();
-        }, LOAD_TIMEOUT);
+        }, revealTimeout);
 
         return () => {
             if (loadTimeoutRef.current) {

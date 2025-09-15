@@ -32,6 +32,7 @@ import { ScopeRegistryProvider } from "./canvas/useScope";
 import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
 import { setupPrettyConsole } from "./debug/debug";
 import { DebugConfigProvider } from "./debug/DebugConfig";
+import { DeveloperConfigProvider } from "./debug/DeveloperConfig";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 import { BOOTSTRAP_ADDRS } from "./bootstrap.js";
 
@@ -202,44 +203,46 @@ export const App = () => {
             <ErrorProvider>
                 <ThemeProvider>
                     <DebugConfigProvider>
-                        <PeerProvider
-                            network={
-                                bootstrapAddrs !== undefined
-                                    ? {
-                                          // Explicit override: if empty we stay offline
-                                          type: "explicit",
-                                          bootstrap: bootstrapAddrs,
-                                      }
-                                    : networkConfig
-                            }
-                            iframe={{ type: "proxy", targetOrigin: "*" }}
-                            waitForConnnected={false}
-                            inMemory={inMemory}
-                            singleton
-                        >
-                            <IdentitiesProvider>
-                                <AppProvider>
-                                    <HeaderVisibilityProvider>
-                                        <BlurOnOutsidePointerProvider>
-                                            <ScopeRegistryProvider>
-                                                <CanvasProvider>
-                                                    <ReplyProgressProvider>
-                                                        <ProfileProvider>
-                                                            <AIReplyProvider>
-                                                                <HostRegistryProvider>
-                                                                    <Content />
-                                                                    {/* <DebugOverlay /> */}
-                                                                </HostRegistryProvider>
-                                                            </AIReplyProvider>
-                                                        </ProfileProvider>
-                                                    </ReplyProgressProvider>
-                                                </CanvasProvider>
-                                            </ScopeRegistryProvider>
-                                        </BlurOnOutsidePointerProvider>
-                                    </HeaderVisibilityProvider>
-                                </AppProvider>
-                            </IdentitiesProvider>
-                        </PeerProvider>
+                        <DeveloperConfigProvider>
+                            <PeerProvider
+                                network={
+                                    bootstrapAddrs !== undefined
+                                        ? {
+                                              // Explicit override: if empty we stay offline
+                                              type: "explicit",
+                                              bootstrap: bootstrapAddrs,
+                                          }
+                                        : networkConfig
+                                }
+                                iframe={{ type: "proxy", targetOrigin: "*" }}
+                                waitForConnnected={false}
+                                inMemory={inMemory}
+                                singleton
+                            >
+                                <IdentitiesProvider>
+                                    <AppProvider>
+                                        <HeaderVisibilityProvider>
+                                            <BlurOnOutsidePointerProvider>
+                                                <ScopeRegistryProvider>
+                                                    <CanvasProvider>
+                                                        <ReplyProgressProvider>
+                                                            <ProfileProvider>
+                                                                <AIReplyProvider>
+                                                                    <HostRegistryProvider>
+                                                                        <Content />
+                                                                        {/* <DebugOverlay /> */}
+                                                                    </HostRegistryProvider>
+                                                                </AIReplyProvider>
+                                                            </ProfileProvider>
+                                                        </ReplyProgressProvider>
+                                                    </CanvasProvider>
+                                                </ScopeRegistryProvider>
+                                            </BlurOnOutsidePointerProvider>
+                                        </HeaderVisibilityProvider>
+                                    </AppProvider>
+                                </IdentitiesProvider>
+                            </PeerProvider>
+                        </DeveloperConfigProvider>
                     </DebugConfigProvider>
                 </ThemeProvider>
             </ErrorProvider>

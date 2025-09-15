@@ -38,9 +38,10 @@ export const CanvasSettingsButton = ({
 
     /* ─────────────────── “More info” state ─────────────────── */
     const [infoOpen, setInfoOpen] = useState(false);
-    const [elementsInfo, setElementsInfo] = useState<
-        Array<{ type: string; url?: string }>
-    >([]);
+    const [elementsInfo, setElementsInfo] = useState<{
+        elements: Array<{ type: string; url?: string }>;
+        expectedElementCount: number;
+    }>({ elements: [], expectedElementCount: 0 });
 
     const handleMoreInfo = async () => {
         if (!canvas) return;
@@ -49,13 +50,17 @@ export const CanvasSettingsButton = ({
                 .iterate({ query: getOwnedElementsQuery(canvas) })
                 .all();
 
-            setElementsInfo(
-                elements.map((x) =>
+            setElementsInfo({
+                elements: elements.map((x) =>
                     x.content instanceof IFrameContent
                         ? { type: "IFrame", url: x.content.src }
                         : { type: x.content.constructor.name }
-                )
-            );
+                ),
+                expectedElementCount: Number(
+                    (canvas as WithIndexedContext<Canvas, IndexableCanvas>)
+                        .__indexed.elements
+                ),
+            });
             setInfoOpen(true);
         } catch (err) {
             console.error("Failed to fetch elements info", err);
@@ -160,10 +165,12 @@ export const CanvasSettingsButton = ({
                         </Dialog.Title>
 
                         <p className="mb-2">
-                            Element Count: {elementsInfo.length}
+                            Element Count: {elementsInfo.elements.length}
+                            Expected Element Count:{" "}
+                            {elementsInfo.expectedElementCount}
                         </p>
                         <ul className="space-y-1 mb-6">
-                            {elementsInfo.map((info, idx) => (
+                            {elementsInfo.elements.map((info, idx) => (
                                 <li key={idx}>
                                     Type: {info.type}
                                     {info.url && (

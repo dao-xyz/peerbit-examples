@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { useDebugConfig } from "./DebugConfig";
+import { useDeveloperConfig, setDeveloperOptions } from "./DeveloperConfig";
 import { subscribeLogs } from "./debug";
 import { setupPrettyConsole } from "./debug";
 import { buildCommit } from "../utils";
@@ -25,6 +26,7 @@ export const DeveloperPanel: React.FC<{
     onOpenChange: (open: boolean) => void;
 }> = ({ open, onOpenChange }) => {
     const dbg = useDebugConfig();
+    const dev = useDeveloperConfig();
     const [entries, setEntries] = useState<Entry[]>([]);
     const [perf, setPerf] = useState<any[]>([]);
 
@@ -134,6 +136,25 @@ export const DeveloperPanel: React.FC<{
                     />
                 </div>
                 <div className="flex items-center justify-between">
+                    <label htmlFor="reveal-timeout-input" className="mr-2">
+                        Reveal timeout (ms)
+                    </label>
+                    <input
+                        id="reveal-timeout-input"
+                        type="number"
+                        className="input input-sm w-32 p-1 rounded bg-neutral-100 dark:bg-neutral-900"
+                        value={dev.revealTimeoutMs ?? ""}
+                        placeholder="default"
+                        onChange={(e) => {
+                            const val = e.target.value;
+                            const num = val === "" ? undefined : Number(val);
+                            if (num === undefined || Number.isFinite(num)) {
+                                setDeveloperOptions({ revealTimeoutMs: num });
+                            }
+                        }}
+                    />
+                </div>
+                <div className="flex items-center justify-between">
                     <span>Clear logs</span>
                     <button
                         className="btn btn-sm"
@@ -144,7 +165,7 @@ export const DeveloperPanel: React.FC<{
                 </div>
             </div>
         ),
-        [dbg.enabled, dbg.captureEvents, dbg.perfEnabled]
+        [dbg.enabled, dbg.captureEvents, dbg.perfEnabled, dev.revealTimeoutMs]
     );
     // Avoid noisy logs in tests
 
