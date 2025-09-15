@@ -93,7 +93,7 @@ export const Content = () => {
                     detail: (window as any).__peerInfo,
                 })
             );
-        } catch {}
+        } catch { }
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
     return (
@@ -113,7 +113,7 @@ export const Content = () => {
                                             className={clsx(
                                                 "sticky top-0 inset-x-0  z-30",
                                                 heightStyle[
-                                                    String(headerVisible)
+                                                String(headerVisible)
                                                 ]
                                             )} /* transition-transform duration-800 ease-in-out */
                                             style={
@@ -147,13 +147,13 @@ export const Content = () => {
 const networkConfig: NetworkOption =
     import.meta.env.MODE === "development"
         ? {
-              type: "local",
-          }
+            type: "local",
+        }
         : {
-              bootstrap: [
-                  "/dns4/70bba9867f56685a64486af189c9929cf8783c65.peerchecker.com/tcp/4003/wss/p2p/12D3KooWM4P75UCxjryarazRdhymDHryRcYujUyV1VKJtq7R1htf",
-              ],
-          };
+            bootstrap: [
+                "/dns4/c111240765c52526ebd787f2bd3901246fdc0d02.peerchecker.com/tcp/4003/wss/p2p/12D3KooWKXn15fY9aruL1CV48RUfaFsa4nYFQHAbMu6p2DhKdN4G",
+            ],
+        };
 
 export const App = () => {
     // Initialize debug console once per app load
@@ -193,9 +193,9 @@ export const App = () => {
             ? offline
                 ? [] // explicit offline sentinel
                 : bootstrapParam
-                      .split(",")
-                      .map((s) => s.trim())
-                      .filter(Boolean)
+                    .split(",")
+                    .map((s) => s.trim())
+                    .filter(Boolean)
             : undefined; // not provided at all => use default network config
     if (typeof window !== "undefined") {
         (window as any).__DBG_BOOTSTRAP = bootstrapAddrs; // aid tests/debug
@@ -210,10 +210,10 @@ export const App = () => {
                             network={
                                 bootstrapAddrs !== undefined
                                     ? {
-                                          // Explicit override: if empty we stay offline
-                                          type: "explicit",
-                                          bootstrap: bootstrapAddrs,
-                                      }
+                                        // Explicit override: if empty we stay offline
+                                        type: "explicit",
+                                        bootstrap: bootstrapAddrs,
+                                    }
                                     : networkConfig
                             }
                             iframe={{ type: "proxy", targetOrigin: "*" }}
