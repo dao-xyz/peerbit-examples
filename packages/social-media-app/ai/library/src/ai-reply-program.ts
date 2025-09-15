@@ -285,6 +285,7 @@ export type Args = {
         query: ChatQuery | ModelRequest | SuggestedReplyQuery,
         context?: any
     ) => void;
+    debug?: boolean;
 } & (OpenAPIArgs | OLLamaArgs);
 
 @variant("canvas-ai-reply")
@@ -430,8 +431,11 @@ export class CanvasAIReply extends Program<Args> {
             args?.replicate ||
             (args?.replicate === undefined && args?.server)
         ) {
+            args?.debug && console.log("Starting replication work");
             this.origin = defaultGigaReplicator(this.node);
             await this.origin.start();
+        } else {
+            args?.debug && console.log("Not starting replication work");
         }
     }
 
