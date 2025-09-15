@@ -33,6 +33,7 @@ import { DraftManagerProvider } from "./canvas/edit/draft/DraftManager";
 import { setupPrettyConsole } from "./debug/debug";
 import { DebugConfigProvider } from "./debug/DebugConfig";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
+import { BOOTSTRAP_ADDRS } from "./bootstrap.js";
 
 const HEADER_EXPANDED_HEIGHT = 12;
 const heightStyle: { [expanded: string]: string } = {
@@ -93,7 +94,7 @@ export const Content = () => {
                     detail: (window as any).__peerInfo,
                 })
             );
-        } catch { }
+        } catch {}
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
     return (
@@ -113,7 +114,7 @@ export const Content = () => {
                                             className={clsx(
                                                 "sticky top-0 inset-x-0  z-30",
                                                 heightStyle[
-                                                String(headerVisible)
+                                                    String(headerVisible)
                                                 ]
                                             )} /* transition-transform duration-800 ease-in-out */
                                             style={
@@ -144,17 +145,6 @@ export const Content = () => {
     );
 };
 
-const networkConfig: NetworkOption =
-    import.meta.env.MODE === "development"
-        ? {
-            type: "local",
-        }
-        : {
-            bootstrap: [
-                "/dns4/c111240765c52526ebd787f2bd3901246fdc0d02.peerchecker.com/tcp/4003/wss/p2p/12D3KooWKXn15fY9aruL1CV48RUfaFsa4nYFQHAbMu6p2DhKdN4G",
-            ],
-        };
-
 export const App = () => {
     // Initialize debug console once per app load
     setupPrettyConsole();
@@ -168,11 +158,11 @@ export const App = () => {
             // Remove potential fragment-only routing prefixes like #/ or #//
             const clean = hashQuery.replace(/^\/?/, "");
             const hashParams = new URLSearchParams(clean);
-            for (const [k, v] of hashParams.entries()) {
+            hashParams.forEach((v, k) => {
                 if (!merged.has(k)) {
                     merged.set(k, v);
                 }
-            }
+            });
         }
         return merged;
     })();
@@ -193,14 +183,20 @@ export const App = () => {
             ? offline
                 ? [] // explicit offline sentinel
                 : bootstrapParam
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter(Boolean)
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean)
             : undefined; // not provided at all => use default network config
     if (typeof window !== "undefined") {
         (window as any).__DBG_BOOTSTRAP = bootstrapAddrs; // aid tests/debug
     }
-    console.log(bootstrapAddrs, bootstrapParam);
+
+    // your original config stays the same, but now reuses that array
+    const networkConfig: NetworkOption =
+        import.meta.env.MODE === "development"
+            ? { type: "local" }
+            : { bootstrap: BOOTSTRAP_ADDRS };
+
     return (
         <HashRouter basename="/">
             <ErrorProvider>
@@ -210,10 +206,10 @@ export const App = () => {
                             network={
                                 bootstrapAddrs !== undefined
                                     ? {
-                                        // Explicit override: if empty we stay offline
-                                        type: "explicit",
-                                        bootstrap: bootstrapAddrs,
-                                    }
+                                          // Explicit override: if empty we stay offline
+                                          type: "explicit",
+                                          bootstrap: bootstrapAddrs,
+                                      }
                                     : networkConfig
                             }
                             iframe={{ type: "proxy", targetOrigin: "*" }}

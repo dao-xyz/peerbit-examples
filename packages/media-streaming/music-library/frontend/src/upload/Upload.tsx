@@ -266,8 +266,8 @@ export const Upload: React.FC<Props> = ({ source }) => {
                                 status === "error"
                                     ? "text-red-400"
                                     : status === "done"
-                                    ? "text-emerald-400"
-                                    : "text-neutral-300"
+                                      ? "text-emerald-400"
+                                      : "text-neutral-300"
                             }`}
                         >
                             {msg}

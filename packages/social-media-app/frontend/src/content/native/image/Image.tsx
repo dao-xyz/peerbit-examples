@@ -201,8 +201,8 @@ export const ImageContent = memo(function ImageContent({
         fit === "cover"
             ? "object-cover"
             : fit === "contain"
-            ? "object-contain"
-            : "";
+              ? "object-contain"
+              : "";
     const overlayOpacityHidden = 0.6;
     const overlayOpacity =
         overlayOpacityHidden -

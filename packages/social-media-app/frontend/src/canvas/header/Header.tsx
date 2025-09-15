@@ -136,8 +136,8 @@ export const Header = ({
                                 variant === "large"
                                     ? 20
                                     : variant === "medium"
-                                    ? 16
-                                    : 12
+                                      ? 16
+                                      : 12
                             }
                         />
                     </div>

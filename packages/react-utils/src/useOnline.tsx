@@ -15,7 +15,7 @@ type ExtractEvents<T> = T extends Program<any, infer Events> ? Events : never;
 
 export const useOnline = <
     P extends Program<ExtractArgs<P>, ExtractEvents<P>> &
-        Program<any, ProgramEvents>
+        Program<any, ProgramEvents>,
 >(
     program?: P,
     options?: { id?: string; debug?: boolean }

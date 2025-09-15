@@ -114,9 +114,8 @@ export class Template {
                         "Failed to resolve child during template cloning"
                     );
                 }
-                const loaded = await src.nearestScope.openWithSameSettings(
-                    child
-                );
+                const loaded =
+                    await src.nearestScope.openWithSameSettings(child);
                 const vizualization = await loaded.getVisualization();
                 await clone(loaded, dst, link.kind, vizualization?.view);
             }
@@ -213,7 +212,7 @@ export async function createAlbumTemplate(properties: {
 
     const infoText =
         properties?.description == null
-            ? properties.name ?? "Album"
+            ? (properties.name ?? "Album")
             : `# ${properties.name}\n\n${properties.description}`;
     await albumRoot.addTextElement(infoText);
 

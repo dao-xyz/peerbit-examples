@@ -70,8 +70,8 @@ function createSmoothPathSegments(
                 horizontalDiff === 0
                     ? minHorizontalDiff
                     : horizontalDiff > 0
-                    ? minHorizontalDiff
-                    : -minHorizontalDiff;
+                      ? minHorizontalDiff
+                      : -minHorizontalDiff;
             cp1x = p1.x + offset;
             cp2x = p2.x + offset;
         }

@@ -80,7 +80,7 @@ export class AppPreview extends Program<Args> {
             queryType: RequestURL,
             topic: "request-app-preview",
             responseHandler:
-                args?.server ?? isNode
+                (args?.server ?? isNode)
                     ? async (query, _context) => {
                           return resolveAppFromUrl(query.url);
                       }

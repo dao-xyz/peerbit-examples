@@ -142,7 +142,7 @@ export const inIframe = () => {
 };
 
 export function debounceLeadingTrailing<
-    T extends (this: any, ...args: any[]) => void
+    T extends (this: any, ...args: any[]) => void,
 >(
     func: T,
     delay: number

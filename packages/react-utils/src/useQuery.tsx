@@ -31,7 +31,7 @@ export type UseQuerySharedOptions<T, I, R extends boolean | undefined, RT> = {
     resolve?: R;
     transform?: (r: RT) => Promise<RT>;
     debounce?: number;
-    debug?: boolean | { id: string };
+    debug?: boolean | string;
     reverse?: boolean;
     batchSize?: number;
     prefetch?: boolean;
@@ -74,7 +74,7 @@ export const useQuery = <
     T extends Record<string, any>,
     I extends Record<string, any>,
     R extends boolean | undefined = true,
-    RT = R extends false ? WithContext<I> : WithIndexedContext<T, I>
+    RT = R extends false ? WithContext<I> : WithIndexedContext<T, I>,
 >(
     /** Single DB or list of DBs. 100 % backward-compatible with the old single param. */
     dbOrDbs: Documents<T, I> | Documents<T, I>[] | undefined,
@@ -118,7 +118,7 @@ export const useQuery = <
     const log = (...a: any[]) => {
         if (!options.debug) return;
         if (typeof options.debug === "boolean") console.log(...a);
-        else console.log(options.debug.id, ...a);
+        else console.log(options.debug, ...a);
     };
 
     const updateAll = (combined: Item[]) => {
@@ -127,7 +127,7 @@ export const useQuery = <
     };
 
     const reset = () => {
-        iteratorRefs.current.forEach(({ iterator }) => iterator.close());
+        iteratorRefs.current?.forEach(({ iterator }) => iterator.close());
         iteratorRefs.current = [];
 
         closeControllerRef.current?.abort();
@@ -156,11 +156,35 @@ export const useQuery = <
 
         reset();
         const abortSignal = closeControllerRef.current?.signal;
+        const onMissedResults = (evt: { amount: number }) => {
+            if (allRef.current.length > 0 || !options.onChange) {
+                return;
+            }
+            console.log("Missed results, loading more", evt.amount);
+            loadMore(evt.amount);
+        };
 
         iteratorRefs.current = openDbs.map((db) => {
             const iterator = db.index.iterate(query ?? {}, {
                 local: options.local ?? true,
-                remote: options.remote ?? undefined,
+                remote: options.remote
+                    ? {
+                          ...(typeof options?.remote === "object"
+                              ? options?.remote
+                              : {}),
+                          ...(typeof options?.remote === "object" &&
+                          options?.remote?.joining
+                              ? {
+                                    joining: {
+                                        waitFor:
+                                            options?.remote?.joining.waitFor ??
+                                            5000,
+                                        onMissedResults,
+                                    },
+                                }
+                              : undefined),
+                      }
+                    : undefined,
                 resolve,
                 signal: abortSignal,
             }) as ResultsIterator<Item>;
@@ -170,10 +194,12 @@ export const useQuery = <
             return ref;
         });
 
-        /* prefetch if requested */
-        if (options.prefetch) void loadMore();
         /* store a deterministic id (useful for external keys) */
         setId(uuid());
+
+        /* prefetch if requested */
+        if (options.prefetch) void loadMore();
+
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
         dbs.map((d) => d?.address).join("|"),
@@ -195,9 +221,19 @@ export const useQuery = <
         waitedOnceRef.current = true;
     };
 
+    /*  maybe make the rule that if results are empty and we get results from joining  
+     set the results to the joining results 
+     when results are not empty use onMerge option to merge the results ?  */
+
     const loadMore = async (n: number = batchSize): Promise<boolean> => {
         const iterators = iteratorRefs.current;
-        if (!iterators.length || emptyResultsRef.current) return false;
+        if (!iterators.length || emptyResultsRef.current) {
+            log("No iterators or already empty", {
+                length: iterators.length,
+                emptyResultsRef: emptyResultsRef.current,
+            });
+            return false;
+        }
 
         setIsLoading(true);
         try {
@@ -234,6 +270,7 @@ export const useQuery = <
             for (const ref of iterators) {
                 if (ref.iterator.done()) continue;
                 const batch = await ref.iterator.next(n); // pull up to <n> at once
+                log("Iterator", ref.id, "fetched", batch.length, "items");
                 if (batch.length) {
                     ref.itemsConsumed += batch.length;
                     newlyFetched.push(...batch);

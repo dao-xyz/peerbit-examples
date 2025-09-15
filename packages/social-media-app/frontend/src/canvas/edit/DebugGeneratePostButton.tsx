@@ -72,9 +72,8 @@ export const DebugGeneratePostButton = () => {
             });
 
             // Open the canvas so we can insert elements.
-            const openCanvas = await leaf.nearestScope.openWithSameSettings(
-                canvas
-            );
+            const openCanvas =
+                await leaf.nearestScope.openWithSameSettings(canvas);
 
             for (const [ix, type] of typeArray.entries()) {
                 let mockContent: ElementContent;

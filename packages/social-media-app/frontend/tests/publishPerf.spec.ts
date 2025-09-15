@@ -108,8 +108,8 @@ test.describe("publish perf marks", () => {
             ...(typeof perfData.parentFlush === "number"
                 ? ["parentFlush"]
                 : typeof perfData.postParentFlush === "number"
-                ? ["postParentFlush"]
-                : []),
+                  ? ["postParentFlush"]
+                  : []),
         ];
         let prev = 0;
         for (const phase of phases) {

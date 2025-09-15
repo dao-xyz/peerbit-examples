@@ -1022,8 +1022,8 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
                         ? loopCounter.current * videoRef.duration * 1e6 +
                           observedMediaTime
                         : isSafari
-                        ? observedMediaTime
-                        : undefined;
+                          ? observedMediaTime
+                          : undefined;
 
                 let frame = new VideoFrame(videoRef, {
                     timestamp,

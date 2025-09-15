@@ -98,7 +98,7 @@ export interface HierarchicalReindexManager<C extends ReindexCanvasLike> {
 }
 
 export const createHierarchicalReindexManager = <
-    C extends ReindexCanvasLike
+    C extends ReindexCanvasLike,
 >(args: {
     delay: number | (() => number);
     reindex: ReindexFn<C>;

@@ -138,8 +138,5 @@ export const emitDebugEvent = (event: DebugEvent) => {
         }
         g.__DBG_EVENTS.push(event);
         g.__DBG_EVENTS_COUNT = (g.__DBG_EVENTS_COUNT ?? 0) + 1;
-        try {
-            console.debug("[DBG_EVT]", event.source, event.name);
-        } catch {}
     } catch {}
 };

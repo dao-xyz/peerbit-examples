@@ -200,8 +200,8 @@ export const Reply = ({
                                 isChat
                                     ? "medium"
                                     : isExpandedBreadcrumb
-                                    ? "tiny"
-                                    : "large"
+                                      ? "tiny"
+                                      : "large"
                             }
                             forwardRef={headerRef}
                             canvas={canvas}

@@ -158,11 +158,11 @@ const tabOf = (bg?: BackGroundTypes): string =>
     bg instanceof StyledBackground && bg.css.startsWith("background-color:")
         ? "color"
         : bg instanceof StyledBackground &&
-          bg.css.startsWith("background-image:url")
-        ? "url"
-        : bg instanceof CanvasBackground
-        ? "canvas"
-        : "custom"; // default to custom if unrecognised
+            bg.css.startsWith("background-image:url")
+          ? "url"
+          : bg instanceof CanvasBackground
+            ? "canvas"
+            : "custom"; // default to custom if unrecognised
 
 export const BackgroundEditor: React.FC<{
     bg: BackGroundTypes | undefined;
@@ -203,7 +203,9 @@ export const BackgroundEditor: React.FC<{
             fill,
         });
         setBackground(
-            new StyledBackground({ css: cssUrl(url, { fixed, repeatY, fill }) })
+            new StyledBackground({
+                css: cssUrl(url, { fixed, repeatY, fill }),
+            })
         );
     };
 
@@ -244,8 +246,8 @@ export const BackgroundEditor: React.FC<{
                         {t === "color"
                             ? "Colour"
                             : t === "url"
-                            ? "Image URL"
-                            : /*  TODO t === "canvas" ? "Canvas" :  */ "Custom CSS"}
+                              ? "Image URL"
+                              : /*  TODO t === "canvas" ? "Canvas" :  */ "Custom CSS"}
                     </Tabs.Trigger>
                 ))}
             </Tabs.List>

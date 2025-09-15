@@ -55,7 +55,7 @@ export const CustomizedBackground: React.FC<{
         const v = visualizationToUse as BasicVisualization;
         const bgWrap = v.background as ModedBackground;
         if (!bgWrap) return;
-        const chosen = isDark ? bgWrap.dark ?? bgWrap.light : bgWrap.light;
+        const chosen = isDark ? (bgWrap.dark ?? bgWrap.light) : bgWrap.light;
         return styleFrom(chosen);
     }, [
         draft,

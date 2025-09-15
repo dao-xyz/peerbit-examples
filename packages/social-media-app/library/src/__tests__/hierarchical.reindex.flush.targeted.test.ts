@@ -5,7 +5,10 @@ import {
 } from "../utils.js";
 
 class StubCanvas implements ReindexCanvasLike {
-    constructor(public idString: string, private ancestors: StubCanvas[]) {}
+    constructor(
+        public idString: string,
+        private ancestors: StubCanvas[]
+    ) {}
     async loadPath(_args: {
         includeSelf: boolean;
     }): Promise<ReindexCanvasLike[]> {

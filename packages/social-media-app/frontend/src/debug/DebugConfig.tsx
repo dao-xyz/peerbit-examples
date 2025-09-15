@@ -52,8 +52,8 @@ export const DebugConfigProvider: React.FC<{ children: React.ReactNode }> = ({
             typeof (globalDbg as any).perfEnabled === "boolean"
                 ? (globalDbg as any).perfEnabled
                 : typeof (globalDbg as any).perf === "boolean"
-                ? (globalDbg as any).perf
-                : searchPerf;
+                  ? (globalDbg as any).perf
+                  : searchPerf;
         g.__DBG = {
             ...globalDbg,
             enabled,

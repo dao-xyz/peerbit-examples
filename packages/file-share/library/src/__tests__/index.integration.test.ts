@@ -108,9 +108,8 @@ describe("index", () => {
                 peer.identity.publicKey
             );
 
-            const file = (await filestoreReader.getByName(
-                "random large file"
-            ))!;
+            const file =
+                (await filestoreReader.getByName("random large file"))!;
 
             expect(equals(file!.bytes, largeFile)).to.be.true;
 

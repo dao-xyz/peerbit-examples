@@ -228,11 +228,13 @@ function useStreamContextHook() {
         query: canvasQuery,
         reverse: visualization?.view === ChildVisualization.CHAT ? true : false,
         batchSize,
-        debug: false,
+        debug: "useQuery REPLIES",
         local: true,
+
         remote: {
+            eager: true,
             // Avoid blocking initial list hydration on remote joining; rely on link visibility
-            joining: { waitFor: 0 },
+            joining: { waitFor: 5e3 },
         },
         onChange: {
             merge: async (e) => {
@@ -443,7 +445,7 @@ const makeInitialStreamValue = (): ReturnType<typeof useStreamContextHook> =>
         hasMore: () => false,
         query: "",
         setQuery: () => {},
-    } as any);
+    }) as any;
 
 const StreamContext: React.Context<Ctx> =
     (globalThis as any)[CTX_KEY] ??

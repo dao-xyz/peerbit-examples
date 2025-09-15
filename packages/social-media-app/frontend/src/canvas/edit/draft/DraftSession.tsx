@@ -199,10 +199,10 @@ export const DraftSessionProvider: React.FC<{
     };
 
     const isPublishing = keyRef.current
-        ? mgr.isPublishing?.(keyRef.current) ?? false
+        ? (mgr.isPublishing?.(keyRef.current) ?? false)
         : false;
     const isSaving = keyRef.current
-        ? mgr.isSaving?.(keyRef.current) ?? false
+        ? (mgr.isSaving?.(keyRef.current) ?? false)
         : false;
 
     const value = useMemo(

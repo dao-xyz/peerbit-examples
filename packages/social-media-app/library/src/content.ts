@@ -4348,8 +4348,8 @@ export class Canvas {
             i === 0
                 ? orderKeyBetween(undefined, afterKey) // strictly before first
                 : i === ordered.length
-                ? orderKeyBetween(beforeKey, undefined) // strictly after last
-                : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
+                  ? orderKeyBetween(beforeKey, undefined) // strictly after last
+                  : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
 
         await this.upsertViewPlacement(child, newKey);
         return newKey;
@@ -4816,7 +4816,7 @@ export class IFrameContent extends ElementContent {
 
 @variant(1)
 export class StaticContent<
-    T extends AbstractStaticContent = AbstractStaticContent
+    T extends AbstractStaticContent = AbstractStaticContent,
 > extends ElementContent {
     @field({ type: AbstractStaticContent })
     content: T;

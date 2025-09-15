@@ -16,7 +16,7 @@ type ExtractEvents<T> = T extends Program<any, infer Events> ? Events : never;
 
 export function useProgram<
     P extends Program<ExtractArgs<P>, ExtractEvents<P>> &
-        Program<any, ProgramEvents>
+        Program<any, ProgramEvents>,
 >(
     addressOrOpen?: P | string,
     options?: OpenOptions<P> & {

@@ -104,9 +104,8 @@ export const Room = () => {
         const updateNames = async (p: Post) => {
             const pk = (
                 await room.program.messages.log.log.get(
-                    (
-                        await room.program.messages.index.getDetailed(p.id)
-                    )[0]?.results[0].context.head
+                    (await room.program.messages.index.getDetailed(p.id))[0]
+                        ?.results[0].context.head
                 )
             ).signatures[0].publicKey;
             names.program?.getName(pk).then((name) => {

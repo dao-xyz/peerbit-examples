@@ -585,8 +585,8 @@ export const Drop = () => {
                                                                 ) => {
                                                                     setLimitCPU(
                                                                         e
-                                                                            ? limitCPU ??
-                                                                                  0
+                                                                            ? (limitCPU ??
+                                                                                  0)
                                                                             : undefined
                                                                     );
                                                                 }}

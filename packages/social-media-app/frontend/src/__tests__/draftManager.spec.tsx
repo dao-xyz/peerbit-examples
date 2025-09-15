@@ -55,8 +55,8 @@ vi.mock("@giga-app/interface", () => {
         AddressReference: class {
             constructor(_: any) {}
         },
-        getImmediateRepliesQuery: (_p: any) => ({} as any),
-        getOwnedElementsQuery: (_p: any) => ({} as any),
+        getImmediateRepliesQuery: (_p: any) => ({}) as any,
+        getOwnedElementsQuery: (_p: any) => ({}) as any,
         IndexableCanvas: class {},
     };
 });

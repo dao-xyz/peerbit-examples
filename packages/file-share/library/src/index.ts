@@ -23,7 +23,7 @@ export abstract class AbstractFile {
     abstract parentId?: string;
     abstract getFile<
         OutputType extends "chunks" | "joined" = "joined",
-        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
     >(
         files: Files,
         properties?: {
@@ -91,7 +91,7 @@ export class TinyFile extends AbstractFile {
 
     async getFile<
         OutputType extends "chunks" | "joined" = "joined",
-        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
     >(
         _files: Files,
         properties?: { as: OutputType; progress?: (progress: number) => any }
@@ -195,7 +195,7 @@ export class LargeFile extends AbstractFile {
 
     async getFile<
         OutputType extends "chunks" | "joined" = "joined",
-        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
     >(
         files: Files,
         properties?: {
@@ -403,7 +403,7 @@ export class Files extends Program<Args> {
      */
     async getById<
         OutputType extends "chunks" | "joined" = "joined",
-        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
     >(
         id: string,
         properties?: { as: OutputType }
@@ -440,7 +440,7 @@ export class Files extends Program<Args> {
      */
     async getByName<
         OutputType extends "chunks" | "joined" = "joined",
-        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array
+        Output = OutputType extends "chunks" ? Uint8Array[] : Uint8Array,
     >(
         name: string,
         properties?: { as: OutputType }

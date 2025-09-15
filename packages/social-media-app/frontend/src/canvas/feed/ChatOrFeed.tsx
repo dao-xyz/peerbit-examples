@@ -339,7 +339,6 @@ export const CanvasAndReplies = () => {
                                             replyTo={feedRoot}
                                             autoSave
                                             autoReply={isChat}
-                                            debug
                                         >
                                             {/* Top composer (non-chat) */}
                                             {feedRoot &&

@@ -163,7 +163,7 @@ const _CanvasWrapper = (
     const { peer } = usePeer();
     const debugLog = useMemo(() => {
         if (debug) {
-            let logTag = "[Canvas]";
+            let logTag = "[CanvasWrapper]";
             if (typeof debug === "string") {
                 logTag += ` [${debug}]`;
             }
@@ -265,7 +265,7 @@ const _CanvasWrapper = (
             remote: {
                 // Do not block local rendering on remote joining; keep eager but with zero wait
                 eager: true,
-                joining: { waitFor: 0 },
+                joining: { waitFor: 5e3 },
             },
             onChange: {
                 merge: (change) => {
@@ -316,20 +316,6 @@ const _CanvasWrapper = (
         if (rects.some((el) => !isElementEmpty(el))) return false;
         return true;
     }, [rects, pendingRects]);
-
-    // Instrumentation: log emptiness changes
-    useEffect(() => {
-        try {
-            console.log("[CanvasWrapper] derivedIsEmpty=", derivedIsEmpty, {
-                pendingCount: pendingRects.length,
-                rectsCount: rects.length,
-                pendingKinds: pendingRects.map(
-                    (r) => r.content?.constructor?.name
-                ),
-                rectKinds: rects.map((r) => r.content?.constructor?.name),
-            });
-        } catch {}
-    }, [derivedIsEmpty, pendingRects, rects]);
 
     // 2b). derived hasTextElement (used to figure out whether to insert a default text box)
     const derivedHasTextElement = useMemo(() => {
@@ -573,7 +559,7 @@ const _CanvasWrapper = (
                 logPendingDiff(prev as any, next as any, "mutate");
                 return next;
             });
-            console.log("mutate: updating pending rects", updated.length);
+            debugLog("mutate: updating pending rects", updated.length);
         }
 
         return mutated;
@@ -674,16 +660,10 @@ const _CanvasWrapper = (
                                 next as any,
                                 "addRect.pending:replace-placeholder"
                             );
-                            console.log(
-                                "[CanvasWrapper] replaced placeholder with new pending content",
-                                { pendingCount: next.length }
-                            );
+                            debugLog({ pendingCount: next.length });
                             return next;
                         }
-                        console.log(
-                            "[CanvasWrapper] pending already existed; skipping",
-                            { pendingCount: prev.length }
-                        );
+                        debugLog({ pendingCount: prev.length });
                         return prev;
                     }
                     (element as any).placeholder = true;
@@ -693,7 +673,7 @@ const _CanvasWrapper = (
                         next as any,
                         "addRect.pending:add"
                     );
-                    console.log("[CanvasWrapper] added pending rect", {
+                    debugLog({
                         type: element.content?.constructor?.name,
                         pendingCount: next.length,
                     });
@@ -718,16 +698,8 @@ const _CanvasWrapper = (
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
     ) => {
         try {
-            console.log("[CanvasWrapper] insertImage:start", {
-                pending: options?.pending,
-                y: options?.y,
-            });
             const images = await readFileAsImage(file);
             const newElements: Element[] = await addRect(images, options);
-            console.log("[CanvasWrapper] insertImage:added", {
-                added: newElements.length,
-                kinds: newElements.map((e) => e.content?.constructor?.name),
-            });
             // Persist immediately if drafted pending
             try {
                 if (options?.pending) {
@@ -829,7 +801,7 @@ const _CanvasWrapper = (
 
     const removePending = (id: Uint8Array) => {
         const pending = pendingRects.find((x) => equals(x.id, id));
-        console.log("remove pending");
+        debugLog("remove pending");
         setPendingRects((prev) => {
             const next = prev.filter((el) => !equals(id, el.id));
             logPendingDiff(prev as any, next as any, "removePending");
@@ -872,11 +844,6 @@ const _CanvasWrapper = (
                         !(x.content instanceof StaticContent) ||
                         x.content.content.isEmpty === false
                 );
-                console.log("Non-empty rects to save", {
-                    total: pendings.length,
-                    toSave: toSave.length,
-                    canvas: canvas.idString,
-                });
                 if (toSave.length === 0) {
                     debugLog("No non-empty rects to save");
                     return;

@@ -204,8 +204,8 @@ async function processReplyGeneration(options: {
     const contextCanvases = options.context?.length
         ? await resolveCanvases(options.context, options.node)
         : (targetCanvas.__indexed?.path?.length ?? 0) > 0
-        ? [await targetCanvas.loadParent()]
-        : [];
+          ? [await targetCanvas.loadParent()]
+          : [];
 
     const aggregatedContext = await buildAggregatedPrompt({
         targetCanvas,

@@ -331,9 +331,8 @@ export const useAutoScroll = (properties: {
 
         const setup = debounce(
             () => {
-                resizeScrollBottomRef.current = getScrollBottomOffset(
-                    getScrollTop()
-                );
+                resizeScrollBottomRef.current =
+                    getScrollBottomOffset(getScrollTop());
             },
             cycleLength,
             { leading: true, trailing: false }

@@ -427,7 +427,7 @@ export abstract class TrackSource {
             return this.chunks.log.replicate(
                 args === "streamer" || args === "all"
                     ? { factor: 1 }
-                    : args ?? { factor: 1 }
+                    : (args ?? { factor: 1 })
             );
         }
     }
@@ -561,7 +561,7 @@ export class WebcodecsStreamDB extends TrackSource {
 
 @variant("track")
 export class Track<
-    T extends TrackSource = AudioStreamDB | WebcodecsStreamDB
+    T extends TrackSource = AudioStreamDB | WebcodecsStreamDB,
 > extends Program<never> {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
@@ -757,7 +757,7 @@ type TrackWithBuffer<T extends TrackSource> = {
 };
 
 export type TrackChangeProcessor<
-    T extends TrackSource = WebcodecsStreamDB | AudioStreamDB
+    T extends TrackSource = WebcodecsStreamDB | AudioStreamDB,
 > = (
     properties: {
         force?: boolean;
@@ -1389,8 +1389,8 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                       return Math.min(10 * bufferSizeInvocations, 160);
                   }
                 : typeof opts?.bufferSize === "number"
-                ? () => opts.bufferSize as number
-                : opts.bufferSize;
+                  ? () => opts.bufferSize as number
+                  : opts.bufferSize;
         const preloadingBufferSize = opts?.preloadingBufferSize ?? 60;
         const openTrackQueue = new PQueue({ concurrency: 1 });
         const changeProcessor =
@@ -2314,7 +2314,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
 
             const tracksToRemove: [
                 Track<WebcodecsStreamDB | AudioStreamDB>,
-                boolean
+                boolean,
             ][] = [];
 
             for (const track of currentTrackOptions) {

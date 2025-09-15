@@ -362,10 +362,10 @@ describe("MediaStream", () => {
                     typeof properties.first.type === "object"
                         ? properties.first.type
                         : properties.first.type === "video"
-                        ? new WebcodecsStreamDB({
-                              decoderDescription: { codec: "av01" },
-                          })
-                        : new AudioStreamDB({ sampleRate: 44100 }),
+                          ? new WebcodecsStreamDB({
+                                decoderDescription: { codec: "av01" },
+                            })
+                          : new AudioStreamDB({ sampleRate: 44100 }),
                 start: properties.first.start * MILLISECONDS_TO_MICROSECONDS,
                 end:
                     properties.first.end != null
@@ -402,10 +402,10 @@ describe("MediaStream", () => {
                         typeof properties.second.type === "object"
                             ? properties.second.type
                             : properties.second.type === "video"
-                            ? new WebcodecsStreamDB({
-                                  decoderDescription: { codec: "av01" },
-                              })
-                            : new AudioStreamDB({ sampleRate: 44100 }),
+                              ? new WebcodecsStreamDB({
+                                    decoderDescription: { codec: "av01" },
+                                })
+                              : new AudioStreamDB({ sampleRate: 44100 }),
                     start:
                         properties.second.start * MILLISECONDS_TO_MICROSECONDS,
                     end:
