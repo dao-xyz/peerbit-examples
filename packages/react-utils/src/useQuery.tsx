@@ -58,8 +58,8 @@ export type UseQuerySharedOptions<
     updates?: UpdateOptions<T, I, R>;
     local?: boolean;
     remote?:
-    | boolean
-    | RemoteQueryOptions<AbstractSearchRequest, AbstractSearchResult, any>;
+        | boolean
+        | RemoteQueryOptions<AbstractSearchRequest, AbstractSearchResult, any>;
 } & QueryOptions;
 
 /* ────────────────────────── Main Hook ────────────────────────── */
@@ -158,11 +158,11 @@ export const useQuery = <
 
         let isLogOpenInterval = options.debug
             ? setInterval(() => {
-                log(
-                    "is open?",
-                    iteratorRefs.current.map((x) => !x.iterator.done())
-                );
-            }, 5e3)
+                  log(
+                      "is open?",
+                      iteratorRefs.current.map((x) => !x.iterator.done())
+                  );
+              }, 5e3)
             : undefined;
         reset();
         const abortSignal = closeControllerRef.current?.signal;
@@ -193,23 +193,23 @@ export const useQuery = <
                 local: options.local ?? true,
                 remote: options.remote
                     ? {
-                        ...(typeof options?.remote === "object"
-                            ? {
-                                ...options.remote,
-                                onLateResults: onMissedResults,
-                                wait: {
-                                    ...options?.remote?.wait,
-                                    timeout:
-                                        options?.remote?.wait?.timeout ??
-                                        5000,
-                                },
-                            }
-                            : options?.remote
-                                ? {
+                          ...(typeof options?.remote === "object"
+                              ? {
+                                    ...options.remote,
                                     onLateResults: onMissedResults,
+                                    wait: {
+                                        ...options?.remote?.wait,
+                                        timeout:
+                                            options?.remote?.wait?.timeout ??
+                                            5000,
+                                    },
                                 }
+                              : options?.remote
+                                ? {
+                                      onLateResults: onMissedResults,
+                                  }
                                 : undefined),
-                    }
+                      }
                     : undefined,
                 resolve,
                 signal: abortSignal,
@@ -219,8 +219,8 @@ export const useQuery = <
                             ? true
                             : typeof options.updates === "object" &&
                                 options.updates.merge
-                                ? true
-                                : false,
+                              ? true
+                              : false,
                     onChange: (evt) => {
                         if (evt.added.length > 0) {
                             scheduleDrain(
@@ -241,7 +241,7 @@ export const useQuery = <
                                     let ix = (
                                         options?.resolve
                                             ? (x as WithIndexedContext<T, I>)
-                                                ?.__indexed
+                                                  ?.__indexed
                                             : (x as WithContext<I>)
                                     ) as I;
                                     const existingId = db.index.resolveId(ix);
