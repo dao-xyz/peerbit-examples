@@ -37,7 +37,7 @@ import {
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { equals } from "uint8arrays";
-import { useStreamSettings } from "./StreamSettingsContext"; // ⬅️ new: consume settings via provider
+import { useStreamSettings } from "./StreamSettingsContext";
 
 export const STREAM_QUERY_PARAMS = {
     SETTINGS: "s", // stream view
@@ -230,13 +230,15 @@ function useStreamContextHook() {
         batchSize,
         debug: "useQuery REPLIES",
         local: true,
-
         remote: {
-            eager: true,
+            reach: { eager: true },
             // Avoid blocking initial list hydration on remote joining; rely on link visibility
-            joining: { waitFor: 5e3 },
+            wait: { timeout: 5e3 },
         },
-        onChange: {
+        updates: {
+            merge: true,
+        },
+        /* onChange: {
             merge: async (e) => {
                 // merge optimistic updates signed by me
                 for (const change of e.added) {
@@ -271,7 +273,7 @@ function useStreamContextHook() {
                 }
                 return merged;
             },
-        },
+        }, */
     });
 
     const lastReply = useMemo(() => {

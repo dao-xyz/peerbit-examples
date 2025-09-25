@@ -1,7 +1,7 @@
 import { describe, it, beforeEach, afterEach, expect } from "vitest";
 import { Peerbit } from "peerbit";
 import { field, variant } from "@dao-xyz/borsh";
-import { Documents } from "@peerbit/document";
+import { Documents, WithContext, WithIndexedContext } from "@peerbit/document";
 import { Program } from "@peerbit/program";
 import React, { useEffect } from "react";
 import { render, act, waitFor } from "@testing-library/react";
@@ -21,19 +21,31 @@ class Post {
         this.message = props.message ?? "";
     }
 }
+@variant(0)
+class PostIndexed {
+    @field({ type: "string" })
+    id!: string;
+    @field({ type: "string" })
+    indexedMessage!: string;
+    constructor(props?: Post) {
+        if (!props) return; // borsh
+        this.id = props.id ?? `${Date.now()}-${Math.random()}`;
+        this.indexedMessage = props.message ?? "";
+    }
+}
 
 @variant("posts-db")
 class PostsDB extends Program<{ replicate?: boolean }> {
     @field({ type: Documents })
-    posts: Documents<Post>;
+    posts: Documents<Post, PostIndexed>;
     constructor() {
         super();
-        this.posts = new Documents<Post>();
+        this.posts = new Documents<Post, PostIndexed>();
     }
     async open(args?: { replicate?: boolean }): Promise<void> {
         await this.posts.open({
             type: Post,
-            index: { type: Post },
+            index: { type: PostIndexed },
             replicate: args?.replicate ? { factor: 1 } : false,
         });
     }
@@ -84,26 +96,20 @@ describe("useQuery (integration with Documents)", () => {
         await peerReader?.stop();
     });
 
-    function renderUseQuery<R extends boolean | undefined>(
+    function renderUseQuery<R extends boolean>(
         db: PostsDB,
-        options: UseQuerySharedOptions<Post, Post, R, Post>
+        options: UseQuerySharedOptions<Post, PostIndexed, R>
     ) {
         const result: {
-            current: {
-                items: Post[];
-                loadMore: (n?: number) => Promise<boolean>;
-                isLoading: boolean;
-                empty: () => boolean;
-                id: string | undefined;
-            };
+            current: ReturnType<typeof useQuery<Post, PostIndexed, R>>;
         } = {} as any;
 
         function HookCmp({
             opts,
         }: {
-            opts: UseQuerySharedOptions<Post, Post, R, Post>;
+            opts: UseQuerySharedOptions<Post, PostIndexed, R>;
         }) {
-            const hook = useQuery<Post, Post, R, Post>(db.posts, opts);
+            const hook = useQuery<Post, PostIndexed, R>(db.posts, opts);
             useEffect(() => {
                 result.current = hook;
             }, [hook]);
@@ -111,7 +117,7 @@ describe("useQuery (integration with Documents)", () => {
         }
 
         const api = render(React.createElement(HookCmp, { opts: options }));
-        const rerender = (opts: UseQuerySharedOptions<Post, Post, R, Post>) =>
+        const rerender = (opts: UseQuerySharedOptions<Post, PostIndexed, R>) =>
             api.rerender(React.createElement(HookCmp, { opts }));
         let hasUnmounted = false;
         const doUnmount = () => {
@@ -145,18 +151,35 @@ describe("useQuery (integration with Documents)", () => {
         });
     });
 
+    it("does not mutate the options object passed in", async () => {
+        await setupConnected();
+        const cfg = {
+            query: {},
+            resolve: true,
+            local: true,
+            remote: { reach: { eager: true }, wait: { timeout: 10_000 } },
+            prefetch: false,
+            batchSize: 10,
+        };
+        const cfgOrg = { ...cfg };
+        renderUseQuery(dbReader, cfg);
+        // expect that cfg has not been modified
+        expect(cfg).to.deep.equal(cfgOrg);
+    });
+
     it("respects remote warmup before iterating", async () => {
         await setupConnected();
         await dbWriter.posts.put(new Post({ message: "hello" }));
 
-        const { result, rerender } = renderUseQuery(dbReader, {
+        const cfg: UseQuerySharedOptions<Post, PostIndexed, true> = {
             query: {},
             resolve: true,
-            local: false,
-            remote: { eager: true, warmup: 10_000 },
+            local: true,
+            remote: { reach: { eager: true }, wait: { timeout: 10_000 } },
             prefetch: false,
             batchSize: 10,
-        });
+        };
+        const { result, rerender } = renderUseQuery(dbReader, cfg);
 
         await waitFor(() => {
             if (!result.current) throw new Error("no result yet");
@@ -173,19 +196,15 @@ describe("useQuery (integration with Documents)", () => {
         expect(result.current.items[0].message).toBe("hello");
 
         await act(async () => {
-            rerender({
-                query: {},
-                resolve: true,
-                local: true,
-                remote: false,
-                prefetch: false,
-            });
+            rerender(cfg);
+        });
+        await act(async () => {
             await result.current.loadMore();
         });
         await waitFor(() => expect(result.current.items.length).toBe(1));
     });
 
-    it("honors remote.joining.waitFor by resolving after connection", async () => {
+    it("honors remote.wait.timeout by resolving after connection", async () => {
         // create isolated peers not connected yet
         await setupDisconnected();
 
@@ -193,7 +212,10 @@ describe("useQuery (integration with Documents)", () => {
             query: {},
             resolve: true,
             local: false,
-            remote: { eager: true, joining: { waitFor: 5_000 } },
+            remote: {
+                reach: { eager: true },
+                wait: { behavior: "block", timeout: 5_000 },
+            },
             prefetch: true,
         });
 
@@ -211,5 +233,159 @@ describe("useQuery (integration with Documents)", () => {
 
         await waitFor(() => expect(result.current.items.length).toBe(1));
         expect(result.current.items[0].message).toBe("late");
+    });
+
+    describe("merge", () => {
+        const checkAsResolvedResults = async <R extends boolean>(
+            out: ReturnType<typeof renderUseQuery<R>>,
+            resolved: R
+        ) => {
+            const { result } = out;
+            await waitFor(() => expect(result.current).toBeDefined());
+
+            // Initially empty
+            expect(result.current.items.length).toBe(0);
+
+            // Create a post on writer and expect reader hook to merge it automatically
+            const id = `${Date.now()}-merge`;
+            await act(async () => {
+                // the reader actually does the put (a user)
+                await dbReader.posts.put(new Post({ id, message: "first" }));
+            });
+
+            await waitFor(() => expect(result.current.items.length).toBe(1), {
+                timeout: 1e4,
+            });
+            if (resolved) {
+                expect((result.current.items[0] as Post).message).toBe("first");
+                expect(result.current.items[0]).to.be.instanceOf(Post);
+            } else {
+                expect(
+                    (result.current.items[0] as PostIndexed).indexedMessage
+                ).toBe("first");
+                expect(result.current.items[0]).to.be.instanceOf(PostIndexed);
+            }
+        };
+
+        it("updates.merge merges new writes into state without manual iteration, as resolved", async () => {
+            await setupConnected();
+
+            // resolved undefined means we should resolve
+            await checkAsResolvedResults(
+                renderUseQuery<true>(dbReader, {
+                    query: {},
+                    local: false,
+                    remote: { reach: { eager: true } },
+                    prefetch: false,
+                    updates: { merge: true },
+                }),
+                true
+            );
+
+            // resolved true means we should resolve
+            await checkAsResolvedResults(
+                renderUseQuery<true>(dbReader, {
+                    query: {},
+                    local: false,
+                    resolve: true,
+                    remote: { reach: { eager: true } },
+                    prefetch: false,
+                    updates: { merge: true },
+                }),
+                true
+            );
+
+            // resolved false means we should NOT resolve
+            await checkAsResolvedResults(
+                renderUseQuery<false>(dbReader, {
+                    query: {},
+                    local: false,
+                    resolve: false,
+                    remote: { reach: { eager: true } },
+                    prefetch: false,
+                    updates: { merge: true },
+                }),
+                false
+            );
+        });
+    });
+
+    /*  TODO not yet supported
+     
+    it("updates.merge reflects document mutation in hook state", async () => {
+        await setupConnected();
+    
+        const id = `${Date.now()}-mut`;
+        await dbWriter.posts.put(new Post({ id, message: "v1" }));
+    
+        const { result } = renderUseQuery(dbReader, {
+            query: {},
+            resolve: true,
+            local: false,
+            remote: { reach: { eager: true } },
+            prefetch: true,
+            updates: { merge: true },
+        });
+    
+        await waitFor(() => expect(result.current.items.length).toBe(1), {
+            timeout: 1e4,
+        });
+        expect(result.current.items[0].message).toBe("v1");
+    
+        // Mutate by putting a new version with the same id
+        await act(async () => {
+            // the reader actually does the put (a user)
+            await dbReader.posts.put(new Post({ id, message: "v2" }));
+        });
+    
+        // Expect the hook state to reflect the updated content
+        await waitFor(
+            () => {
+                const found = result.current.items.find((p) => p.id === id);
+                expect(found?.message).toBe("v2");
+            },
+            { timeout: 1e4 }
+        );
+    });
+    */
+    it("clears results when props change (e.g. reverse toggled)", async () => {
+        await setupConnected();
+        await dbWriter.posts.put(new Post({ message: "one" }));
+        await dbWriter.posts.put(new Post({ message: "two" }));
+
+        const { result, rerender } = renderUseQuery(dbReader, {
+            query: {},
+            resolve: true,
+            local: true,
+            remote: false,
+            prefetch: true,
+            reverse: false,
+        });
+
+        await waitFor(() =>
+            expect(result.current.items.length).toBeGreaterThan(0)
+        );
+
+        // Toggle a prop that triggers iterator rebuild
+        await act(async () => {
+            rerender({
+                query: {},
+                resolve: true,
+                local: true,
+                remote: false,
+                prefetch: false,
+                reverse: true,
+            });
+        });
+
+        // After reset we expect cleared results until re-fetched
+        await waitFor(() => expect(result.current.items.length).toBe(0));
+
+        await act(async () => {
+            await result.current.loadMore();
+        });
+        await waitFor(() =>
+            expect(result.current.items.length).toBeGreaterThan(0)
+        );
     });
 });

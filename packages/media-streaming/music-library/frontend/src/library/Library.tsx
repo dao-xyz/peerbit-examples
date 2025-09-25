@@ -201,14 +201,12 @@ export const Library: React.FC = () => {
             query: useMemo(() => ({ query: {} }), []),
             prefetch: true,
             batchSize: 100,
-            onChange: {
+            updates: {
                 merge: true,
             },
             remote: {
-                eager: true,
-                joining: {
-                    waitFor: 5e3,
-                },
+                reach: { eager: true },
+                wait: { timeout: 5e3 },
             },
         }
     );

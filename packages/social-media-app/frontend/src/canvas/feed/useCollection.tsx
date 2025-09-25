@@ -49,13 +49,11 @@ export const useAllPosts = (properties: {
         debug: properties?.debug ?? false, // { id: "replies" },
         local: true,
         remote: {
-            joining: {
-                waitFor: 5e3,
-            },
+            wait: { timeout: 5000 },
         },
 
         prefetch: true,
-        onChange: {
+        updates: {
             merge: true,
         },
     });

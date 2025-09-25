@@ -24,12 +24,11 @@ import {
     getQualityLessThanOrEqualQuery,
     LOWEST_QUALITY,
     Quality,
-    IndexableElement,
     Scope,
     IndexableCanvas,
 } from "@giga-app/interface";
 import { randomBytes, sha256Sync } from "@peerbit/crypto";
-import { concat, equals } from "uint8arrays";
+import { equals } from "uint8arrays";
 import { useApps } from "../content/useApps.js";
 import { readFileAsImage } from "../content/native/image/utils.js";
 import { useErrorDialog } from "../dialogs/useErrorDialog.js";
@@ -40,7 +39,7 @@ import {
 } from "./utils/rect.js";
 import { useReplyProgress } from "./main/useReplyProgress.js";
 import { waitFor } from "@peerbit/time";
-import { DocumentsChange, WithIndexedContext } from "@peerbit/document";
+import { WithIndexedContext } from "@peerbit/document";
 import { useStream } from "./feed/StreamContext.js";
 import { useRegisterCanvasHandle } from "./edit/CanvasHandleRegistry.js";
 import { PrivateScope, PublicScope } from "./useScope.js";
@@ -260,15 +259,16 @@ const _CanvasWrapper = (
             query,
             debounce: 123,
             local: true,
+            debug: !!debug && "useQuery ELEMENTS",
             prefetch: true,
-            debug: !!debug,
             remote: {
                 // Do not block local rendering on remote joining; keep eager but with zero wait
-                eager: true,
-                joining: { waitFor: 5e3 },
+                reach: { eager: true },
+                wait: { timeout: 5e3 },
             },
-            onChange: {
-                merge: (change) => {
+            updates: {
+                merge: true,
+                /* merge: (change) => {
                     const filtered: DocumentsChange<
                         Element<ElementContent>,
                         IndexableElement
@@ -277,10 +277,12 @@ const _CanvasWrapper = (
                         removed: [], // TODO: implement if you need removal merging
                     };
                     return filtered;
-                },
+                }, */
             },
         }
     );
+
+    debug && console.log("useQuery ELEMENTS", { rawRects });
 
     // Defensive: only expose rects that belong to this canvas
     const rects = useMemo(() => {

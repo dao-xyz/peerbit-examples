@@ -341,7 +341,7 @@ export abstract class TrackSource {
             }),
             {
                 remote: options?.remote ?? {
-                    eager: true, // TODO eager needed?
+                    reach: { eager: true }, // TODO eager needed?
                     replicate: options?.remote?.replicate ?? true,
                 },
                 local: options?.local ?? true,
@@ -365,7 +365,7 @@ export abstract class TrackSource {
                     {
                         local: true,
                         remote: {
-                            eager: true,
+                            reach: { eager: true },
                         },
                     }
                 )
@@ -1030,6 +1030,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
         options?: SearchOptions<
             Track<AudioStreamDB | WebcodecsStreamDB>,
             any,
+            any,
             any
         >
     ): Promise<
@@ -1055,7 +1056,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
             {
                 ...options,
                 remote: {
-                    eager: true,
+                    reach: { eager: true },
                     ...(typeof options?.remote === "object"
                         ? options?.remote
                         : {}),
@@ -1117,7 +1118,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                     {
                         local: true,
                         remote: {
-                            eager: true,
+                            reach: { eager: true },
                         },
                     }
                 );
@@ -1206,7 +1207,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
                             {
                                 local: true,
                                 remote: {
-                                    eager: true,
+                                    reach: { eager: true },
                                 },
                             }
                         )

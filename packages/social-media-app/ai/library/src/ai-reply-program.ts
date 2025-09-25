@@ -88,7 +88,7 @@ async function getOrderedContextTexts(opts: {
             ],
             sort: new Sort({ key: ["__context", "created"] }),
         },
-        { remote: { eager: true } }
+        { remote: { reach: { eager: true } } }
     );
 
     const texts: { text: string; order?: number; from: string }[] = [];

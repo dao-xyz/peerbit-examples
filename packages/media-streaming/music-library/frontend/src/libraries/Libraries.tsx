@@ -88,14 +88,12 @@ export const Libraries = () => {
             }, []),
             prefetch: true,
             batchSize: 200,
-            onChange: {
+            updates: {
                 merge: true,
             },
             remote: {
-                eager: true,
-                joining: {
-                    waitFor: 5e3,
-                },
+                reach: { eager: true },
+                wait: { timeout: 5e3 },
             },
         }
     );

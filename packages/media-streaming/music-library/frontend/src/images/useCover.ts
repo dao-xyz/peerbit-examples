@@ -15,14 +15,12 @@ export const useCover = (id?: Uint8Array) => {
     } = useQuery(imgs.program?.documents, {
         query: useMemo(() => ({ query: { id } }), [id]),
         prefetch: true,
-        onChange: {
+        updates: {
             merge: true,
         },
         remote: {
-            eager: true,
-            joining: {
-                waitFor: 5e3,
-            },
+            reach: { eager: true },
+            wait: { timeout: 5000 },
         },
     });
 

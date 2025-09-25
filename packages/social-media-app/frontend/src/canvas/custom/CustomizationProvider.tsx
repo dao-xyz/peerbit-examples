@@ -40,21 +40,14 @@ const useVisualization = (properies: { canvas: Canvas }) => {
     /* 1. fetch the current saved visualization ------------------- */
     const { items, isLoading } = useQuery(canvas?.nearestScope.visualizations, {
         query,
-        onChange: {
-            merge: (ch) => ({
-                added: ch.added.filter((v) => equals(v.canvasId, canvas.id)),
-                removed: ch.removed.filter((v) =>
-                    equals(v.canvasId, canvas.id)
-                ),
-            }),
+        updates: {
+            merge: true,
         },
         resolve: true,
         local: true,
         remote: {
-            eager: true,
-            joining: {
-                waitFor: 5e3,
-            },
+            reach: { eager: true },
+            wait: { timeout: 5000 },
         },
         prefetch: true,
     });

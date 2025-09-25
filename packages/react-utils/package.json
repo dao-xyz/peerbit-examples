@@ -52,7 +52,7 @@
         "build": "yarn clean && tsc -p tsconfig.json",
         "test": "vitest run",
         "test:node": "vitest run --project node",
-        "test:dom": "vitest run --project jsdom",
+        "test:dom": "vitest run --project happy-dom",
         "test:watch": "vitest"
     },
     "eslintConfig": {

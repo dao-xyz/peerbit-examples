@@ -26,15 +26,13 @@ export const NamesProvider = ({ children }: PropsWithChildren) => {
         query: useMemo(() => ({}), []),
         prefetch: true,
         batchSize: 1000,
-        onChange: {
+        updates: {
             merge: true,
         },
         debug: false,
         remote: {
-            eager: true,
-            joining: {
-                waitFor: 5e3,
-            },
+            reach: { eager: true },
+            wait: { timeout: 5000 },
         },
     });
 

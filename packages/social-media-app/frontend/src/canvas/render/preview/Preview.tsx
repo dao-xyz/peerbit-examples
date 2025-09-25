@@ -75,9 +75,9 @@ function getRectsForVariant<V extends VariantType>(
 ): V extends "tiny" | "breadcrumb"
     ? Element<ElementContent> | undefined
     : {
-        text?: Element<StaticContent<StaticMarkdownText>>;
-        other: Element<ElementContent>[];
-    } {
+          text?: Element<StaticContent<StaticMarkdownText>>;
+          other: Element<ElementContent>[];
+      } {
     switch (variant) {
         case "tiny":
         case "breadcrumb":
@@ -123,8 +123,9 @@ const PreviewFrame = ({
     classNameContent?: string;
 }) => (
     <div
-        className={`flex flex-col relative w-full ${maximizeHeight ? "h-full" : ""
-            }`}
+        className={`flex flex-col relative w-full ${
+            maximizeHeight ? "h-full" : ""
+        }`}
         onClick={(e) => {
             if (onClick) {
                 onClick(element);
@@ -135,8 +136,8 @@ const PreviewFrame = ({
         <Frame
             thumbnail={false}
             active={false}
-            setActive={() => { }}
-            delete={() => { }}
+            setActive={() => {}}
+            delete={() => {}}
             editMode={false}
             showEditControls={false}
             element={element}
@@ -215,12 +216,12 @@ const BlurredBackground = ({
                 /* ← same props you already pass elsewhere */
                 thumbnail={false}
                 active={false}
-                setActive={() => { }}
-                delete={() => { }}
+                setActive={() => {}}
+                delete={() => {}}
                 editMode={false}
                 showEditControls={false}
                 element={element}
-                onLoad={() => { }}
+                onLoad={() => {}}
                 fit="cover"
                 /* ⚡ key performance classes */
                 className="w-full h-full object-cover
@@ -497,8 +498,8 @@ const PostQuotePreview = ({
                         className={clsx(
                             "w-full h-full",
                             i === 1 &&
-                            apps.slice(1).length > 0 &&
-                            "[filter:url('#gaussianBlurCanvas')]"
+                                apps.slice(1).length > 0 &&
+                                "[filter:url('#gaussianBlurCanvas')]"
                         )}
                     >
                         <PreviewFrame
@@ -788,12 +789,12 @@ const Expandable = ({
     const style = expanded
         ? undefined
         : ({
-            maxHeight:
-                typeof collapsedMaxHeight === "number"
-                    ? `${collapsedMaxHeight}px`
-                    : collapsedMaxHeight,
-            overflow: "hidden",
-        } as React.CSSProperties);
+              maxHeight:
+                  typeof collapsedMaxHeight === "number"
+                      ? `${collapsedMaxHeight}px`
+                      : collapsedMaxHeight,
+              overflow: "hidden",
+          } as React.CSSProperties);
 
     const toggle = (e: React.MouseEvent) => {
         e.stopPropagation();

@@ -54,10 +54,10 @@ export const StreamSettingsProvider: React.FC<{
 
     const { items: dynamicViewItems } = useQuery(program.program?.settings, {
         query: useMemo(() => ({}), []),
-        onChange: { merge: true },
+        updates: { merge: true },
         prefetch: true,
         local: true,
-        remote: { eager: true, joining: { waitFor: 5e3 } },
+        remote: { reach: { eager: true }, wait: { timeout: 5e3 } },
     });
 
     const createSettings = async (

@@ -195,7 +195,11 @@ export const App = () => {
     // your original config stays the same, but now reuses that array
     const networkConfig: NetworkOption =
         import.meta.env.MODE === "development"
-            ? { type: "local" }
+            ? {
+                  /* type: "local" */ bootstrap: [
+                      "/ip4/127.0.0.1/tcp/55993/ws/p2p/12D3KooWFDnHYK8dtJBukcBZmEHBL8MjXjXyg1YSYBmqRkjL1BZX",
+                  ],
+              }
             : { bootstrap: BOOTSTRAP_ADDRS };
 
     return (
@@ -215,7 +219,7 @@ export const App = () => {
                                         : networkConfig
                                 }
                                 iframe={{ type: "proxy", targetOrigin: "*" }}
-                                waitForConnnected={false}
+                                waitForConnnected={true}
                                 inMemory={inMemory}
                                 singleton
                             >

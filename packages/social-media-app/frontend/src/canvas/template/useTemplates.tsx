@@ -84,7 +84,7 @@ export function useTemplates(): UseTemplatesReturn {
                 if (prog.templates.closed) return;
                 const exists = await prog.templates.index.get(tpl.id, {
                     local: true,
-                    remote: { eager: true },
+                    remote: { reach: { eager: true } },
                 });
                 if (!exists) {
                     await prog.templates.put(tpl);
@@ -145,8 +145,8 @@ export function useTemplates(): UseTemplatesReturn {
         local: true,
         prefetch: true,
         batchSize: 1000,
-        remote: { eager: true, joining: { waitFor: 5_000 } },
-        onChange: { merge: true },
+        remote: { reach: { eager: true }, wait: { timeout: 5_000 } },
+        updates: { merge: true },
     });
 
     /** 5) Mutators and helpers */

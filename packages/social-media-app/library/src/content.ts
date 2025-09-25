@@ -651,7 +651,11 @@ export const loadCanvasFromScopes = async (
                     waitFor: 5e3,
                     resolve: true,
                     local: options?.local ?? true,
-                    remote: { eager: true, strategy: "fallback", timeout: 1e4 },
+                    remote: {
+                        reach: { eager: true },
+                        strategy: "fallback",
+                        timeout: 1e4,
+                    },
                 })
                 .then((x) => {
                     return { canvas: x, scope };
@@ -2692,7 +2696,7 @@ export class Scope extends Program<ScopeArgs> {
             return undefined;
         })();
 
-        const iterateOptsBase: QueryOptions<false, any, false> = {
+        const iterateOptsBase: QueryOptions<any, any, any, false> = {
             resolve: false,
             local: true,
             remote: false,
@@ -2710,7 +2714,7 @@ export class Scope extends Program<ScopeArgs> {
             elements.length < expectedCount
         ) {
             // Try a bounded remote fallback fetch once
-            const iterateWithRemote: QueryOptions<false, any, false> = {
+            const iterateWithRemote: QueryOptions<any, any, any, false> = {
                 resolve: false,
                 local: true,
                 remote: {
