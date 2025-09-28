@@ -3,6 +3,7 @@ import {
     AbstractSearchRequest,
     AbstractSearchResult,
     ClosedError,
+    Context,
     Documents,
     RemoteQueryOptions,
     ResultsIterator,
@@ -84,6 +85,12 @@ export const useQuery = <
 ) => {
     /* ─────── internal type alias for convenience ─────── */
     type Item = RT;
+    type IteratorRef = {
+        id: string;
+        db: Documents<T, I>;
+        iterator: ResultsIterator<Item>;
+        itemsConsumed: number;
+    };
 
     /* ────────────── normalise DBs input ────────────── */
     const dbs = useMemo<(Documents<T, I> | undefined)[]>(() => {
@@ -96,14 +103,8 @@ export const useQuery = <
     const [all, setAll] = useState<Item[]>([]);
     const allRef = useRef<Item[]>([]);
     const [isLoading, setIsLoading] = useState(false);
-    const iteratorRefs = useRef<
-        {
-            id: string;
-            db: Documents<T, I>;
-            iterator: ResultsIterator<Item>;
-            itemsConsumed: number;
-        }[]
-    >([]);
+    const iteratorRefs = useRef<IteratorRef[]>([]);
+    const itemIdRef = useRef(new WeakMap<object, string>());
     const emptyResultsRef = useRef(false);
     const closeControllerRef = useRef<AbortController | null>(null);
     const waitedOnceRef = useRef(false);
@@ -138,6 +139,7 @@ export const useQuery = <
         waitedOnceRef.current = false;
 
         allRef.current = [];
+        itemIdRef.current = new WeakMap();
         setAll([]);
         setIsLoading(false);
         log("Iterators reset");
@@ -188,6 +190,7 @@ export const useQuery = <
         };
 
         iteratorRefs.current = openDbs.map((db) => {
+            let currentRef: IteratorRef | undefined;
             const iterator = db.index.iterate(query ?? {}, {
                 closePolicy: "manual",
                 local: options.local ?? true,
@@ -234,45 +237,22 @@ export const useQuery = <
                             props.reason === "join" ||
                             props.reason === "change"
                         ) {
-                            let newArr = [...allRef.current];
-                            for (const item of batch) {
-                                const id = db.index.resolveId(item);
-                                const existingIndex = newArr.findIndex((x) => {
-                                    let ix = (
-                                        options?.resolve
-                                            ? (x as WithIndexedContext<T, I>)
-                                                  ?.__indexed
-                                            : (x as WithContext<I>)
-                                    ) as I;
-                                    const existingId = db.index.resolveId(ix);
-                                    return existingId === id;
-                                });
-                                if (existingIndex !== -1) {
-                                    newArr[existingIndex] = item as Item;
-                                } else {
-                                    if (!options.reverse) {
-                                        newArr.unshift(item as Item);
-                                    } else {
-                                        newArr.push(item as Item);
-                                    }
-                                }
-                            }
-                            log(
-                                "merging ",
-                                batch,
-                                "into ",
-                                newArr,
-                                [...allRef.current],
-                                options?.resolve
-                            );
-
-                            updateAll(newArr);
+                            if (!currentRef) return;
+                            handleBatch(iteratorRefs.current, [
+                                { ref: currentRef, items: batch as Item[] },
+                            ]);
                         }
                     },
                 },
             }) as ResultsIterator<Item>;
 
-            const ref = { id: uuid(), db, iterator, itemsConsumed: 0 };
+            const ref: IteratorRef = {
+                id: uuid(),
+                db,
+                iterator,
+                itemsConsumed: 0,
+            };
+            currentRef = ref;
             log("Iterator init", ref.id, "db", db.address);
             return ref;
         });
@@ -305,6 +285,144 @@ export const useQuery = <
 
     const markWaited = () => {
         waitedOnceRef.current = true;
+    };
+
+    /* helper to turn primitive ids into stable map keys */
+    const idToKey = (value: indexerTypes.IdPrimitive): string => {
+        switch (typeof value) {
+            case "string":
+                return `s:${value}`;
+            case "number":
+                return `n:${value}`;
+            default:
+                return `b:${value.toString()}`;
+        }
+    };
+
+    const handleBatch = async (
+        iterators: IteratorRef[],
+        batches: { ref: IteratorRef; items: Item[] }[]
+    ): Promise<boolean> => {
+        if (!iterators.length) {
+            return false;
+        }
+
+        const totalFetched = batches.reduce(
+            (sum, batch) => sum + batch.items.length,
+            0
+        );
+        if (totalFetched === 0) {
+            emptyResultsRef.current = iterators.every((i) => i.iterator.done());
+            return !emptyResultsRef.current;
+        }
+
+        let processed = batches;
+        if (options.transform) {
+            const transform = options.transform;
+            processed = await Promise.all(
+                batches.map(async ({ ref, items }) => ({
+                    ref,
+                    items: await Promise.all(items.map(transform)),
+                }))
+            );
+        }
+
+        const prev = allRef.current;
+        const next = [...prev];
+        const keyIndex = new Map<string, number>();
+        prev.forEach((item, idx) => {
+            const key = itemIdRef.current.get(item as object);
+            if (key) keyIndex.set(key, idx);
+        });
+
+        const seenHeads = new Set(prev.map((x) => (x as any).__context?.head));
+        const freshItems: Item[] = [];
+        let hasMutations = false;
+
+        for (const { ref, items } of processed) {
+            const db = ref.db;
+            for (const item of items) {
+                const ctx = (item as WithContext<any>).__context;
+                const head = ctx?.head;
+
+                let key: string | null = null;
+                try {
+                    key = idToKey(
+                        db.index.resolveId(
+                            item as WithContext<I> | WithIndexedContext<T, I>
+                        ).primitive
+                    );
+                } catch (error) {
+                    log("useQuery: failed to resolve id", error);
+                }
+
+                if (key && keyIndex.has(key)) {
+                    const existingIndex = keyIndex.get(key)!;
+                    const current = next[existingIndex];
+                    const currentContext: Context | undefined = (
+                        current as WithContext<any>
+                    ).__context;
+                    const incomingContext: Context | undefined = ctx;
+                    const shouldReplace =
+                        !currentContext ||
+                        !incomingContext ||
+                        currentContext.modified <= incomingContext.modified;
+
+                    if (shouldReplace && current !== item) {
+                        itemIdRef.current.delete(current as object);
+                        next[existingIndex] = item;
+                        hasMutations = true;
+                    }
+
+                    if (key) {
+                        itemIdRef.current.set(item as object, key);
+                        keyIndex.set(key, existingIndex);
+                    }
+                    if (head != null) seenHeads.add(head);
+                    continue;
+                }
+
+                if (head != null && seenHeads.has(head)) continue;
+                if (head != null) seenHeads.add(head);
+
+                freshItems.push(item);
+                if (key) {
+                    itemIdRef.current.set(item as object, key);
+                    keyIndex.set(key, prev.length + freshItems.length - 1);
+                }
+            }
+        }
+
+        if (!freshItems.length && !hasMutations) {
+            emptyResultsRef.current = iterators.every((i) => i.iterator.done());
+            return !emptyResultsRef.current;
+        }
+
+        const combined = reverseRef.current
+            ? [...freshItems.reverse(), ...next]
+            : [...next, ...freshItems];
+
+        updateAll(combined);
+
+        emptyResultsRef.current = iterators.every((i) => i.iterator.done());
+        return !emptyResultsRef.current;
+    };
+
+    const drainRoundRobin = async (
+        iterators: IteratorRef[],
+        n: number
+    ): Promise<boolean> => {
+        const batches: { ref: IteratorRef; items: Item[] }[] = [];
+        for (const ref of iterators) {
+            if (ref.iterator.done()) continue;
+            const batch = await ref.iterator.next(n);
+            log("Iterator", ref.id, "fetched", batch.length, "items");
+            if (batch.length) {
+                ref.itemsConsumed += batch.length;
+                batches.push({ ref, items: batch });
+            }
+        }
+        return handleBatch(iterators, batches);
     };
 
     /*  maybe make the rule that if results are empty and we get results from joining  
@@ -351,49 +469,7 @@ export const useQuery = <
                 markWaited();
             }
 
-            /* pull items round-robin */
-            const newlyFetched: Item[] = [];
-            for (const ref of iterators) {
-                if (ref.iterator.done()) continue;
-                const batch = await ref.iterator.next(n); // pull up to <n> at once
-                log("Iterator", ref.id, "fetched", batch.length, "items");
-                if (batch.length) {
-                    ref.itemsConsumed += batch.length;
-                    newlyFetched.push(...batch);
-                }
-            }
-
-            if (!newlyFetched.length) {
-                emptyResultsRef.current = iterators.every((i) =>
-                    i.iterator.done()
-                );
-                return !emptyResultsRef.current;
-            }
-
-            /* optional transform */
-            let processed = newlyFetched;
-            if (options.transform) {
-                processed = await Promise.all(processed.map(options.transform));
-            }
-
-            /* deduplicate & merge */
-            const prev = allRef.current;
-            const dedupHeads = new Set(
-                prev.map((x) => (x as any).__context.head)
-            );
-            const unique = processed.filter(
-                (x) => !dedupHeads.has((x as any).__context.head)
-            );
-            if (!unique.length)
-                return !iterators.every((i) => i.iterator.done());
-
-            const combined = reverseRef.current
-                ? [...unique.reverse(), ...prev]
-                : [...prev, ...unique];
-            updateAll(combined);
-
-            emptyResultsRef.current = iterators.every((i) => i.iterator.done());
-            return !emptyResultsRef.current;
+            return drainRoundRobin(iterators, n);
         } catch (e) {
             if (!(e instanceof ClosedError)) throw e;
             return false;

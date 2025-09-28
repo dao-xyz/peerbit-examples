@@ -95,7 +95,7 @@ export const Content = () => {
                     detail: (window as any).__peerInfo,
                 })
             );
-        } catch { }
+        } catch {}
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
     return (
@@ -115,7 +115,7 @@ export const Content = () => {
                                             className={clsx(
                                                 "sticky top-0 inset-x-0  z-30",
                                                 heightStyle[
-                                                String(headerVisible)
+                                                    String(headerVisible)
                                                 ]
                                             )} /* transition-transform duration-800 ease-in-out */
                                             style={
@@ -184,9 +184,9 @@ export const App = () => {
             ? offline
                 ? [] // explicit offline sentinel
                 : bootstrapParam
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter(Boolean)
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean)
             : undefined; // not provided at all => use default network config
     if (typeof window !== "undefined") {
         (window as any).__DBG_BOOTSTRAP = bootstrapAddrs; // aid tests/debug
@@ -196,9 +196,8 @@ export const App = () => {
     const networkConfig: NetworkOption =
         import.meta.env.MODE === "development"
             ? {
-                /* type: "local" */
-                bootstrap: ["/ip4/127.0.0.1/tcp/59322/ws/p2p/12D3KooWKyXvBLwPAmuPAi485z2hNB9B7tCNmvk2tWhMwa9AZdmu"]
-            }
+                  type: "local",
+              }
             : { bootstrap: BOOTSTRAP_ADDRS };
 
     return (
@@ -211,10 +210,10 @@ export const App = () => {
                                 network={
                                     bootstrapAddrs !== undefined
                                         ? {
-                                            // Explicit override: if empty we stay offline
-                                            type: "explicit",
-                                            bootstrap: bootstrapAddrs,
-                                        }
+                                              // Explicit override: if empty we stay offline
+                                              type: "explicit",
+                                              bootstrap: bootstrapAddrs,
+                                          }
                                         : networkConfig
                                 }
                                 iframe={{ type: "proxy", targetOrigin: "*" }}

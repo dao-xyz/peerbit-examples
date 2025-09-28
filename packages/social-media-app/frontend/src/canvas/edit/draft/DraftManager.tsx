@@ -226,6 +226,11 @@ export const DraftManagerProvider: React.FC<{
             const children: CanvasIx[] = await privateScope.replies.index
                 .iterate({ query: getImmediateRepliesQuery(parentInPrivate) })
                 .all();
+            console.error("recoverLatestForParent", {
+                parent: parent.idString,
+                count: children.length,
+                ids: children.map((c) => c.idString),
+            });
             // In private scope, replies are authored by the current user; avoid strict key match to prevent
             // recovery failures if the identity re-initializes between reloads.
             children.sort(

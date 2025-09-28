@@ -293,6 +293,17 @@ const _CanvasWrapper = (
         }
     }, [rawRects, canvasDB?.idString]);
 
+    useEffect(() => {
+        (window as any).__pendingRects = pendingRects.map((r) => ({
+            id: r.idString,
+            type: r.content?.constructor?.name,
+        }));
+        (window as any).__committedRects = rects.map((r) => ({
+            id: r.idString,
+            type: r.content?.constructor?.name,
+        }));
+    }, [pendingRects, rects]);
+
     // 1) helper: what counts as “empty”?
     const isElementEmpty = (el: Element) => {
         // text: empty when StaticMarkdownText.isEmpty === true
@@ -700,12 +711,24 @@ const _CanvasWrapper = (
         options?: { pending?: boolean; y?: number | "optimize" | "max" }
     ) => {
         try {
+            if (!canvasDB?.initialized) {
+                await waitFor(
+                    () => canvasRef.current?.initialized === true
+                ).catch(() => new Error("Canvas not ready"));
+            }
+            const targetCanvas = canvasRef.current ?? canvasDB;
+            if (!targetCanvas?.initialized) {
+                throw new Error("Canvas not ready");
+            }
             const images = await readFileAsImage(file);
             const newElements: Element[] = await addRect(images, options);
+            console.error("insertImage result", newElements?.length);
             // Persist immediately if drafted pending
             try {
                 if (options?.pending) {
-                    await savePending(privateScope ?? canvasDB.nearestScope);
+                    await savePending(
+                        privateScope ?? targetCanvas.nearestScope
+                    );
                 }
             } catch (e) {
                 console.error("insertImage: immediate save failed", e);
@@ -713,6 +736,7 @@ const _CanvasWrapper = (
             onContentChange?.(newElements);
         } catch (e) {
             showError({ message: "Failed to insert image", error: e });
+            console.error("insertImage error", e);
         }
     };
 
@@ -868,6 +892,11 @@ const _CanvasWrapper = (
                 });
                 // Persist through the Canvas DB so ownership/indexing is correct
                 for (const el of toSave) {
+                    console.error("savePending:createElement", {
+                        canvas: canvas.idString,
+                        element: el.idString,
+                        type: el.content?.constructor?.name,
+                    });
                     await canvas.createElement(el);
                 }
                 // Ensure indexes are up to date before navigation/reload

@@ -310,14 +310,13 @@ describe("useQuery (integration with Documents)", () => {
         });
     });
 
-    /*  TODO not yet supported
-     
+    /*
     it("updates.merge reflects document mutation in hook state", async () => {
         await setupConnected();
-    
+
         const id = `${Date.now()}-mut`;
         await dbWriter.posts.put(new Post({ id, message: "v1" }));
-    
+
         const { result } = renderUseQuery(dbReader, {
             query: {},
             resolve: true,
@@ -326,18 +325,18 @@ describe("useQuery (integration with Documents)", () => {
             prefetch: true,
             updates: { merge: true },
         });
-    
+
         await waitFor(() => expect(result.current.items.length).toBe(1), {
             timeout: 1e4,
         });
         expect(result.current.items[0].message).toBe("v1");
-    
+
         // Mutate by putting a new version with the same id
         await act(async () => {
             // the reader actually does the put (a user)
             await dbReader.posts.put(new Post({ id, message: "v2" }));
         });
-    
+
         // Expect the hook state to reflect the updated content
         await waitFor(
             () => {

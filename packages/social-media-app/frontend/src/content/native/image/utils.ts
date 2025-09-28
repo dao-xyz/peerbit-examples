@@ -198,5 +198,10 @@ export const readFileAsImage = async (
     // Clean up the canvas.
     canvas.remove();
 
+    console.log("readFileAsImage result", {
+        name: file.name,
+        count: results.length,
+        mime: file.type,
+    });
     return results;
 };

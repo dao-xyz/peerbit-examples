@@ -25,7 +25,7 @@ export default defineConfig({
     projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
     webServer: {
         // Use package script with forwarded flag to respect local vite config
-        command: `yarn start -- --port ${PORT}`,
+        command: `pnpm start -- --port ${PORT}`,
         url: BASE_HTTP,
         /* reuseExistingServer: true, */
     },

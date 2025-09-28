@@ -20,6 +20,7 @@ export const ImageUploadTrigger = (properties?: {
         if (fileArray.length > 0) {
             // Optionally, loop to support multiple images
             for (const file of fileArray) {
+                console.log("ImageUploadTrigger: insert", file.name);
                 await insertImage(file, { pending: true });
             }
             // Ensure a text editor placeholder exists after queuing images
