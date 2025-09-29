@@ -217,7 +217,7 @@ export const App = () => {
                                         : networkConfig
                                 }
                                 iframe={{ type: "proxy", targetOrigin: "*" }}
-                                waitForConnnected={true}
+                                waitForConnnected={true} /* {'in-flight'} */
                                 inMemory={inMemory}
                                 singleton
                             >

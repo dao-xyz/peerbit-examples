@@ -1,5 +1,6 @@
 import { test, expect } from "@playwright/test";
 import { OFFLINE_BASE } from "./utils/url";
+import { getCanvasSaveStats, waitForCanvasSaveDelta } from "./utils/autosave";
 
 const PNG_BASE64 =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
@@ -313,7 +314,12 @@ test.describe("ToolbarCreateNew", () => {
         // Upload image
         const fileInput = toolbar.locator("input[type=file]");
         await expect(fileInput).toBeAttached();
+        const baseline = await getCanvasSaveStats(page);
         await fileInput.setInputFiles(smallPngFile(uniqueName));
+        await waitForCanvasSaveDelta(page, {
+            baseline,
+            minRectDelta: 1,
+        });
 
         // Image should appear in the ImageCanvas with alt set to file name
         await expect(
@@ -331,11 +337,14 @@ test.describe("ToolbarCreateNew", () => {
         // Queue one image but do not press send
         const fileInput = toolbar.locator("input[type=file]");
         await expect(fileInput).toBeAttached();
+        const baseline = await getCanvasSaveStats(page);
         const imgName = `placeholder-test-${Date.now()}.png`;
         await fileInput.setInputFiles(smallPngFile(imgName));
 
-        // After a short delay, a text editor should be available to type into
-        await page.waitForTimeout(3000);
+        await waitForCanvasSaveDelta(page, {
+            baseline,
+            minRectDelta: 1,
+        });
         // If the editor isn't already focused, click the text area container to start editing
         const textContainer = toolbar.getByTestId("composer-textarea").first();
         try {
@@ -359,8 +368,13 @@ test.describe("ToolbarCreateNew", () => {
         });
 
         // Compose and send a text post
+        const baseline = await getCanvasSaveStats(page);
         const msg = uid("Navigate to post");
         await textArea.fill(msg);
+        await waitForCanvasSaveDelta(page, {
+            baseline,
+            minRectDelta: 1,
+        });
         const sendBtn = toolbar.getByTestId("send-button");
         await expect(sendBtn).toBeEnabled({ timeout: 30000 });
         const base = (await getReplyPublishedEvents(page)).length;
@@ -414,6 +428,8 @@ test.describe("ToolbarCreateNew", () => {
             (window as any).__DBG_EVENTS = [];
         });
 
+        const baseline = await getCanvasSaveStats(page);
+
         // Upload an image
         const fileInput = toolbar.locator("input[type=file]");
         await expect(fileInput).toBeAttached();
@@ -425,6 +441,10 @@ test.describe("ToolbarCreateNew", () => {
         await expect(textArea).toBeVisible({ timeout: 30000 });
         const caption = uid("Image caption");
         await textArea.fill(caption);
+        await waitForCanvasSaveDelta(page, {
+            baseline,
+            minRectDelta: 2,
+        });
         const sendBtn = toolbar.getByTestId("send-button");
         await expect(sendBtn).toBeEnabled({ timeout: 30000 });
         const base = (await getReplyPublishedEvents(page)).length;

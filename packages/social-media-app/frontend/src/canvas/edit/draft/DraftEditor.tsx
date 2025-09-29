@@ -16,7 +16,6 @@ const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({ enabled }) => {
             debounce(async () => {
                 if (!enabled || !privateScope) return;
                 try {
-                    console.log("AutoSaveBridge: flush");
                     // 1) persist pending rects into PRIVATE scope
                     await savePending(privateScope);
                     // 2) trigger DraftManager debounced save (so publish rotation has data)

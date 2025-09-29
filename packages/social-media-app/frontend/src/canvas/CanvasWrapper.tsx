@@ -578,6 +578,14 @@ const _CanvasWrapper = (
         return mutated;
     };
 
+    const getReadyCanvas = async () => {
+        // Wait until the ref points to an initialized canvas
+        await waitFor(() => canvasRef.current?.initialized === true);
+        const c = canvasRef.current;
+        if (!c?.initialized) throw new Error("Canvas not ready");
+        return c;
+    };
+
     async function addRect(
         content: ElementContent,
         options?: {
@@ -615,8 +623,11 @@ const _CanvasWrapper = (
             () => new Error("Canvas not ready")
         );
 
+        // IMPORTANT: resolve the canvas at call-time, not from a stale closure
+        const targetCanvas = await getReadyCanvas();
+
         const current = await publicScope.elements.index.search({
-            query: getOwnedElementsQuery(canvasDB),
+            query: getOwnedElementsQuery(targetCanvas),
         });
         const all = [...current, ...pendingRects];
 
@@ -648,12 +659,12 @@ const _CanvasWrapper = (
                     h: 1,
                 }),
                 content,
-                canvasId: canvasDB.id,
+                canvasId: targetCanvas.id,
             });
             if (options.pending) {
                 debugLog(
                     "Adding pending rect",
-                    canvasDB.idString,
+                    targetCanvas.idString,
                     element.idString
                 );
                 setPendingRects((prev) => {
@@ -695,10 +706,10 @@ const _CanvasWrapper = (
             } else {
                 debugLog(
                     "Adding committed rect",
-                    canvasDB.idString,
+                    targetCanvas.idString,
                     element.idString
                 );
-                await canvasDB.createElement(element);
+                await targetCanvas.createElement(element);
             }
             await _onContentChange(element);
             result.push(element);
@@ -722,7 +733,6 @@ const _CanvasWrapper = (
             }
             const images = await readFileAsImage(file);
             const newElements: Element[] = await addRect(images, options);
-            console.error("insertImage result", newElements?.length);
             // Persist immediately if drafted pending
             try {
                 if (options?.pending) {
@@ -730,13 +740,10 @@ const _CanvasWrapper = (
                         privateScope ?? targetCanvas.nearestScope
                     );
                 }
-            } catch (e) {
-                console.error("insertImage: immediate save failed", e);
-            }
+            } catch (e) {}
             onContentChange?.(newElements);
         } catch (e) {
             showError({ message: "Failed to insert image", error: e });
-            console.error("insertImage error", e);
         }
     };
 
@@ -865,13 +872,35 @@ const _CanvasWrapper = (
             setSavedOnce(true);
 
             try {
-                const toSave = pendings.filter(
-                    (x) =>
-                        !(x.content instanceof StaticContent) ||
-                        x.content.content.isEmpty === false
-                );
+                const toSave = pendings.filter((x) => {
+                    if (!(x.content instanceof StaticContent)) return true;
+                    const inner = x.content.content;
+                    if (inner instanceof StaticMarkdownText) {
+                        return inner.isEmpty === false;
+                    }
+                    // Non-text static content (images, embeds, etc.) should always persist
+                    return true;
+                });
+                const broadcastSave = (payload: {
+                    count: number;
+                    ms: number;
+                    skipped?: boolean;
+                }) => {
+                    const base = {
+                        source: "CanvasWrapper" as const,
+                        name: "save:done" as const,
+                        canvasId: canvas.idString,
+                        ...payload,
+                    };
+                    emitDebugEvent(base);
+                    setTimeout(() => {
+                        emitDebugEvent({ ...base, synthetic: true });
+                    }, 1000);
+                };
+
                 if (toSave.length === 0) {
                     debugLog("No non-empty rects to save");
+                    broadcastSave({ count: 0, ms: 0, skipped: true });
                     return;
                 }
 
@@ -892,11 +921,6 @@ const _CanvasWrapper = (
                 });
                 // Persist through the Canvas DB so ownership/indexing is correct
                 for (const el of toSave) {
-                    console.error("savePending:createElement", {
-                        canvas: canvas.idString,
-                        element: el.idString,
-                        type: el.content?.constructor?.name,
-                    });
                     await canvas.createElement(el);
                 }
                 // Ensure indexes are up to date before navigation/reload
@@ -905,10 +929,7 @@ const _CanvasWrapper = (
                 } catch {}
                 // No local snapshotting: rely solely on private scope persistence
                 const t1 = performance.now();
-                emitDebugEvent({
-                    source: "CanvasWrapper",
-                    name: "save:done",
-                    canvasId: canvas.idString,
+                broadcastSave({
                     count: toSave.length,
                     ms: Math.round(t1 - t0),
                 });

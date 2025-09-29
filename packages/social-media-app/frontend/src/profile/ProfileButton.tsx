@@ -1,4 +1,10 @@
-import { forwardRef, useEffect, useState } from "react";
+import {
+    forwardRef,
+    useEffect,
+    useState,
+    type MouseEvent,
+    type ButtonHTMLAttributes,
+} from "react";
 import { PublicSignKey } from "@peerbit/crypto";
 import { LOWEST_QUALITY } from "@giga-app/interface";
 import { IndexedProfileRow, useProfiles } from "./useProfiles";
@@ -21,15 +27,29 @@ type ProfileButtonInput = {
     className?: string;
     publicKey: PublicSignKey;
     direction?: "row" | "col";
-    onClick?: () => void;
     size?: number;
     rounded?: boolean; // If true, apply rounded corners to the profile photo
     key?: string; // Optional key for React list rendering
-};
+    /**
+     * When false, the internal button click will not trigger navigation.
+     * Useful when the button is wrapped by a dropdown trigger that wants to
+     * handle pointer events itself.
+     */
+    enableNavigate?: boolean;
+} & Omit<ButtonHTMLAttributes<HTMLButtonElement>, "children">;
 
 export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
     function ProfileButton(
-        { className = "", publicKey, onClick, size, rounded = false, key },
+        {
+            className = "",
+            publicKey,
+            onClick,
+            size,
+            rounded = false,
+            key,
+            enableNavigate = true,
+            ...rest
+        },
         ref
     ) {
         const { profiles, navigateTo, getProfile } = useProfiles();
@@ -95,7 +115,12 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
                             canvas={canvas}
                             debug="profile"
                         >
-                            <CanvasPreview onClick={onClick} variant="tiny" />
+                            <CanvasPreview
+                                onClick={(e) =>
+                                    onClick?.(e as any /* TODO types */)
+                                }
+                                variant="tiny"
+                            />
                         </CanvasWrapper>
                     </div>
                 );
@@ -110,19 +135,22 @@ export const ProfileButton = forwardRef<HTMLButtonElement, ProfileButtonInput>(
         };
 
         const content = getContent();
+
+        const handleClick = (event: MouseEvent<HTMLButtonElement>) => {
+            onClick?.(event);
+            if (event.defaultPrevented) return;
+            if (!enableNavigate) return;
+            event.stopPropagation();
+            navigateTo(profile);
+        };
+
         return (
             <button
                 ref={ref}
                 key={key}
                 className={"btn p-0 hover:filter hover:invert " + className}
-                onClick={
-                    onClick
-                        ? onClick
-                        : (e) => {
-                              e.stopPropagation();
-                              navigateTo(profile);
-                          }
-                }
+                onClick={handleClick}
+                {...rest}
             >
                 {content}
             </button>

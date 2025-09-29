@@ -8,7 +8,7 @@ import { useDraftSession } from "./DraftSession";
 export const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({
     enabled,
 }) => {
-    const { savePending, pendingRects, subscribeContentChange } = useCanvas();
+    const { savePending, subscribeContentChange } = useCanvas();
     const privateScope = PrivateScope.useScope();
     const session = useDraftSession();
 
@@ -26,18 +26,13 @@ export const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({
 
     // call on each content mutation event
     useEffect(() => {
+        if (!enabled) return;
         const unsub = subscribeContentChange(() => flush());
         return () => {
             unsub();
             flush.cancel();
         };
-    }, [flush, subscribeContentChange]);
-
-    // also react to presence of non-empty pending rects (e.g. programmatic inserts)
-    useEffect(() => {
-        if (!enabled) return;
-        if (pendingRects.some((p) => !p.content.isEmpty)) flush();
-    }, [enabled, pendingRects, flush]);
+    }, [enabled, flush, subscribeContentChange]);
 
     // safety: flush on unmount if something is pending
     /* useEffect(() => {

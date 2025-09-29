@@ -19,7 +19,8 @@ import { ProgramClient } from "@peerbit/program";
 import { webSockets } from "@libp2p/websockets";
 import * as filters from "@libp2p/websockets/filters";
 import { detectIncognito } from "detectincognitojs";
-
+import { waitFor } from "@testing-library/dom";
+import { Libp2p } from "@libp2p/interface";
 const isInStandaloneMode = () =>
     window.matchMedia("(display-mode: standalone)").matches ||
     window.navigator["standalone"] ||
@@ -90,7 +91,7 @@ export type NetworkOption =
 type NodeOptions = {
     type?: "node";
     network: "local" | "remote" | NetworkOption;
-    waitForConnnected?: boolean;
+    waitForConnnected?: boolean | "in-flight";
     keypair?: Ed25519Keypair;
     host?: boolean;
     singleton?: boolean;
@@ -370,7 +371,7 @@ export const PeerProvider = (options: PeerOptions) => {
                         }
                         // 3) Remote default: use bootstrap service (no explicit bootstrap provided)
                         else {
-                            await newPeer["bootstrap"]?.();
+                            await (newPeer as Peerbit).bootstrap?.();
                         }
                         setConnectionState("connected");
                     } catch (err: any) {
@@ -412,8 +413,28 @@ export const PeerProvider = (options: PeerOptions) => {
                         }
                     } catch {}
                 });
-                if (nodeOptions.waitForConnnected !== false) {
+                if (nodeOptions.waitForConnnected === true) {
                     await promise;
+                } else if (nodeOptions.waitForConnnected === "in-flight") {
+                    // wait for dialQueue to not be empty or connections to contains the peerId
+                    // or done
+                    let isDone = false;
+                    promise.finally(() => {
+                        isDone = true;
+                    });
+                    await waitFor(() => {
+                        if (isDone) {
+                            return true;
+                        }
+                        const libp2p = newPeer as any as Libp2p;
+                        if (libp2p.getDialQueue().length > 0) {
+                            return true;
+                        }
+                        if (libp2p.getConnections().length > 0) {
+                            return true;
+                        }
+                        return false;
+                    });
                 }
             } else {
                 // When in proxy mode (iframe), use the provided targetOrigin.

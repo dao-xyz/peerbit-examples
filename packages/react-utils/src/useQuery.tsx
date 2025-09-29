@@ -158,14 +158,6 @@ export const useQuery = <
             return;
         }
 
-        let isLogOpenInterval = options.debug
-            ? setInterval(() => {
-                  log(
-                      "is open?",
-                      iteratorRefs.current.map((x) => !x.iterator.done())
-                  );
-              }, 5e3)
-            : undefined;
         reset();
         const abortSignal = closeControllerRef.current?.signal;
         const onMissedResults = (evt: { amount: number }) => {
@@ -262,10 +254,6 @@ export const useQuery = <
 
         /* prefetch if requested */
         if (options.prefetch) void loadMore();
-
-        return () => {
-            clearInterval(isLogOpenInterval);
-        };
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
         dbs.map((d) => d?.address).join("|"),

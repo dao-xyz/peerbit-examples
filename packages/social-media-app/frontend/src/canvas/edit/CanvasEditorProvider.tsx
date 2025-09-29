@@ -4,7 +4,6 @@ import type { Canvas, IndexableCanvas } from "@giga-app/interface";
 import type { WithIndexedContext } from "@peerbit/document";
 import { DraftEditor } from "./draft/DraftEditor";
 import { CanvasWrapper } from "../CanvasWrapper";
-import { AutoReplyProvider } from "../AutoReplyContext";
 import { DraftSessionProvider } from "./draft/DraftSession";
 
 /* ────────────────────────────────────────────────────────────────────────────
@@ -74,8 +73,8 @@ export const CanvasEditorProvider: React.FC<{
 
     // Optional knobs
     sessionKey?: Uint8Array; // share one draft across multiple toolbars (draft mode only)
-    autoSave?: boolean; // draft mode: enable debounced saves on content changes
     autoReply?: boolean; // draft mode: enable auto-reply targeting
+    autoSave?: boolean; // draft mode: enable autosave bridge
     placeholder?: string;
     classNameContent?: string;
     debug?: boolean; // log if neither canvas nor replyTo provided
@@ -84,8 +83,8 @@ export const CanvasEditorProvider: React.FC<{
     canvas,
     replyTo,
     sessionKey,
-    autoSave,
     autoReply,
+    autoSave,
     placeholder,
     classNameContent,
     debug,
@@ -95,8 +94,8 @@ export const CanvasEditorProvider: React.FC<{
         return (
             <DraftSessionProvider replyTo={replyTo} keyish={sessionKey}>
                 <DraftEditor
-                    autoSave={autoSave}
                     autoReply={autoReply}
+                    autoSave={autoSave}
                     placeholder={placeholder}
                     classNameContent={classNameContent}
                     debug={debug}

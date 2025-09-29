@@ -12,6 +12,7 @@
         "start-remote": "vite --mode staging --config vite.config.remote.ts",
         "prefetch:update": "tsx --tsconfig tsconfig.scripts.json scripts/update-prefetch.ts",
         "build": "tsc && npm run prefetch:update && vite build",
+        "build:test": "tsc --project tsconfig.test.json && vite build",
         "preview": "vite preview",
         "deploy": "yarn build && NODE_DEBUG=gh-pages gh-pages -d dist",
         "pretest:e2e": "yarn workspace @giga-app/interface build",
@@ -44,7 +45,7 @@
         "react-grid-layout-next": "^2.2.0",
         "react-icons": "^5.5.0",
         "react-markdown": "^10.1.0",
-        "react-router": "^7.6.2",
+        "react-router": "^7.9.3",
         "react-use": "^17.6.0",
         "remark-gfm": "^4.0.1",
         "react-color": "^2.19.3"

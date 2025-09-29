@@ -2,6 +2,7 @@ import exp from "constants";
 import { test, expect } from "./fixtures/persistentContext";
 import { expectPersistent } from "./utils/persistence";
 import { OFFLINE_BASE } from "./utils/url";
+import { waitForCanvasSaveDelta, getCanvasSaveStats } from "./utils/autosave";
 
 const PNG_BASE64 =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";
@@ -58,11 +59,15 @@ test.describe("Draft recovery", () => {
         const textArea = toolbar.locator("textarea");
         await expect(textArea).toBeVisible({ timeout: 20000 });
 
+        const saveBaseline = await getCanvasSaveStats(page);
+
         const msg = uid("Recovered text");
         await textArea.fill(msg);
 
-        // Give autosave time to persist the draft's text
-        await page.waitForTimeout(3000);
+        await waitForCanvasSaveDelta(page, {
+            baseline: saveBaseline,
+            minRectDelta: 1,
+        });
 
         // Capture identity and reload to trigger recovery
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
@@ -102,11 +107,15 @@ test.describe("Draft recovery", () => {
         const fileInput = toolbar.locator("input[type=file]").first();
         await expect(fileInput).toBeAttached({ timeout: 30000 });
 
+        const saveBaseline = await getCanvasSaveStats(page);
+
         const imgName = `recover-image-${Date.now()}.png`;
         await fileInput.setInputFiles(smallPngFile(imgName));
 
-        // Allow autosave to persist image to draft
-        await page.waitForTimeout(3000);
+        await waitForCanvasSaveDelta(page, {
+            baseline: saveBaseline,
+            minRectDelta: 1,
+        });
 
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
             timeout: 20000,
@@ -161,6 +170,8 @@ test.describe("Draft recovery", () => {
         const textArea = toolbar.locator("textarea");
         await expect(textArea).toBeVisible({ timeout: 20000 });
 
+        const saveBaseline = await getCanvasSaveStats(page);
+
         const msg = uid("Recovered caption");
         await textArea.fill(msg);
 
@@ -169,7 +180,10 @@ test.describe("Draft recovery", () => {
         const imgName = `recover-mixed-${Date.now()}.png`;
         await fileInput.setInputFiles(smallPngFile(imgName));
 
-        // Allow autosave to persist both
+        await waitForCanvasSaveDelta(page, {
+            baseline: saveBaseline,
+            minRectDelta: 2,
+        });
 
         // Read identity info opportunistically (don’t block the test on it)
         const first = await page.evaluate(() => (window as any).__peerInfo);

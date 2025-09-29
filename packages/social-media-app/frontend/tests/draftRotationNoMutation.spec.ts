@@ -1,6 +1,7 @@
 import { test, expect } from "@playwright/test";
 import { OFFLINE_BASE } from "./utils/url";
 import { setupConsoleCapture } from "./utils/consoleCapture";
+import { getCanvasSaveStats, waitForCanvasSaveDelta } from "./utils/autosave";
 
 function uid(prefix: string) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -52,7 +53,7 @@ test.describe("Draft rotation does not mutate previous posts in feed", () => {
                 .getByTestId("composer-textarea")
                 .first();
             await textContainer.click({ timeout: 1500 });
-        } catch {}
+        } catch { }
         const textArea = toolbar.locator("textarea");
         // Wait for a textarea to exist; on slow starts, it may mount slightly later
         await page.waitForFunction(
@@ -103,14 +104,18 @@ test.describe("Draft rotation does not mutate previous posts in feed", () => {
         });
 
         // 2) Wait a moment, then start composing a NEW draft without sending
-        await page.waitForTimeout(1000);
+        const baseline = await getCanvasSaveStats(page);
+        await waitForCanvasSaveDelta(page, {
+            baseline,
+            minEventDelta: 1,
+        });
         // Ensure textarea exists (new draft mounted). Nudge editor into editing mode if needed.
         try {
             const textContainer = toolbar
                 .getByTestId("composer-textarea")
                 .first();
             await textContainer.click({ timeout: 1500 });
-        } catch {}
+        } catch { }
         // Wait for a textarea to be present for the fresh draft
         await page.waitForFunction(
             () =>
@@ -140,7 +145,11 @@ test.describe("Draft rotation does not mutate previous posts in feed", () => {
         }
 
         // Let the UI settle; then re-locate the first card to avoid stale locators
-        await page.waitForTimeout(3000);
+        const baselineAfterDraft = await getCanvasSaveStats(page);
+        await waitForCanvasSaveDelta(page, {
+            baseline: baselineAfterDraft,
+            minEventDelta: 1,
+        });
         const firstCardAgain = page
             .locator(`[data-canvas-id="${replyId}"]`)
             .first();

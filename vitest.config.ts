@@ -1,5 +1,5 @@
 import { defineConfig } from "vitest/config";
-
+import path from "path";
 const SHARED = {
     isolate: false,
     sequence: { concurrent: false, shuffle: false } as const,
@@ -40,8 +40,22 @@ const NODE = defineConfig({
 
 // jsdom project: only *.dom.*
 const JSDOM = defineConfig({
+    resolve: {
+        // Force a single React instance across the graph
+        dedupe: ["react", "react-dom"],
+        // (Optional but handy in monorepos) hard alias to root node_modules
+        /* alias: {
+            react: path.resolve("node_modules/react"),
+            "react-dom": path.resolve("node_modules/react-dom"),
+        }, */
+    },
+    optimizeDeps: {
+        // Prebundle one copy only
+        include: ["react", "react-dom"],
+    },
     test: {
         ...SHARED,
+
         name: "happy-dom",
         environment: "happy-dom",
         globals: true,

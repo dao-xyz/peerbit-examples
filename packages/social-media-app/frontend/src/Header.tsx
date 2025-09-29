@@ -100,6 +100,7 @@ export const Header = (props: HeaderProps) => {
                                                 <ProfileButton
                                                     size={24}
                                                     className="h-full p-1 "
+                                                    enableNavigate={false}
                                                     publicKey={
                                                         peer.identity.publicKey
                                                     }
