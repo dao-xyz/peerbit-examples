@@ -3,7 +3,7 @@ import {
     type Page,
     type TestInfo,
 } from "@playwright/test";
-import { test, expect } from "./fixtures/persistentContext";
+import { test, expect } from "@playwright/test";
 import { withSearchParams } from "./utils/url";
 import { startReplicator } from "./replicator/replicatorNode";
 import { launchPersistentBrowserContext } from "./utils/persistentBrowser";
@@ -42,7 +42,7 @@ async function waitForComposer(page: Page) {
 }
 
 // skip for now because peerbit does not support non-persistent node live updates
-test.skip("Two users relaying via node replicator", () => {
+test("Two users relaying via node replicator", () => {
     test.setTimeout(60_000);
     let bootstrap: string[] = [];
     let stopReplicator: (() => Promise<void>) | undefined;

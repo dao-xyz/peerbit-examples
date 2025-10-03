@@ -5,9 +5,22 @@ import { type Multiaddr, multiaddr } from "@multiformats/multiaddr";
 // import your named export
 import { BOOTSTRAP_ADDRS } from "../src/bootstrap";
 
+function toOptions(multiaddr: Multiaddr) {
+    var opts: { family: string; host: string; port: number } = {
+        family: '',
+        host: '',
+        port: 0
+    };
+    var parsed = multiaddr.toString().split('/')
+    opts.family = parsed[1] === 'ip4' ? 'ipv4' : 'ipv6'
+    opts.host = parsed[2]
+    opts.port = Number(parsed[4])
+    return opts
+}
+
 // --- helpers ---
 function toHostPortScheme(ma: Multiaddr) {
-    const { host, port } = ma.toOptions(); // { host, port }
+    const { host, port } = toOptions(ma);
     const s = ma.toString();
     const secure = s.includes("/tls") || s.includes("/wss");
     const scheme = secure ? "https" : "http"; // maps WS to HTTP scheme

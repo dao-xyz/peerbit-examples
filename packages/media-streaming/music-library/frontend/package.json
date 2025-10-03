@@ -20,7 +20,7 @@
     "dependencies": {
         "react-spinners": "^0.17.0",
         "peerbit": "^4",
-        "@peerbit/document": "^9",
+        "@peerbit/document": "^10",
         "@peerbit/react": "*",
         "@peerbit/media-streaming": "*",
         "@peerbit/media-streaming-web": "*",

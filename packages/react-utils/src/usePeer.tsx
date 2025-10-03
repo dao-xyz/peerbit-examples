@@ -17,7 +17,6 @@ import { useMount } from "./useMount.js";
 import { createClient, createHost } from "@peerbit/proxy-window";
 import { ProgramClient } from "@peerbit/program";
 import { webSockets } from "@libp2p/websockets";
-import * as filters from "@libp2p/websockets/filters";
 import { detectIncognito } from "detectincognitojs";
 import { waitFor } from "@testing-library/dom";
 import { Libp2p } from "@libp2p/interface";
@@ -213,7 +212,7 @@ export const PeerProvider = (options: PeerOptions) => {
                                 // Mark expired and remove proactively
                                 try {
                                     mutex.release(lockKey);
-                                } catch {}
+                                } catch { }
                             }
                         };
                         document.addEventListener(
@@ -290,20 +289,20 @@ export const PeerProvider = (options: PeerOptions) => {
                         connectionMonitor: { enabled: false },
                         ...(nodeOptions.network === "local"
                             ? {
-                                  connectionGater: {
-                                      denyDialMultiaddr: () => false,
-                                  },
-                                  transports: [
-                                      webSockets({ filter: filters.all }) /* ,
+                                connectionGater: {
+                                    denyDialMultiaddr: () => false,
+                                },
+                                transports: [
+                                    webSockets({}) /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }
+                                ],
+                            }
                             : {
-                                  transports: [
-                                      webSockets() /* ,
+                                transports: [
+                                    webSockets() /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }) /* 
+                                ],
+                            }) /* 
                         services: {
                             pubsub: (c) =>
                                 new DirectSub(c, { canRelayMessage: true }),
@@ -411,7 +410,7 @@ export const PeerProvider = (options: PeerOptions) => {
                                 })
                             );
                         }
-                    } catch {}
+                    } catch { }
                 });
                 if (nodeOptions.waitForConnnected === true) {
                     await promise;
@@ -451,7 +450,7 @@ export const PeerProvider = (options: PeerOptions) => {
                             detail: (window as any).__peerInfo,
                         })
                     );
-                } catch {}
+                } catch { }
             }
 
             setPeer(newPeer);

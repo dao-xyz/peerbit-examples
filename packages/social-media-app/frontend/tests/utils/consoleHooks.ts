@@ -5,6 +5,7 @@ export type ConsoleHook = {
     clear: () => void;
     errors: () => ConsoleMessage[];
     messages: () => ConsoleMessage[];
+    pageErrors: () => Error[];
 };
 
 /**
@@ -13,11 +14,17 @@ export type ConsoleHook = {
  */
 export function attachConsoleHooks(
     page: Page,
-    opts?: { logAll?: boolean; echoErrors?: boolean }
+    opts?: {
+        logAll?: boolean;
+        echoErrors?: boolean;
+        capturePageErrors?: boolean;
+    }
 ): ConsoleHook {
     const all: ConsoleMessage[] = [];
     const errs: ConsoleMessage[] = [];
-    const { logAll = false, echoErrors = true } = opts || {};
+    const pageErrs: Error[] = [];
+    const { logAll = false, echoErrors = true, capturePageErrors = false } =
+        opts || {};
 
     const onConsole = (msg: ConsoleMessage) => {
         all.push(msg);
@@ -31,9 +38,8 @@ export function attachConsoleHooks(
             if (echoErrors) {
                 const loc = msg.location();
                 const locStr = loc?.url
-                    ? `${loc.url}:${loc.lineNumber ?? 0}:${
-                          loc.columnNumber ?? 0
-                      }`
+                    ? `${loc.url}:${loc.lineNumber ?? 0}:${loc.columnNumber ?? 0
+                    }`
                     : "<no-location>";
                 // eslint-disable-next-line no-console
                 console.error(
@@ -45,14 +51,33 @@ export function attachConsoleHooks(
 
     page.on("console", onConsole);
 
+    const onPageError = (err: Error) => {
+        pageErrs.push(err);
+        if (echoErrors) {
+            // eslint-disable-next-line no-console
+            console.error(`Page error: ${err.stack || err.message || err}`);
+        }
+    };
+
+    if (capturePageErrors) {
+        page.on("pageerror", onPageError);
+    }
+
     return {
-        stop: () => page.off("console", onConsole),
+        stop: () => {
+            page.off("console", onConsole);
+            if (capturePageErrors) {
+                page.off("pageerror", onPageError);
+            }
+        },
         clear: () => {
             all.length = 0;
             errs.length = 0;
+            pageErrs.length = 0;
         },
         errors: () => errs.slice(),
         messages: () => all.slice(),
+        pageErrors: () => pageErrs.slice(),
     };
 }
 
@@ -62,16 +87,22 @@ export function attachConsoleHooks(
 export async function withConsoleCapture<T>(
     page: Page,
     run: () => Promise<T>,
-    opts?: { logAll?: boolean; echoErrors?: boolean }
+    opts?: { logAll?: boolean; echoErrors?: boolean; capturePageErrors?: boolean }
 ): Promise<{
     result: T;
     errors: ConsoleMessage[];
     messages: ConsoleMessage[];
+    pageErrors: Error[];
 }> {
     const hook = attachConsoleHooks(page, opts);
     try {
         const result = await run();
-        return { result, errors: hook.errors(), messages: hook.messages() };
+        return {
+            result,
+            errors: hook.errors(),
+            messages: hook.messages(),
+            pageErrors: hook.pageErrors(),
+        };
     } finally {
         hook.stop();
     }

@@ -1,4 +1,3 @@
-import exp from "constants";
 import { test, expect } from "./fixtures/persistentContext";
 import { expectPersistent } from "./utils/persistence";
 import { OFFLINE_BASE } from "./utils/url";
@@ -25,7 +24,7 @@ test.describe("Draft recovery", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
-            } catch {}
+            } catch { }
         });
     });
 

@@ -14,7 +14,7 @@
     },
     "dependencies": {
         "peerbit": "^4",
-        "@peerbit/document": "^9",
+        "@peerbit/document": "^10",
         "@peerbit/example-many-chat-rooms": "^0",
         "@peerbit/react": "*",
         "react": "^19.1.0",

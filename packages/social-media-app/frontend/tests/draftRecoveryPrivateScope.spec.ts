@@ -1,4 +1,6 @@
 import { test, expect } from "./fixtures/persistentContext";
+import { withConsoleCapture } from "./utils/consoleHooks";
+import { setupConsoleCapture } from "./utils/consoleCapture";
 import { OFFLINE_BASE } from "./utils/url";
 
 function uid(prefix: string) {
@@ -15,46 +17,74 @@ test.describe("Draft recovery privacy", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
-            } catch {}
+            } catch { }
         });
     });
 
-    test("does not recover from public scope (published replies)", async ({
-        page,
-    }) => {
-        await page.goto(OFFLINE_BASE);
+    test(
+        "does not recover from public scope (published replies)",
+        async ({ page }, testInfo) => {
+            setupConsoleCapture(page, testInfo, {
+                printAll: true,
+                failOnError: false,
+                capturePageErrors: true,
+                captureWebErrors: true,
+            });
 
-        // Fill a message and publish it (to create a public reply)
-        const toolbar = page.getByTestId("toolbarcreatenew").first();
-        const textArea = toolbar.locator("textarea");
-        await expect(textArea).toBeVisible({ timeout: 10000 });
+            const { errors, pageErrors } = await withConsoleCapture(
+                page,
+                async () => {
+                    await page.goto(OFFLINE_BASE);
 
-        const msg = uid("Public reply");
-        await textArea.fill(msg);
+                    // Fill a message and publish it (to create a public reply)
+                    const toolbar = page.getByTestId("toolbarcreatenew").first();
+                    const textArea = toolbar.locator("textarea");
+                    await expect(textArea).toBeVisible({ timeout: 10000 });
 
-        // Publish
-        await toolbar.getByTestId("send-button").click();
+                    const msg = uid("Public reply");
+                    await textArea.fill(msg);
 
-        // Give some time for publish and indexing
-        await page.waitForTimeout(2000);
+                    // Publish
+                    await toolbar.getByTestId("send-button").click();
 
-        // Reload to get a fresh composer
-        await page.reload();
+                    // Give some time for publish and indexing
+                    await page.waitForTimeout(2000);
 
-        const toolbar2 = page.getByTestId("toolbarcreatenew").first();
-        const areas = toolbar2.locator("textarea");
+                    // Reload to get a fresh composer
+                    await page.reload();
 
-        // Composer should show exactly one empty text area (fresh draft),
-        // not the previously published message recovered.
-        await expect(areas).toHaveCount(1, { timeout: 10000 });
-        await page.waitForFunction(
-            () => {
-                const el = document.querySelector(
-                    '[data-testid="toolbarcreatenew"] textarea'
-                ) as HTMLTextAreaElement | null;
-                return !el || el.value === "";
-            },
-            { timeout: 10000 }
-        );
-    });
+                    const toolbar2 = page.getByTestId("toolbarcreatenew").first();
+                    const areas = toolbar2.locator("textarea");
+
+                    // Composer should show exactly one empty text area (fresh draft),
+                    // not the previously published message recovered.
+                    await expect(areas).toHaveCount(1, { timeout: 10000 });
+                    await page.waitForFunction(
+                        () => {
+                            const el = document.querySelector(
+                                '[data-testid="toolbarcreatenew"] textarea'
+                            ) as HTMLTextAreaElement | null;
+                            return !el || el.value === "";
+                        },
+                        { timeout: 10000 }
+                    );
+                },
+                { logAll: true, echoErrors: true, capturePageErrors: true }
+            );
+
+            const allErrors = [
+                ...errors.map((msg) => msg.text()),
+                ...pageErrors.map(
+                    (err) => err.stack || err.message || String(err)
+                ),
+            ].filter(Boolean);
+
+            if (allErrors.length) {
+                await testInfo.attach("console-errors", {
+                    body: Buffer.from(allErrors.join("\n"), "utf8"),
+                    contentType: "text/plain",
+                });
+            }
+        }
+    );
 });

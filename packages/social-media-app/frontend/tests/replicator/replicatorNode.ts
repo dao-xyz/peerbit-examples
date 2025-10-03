@@ -1,7 +1,6 @@
 import { Peerbit } from "peerbit";
 import { createRootScope, Scope } from "@giga-app/interface";
 import { webSockets } from "@libp2p/websockets";
-import * as filters from "@libp2p/websockets/filters";
 import { noise } from "@chainsafe/libp2p-noise";
 
 export async function startReplicator() {
@@ -11,7 +10,7 @@ export async function startReplicator() {
             addresses: {
                 listen: ["/ip4/127.0.0.1/tcp/0/ws"],
             },
-            transports: [webSockets({ filter: filters.all })],
+            transports: [webSockets({})],
             connectionManager: { maxConnections: 100 },
             connectionMonitor: { enabled: false },
         },

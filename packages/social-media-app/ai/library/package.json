@@ -46,7 +46,7 @@
     },
     "dependencies": {
         "@giga-app/interface": "^0.0.24",
-        "@peerbit/document": "^9",
+        "@peerbit/document": "^10",
         "ollama": "^0.5.14",
         "peerbit": "^4",
         "uuid": "^10.0.0"

@@ -14,7 +14,7 @@
     },
     "dependencies": {
         "peerbit": "^4",
-        "@peerbit/document": "^9",
+        "@peerbit/document": "^10",
         "@peerbit/peer-names": "^0.0.1",
         "@peerbit/react": "*",
         "react": "^19.1.0",
