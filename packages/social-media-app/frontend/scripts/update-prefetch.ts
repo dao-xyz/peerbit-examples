@@ -7,15 +7,15 @@ import { BOOTSTRAP_ADDRS } from "../src/bootstrap";
 
 function toOptions(multiaddr: Multiaddr) {
     var opts: { family: string; host: string; port: number } = {
-        family: '',
-        host: '',
-        port: 0
+        family: "",
+        host: "",
+        port: 0,
     };
-    var parsed = multiaddr.toString().split('/')
-    opts.family = parsed[1] === 'ip4' ? 'ipv4' : 'ipv6'
-    opts.host = parsed[2]
-    opts.port = Number(parsed[4])
-    return opts
+    var parsed = multiaddr.toString().split("/");
+    opts.family = parsed[1] === "ip4" ? "ipv4" : "ipv6";
+    opts.host = parsed[2];
+    opts.port = Number(parsed[4]);
+    return opts;
 }
 
 // --- helpers ---

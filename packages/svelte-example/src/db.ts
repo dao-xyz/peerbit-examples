@@ -52,14 +52,14 @@ export const createClient = async (localNetwork = false) => {
             },
             connectionGater: localNetwork
                 ? {
-                    denyDialMultiaddr: () => {
-                        // by default libp2p refuse to dial local addresses from the browser since they
-                        // are usually sent by remote peers broadcasting undialable multiaddrs but
-                        // here we are explicitly connecting to a local node so do not deny dialing
-                        // any discovered address
-                        return false;
-                    },
-                }
+                      denyDialMultiaddr: () => {
+                          // by default libp2p refuse to dial local addresses from the browser since they
+                          // are usually sent by remote peers broadcasting undialable multiaddrs but
+                          // here we are explicitly connecting to a local node so do not deny dialing
+                          // any discovered address
+                          return false;
+                      },
+                  }
                 : undefined,
             transports: [
                 webSockets({}),
@@ -78,7 +78,7 @@ export const createClient = async (localNetwork = false) => {
         // to get more info how to launch one
         await client.dial(
             "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
-            (await (await fetch("http://localhost:8082/peer/id")).text())
+                (await (await fetch("http://localhost:8082/peer/id")).text())
         );
     } else {
         // will dial public relay servers

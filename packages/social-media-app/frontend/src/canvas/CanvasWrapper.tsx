@@ -259,7 +259,7 @@ const _CanvasWrapper = (
             query,
             debounce: 123,
             local: true,
-            debug: !!debug && "useQuery ELEMENTS",
+            /* debug: !!debug && "useQuery ELEMENTS", */
             prefetch: true,
             remote: {
                 // Do not block local rendering on remote joining; keep eager but with zero wait
@@ -281,8 +281,6 @@ const _CanvasWrapper = (
             },
         }
     );
-
-    debug && console.log("useQuery ELEMENTS", { rawRects });
 
     // Defensive: only expose rects that belong to this canvas
     const rects = useMemo(() => {

@@ -24,7 +24,7 @@ test.describe("Draft recovery", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
-            } catch { }
+            } catch {}
         });
     });
 
@@ -65,7 +65,7 @@ test.describe("Draft recovery", () => {
 
         await waitForCanvasSaveDelta(page, {
             baseline: saveBaseline,
-            minRectDelta: 1,
+            minRectDelta: 2,
         });
 
         // Capture identity and reload to trigger recovery
@@ -199,11 +199,22 @@ test.describe("Draft recovery", () => {
         // Exactly one text editor with recovered text
         const textAreas = toolbar2.locator("textarea");
         await expect(textAreas).toHaveCount(1, { timeout: 20000 });
-        await expect
-            .poll(async () => await textAreas.first().inputValue(), {
-                timeout: 20000,
-                message: "Waiting for recovered text with image to appear",
-            })
-            .toBe(msg);
+        // the frontend is flaky, running it debug it works (so maybe timing issue, because debug is slower), but non debug it fails
+        try {
+            await expect
+                .poll(async () => await textAreas.first().inputValue(), {
+                    timeout: 20000,
+                    message: "Waiting for recovered text with image to appear",
+                })
+                .toBe(msg);
+        } catch (error) {
+            console.error(
+                "Error occurred while waiting for recovered text:",
+                error
+            );
+            const currentValue = await textAreas.first().inputValue();
+            console.error("Current textarea value:", currentValue);
+            throw error; // Re-throw the error after logging
+        }
     });
 });

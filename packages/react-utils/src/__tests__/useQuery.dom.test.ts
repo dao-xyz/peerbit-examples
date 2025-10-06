@@ -54,14 +54,18 @@ class PostsDB extends Program<{ replicate?: boolean }> {
 describe("useQuery (integration with Documents)", () => {
     let peerWriter: Peerbit;
     let peerReader: Peerbit;
+    let peerReader2: Peerbit | undefined;
     let dbWriter: PostsDB;
     let dbReader: PostsDB;
+    let dbReader2: PostsDB | undefined;
     let autoUnmount: undefined | (() => void);
 
     beforeEach(async () => {
         await sodium.ready;
         peerWriter = await Peerbit.create();
         peerReader = await Peerbit.create();
+        peerReader2 = undefined;
+        dbReader2 = undefined;
     });
     const setupConnected = async () => {
         await peerWriter.dial(peerReader);
@@ -94,6 +98,7 @@ describe("useQuery (integration with Documents)", () => {
         autoUnmount = undefined;
         await peerWriter?.stop();
         await peerReader?.stop();
+        await peerReader2?.stop();
     });
 
     function renderUseQuery<R extends boolean>(
@@ -233,6 +238,129 @@ describe("useQuery (integration with Documents)", () => {
 
         await waitFor(() => expect(result.current.items.length).toBe(1));
         expect(result.current.items[0].message).toBe("late");
+    });
+
+    it("pushes remote writes from replicator to non-replicator", async () => {
+        await setupConnected();
+
+        const { result } = renderUseQuery(dbReader, {
+            query: {},
+            resolve: true,
+            local: false,
+            remote: { reach: { eager: true } },
+            updates: { merge: true },
+            prefetch: false,
+        });
+
+        await waitFor(() => {
+            expect(result.current).toBeDefined();
+        });
+
+        expect(result.current.items.length).toBe(0);
+
+        await act(async () => {
+            await dbWriter.posts.put(new Post({ message: "replicator-push" }));
+        });
+
+        await act(async () => {
+            await result.current.loadMore();
+        });
+
+        await waitFor(
+            () =>
+                expect(
+                    result.current.items.map((p) => (p as Post).message)
+                ).toContain("replicator-push"),
+            { timeout: 10_000 }
+        );
+    });
+
+    it("fanouts pushed updates to multiple observers", async () => {
+        await setupConnected();
+
+        peerReader2 = await Peerbit.create();
+        await peerReader2.dial(peerWriter);
+        dbReader2 = await peerReader2.open<PostsDB>(dbWriter.address, {
+            args: { replicate: false },
+        });
+
+        await dbReader2.posts.log.waitForReplicator(
+            peerWriter.identity.publicKey
+        );
+
+        const hookOne = renderUseQuery(dbReader, {
+            query: {},
+            resolve: true,
+            local: false,
+            remote: { reach: { eager: true } },
+            updates: { merge: true },
+            prefetch: false,
+        });
+
+        const hookTwo = renderUseQuery(dbReader2, {
+            query: {},
+            resolve: true,
+            local: false,
+            remote: { reach: { eager: true } },
+            updates: { merge: true },
+            prefetch: false,
+        });
+
+        await waitFor(() => {
+            expect(hookOne.result.current).toBeDefined();
+            expect(hookTwo.result.current).toBeDefined();
+        });
+
+        await act(async () => {
+            await dbWriter.posts.put(new Post({ message: "broadcast" }));
+        });
+
+        await act(async () => {
+            await hookOne.result.current.loadMore();
+            await hookTwo.result.current.loadMore();
+        });
+
+        await waitFor(
+            () =>
+                expect(
+                    hookOne.result.current.items.some(
+                        (p) => (p as Post).message === "broadcast"
+                    )
+                ).toBe(true),
+            { timeout: 10_000 }
+        );
+
+        await waitFor(
+            () =>
+                expect(
+                    hookTwo.result.current.items.some(
+                        (p) => (p as Post).message === "broadcast"
+                    )
+                ).toBe(true),
+            { timeout: 10_000 }
+        );
+
+        await act(async () => {
+            await dbReader.posts.put(new Post({ message: "observer-origin" }));
+        });
+
+        await act(async () => {
+            await hookOne.result.current.loadMore();
+            await hookTwo.result.current.loadMore();
+        });
+
+        await waitFor(
+            () =>
+                expect(
+                    hookTwo.result.current.items.some(
+                        (p) => (p as Post).message === "observer-origin"
+                    )
+                ).toBe(true),
+            { timeout: 10_000 }
+        );
+
+        hookOne.unmount();
+        hookTwo.unmount();
     });
 
     describe("merge", () => {

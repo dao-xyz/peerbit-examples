@@ -23,8 +23,11 @@ export function attachConsoleHooks(
     const all: ConsoleMessage[] = [];
     const errs: ConsoleMessage[] = [];
     const pageErrs: Error[] = [];
-    const { logAll = false, echoErrors = true, capturePageErrors = false } =
-        opts || {};
+    const {
+        logAll = false,
+        echoErrors = true,
+        capturePageErrors = false,
+    } = opts || {};
 
     const onConsole = (msg: ConsoleMessage) => {
         all.push(msg);
@@ -38,8 +41,9 @@ export function attachConsoleHooks(
             if (echoErrors) {
                 const loc = msg.location();
                 const locStr = loc?.url
-                    ? `${loc.url}:${loc.lineNumber ?? 0}:${loc.columnNumber ?? 0
-                    }`
+                    ? `${loc.url}:${loc.lineNumber ?? 0}:${
+                          loc.columnNumber ?? 0
+                      }`
                     : "<no-location>";
                 // eslint-disable-next-line no-console
                 console.error(
@@ -87,7 +91,11 @@ export function attachConsoleHooks(
 export async function withConsoleCapture<T>(
     page: Page,
     run: () => Promise<T>,
-    opts?: { logAll?: boolean; echoErrors?: boolean; capturePageErrors?: boolean }
+    opts?: {
+        logAll?: boolean;
+        echoErrors?: boolean;
+        capturePageErrors?: boolean;
+    }
 ): Promise<{
     result: T;
     errors: ConsoleMessage[];

@@ -209,6 +209,7 @@ export const useQuery = <
                 resolve,
                 signal: abortSignal,
                 updates: {
+                    push: true,
                     merge:
                         typeof options.updates === "boolean" && options.updates
                             ? true

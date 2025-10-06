@@ -197,6 +197,7 @@ export const App = () => {
         import.meta.env.MODE === "development"
             ? {
                   type: "local",
+                  /*  bootstrap: ["/ip4/127.0.0.1/tcp/58027/ws/p2p/12D3KooWPpLfzjDwtLPQp8SPouVwH8aU1Zn2H6MCnSakn6vfFCaT"], */
               }
             : { bootstrap: BOOTSTRAP_ADDRS };
 
