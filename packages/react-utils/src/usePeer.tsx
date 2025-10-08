@@ -212,7 +212,7 @@ export const PeerProvider = (options: PeerOptions) => {
                                 // Mark expired and remove proactively
                                 try {
                                     mutex.release(lockKey);
-                                } catch {}
+                                } catch { }
                             }
                         };
                         document.addEventListener(
@@ -289,20 +289,23 @@ export const PeerProvider = (options: PeerOptions) => {
                         connectionMonitor: { enabled: false },
                         ...(nodeOptions.network === "local"
                             ? {
-                                  connectionGater: {
-                                      denyDialMultiaddr: () => false,
-                                  },
-                                  transports: [
-                                      webSockets({}) /* ,
+                                connectionGater: {
+                                    denyDialMultiaddr: () => false,
+                                },
+                                transports: [
+                                    webSockets({}) /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }
+                                ],
+                            }
                             : {
-                                  transports: [
-                                      webSockets() /* ,
+                                connectionGater: {
+                                    denyDialMultiaddr: () => false, // TODO do right here, dont allow local dials except bootstrap
+                                },
+                                transports: [
+                                    webSockets() /* ,
                                     circuitRelayTransport(), */,
-                                  ],
-                              }) /* 
+                                ],
+                            }) /* 
                         services: {
                             pubsub: (c) =>
                                 new DirectSub(c, { canRelayMessage: true }),
@@ -410,7 +413,7 @@ export const PeerProvider = (options: PeerOptions) => {
                                 })
                             );
                         }
-                    } catch {}
+                    } catch { }
                 });
                 if (nodeOptions.waitForConnnected === true) {
                     await promise;
@@ -450,7 +453,7 @@ export const PeerProvider = (options: PeerOptions) => {
                             detail: (window as any).__peerInfo,
                         })
                     );
-                } catch {}
+                } catch { }
             }
 
             setPeer(newPeer);

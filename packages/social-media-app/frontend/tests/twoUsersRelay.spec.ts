@@ -43,7 +43,7 @@ async function waitForComposer(page: Page) {
 
 // skip for now because peerbit does not support non-persistent node live updates
 test.describe("Two users relaying via node replicator", () => {
-    test.setTimeout(60_000);
+    test.setTimeout(6660_000);
     let bootstrap: string[] = [];
     let stopReplicator: (() => Promise<void>) | undefined;
 

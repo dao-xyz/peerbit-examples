@@ -59,8 +59,8 @@ export type UseQuerySharedOptions<
     updates?: UpdateOptions<T, I, R>;
     local?: boolean;
     remote?:
-        | boolean
-        | RemoteQueryOptions<AbstractSearchRequest, AbstractSearchResult, any>;
+    | boolean
+    | RemoteQueryOptions<AbstractSearchRequest, AbstractSearchResult, any>;
 } & QueryOptions;
 
 /* ────────────────────────── Main Hook ────────────────────────── */
@@ -133,7 +133,7 @@ export const useQuery = <
         iteratorRefs.current?.forEach(({ iterator }) => iterator.close());
         iteratorRefs.current = [];
 
-        closeControllerRef.current?.abort();
+        closeControllerRef.current?.abort(new Error("Reset"));
         closeControllerRef.current = new AbortController();
         emptyResultsRef.current = false;
         waitedOnceRef.current = false;
@@ -170,6 +170,7 @@ export const useQuery = <
         };
         let draining = false;
         const scheduleDrain = (ref: ResultsIterator<RT>, amount: number) => {
+            log("Schedule drain", draining, ref, amount);
             if (draining) return;
             draining = true;
             loadMore(amount)
@@ -188,23 +189,23 @@ export const useQuery = <
                 local: options.local ?? true,
                 remote: options.remote
                     ? {
-                          ...(typeof options?.remote === "object"
-                              ? {
-                                    ...options.remote,
-                                    onLateResults: onMissedResults,
-                                    wait: {
-                                        ...options?.remote?.wait,
-                                        timeout:
-                                            options?.remote?.wait?.timeout ??
-                                            5000,
-                                    },
-                                }
-                              : options?.remote
+                        ...(typeof options?.remote === "object"
+                            ? {
+                                ...options.remote,
+                                onLateResults: onMissedResults,
+                                wait: {
+                                    ...options?.remote?.wait,
+                                    timeout:
+                                        options?.remote?.wait?.timeout ??
+                                        5000,
+                                },
+                            }
+                            : options?.remote
                                 ? {
-                                      onLateResults: onMissedResults,
-                                  }
+                                    onLateResults: onMissedResults,
+                                }
                                 : undefined),
-                      }
+                    }
                     : undefined,
                 resolve,
                 signal: abortSignal,
@@ -215,9 +216,10 @@ export const useQuery = <
                             ? true
                             : typeof options.updates === "object" &&
                                 options.updates.merge
-                              ? true
-                              : false,
+                                ? true
+                                : false,
                     onChange: (evt) => {
+                        log("Live update", evt);
                         if (evt.added.length > 0) {
                             scheduleDrain(
                                 iterator as ResultsIterator<RT>,
@@ -226,6 +228,7 @@ export const useQuery = <
                         }
                     },
                     onResults: (batch, props) => {
+                        log("onResults", { batch, props, currentRef: !!currentRef });
                         if (
                             props.reason === "join" ||
                             props.reason === "change"
@@ -293,6 +296,7 @@ export const useQuery = <
         batches: { ref: IteratorRef; items: Item[] }[]
     ): Promise<boolean> => {
         if (!iterators.length) {
+            log("No iterators in handleBatch");
             return false;
         }
 
@@ -301,6 +305,7 @@ export const useQuery = <
             0
         );
         if (totalFetched === 0) {
+            log("No items fetched");
             emptyResultsRef.current = iterators.every((i) => i.iterator.done());
             return !emptyResultsRef.current;
         }
@@ -328,6 +333,7 @@ export const useQuery = <
         const freshItems: Item[] = [];
         let hasMutations = false;
 
+        log("Processing batches", { processed, keyIndex });
         for (const { ref, items } of processed) {
             const db = ref.db;
             for (const item of items) {
@@ -350,7 +356,7 @@ export const useQuery = <
                     const current = next[existingIndex];
                     const currentContext: Context | undefined = (
                         current as WithContext<any>
-                    ).__context;
+                    )?.__context;
                     const incomingContext: Context | undefined = ctx;
                     const shouldReplace =
                         !currentContext ||
@@ -382,15 +388,23 @@ export const useQuery = <
             }
         }
 
+
         if (!freshItems.length && !hasMutations) {
             emptyResultsRef.current = iterators.every((i) => i.iterator.done());
+            log("No new items or mutations");
             return !emptyResultsRef.current;
         }
+
 
         const combined = reverseRef.current
             ? [...freshItems.reverse(), ...next]
             : [...next, ...freshItems];
 
+        log("Updating all with", {
+            prevLength: prev.length,
+            freshLength: freshItems.length,
+            combinedLength: combined.length,
+        });
         updateAll(combined);
 
         emptyResultsRef.current = iterators.every((i) => i.iterator.done());

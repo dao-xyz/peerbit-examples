@@ -104,7 +104,7 @@ export const DraftManagerProvider: React.FC<{
         if (!shouldLogForParent(payload.parentId as string | undefined)) return;
         try {
             console.debug("[DraftManager]", name, JSON.stringify(payload));
-        } catch {}
+        } catch { }
         if (captureEvents)
             emitDebugEvent({ source: "DraftManager", name, ...payload });
     };
@@ -226,11 +226,11 @@ export const DraftManagerProvider: React.FC<{
             const children: CanvasIx[] = await privateScope.replies.index
                 .iterate({ query: getImmediateRepliesQuery(parentInPrivate) })
                 .all();
-            console.error("recoverLatestForParent", {
-                parent: parent.idString,
-                count: children.length,
-                ids: children.map((c) => c.idString),
-            });
+            /*   console.error("recoverLatestForParent", {
+                  parent: parent.idString,
+                  count: children.length,
+                  ids: children.map((c) => c.idString),
+              }); */
             // In private scope, replies are authored by the current user; avoid strict key match to prevent
             // recovery failures if the identity re-initializes between reloads.
             children.sort(
@@ -603,7 +603,7 @@ export const DraftManagerProvider: React.FC<{
                                     await parent.nearestScope._hierarchicalReindex!.flush(
                                         toPublish.idString
                                     );
-                                } catch {}
+                                } catch { }
                                 // Emit debug event after flush to ensure the consumer can navigate and read
                                 // Use base64url(canvas.id) so tests can use it for both URL and DOM selectors
                                 logEvt("replyPublished", {
@@ -616,7 +616,7 @@ export const DraftManagerProvider: React.FC<{
                                         parent.idString,
                                         toPublish.idString
                                     );
-                                } catch {}
+                                } catch { }
                                 perfMark("parentFlush");
                             } catch (e) {
                                 console.error(
@@ -646,10 +646,10 @@ export const DraftManagerProvider: React.FC<{
                                     ...perfMarks,
                                     total: Object.keys(perfMarks).length
                                         ? perfMarks[
-                                              Object.keys(
-                                                  perfMarks
-                                              ).pop() as string
-                                          ]
+                                        Object.keys(
+                                            perfMarks
+                                        ).pop() as string
+                                        ]
                                         : 0,
                                 } as any;
                                 console.info("[Perf] publish timings", payload);
@@ -659,7 +659,7 @@ export const DraftManagerProvider: React.FC<{
                                     })
                                 );
                             }
-                        } catch {}
+                        } catch { }
                     });
 
                 publishQueue.current.set(bucket, next);
@@ -805,7 +805,7 @@ export const DraftManagerProvider: React.FC<{
                                 rec.canvas.nearestScope
                                     ?.remove(rec.canvas, { drop: true })
                                     .catch(() => void 0);
-                            } catch {}
+                            } catch { }
                         }
                         records.current.delete(b);
                         debouncers.current.get(b)?.cancel?.();
