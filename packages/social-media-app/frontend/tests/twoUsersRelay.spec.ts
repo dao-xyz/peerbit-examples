@@ -115,6 +115,7 @@ test.describe("Two users relaying via node replicator", () => {
                     { timeout: 60_000 }
                 )
                 .toBeGreaterThan(0);
+
         } finally {
             await user2Context.close();
         }

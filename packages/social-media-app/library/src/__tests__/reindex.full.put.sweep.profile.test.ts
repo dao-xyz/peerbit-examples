@@ -1,6 +1,6 @@
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Parameter sweep to observe scaling of full:put ctx/index phases.
 // Uses the __LAST_FULL_PUT hook added when FULL_PUT_TEST_HOOK=1.
@@ -39,8 +39,7 @@ describe("reindex full:put scaling sweep", () => {
             const hook = (globalThis as any).__LAST_FULL_PUT;
             expect(hook).to.be.ok;
             console.log(
-                `FULL_PUT_SWEEP N=${N} elements=${
-                    hook.elements
+                `FULL_PUT_SWEEP N=${N} elements=${hook.elements
                 } ctxMs=${hook.ctxMs.toFixed(2)} indexMs=${hook.indexMs.toFixed(
                     2
                 )} totalMs=${hook.totalMs.toFixed(2)} bytes=${hook.bytes}`

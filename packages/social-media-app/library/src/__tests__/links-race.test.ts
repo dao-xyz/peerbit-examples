@@ -1,7 +1,7 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
 import { waitForResolved, delay } from "@peerbit/time";
 import { Canvas, Scope, getImmediateRepliesQuery } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 describe("links: cross-scope resolution race", () => {
     let session: TestSession;

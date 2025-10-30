@@ -1,7 +1,6 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
 import { createRoot } from "../root.js";
-import { Canvas } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // This test ensures that adaptiveCooldownMinMs trims the first schedule delay inside a cooldown window.
 // We simulate by scheduling a full reindex, waiting for completion, then quickly scheduling another one

@@ -33,7 +33,7 @@
     },
     "scripts": {
         "clean": "shx rm -rf lib/*",
-        "build": "yarn clean && tsc -p tsconfig.json && yarn cp-images",
+        "build": "pnpm run clean && tsc -p tsconfig.json && pnpm run cp-images",
         "cp-images": "shx cp -r ./resources ./lib/esm/",
         "test": "vitest run",
         "test:watch": "vitest",

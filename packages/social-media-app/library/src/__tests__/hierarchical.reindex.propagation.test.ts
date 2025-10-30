@@ -1,5 +1,6 @@
-import { describe, it, expect } from "vitest";
 import { createHierarchicalReindexManager } from "../utils";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
 
 describe("hierarchical reindex (manager semantics)", () => {
     it("schedules only the target canvas; upgrades to full are preserved", async () => {

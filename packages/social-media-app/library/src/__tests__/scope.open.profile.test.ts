@@ -1,10 +1,10 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Scope } from "../content.js";
 // Install runtime monkey profiler (no-op unless SCOPE_OPEN_PROFILE=1)
 // Import after other modules so we can patch loaded constructors more reliably.
 import "../test-utils/monkey-profiler";
+
 
 /**
  * Profiles repeated Scope open cost.
@@ -45,8 +45,7 @@ describe("scope open profiling", () => {
             if (latest) {
                 totals.push(latest.total);
                 console.log(
-                    `SCOPE_OPEN_LOOP iter=${i} total=${
-                        latest.total
+                    `SCOPE_OPEN_LOOP iter=${i} total=${latest.total
                     } phases=${latest.phases
                         .map((p: any) => p.phase + ":" + p.dt)
                         .join(",")}`
@@ -64,10 +63,10 @@ describe("scope open profiling", () => {
             const sorted = [...totals].sort((a, b) => a - b);
             const pick = (p: number) =>
                 sorted[
-                    Math.min(
-                        sorted.length - 1,
-                        Math.floor(p * (sorted.length - 1))
-                    )
+                Math.min(
+                    sorted.length - 1,
+                    Math.floor(p * (sorted.length - 1))
+                )
                 ];
             const sum = totals.reduce((a, b) => a + b, 0);
             const summary = {

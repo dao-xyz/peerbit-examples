@@ -1,6 +1,6 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /**
  * Sanity check: counts how many hierarchical reindex flushes & calls occur
@@ -116,8 +116,7 @@ describe("reindex count: heavy draft lifecycle", () => {
         // We'll allow up to 2x elements to avoid flakiness and revisit after batching optimization.
         const ratio = flushes.length / ELEMENTS;
         console.log(
-            `[reindex-count] flushes=${
-                flushes.length
+            `[reindex-count] flushes=${flushes.length
             } elements=${ELEMENTS} ratio=${ratio.toFixed(
                 2
             )} (target future << 1)`

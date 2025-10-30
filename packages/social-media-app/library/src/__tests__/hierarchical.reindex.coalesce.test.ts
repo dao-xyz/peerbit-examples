@@ -3,12 +3,13 @@ import {
     createHierarchicalReindexManager,
     ReindexCanvasLike,
 } from "../utils.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 class StubCanvas implements ReindexCanvasLike {
     constructor(
         public idString: string,
         private ancestors: StubCanvas[]
-    ) {}
+    ) { }
     async loadPath(_args: {
         includeSelf: boolean;
     }): Promise<ReindexCanvasLike[]> {

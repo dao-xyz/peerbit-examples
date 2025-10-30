@@ -1,4 +1,4 @@
-import { expect } from "chai";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
 
@@ -16,7 +16,7 @@ describe("publish internal perf instrumentation", () => {
         );
     });
     afterEach(async () => {
-        globalThis.removeEventListener("perf:scope.publish", () => {});
+        globalThis.removeEventListener("perf:scope.publish", () => { });
         await session.stop();
     });
 

@@ -1,6 +1,6 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /**
  * Reproduces slow publish (home migration + heavy element copy) expected to exceed target budget.
@@ -114,7 +114,7 @@ describe("post latency: migrate home with heavy elements (EXPECTED FAIL)", () =>
             // For large migrations we expect deferred cleanup (manual or auto)
             expect(
                 names.includes("sync:deferredCleanup") ||
-                    names.includes("sync:autoDeferred"),
+                names.includes("sync:autoDeferred"),
                 `expected deferred cleanup mark, saw: ${names.join(",")}`
             ).to.be.true;
         }

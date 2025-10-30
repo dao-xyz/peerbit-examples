@@ -1,6 +1,6 @@
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
-import { expect } from "chai";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { Profiles } from "../profile.js";
 import { Connection, Device, Identities } from "../identity.js";
 import { equals, randomBytes } from "@peerbit/crypto";
@@ -27,9 +27,9 @@ describe("profile", () => {
             args?.seed instanceof Scope
                 ? args?.seed
                 : new Scope({
-                      seed: args?.seed ? new Uint8Array(args?.seed) : undefined,
-                      publicKey: session.peers[0].identity.publicKey,
-                  }),
+                    seed: args?.seed ? new Uint8Array(args?.seed) : undefined,
+                    publicKey: session.peers[0].identity.publicKey,
+                }),
             {
                 args: {
                     replicate: args?.replicate ?? true,

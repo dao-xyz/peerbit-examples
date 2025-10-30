@@ -1,4 +1,4 @@
-import { expect } from "chai";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
 

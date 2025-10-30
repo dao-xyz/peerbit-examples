@@ -5,6 +5,7 @@ import { delay, waitForResolved } from "@peerbit/time";
 // These are already in your repo (used by your replicator scripts)
 import { createRoot } from "../root.js";
 import { Peerbit } from "peerbit";
+import { describe, it, beforeEach, afterEach } from "vitest";
 
 describe("createRoot", () => {
     let session: TestSession;

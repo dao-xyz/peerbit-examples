@@ -1,7 +1,7 @@
 import { TestSession } from "@peerbit/test-utils";
-import { expect } from "chai";
 import { Identities } from "../identity.js";
 import { waitForResolved } from "@peerbit/time";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 describe("identity", () => {
     let session: TestSession;

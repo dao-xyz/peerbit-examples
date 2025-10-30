@@ -7,12 +7,12 @@ import {
     AddressReference,
     getChildrenLinksQuery,
 } from "../content.js";
-import { expect } from "chai";
 import { Ed25519Keypair, randomBytes, sha256Sync } from "@peerbit/crypto";
 import { createAlbumTemplate, Template, Templates } from "../template.js";
 import { ensurePath } from "./utils.js";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { ViewKind } from "../link.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /* ----------------------- test-local helpers ----------------------- */
 

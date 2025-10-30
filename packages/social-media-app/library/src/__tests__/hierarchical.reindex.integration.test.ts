@@ -1,6 +1,7 @@
 import { strict as assert } from "assert";
 import { Peerbit } from "peerbit";
 import { Scope, Canvas } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 // Lightweight integration exercising Scope with experimentalHierarchicalReindex flag.
 describe("HierarchicalReindexManager.integration", () => {

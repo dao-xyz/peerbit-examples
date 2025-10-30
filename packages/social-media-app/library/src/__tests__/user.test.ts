@@ -1,7 +1,7 @@
 import { TestSession } from "@peerbit/test-utils";
 import { BrowsingHistory } from "../activity.js";
 import { SimpleWebManifest } from "../types.js";
-import { expect } from "chai";
+import { describe, it, expect } from 'vitest'
 
 describe("user", () => {
     let session: TestSession;

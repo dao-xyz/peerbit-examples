@@ -11,6 +11,7 @@ import {
 import { StaticMarkdownText } from "../static/text.js";
 import { sha256Sync } from "@peerbit/crypto";
 import { Layout } from "../link.js";
+import { describe, it, beforeEach, afterEach } from "vitest";
 
 describe("createContext completeness with remote fallback", () => {
     let session: TestSession;

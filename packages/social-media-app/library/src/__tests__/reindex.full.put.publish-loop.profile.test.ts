@@ -1,8 +1,8 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
 import { createRoot } from "../root.js";
 import { Canvas, Scope } from "../content.js";
 import { sha256Base64Sync } from "@peerbit/crypto";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /**
  * Loop profiling scenario approximating frontend behavior:
@@ -153,10 +153,10 @@ describe("reindex publish loop profiling", () => {
                 const sorted = [...arr].sort((a, b) => a - b);
                 const pick = (p: number) =>
                     sorted[
-                        Math.min(
-                            sorted.length - 1,
-                            Math.floor(p * (sorted.length - 1))
-                        )
+                    Math.min(
+                        sorted.length - 1,
+                        Math.floor(p * (sorted.length - 1))
+                    )
                     ];
                 const sum = sorted.reduce((a, b) => a + b, 0);
                 return {
@@ -169,8 +169,7 @@ describe("reindex publish loop profiling", () => {
             const schedStats = quantiles(sched.map((e) => e.scheduleDelay));
             const cooldownStats = quantiles(cooldown.map((e) => e.remaining));
             console.log(
-                `REINDEX_IDLE_SUMMARY scheduleDelay.count=${
-                    sched.length
+                `REINDEX_IDLE_SUMMARY scheduleDelay.count=${sched.length
                 } scheduleDelay.avg=${schedStats.avg.toFixed(
                     2
                 )} scheduleDelay.p50=${schedStats.p50.toFixed(
@@ -179,8 +178,7 @@ describe("reindex publish loop profiling", () => {
                     2
                 )} scheduleDelay.max=${schedStats.max.toFixed(
                     2
-                )} cooldown.defer.count=${
-                    cooldown.length
+                )} cooldown.defer.count=${cooldown.length
                 } cooldown.defer.avg=${cooldownStats.avg.toFixed(
                     2
                 )} cooldown.defer.p50=${cooldownStats.p50.toFixed(

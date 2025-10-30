@@ -1,7 +1,7 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
 import { performance } from "perf_hooks";
 import { Canvas, Scope } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /**
  * Profiling test: attempts to reproduce the slow `full:put` phase observed in E2E.

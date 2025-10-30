@@ -1,5 +1,6 @@
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /**
  * Lightweight CPU bench to compare sequential addTextElement vs addTextElements batch helper.
@@ -50,8 +51,7 @@ describe("cpu bench: add elements", () => {
         const batchMs = Date.now() - tBatch0;
 
         console.log(
-            `[cpu-bench] sequential=${seqMs}ms batch=${batchMs}ms improvement=${
-                seqMs - batchMs
+            `[cpu-bench] sequential=${seqMs}ms batch=${batchMs}ms improvement=${seqMs - batchMs
             }ms`
         );
     });

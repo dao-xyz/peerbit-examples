@@ -25,7 +25,6 @@ import {
     WithIndexedContext,
     ByteMatchQuery,
 } from "@peerbit/document";
-import { expect } from "chai";
 import { waitForResolved } from "@peerbit/time";
 import { sha256Base64Sync, sha256Sync } from "@peerbit/crypto";
 import { StaticImage } from "../static/image.js";
@@ -34,7 +33,8 @@ import { orderKeyBetween } from "../order-key.js";
 import { ensurePath } from "./utils.js";
 import { Layout, ViewKind } from "../link.js";
 import { randomBytes } from "@peerbit/crypto";
-import { describe, it } from "vitest";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
+
 
 /* ----------------------- helpers (public APIs only) ----------------------- */
 
@@ -51,11 +51,11 @@ async function createOpenRootScope(
         opts?.seed instanceof Scope
             ? opts.seed
             : new Scope({
-                  seed: opts?.seed
-                      ? new Uint8Array(opts.seed as number[])
-                      : undefined,
-                  publicKey: peer.identity.publicKey,
-              }),
+                seed: opts?.seed
+                    ? new Uint8Array(opts.seed as number[])
+                    : undefined,
+                publicKey: peer.identity.publicKey,
+            }),
         {
             args: {
                 replicate: opts?.replicate ?? true,

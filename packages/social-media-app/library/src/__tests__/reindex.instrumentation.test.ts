@@ -1,6 +1,6 @@
-import { expect } from "chai";
 import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
+import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
 /**
  * Tracks hierarchical reindex flush metrics when publishing a medium payload.
