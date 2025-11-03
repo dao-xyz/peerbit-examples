@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/blog",
-    "version": "0.0.11",
+    "version": "0.0.12",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -43,6 +43,6 @@
         "@inquirer/editor": "^2",
         "@inquirer/input": "^2",
         "@inquirer/select": "^2",
-        "@peerbit/blog-sdk": "^0.0.8"
+        "@peerbit/blog-sdk": "^0.0.9"
     }
 }

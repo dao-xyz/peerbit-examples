@@ -1,6 +1,6 @@
 {
     "name": "@peerbit/media-streaming-web",
-    "version": "0.0.6",
+    "version": "0.0.7",
     "author": "dao.xyz",
     "repository": "https://github.com/@dao-xyz/peerbit-examples",
     "license": "Apache-2.0",
@@ -45,7 +45,7 @@
     },
     "dependencies": {
         "@peerbit/document": "^10",
-        "@peerbit/media-streaming": "^0.0.5",
+        "@peerbit/media-streaming": "^0.0.6",
         "peerbit": "^4",
         "uuid": "^10.0.0"
     }

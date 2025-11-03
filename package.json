@@ -37,7 +37,9 @@
         "clean": "pnpm -r run clean",
         "build": "pnpm -r --sort --workspace-concurrency=1 run build",
         "build-node": "if [ -d ./packages/node ]; then (cd ./packages/node && pnpm run build); else echo \"packages/node not present\"; fi",
-        "pub": "pnpm -r publish --access public",
+        "pub": "pnpm changeset publish",
+        "version-packages": "pnpm changeset version",
+        "changeset": "pnpm exec changeset",
         "test": "pnpm run build && vitest run",
         "test:vitest": "pnpm run build && vitest run",
         "test:vitest:watch": "vitest",
@@ -53,6 +55,7 @@
         "prefetch:update": "pnpm --filter @giga-app/interface-frontend run prefetch:update"
     },
     "devDependencies": {
+        "@changesets/cli": "^2.29.7",
         "@testing-library/dom": "10.4.1",
         "@testing-library/react": "16.3.0",
         "@types/chai": "^4.3.18",
@@ -71,8 +74,8 @@
         "eslint-config-prettier": "^8.5.0",
         "eslint-config-react-app": "^7.0.1",
         "eslint-plugin-prettier": "^4.2.1",
-        "jsdom": "^27.0.0",
         "happy-dom": "^18.0.1",
+        "jsdom": "^27.0.0",
         "json": "^11.0.0",
         "mocha": "^10.7.0",
         "patch-package": "^8",
