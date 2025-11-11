@@ -150,6 +150,25 @@ export const DraftSessionProvider: React.FC<{
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
+    // Tests wait for draft sessions to become interactive; expose a best-effort signal
+    useEffect(() => {
+        if (process.env.NODE_ENV === "production") return;
+        if (typeof window === "undefined") return;
+        if (!draft?.idString) return;
+        try {
+            const detail = {
+                draftId: draft.idString,
+                parentId: replyTo?.idString,
+            };
+            (window as any).__DRAFT_READY = detail;
+            window.dispatchEvent(
+                new CustomEvent("draft:ready", { detail })
+            );
+        } catch {
+            // no-op
+        }
+    }, [draft?.idString, replyTo?.idString]);
+
     // publish: flush UI → save → rotate (manager notifies; subscription updates draft)
     const publish = async () => {
         const k = keyRef.current!;

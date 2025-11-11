@@ -24,7 +24,7 @@ test.describe("ToolbarCreateNew", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
-            } catch {}
+            } catch { }
         });
         page.on("console", (msg) => {
             const t = msg.text();
@@ -91,7 +91,7 @@ test.describe("ToolbarCreateNew", () => {
             const b = buttons.nth(i);
             try {
                 await b.scrollIntoViewIfNeeded();
-            } catch {}
+            } catch { }
             try {
                 await b.click({ trial: false });
             } catch {
@@ -102,7 +102,7 @@ test.describe("ToolbarCreateNew", () => {
                 return;
             } catch {
                 // If a menu opened, press Escape to close it and try next
-                await page.keyboard.press("Escape").catch(() => {});
+                await page.keyboard.press("Escape").catch(() => { });
             }
         }
         // Fallback to dropdown menu → Open
@@ -110,7 +110,7 @@ test.describe("ToolbarCreateNew", () => {
         try {
             await expect(page).toHaveURL(/#\/c\//, { timeout: 1500 });
             return;
-        } catch {}
+        } catch { }
         // As last resort, navigate directly (consumes same route as clicking)
         await page.evaluate((id) => {
             // HashRouter: navigating by hash mimics user route
@@ -201,7 +201,7 @@ test.describe("ToolbarCreateNew", () => {
                 .getByTestId("composer-textarea")
                 .first();
             await textContainer.click({ timeout: 800 });
-        } catch {}
+        } catch { }
         await page.waitForFunction(
             () => {
                 const el = document.querySelector(
@@ -349,7 +349,7 @@ test.describe("ToolbarCreateNew", () => {
         const textContainer = toolbar.getByTestId("composer-textarea").first();
         try {
             await textContainer.click({ timeout: 2000 });
-        } catch {}
+        } catch { }
         const textArea = page.locator("textarea").first();
         await expect(textArea).toBeVisible({ timeout: 30000 });
     });

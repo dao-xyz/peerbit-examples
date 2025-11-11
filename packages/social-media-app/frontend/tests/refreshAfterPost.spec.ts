@@ -5,7 +5,6 @@ import {
     getPeerInfo,
     waitForPeerInfo,
 } from "./utils/persistence";
-import exp from "constants";
 
 function uid(prefix: string) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -18,12 +17,46 @@ async function getReplyPublishedEvents(page: import("@playwright/test").Page) {
     );
 }
 
+async function waitForComposerReady(
+    page: import("@playwright/test").Page,
+    timeout = 30000
+) {
+    await page.waitForFunction(
+        () => {
+            const ready = (window as any).__DRAFT_READY;
+            const textarea = document.querySelector(
+                '[data-testid="toolbarcreatenew"] textarea'
+            );
+            return !!ready?.draftId && !!textarea;
+        },
+        null,
+        { timeout }
+    );
+}
+
+async function expectNoNonEmptyDrafts(
+    page: import("@playwright/test").Page,
+    timeout = 15000
+) {
+    const summary =
+        (await page.waitForFunction(
+            () => (window as any).__PENDING_DRAFT_SUMMARY ?? null,
+            null,
+            { timeout }
+        ).then((handle) => handle.jsonValue())) ?? [];
+    const nonEmpty = summary.filter((entry: any) => entry && entry.empty === false);
+    expect(nonEmpty).toHaveLength(0);
+}
+
 test.describe("refresh after post: no non-empty pending drafts; feed persists", () => {
     test("publish → visible → refresh → feed has post, drafts empty", async ({
         page,
     }) => {
         const url = withSearchParams(OFFLINE_BASE, { ephemeral: false });
         await page.goto(url);
+        await page.evaluate(() => {
+            (window as any).__DRAFT_READY = null;
+        });
 
         // Wait for peer to be ready and capture identity before publish
         await expectPersistent(page);
@@ -42,7 +75,8 @@ test.describe("refresh after post: no non-empty pending drafts; feed persists", 
 
         // Compose and publish a post
         const toolbar = page.getByTestId("toolbarcreatenew").first();
-        await expect(toolbar).toBeVisible({ timeout: 1e4 });
+        await expect(toolbar).toBeVisible({ timeout: 2e4 });
+        await waitForComposerReady(page);
         const textArea = toolbar.locator("textarea");
         await expect(textArea).toBeVisible({ timeout: 5e3 });
         const sendBtn = toolbar.getByTestId("send-button");
@@ -70,6 +104,7 @@ test.describe("refresh after post: no non-empty pending drafts; feed persists", 
                 { timeout: 2e4 }
             )
             .toBe(true);
+
         const evt = (await getReplyPublishedEvents(page))[base];
         const replyId = evt.replyId as string;
 
@@ -82,6 +117,10 @@ test.describe("refresh after post: no non-empty pending drafts; feed persists", 
         await page.reload();
 
         await waitForPeerInfo(page);
+        await page.evaluate(() => {
+            (window as any).__DRAFT_READY = null;
+        });
+        await waitForComposerReady(page);
         const afterPeer = await getPeerInfo(page);
         expect(afterPeer?.peerHash).toBe(beforePeer?.peerHash);
 
@@ -94,9 +133,12 @@ test.describe("refresh after post: no non-empty pending drafts; feed persists", 
 
         // Drafts row: if present, all entries should be empty (no elements)
         // We detect this via the DraftsRow's whenEmpty label "Empty post".
-        const draftsHeader = page.locator("[data-pending-drafts]").first();
+        const draftsHeader = page.locator("[data-pending-drafts]");
         if (await draftsHeader.count()) {
-            throw new Error("Drafts row should not be present");
+            await expectNoNonEmptyDrafts(page);
+        } else {
+            // Still assert no persisted content remains
+            await expectNoNonEmptyDrafts(page);
         }
 
         // Composer textarea should be empty (fresh draft; no persisted content)

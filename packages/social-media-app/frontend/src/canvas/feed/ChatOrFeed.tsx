@@ -248,7 +248,6 @@ export const CanvasAndReplies = () => {
     const activeIds = useActiveDraftIds();
 
     const draftsFiltered = useMemo(() => {
-        // if your draft objects are WithIndexedContext<Canvas,...>, they have
         return drafts.filter((d) => !activeIds.has(d.idString));
     }, [drafts, activeIds]);
 

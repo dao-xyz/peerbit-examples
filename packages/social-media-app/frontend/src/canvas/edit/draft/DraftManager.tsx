@@ -580,6 +580,7 @@ export const DraftManagerProvider: React.FC<{
                                         parentId: rec.replyTo.idString,
                                     });
                                 const parent = rec.replyTo;
+                                const draftScope = toPublish.nearestScope;
                                 log("publish: syncing draft to parent", {
                                     elements:
                                         await rec.canvas.countOwnedElements(),
@@ -606,10 +607,12 @@ export const DraftManagerProvider: React.FC<{
                                 } catch { }
                                 // Emit debug event after flush to ensure the consumer can navigate and read
                                 // Use base64url(canvas.id) so tests can use it for both URL and DOM selectors
-                                logEvt("replyPublished", {
-                                    replyId: toBase64URL(toPublish.id),
-                                    parentId: parent.idString,
-                                });
+                                if (captureEvents) {
+                                    logEvt("replyPublished", {
+                                        replyId: toBase64URL(toPublish.id),
+                                        parentId: parent.idString,
+                                    });
+                                }
                                 // Remember last published for this parent to not recover it as draft
                                 try {
                                     lastPublishedByParent.current.set(
@@ -618,6 +621,28 @@ export const DraftManagerProvider: React.FC<{
                                     );
                                 } catch { }
                                 perfMark("parentFlush");
+
+                                // Drop the published draft from the private scope so it does not linger
+                                // as a recoverable draft (and show up in DraftsRow) after refresh.
+                                try {
+                                    if (draftScope && draftScope !== parent.nearestScope) {
+                                        await draftScope.remove(toPublish, {
+                                            drop: true,
+                                        });
+                                        if (captureEvents) {
+                                            logEvt("publish:cleanupDraft", {
+                                                bucket,
+                                                draftId: toPublish.idString,
+                                                parentId: parent.idString,
+                                            });
+                                        }
+                                    }
+                                } catch (cleanupError) {
+                                    console.warn(
+                                        "[DraftManager] publish: cleanup error",
+                                        cleanupError
+                                    );
+                                }
                             } catch (e) {
                                 console.error(
                                     "[DraftManager] publish: sync error",
