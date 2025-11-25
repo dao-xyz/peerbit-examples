@@ -24,7 +24,7 @@ export const LibrariesProvider = ({ children }: PropsWithChildren) => {
     const { peer } = usePeer();
 
     /* singleton store program */
-    const storeProg = useProgram(peer ? new StoraOfLibraries() : null, {
+    const storeProg = useProgram(peer, peer ? new StoraOfLibraries() : null, {
         existing: "reuse",
         args: { replicate: false },
     });

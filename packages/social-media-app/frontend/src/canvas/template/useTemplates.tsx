@@ -2,7 +2,8 @@
  * useTemplates.tsx
  *********************************************************************/
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { usePeer, useProgram, useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { sha256Sync } from "@peerbit/crypto";
 import {
     Template,
@@ -46,7 +47,7 @@ export function useTemplates(): UseTemplatesReturn {
     const { peer, persisted } = usePeer();
 
     /** 1) Open the Templates *program* (documents db that stores Template objects) */
-    const templatesProgram = useProgram(TEMPLATES_DB, {
+    const templatesProgram = useProgram(peer, TEMPLATES_DB, {
         existing: "reuse",
         args: { replicate: persisted },
     });
@@ -65,7 +66,7 @@ export function useTemplates(): UseTemplatesReturn {
         [peer?.identity.publicKey.hashcode()]
     );
 
-    const templatesScope = useProgram(templatesScopeInst, {
+    const templatesScope = useProgram(peer, templatesScopeInst, {
         existing: "reuse",
         args: { replicate: persisted },
     });

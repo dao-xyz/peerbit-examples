@@ -16,7 +16,7 @@ describe("publish internal perf instrumentation", () => {
         );
     });
     afterEach(async () => {
-        globalThis.removeEventListener("perf:scope.publish", () => { });
+        globalThis.removeEventListener("perf:scope.publish", () => {});
         await session.stop();
     });
 

@@ -43,6 +43,6 @@
         "@inquirer/editor": "^2",
         "@inquirer/input": "^2",
         "@inquirer/select": "^2",
-        "@peerbit/media-streaming": "^0.0.6"
+        "@peerbit/media-streaming": "workspace:^"
     }
 }

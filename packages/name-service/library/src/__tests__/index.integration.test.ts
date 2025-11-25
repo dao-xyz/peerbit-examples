@@ -2,20 +2,20 @@ import { Peerbit } from "peerbit";
 import { Name, Names } from "../index.js";
 import { Ed25519Keypair, PreHash } from "@peerbit/crypto";
 import { randomBytes } from "@peerbit/crypto";
-import { expect } from "chai";
+import { describe, beforeAll, afterAll, test, expect } from "vitest";
 
 describe("index", () => {
     let peer: Peerbit;
 
-    before(async () => {
+    beforeAll(async () => {
         peer = await Peerbit.create();
     });
 
-    after(async () => {
+    afterAll(async () => {
         await peer.stop();
     });
 
-    it("one name", async () => {
+    test("one name", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
         const names = await peer.open(new Names({ id: randomBytes(32) }));
 

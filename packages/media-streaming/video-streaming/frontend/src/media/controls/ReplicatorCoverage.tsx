@@ -1,5 +1,5 @@
 import { Track, MediaStreamDB } from "@peerbit/media-streaming";
-import { useLocal } from "@peerbit/react";
+import { useLocal } from "@peerbit/document-react";
 import { useEffect, useRef, useState } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";
 import { FaLeaf, FaSeedling } from "react-icons/fa";

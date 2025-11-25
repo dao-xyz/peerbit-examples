@@ -39,12 +39,16 @@ async function expectNoNonEmptyDrafts(
     timeout = 15000
 ) {
     const summary =
-        (await page.waitForFunction(
-            () => (window as any).__PENDING_DRAFT_SUMMARY ?? null,
-            null,
-            { timeout }
-        ).then((handle) => handle.jsonValue())) ?? [];
-    const nonEmpty = summary.filter((entry: any) => entry && entry.empty === false);
+        (await page
+            .waitForFunction(
+                () => (window as any).__PENDING_DRAFT_SUMMARY ?? null,
+                null,
+                { timeout }
+            )
+            .then((handle) => handle.jsonValue())) ?? [];
+    const nonEmpty = summary.filter(
+        (entry: any) => entry && entry.empty === false
+    );
     expect(nonEmpty).toHaveLength(0);
 }
 

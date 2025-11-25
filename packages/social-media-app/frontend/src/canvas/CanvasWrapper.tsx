@@ -9,7 +9,8 @@ import React, {
     forwardRef,
     useCallback,
 } from "react";
-import { usePeer, useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
+import { usePeer } from "@peerbit/react";
 import {
     Canvas as CanvasDB,
     Element,

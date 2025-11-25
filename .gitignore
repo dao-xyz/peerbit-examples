@@ -17,3 +17,4 @@ nginx
 /dist
 **/.pw-user-data/*
 test-results
+.pw-user-data

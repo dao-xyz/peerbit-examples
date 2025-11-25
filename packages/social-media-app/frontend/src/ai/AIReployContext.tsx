@@ -1,6 +1,6 @@
 import React, { createContext, useContext, ReactNode, useEffect } from "react";
 import { CanvasAIReply } from "@giga-app/llm";
-import { useProgram } from "@peerbit/react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { Canvas } from "@giga-app/interface";
 
 export type AIReplyContext = {
@@ -33,8 +33,9 @@ type AIReplyMProviderProps = {
 };
 
 export const AIReplyProvider = ({ children }: AIReplyMProviderProps) => {
+    const { peer } = usePeer();
     // Use the Peerbit hook to open the program.
-    const { program } = useProgram(new CanvasAIReply(), {
+    const { program } = useProgram(peer, new CanvasAIReply(), {
         existing: "reuse",
     });
 

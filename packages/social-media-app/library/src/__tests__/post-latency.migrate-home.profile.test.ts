@@ -2,7 +2,6 @@ import { TestSession } from "@peerbit/test-utils";
 import { Canvas, Scope } from "../content.js";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
-
 /**
  * Profiles copy + cleanup + reindex phases for different element counts using instrumentation
  * emitted when __COLLECT_REINDEX and __PERF_EVENTS__ are enabled.

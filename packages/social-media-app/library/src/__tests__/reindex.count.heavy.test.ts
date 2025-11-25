@@ -116,7 +116,8 @@ describe("reindex count: heavy draft lifecycle", () => {
         // We'll allow up to 2x elements to avoid flakiness and revisit after batching optimization.
         const ratio = flushes.length / ELEMENTS;
         console.log(
-            `[reindex-count] flushes=${flushes.length
+            `[reindex-count] flushes=${
+                flushes.length
             } elements=${ELEMENTS} ratio=${ratio.toFixed(
                 2
             )} (target future << 1)`

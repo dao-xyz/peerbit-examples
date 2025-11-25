@@ -161,9 +161,7 @@ export const DraftSessionProvider: React.FC<{
                 parentId: replyTo?.idString,
             };
             (window as any).__DRAFT_READY = detail;
-            window.dispatchEvent(
-                new CustomEvent("draft:ready", { detail })
-            );
+            window.dispatchEvent(new CustomEvent("draft:ready", { detail }));
         } catch {
             // no-op
         }

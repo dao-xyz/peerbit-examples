@@ -15,7 +15,7 @@ test.describe("Replication via node replicator relay", () => {
         stop = async () => {
             try {
                 await client.stop();
-            } catch { }
+            } catch {}
         };
     });
 
@@ -29,7 +29,7 @@ test.describe("Replication via node replicator relay", () => {
         if (stop) {
             try {
                 await stop();
-            } catch { }
+            } catch {}
         }
         stop = undefined;
         bootstrap = undefined;
@@ -53,11 +53,13 @@ test.describe("Replication via node replicator relay", () => {
             // Publish the message so it is stored in the public scope replicated by the node
             await toolbar.getByTestId("send-button").click();
 
-            // wait for the text area to be empty 
+            // wait for the text area to be empty
             await expect(textArea).toHaveText("", { timeout: 15000 });
 
             // wait for the message to appear as a message in the feed
-            await page.getByText(msg, { exact: true }).waitFor({ timeout: 15000 });
+            await page
+                .getByText(msg, { exact: true })
+                .waitFor({ timeout: 15000 });
 
             await page.reload();
 
@@ -69,7 +71,7 @@ test.describe("Replication via node replicator relay", () => {
             if (stop) {
                 try {
                     await stop();
-                } catch { }
+                } catch {}
                 stop = undefined;
             }
         }
@@ -154,7 +156,7 @@ test.describe("Replication via node replicator relay", () => {
             if (stop) {
                 try {
                     await stop();
-                } catch { }
+                } catch {}
                 stop = undefined;
             }
         }

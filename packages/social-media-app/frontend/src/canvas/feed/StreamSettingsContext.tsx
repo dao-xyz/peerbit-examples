@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useMemo } from "react";
-import { usePeer, useProgram, useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
+import { usePeer, useProgram } from "@peerbit/react";
 import {
     StreamSettings,
     StreamSetting,
@@ -42,6 +43,7 @@ export const StreamSettingsProvider: React.FC<{
 }> = ({ children }) => {
     const { peer } = usePeer();
     const program = useProgram(
+        peer,
         useMemo(
             () =>
                 peer

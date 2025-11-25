@@ -7,6 +7,7 @@ import { MediaStreamDB } from "@peerbit/media-streaming";
 export const CreateStream = () => {
     const { peer } = usePeer();
     const mediaStream = useProgram<MediaStreamDB>(
+        peer,
         peer && new MediaStreamDB(peer.identity.publicKey),
         {
             existing: "reuse",

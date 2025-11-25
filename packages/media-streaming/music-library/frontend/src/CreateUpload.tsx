@@ -14,6 +14,7 @@ export const CreateUpload = () => {
 
     /* open a fresh stream */
     const mediaStream = useProgram<AudioContainer>(
+        peer,
         peer && new AudioContainer(peer.identity.publicKey),
         {
             existing: "reuse",

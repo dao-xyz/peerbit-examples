@@ -76,6 +76,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
     // Ensure AppPreview is included in the bundle by assigning it to our ref.
     const appServiceRef = useRef<AppPreview | undefined>(undefined);
     const { program: historyDB } = useProgram(
+        peer,
         peer
             ? new BrowsingHistory({ rootTrust: peer.identity.publicKey })
             : undefined

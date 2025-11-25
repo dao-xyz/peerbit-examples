@@ -1,5 +1,5 @@
 import { Track, MediaStreamDB } from "@peerbit/media-streaming";
-import { useLocal } from "@peerbit/react";
+import { useLocal } from "@peerbit/document-react";
 import { useMaxTime } from "./useMaxTime.js";
 import { useMemo } from "react";
 import * as Tooltip from "@radix-ui/react-tooltip";

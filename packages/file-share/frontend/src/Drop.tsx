@@ -67,6 +67,7 @@ export const Drop = () => {
     const [left, setLeft] = useState(false);
 
     const files = useProgram<Files>(
+        peer,
         params.address && decodeURIComponent(params.address),
         {
             existing: "reuse",

@@ -36,12 +36,12 @@
         "test-view-remote": "npm run build && node ./lib/esm/__tests__/view-remote.js"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^2",
+        "@peerbit/test-utils": "^2.3.2",
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "^10",
-        "peerbit": "^4",
+        "@peerbit/document": "^10.1.2",
+        "peerbit": "^4.4.2",
         "uuid": "^10.0.0"
     }
 }

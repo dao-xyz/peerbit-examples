@@ -14,7 +14,7 @@ import {
 } from "@giga-app/interface";
 import { useThemeContext } from "../../theme/useTheme";
 import { useSearchParams } from "react-router";
-import { useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
 import {
     IndexedVisualization,
     getOwnedByCanvasQuery,

@@ -13,11 +13,10 @@
         "moduleResolution": "node",
         "resolveJsonModule": true,
         "isolatedModules": true,
-        "experimentalDecorators": true,
         "noEmit": true,
         "jsx": "react-jsx"
     },
-    "include": ["src", "../../one-chat-room/frontend/src/Home.tsx"],
+    "include": ["src"],
     "references": [
         {
             "path": "./tsconfig.node.json"

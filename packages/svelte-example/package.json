@@ -10,15 +10,15 @@
         "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
     },
     "dependencies": {
-        "uuid": "^10",
-        "peerbit": "^4",
-        "@peerbit/document": "^10"
+        "@peerbit/document": "^10.1.2",
+        "peerbit": "^4.4.2",
+        "uuid": "^10"
     },
     "devDependencies": {
-        "@types/uuid": "^8",
         "@sveltejs/adapter-auto": "^6.1.0",
         "@sveltejs/kit": "^2.0.0",
         "@sveltejs/vite-plugin-svelte": "^6.2.0",
+        "@types/uuid": "^8",
         "svelte": "^5.38.6",
         "svelte-check": "^4.3.1",
         "typescript": "^5.0.0",

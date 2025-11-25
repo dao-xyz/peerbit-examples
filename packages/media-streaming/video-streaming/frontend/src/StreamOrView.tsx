@@ -14,7 +14,7 @@ export const StreamOrView = () => {
         undefined
     );
 
-    const mediaStream = useProgram<MediaStreamDB>(params.address, {
+    const mediaStream = useProgram<MediaStreamDB>(peer, params.address, {
         existing: "reuse",
     });
 

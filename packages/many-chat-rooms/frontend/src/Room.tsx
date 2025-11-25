@@ -62,7 +62,7 @@ export const Room = () => {
     const { peer, loading: loadingPeer } = usePeer();
 
     /// aliases
-    const names = useProgram(new Names(), {
+    const names = useProgram(peer, new Names(), {
         args: {
             replicate: {
                 factor: 1,
@@ -73,6 +73,7 @@ export const Room = () => {
 
     /// messages
     const room = useProgram(
+        peer,
         params.name && new RoomDB({ name: getRoomNameFromPath(params.name) }),
         {
             args: {

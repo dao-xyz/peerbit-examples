@@ -9,6 +9,21 @@ import { startReplicator } from "./replicator/replicatorNode";
 import { launchPersistentBrowserContext } from "./utils/persistentBrowser";
 
 const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
+const DEBUG_FEED = Boolean(
+    process.env.PEERBIT_DEBUG_FEED ||
+        process.env.DEBUG_FEED ||
+        process.env.PEERBIT_DEBUG_ITERATORS
+);
+
+const attachConsoleLogging = (page: Page, label: string) => {
+    if (!DEBUG_FEED) return () => {};
+    const handler = (msg: any) => {
+        const text = msg.text?.();
+        console.log(`[${label}][${msg.type()}] ${text}`);
+    };
+    page.on("console", handler);
+    return () => page.off("console", handler);
+};
 
 async function createSecondUserContext(
     testInfo: TestInfo,
@@ -20,10 +35,10 @@ async function createSecondUserContext(
         baseURL: baseUrl,
     });
 
-    const url = withSearchParams(
-        baseUrl,
-        opts.ephemeral ? { ephemeral: "true" } : {}
-    );
+    const url = withSearchParams(baseUrl, {
+        ...(opts.ephemeral ? { ephemeral: "true" } : {}),
+        ...(DEBUG_FEED ? { debugfeed: "1" } : {}),
+    });
 
     return { context, url };
 }
@@ -70,6 +85,7 @@ test.describe("Two users relaying via node replicator", () => {
         withSearchParams(baseUrl, {
             ...(bootstrap.length ? { bootstrap: bootstrap.join(",") } : {}),
             ...(opts.ephemeral ? { ephemeral: "true" } : {}),
+            ...(DEBUG_FEED ? { debugfeed: "1" } : {}),
         });
 
     async function runTwoUserFlow(
@@ -80,6 +96,15 @@ test.describe("Two users relaying via node replicator", () => {
         const baseAppUrl =
             (testInfo.project.use.baseURL as string | undefined) || BASE_URL;
         const primaryUrl = buildUrl(baseAppUrl, opts);
+        if (DEBUG_FEED) {
+            await primaryPage.addInitScript(() => {
+                (window as any).__PEERBIT_DEBUG__ = true;
+            });
+        }
+        const detachPrimaryConsole = attachConsoleLogging(
+            primaryPage,
+            "primary"
+        );
         await primaryPage.goto(primaryUrl);
         await waitForComposer(primaryPage);
         const toolbar = primaryPage.getByTestId("toolbarcreatenew").first();
@@ -87,8 +112,15 @@ test.describe("Two users relaying via node replicator", () => {
 
         const { context: user2Context, url: user2Url } =
             await createSecondUserContext(testInfo, baseAppUrl, opts);
+        let detachSecondaryConsole = () => {};
         try {
             const page2 = await user2Context.newPage();
+            if (DEBUG_FEED) {
+                await page2.addInitScript(() => {
+                    (window as any).__PEERBIT_DEBUG__ = true;
+                });
+                detachSecondaryConsole = attachConsoleLogging(page2, "user2");
+            }
             const finalUrl = withSearchParams(user2Url, {
                 ...(bootstrap.length ? { bootstrap: bootstrap.join(",") } : {}),
             });
@@ -108,15 +140,46 @@ test.describe("Two users relaying via node replicator", () => {
             await primaryTextarea.fill(message);
             await toolbar.getByTestId("send-button").click();
 
+            const messagePattern = new RegExp(
+                message.trim().replace(/\s+/g, "\\s+")
+            );
+            const locateMessage = () => page2.getByText(messagePattern);
             await expect
                 .poll(
-                    async () =>
-                        await page2.getByText(message, { exact: true }).count(),
+                    async () => {
+                        const count = await locateMessage().count();
+                        if (DEBUG_FEED) {
+                            console.log("[user2][log] message-count", {
+                                message,
+                                count,
+                            });
+                            if (count === 0) {
+                                const presentInDom =
+                                    (await page2.evaluate((payload) => {
+                                        const normalizedPayload = payload
+                                            .trim()
+                                            .replace(/\s+/g, " ");
+                                        const normalizedBody =
+                                            document.body.innerText
+                                                ?.replace(/\s+/g, " ")
+                                                ?.trim() ?? "";
+                                        return normalizedBody.includes(
+                                            normalizedPayload
+                                        );
+                                    }, message)) ?? false;
+                                console.log("[user2][log] message-in-body", {
+                                    includes: presentInDom,
+                                });
+                            }
+                        }
+                        return count;
+                    },
                     { timeout: 60_000 }
                 )
                 .toBeGreaterThan(0);
-
         } finally {
+            detachSecondaryConsole();
+            detachPrimaryConsole();
             await user2Context.close();
         }
     }

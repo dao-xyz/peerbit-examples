@@ -1,11 +1,13 @@
 import { useMemo } from "react";
-import { useProgram, useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { ImageItems } from "@peerbit/music-library-utils";
 
 /** returns [coverURL, setCover(id, file)] */
 export const useCover = (id?: Uint8Array) => {
+    const { peer } = usePeer();
     /* open once, reuse */
-    const imgs = useProgram<ImageItems>(new ImageItems(), {
+    const imgs = useProgram<ImageItems>(peer, new ImageItems(), {
         existing: "reuse",
     });
 

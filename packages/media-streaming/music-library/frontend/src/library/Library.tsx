@@ -1,5 +1,6 @@
 import { MediaStreamDBs, MediaStreamDB } from "@peerbit/media-streaming";
-import { useProgram, useQuery, usePeer } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
+import { useProgram, usePeer } from "@peerbit/react";
 import { useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router";
 import { Pencil1Icon, PlayIcon, TrashIcon } from "@radix-ui/react-icons";
@@ -192,7 +193,9 @@ export const Library: React.FC = () => {
     const libraries = useLibraries();
 
     /* open library DB ------------------------------------------------------- */
-    const lib = useProgram<MediaStreamDBs>(address, { existing: "reuse" });
+    const lib = useProgram<MediaStreamDBs>(peer, address, {
+        existing: "reuse",
+    });
 
     /* load track list ------------------------------------------------------- */
     const { items: tracks, isLoading: tracksLoading } = useQuery(

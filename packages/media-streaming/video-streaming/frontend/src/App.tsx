@@ -15,10 +15,10 @@ export const App = () => {
                 import.meta.env.MODE === "development"
                     ? "local"
                     : {
-                        bootstrap: [
-                            "/dns4/9b97941c59a57bfe1cb9326c0adec2a1348e6940.peerchecker.com/tcp/4003/wss/p2p/12D3KooWLeSKmApwQ12CWQsumiy6Ge4u6hQR4KpEKMg9gHrNQwzf",
-                        ],
-                    }
+                          bootstrap: [
+                              "/dns4/9b97941c59a57bfe1cb9326c0adec2a1348e6940.peerchecker.com/tcp/4003/wss/p2p/12D3KooWLeSKmApwQ12CWQsumiy6Ge4u6hQR4KpEKMg9gHrNQwzf",
+                          ],
+                      }
             }
         >
             <AppProvider navigation="emit-all">

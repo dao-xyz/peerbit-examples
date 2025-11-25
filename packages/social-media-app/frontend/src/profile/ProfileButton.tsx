@@ -12,7 +12,7 @@ import { CanvasPreview } from "../canvas/render/preview/Preview";
 import { ProfilePhotoGenerated } from "./ProfilePhotoGenerated";
 import { CanvasWrapper } from "../canvas/CanvasWrapper";
 import { useIdentities } from "../identity/useIdentities";
-import { debounceLeadingTrailing } from "@peerbit/react";
+import { debounceLeadingTrailing } from "@peerbit/document-react";
 import { useInitializeCanvas } from "../canvas/useInitializedCanvas";
 
 function pxToRem(px: number) {

@@ -18,7 +18,7 @@ export const LibraryHeader: React.FC<Props> = ({ onDelete, onUpload }) => {
     const { getName, setName } = useNames();
 
     /* open the current library so we can read owner & id */
-    const lib = useProgram<MediaStreamDBs>(params.address, {
+    const lib = useProgram<MediaStreamDBs>(peer, params.address, {
         existing: "reuse",
     });
     const isOwner = peer?.identity.publicKey.equals(lib.program?.owner);

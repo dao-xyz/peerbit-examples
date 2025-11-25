@@ -39,7 +39,8 @@ describe("reindex full:put scaling sweep", () => {
             const hook = (globalThis as any).__LAST_FULL_PUT;
             expect(hook).to.be.ok;
             console.log(
-                `FULL_PUT_SWEEP N=${N} elements=${hook.elements
+                `FULL_PUT_SWEEP N=${N} elements=${
+                    hook.elements
                 } ctxMs=${hook.ctxMs.toFixed(2)} indexMs=${hook.indexMs.toFixed(
                     2
                 )} totalMs=${hook.totalMs.toFixed(2)} bytes=${hook.bytes}`

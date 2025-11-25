@@ -563,13 +563,19 @@ export const Renderer = (args: { stream: MediaStreamDB }) => {
         undefined
     );
     const sourceTypeRef = useRef<StreamType | undefined>(undefined);
+    const { peer } = usePeer();
 
     const videoLoadedOnce = useRef(false);
-    const { program: mediaStreamDB } = useProgram<MediaStreamDB>(args.stream, {
-        existing: "reuse",
-    });
+    const { program: mediaStreamDB } = useProgram<MediaStreamDB>(
+        peer,
+        args.stream,
+        {
+            existing: "reuse",
+        }
+    );
 
     const { program: mediaStreamDBs } = useProgram<MediaStreamDBs>(
+        peer,
         new MediaStreamDBs(),
         {
             existing: "reuse",

@@ -23,11 +23,11 @@ export const ProfileContext = React.createContext<IProfilesContext>({} as any);
 export const useProfiles = () => useContext(ProfileContext);
 
 export const ProfileProvider = ({ children }: { children: JSX.Element }) => {
-    const { persisted } = usePeer();
+    const { peer, persisted } = usePeer();
     const navigate = useNavigate();
 
     // Open the registry
-    const profilesProgram = useProgram(new Profiles(), {
+    const profilesProgram = useProgram(peer, new Profiles(), {
         args: { replicate: !!persisted },
         existing: "reuse",
     });

@@ -17,7 +17,7 @@ import { Send } from "@mui/icons-material";
 import { getKeyFromPath } from "./routes";
 import { Ed25519PublicKey, X25519Keypair } from "@peerbit/crypto";
 import PeopleIcon from "@mui/icons-material/People";
-import { useProgram } from "@peerbit/react";
+import { useProgram } from "@peerbit/program-react";
 
 const shortName = (name: string) => {
     return (
@@ -64,7 +64,7 @@ export const Room = () => {
     const { peer, loading: loadingPeer } = usePeer();
 
     /// aliases
-    const names = useProgram(new Names(), {
+    const names = useProgram(peer, new Names(), {
         args: {
             replicate: {
                 factor: 1,
@@ -75,6 +75,7 @@ export const Room = () => {
 
     /// messages
     const room = useProgram(
+        peer,
         params.key && new RoomDB({ creator: getKeyFromPath(params.key) }),
         {
             args: {

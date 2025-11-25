@@ -27,9 +27,9 @@ describe("profile", () => {
             args?.seed instanceof Scope
                 ? args?.seed
                 : new Scope({
-                    seed: args?.seed ? new Uint8Array(args?.seed) : undefined,
-                    publicKey: session.peers[0].identity.publicKey,
-                }),
+                      seed: args?.seed ? new Uint8Array(args?.seed) : undefined,
+                      publicKey: session.peers[0].identity.publicKey,
+                  }),
             {
                 args: {
                     replicate: args?.replicate ?? true,

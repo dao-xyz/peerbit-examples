@@ -1,4 +1,5 @@
-import { useLocal, usePeer, useProgram } from "@peerbit/react";
+import { useLocal } from "@peerbit/document-react";
+import { usePeer, useProgram } from "@peerbit/react";
 import React, { JSX, useContext } from "react";
 import { Connection, Identities } from "@giga-app/interface";
 import { And, BoolQuery, ByteMatchQuery, Or } from "@peerbit/indexer-interface";
@@ -24,7 +25,7 @@ export const IdentitiesProvider = ({ children }: { children: JSX.Element }) => {
     const peerContext = usePeer();
     const { peer, persisted } = peerContext;
 
-    const identities = useProgram(new Identities({ baseUrl }), {
+    const identities = useProgram(peer, new Identities({ baseUrl }), {
         existing: "reuse",
         args: {
             replicate: persisted,

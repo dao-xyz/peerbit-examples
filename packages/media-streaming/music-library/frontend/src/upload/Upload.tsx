@@ -20,7 +20,7 @@ import { getPicSumLink } from "../images/utils";
 type Props = { source: AudioContainer };
 
 export const Upload: React.FC<Props> = ({ source }) => {
-    const peer = usePeer();
+    const { peer } = usePeer();
     const navigate = useNavigate();
     const [search] = useSearchParams();
     const libAddr = search.get("lib");
@@ -41,7 +41,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
     const { setName } = useNames();
 
     // open your ImageItems store once, reuse
-    const imgs = useProgram(new ImageItems(), { existing: "reuse" });
+    const imgs = useProgram(peer, new ImageItems(), { existing: "reuse" });
 
     // subscribe to any already-stored cover for that track:
     const [storedCover, setCover] = useCover(source?.id);
@@ -139,7 +139,7 @@ export const Upload: React.FC<Props> = ({ source }) => {
             }
             await setName(source.id, audioFile.name);
 
-            peer.peer
+            peer
                 .open<MediaStreamDBs>(libAddr, {
                     existing: "reuse",
                     args: {

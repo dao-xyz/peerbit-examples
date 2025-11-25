@@ -1,11 +1,13 @@
 import { Peerbit } from "peerbit";
 import { Alias, BlogPosts, Post } from "../index.js";
 import { waitForResolved, delay } from "@peerbit/time";
+import { describe, it, afterEach } from "vitest";
+
 describe("bootstrap", () => {
     let peer: Peerbit;
     let peer2: Peerbit;
 
-    after(async () => {
+    afterEach(async () => {
         // @ts-ignore
         await peer?.stop();
         // @ts-ignore

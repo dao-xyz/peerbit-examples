@@ -3,17 +3,17 @@ import { Files, LargeFile } from "../index.js";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
 import { delay, waitForResolved } from "@peerbit/time";
-import { expect } from "chai";
+import { expect, describe, it, beforeEach, afterEach } from "vitest";
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
 
-    before(async () => {
+    beforeEach(async () => {
         peer = await Peerbit.create();
         peer2 = await Peerbit.create();
         await peer.dial(peer2);
     });
 
-    after(async () => {
+    afterEach(async () => {
         await peer.stop();
         await peer2.stop();
     });

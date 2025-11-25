@@ -5,7 +5,7 @@ import {
     StringMatchMethod,
     StringMatch,
 } from "@peerbit/document";
-import { expect } from "chai";
+import { expect, describe, it, beforeEach, afterEach } from "vitest";
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;

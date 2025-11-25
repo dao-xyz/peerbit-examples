@@ -26,8 +26,6 @@
         "allowSyntheticDefaultImports": true,
         "resolveJsonModule": true,
         "isolatedModules": true,
-        "emitDecoratorMetadata": true,
-        "experimentalDecorators": true,
         "skipLibCheck": true
     }
 }

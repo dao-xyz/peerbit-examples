@@ -51,7 +51,8 @@ describe("cpu bench: add elements", () => {
         const batchMs = Date.now() - tBatch0;
 
         console.log(
-            `[cpu-bench] sequential=${seqMs}ms batch=${batchMs}ms improvement=${seqMs - batchMs
+            `[cpu-bench] sequential=${seqMs}ms batch=${batchMs}ms improvement=${
+                seqMs - batchMs
             }ms`
         );
     });

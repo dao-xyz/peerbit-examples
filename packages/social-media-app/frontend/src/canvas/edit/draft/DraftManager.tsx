@@ -104,7 +104,7 @@ export const DraftManagerProvider: React.FC<{
         if (!shouldLogForParent(payload.parentId as string | undefined)) return;
         try {
             console.debug("[DraftManager]", name, JSON.stringify(payload));
-        } catch { }
+        } catch {}
         if (captureEvents)
             emitDebugEvent({ source: "DraftManager", name, ...payload });
     };
@@ -604,7 +604,7 @@ export const DraftManagerProvider: React.FC<{
                                     await parent.nearestScope._hierarchicalReindex!.flush(
                                         toPublish.idString
                                     );
-                                } catch { }
+                                } catch {}
                                 // Emit debug event after flush to ensure the consumer can navigate and read
                                 // Use base64url(canvas.id) so tests can use it for both URL and DOM selectors
                                 if (captureEvents) {
@@ -619,13 +619,16 @@ export const DraftManagerProvider: React.FC<{
                                         parent.idString,
                                         toPublish.idString
                                     );
-                                } catch { }
+                                } catch {}
                                 perfMark("parentFlush");
 
                                 // Drop the published draft from the private scope so it does not linger
                                 // as a recoverable draft (and show up in DraftsRow) after refresh.
                                 try {
-                                    if (draftScope && draftScope !== parent.nearestScope) {
+                                    if (
+                                        draftScope &&
+                                        draftScope !== parent.nearestScope
+                                    ) {
                                         await draftScope.remove(toPublish, {
                                             drop: true,
                                         });
@@ -671,10 +674,10 @@ export const DraftManagerProvider: React.FC<{
                                     ...perfMarks,
                                     total: Object.keys(perfMarks).length
                                         ? perfMarks[
-                                        Object.keys(
-                                            perfMarks
-                                        ).pop() as string
-                                        ]
+                                              Object.keys(
+                                                  perfMarks
+                                              ).pop() as string
+                                          ]
                                         : 0,
                                 } as any;
                                 console.info("[Perf] publish timings", payload);
@@ -684,7 +687,7 @@ export const DraftManagerProvider: React.FC<{
                                     })
                                 );
                             }
-                        } catch { }
+                        } catch {}
                     });
 
                 publishQueue.current.set(bucket, next);
@@ -830,7 +833,7 @@ export const DraftManagerProvider: React.FC<{
                                 rec.canvas.nearestScope
                                     ?.remove(rec.canvas, { drop: true })
                                     .catch(() => void 0);
-                            } catch { }
+                            } catch {}
                         }
                         records.current.delete(b);
                         debouncers.current.get(b)?.cancel?.();

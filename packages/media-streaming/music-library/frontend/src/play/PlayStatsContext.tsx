@@ -1,5 +1,6 @@
 import { createContext, useContext, PropsWithChildren, useMemo } from "react";
-import { useCount, useProgram } from "@peerbit/react";
+import { useCount } from "@peerbit/document-react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { PlayStats, PlayEvent } from "@peerbit/music-library-utils"; // ← path to your file
 
 /* ---------- context shape ---------- */
@@ -18,8 +19,9 @@ interface PlayStatsCtx {
 const Ctx = createContext<PlayStatsCtx | null>(null);
 
 export const PlayStatsProvider = ({ children }: PropsWithChildren) => {
+    const { peer } = usePeer();
     /* open once – replicate to everyone */
-    const stats = useProgram(new PlayStats(), {
+    const stats = useProgram(peer, new PlayStats(), {
         existing: "reuse",
         args: {}, // no extra args
     });

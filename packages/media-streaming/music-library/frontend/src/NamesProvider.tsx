@@ -4,7 +4,8 @@ import React, {
     useMemo,
     PropsWithChildren,
 } from "react";
-import { useProgram, useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { NamedItems } from "@peerbit/music-library-utils";
 import { equals } from "uint8arrays";
 
@@ -19,7 +20,8 @@ const Ctx = createContext<NamesCtx | null>(null);
 
 /* ───────── provider ───────── */
 export const NamesProvider = ({ children }: PropsWithChildren) => {
-    const namesProg = useProgram(new NamedItems(), {});
+    const { peer } = usePeer();
+    const namesProg = useProgram(peer, new NamedItems(), {});
 
     /* live cache of all docs */
     const { items: docs } = useQuery(namesProg.program?.documents, {

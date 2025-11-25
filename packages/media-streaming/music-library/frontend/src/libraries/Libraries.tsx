@@ -1,4 +1,5 @@
-import { usePeer, useQuery } from "@peerbit/react";
+import { useQuery } from "@peerbit/document-react";
+import { usePeer } from "@peerbit/react";
 import { useMemo } from "react";
 import { useNavigate } from "react-router";
 import { PlayIcon, PlusIcon, Pencil1Icon } from "@radix-ui/react-icons";

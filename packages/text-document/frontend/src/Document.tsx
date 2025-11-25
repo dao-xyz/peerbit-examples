@@ -1,4 +1,4 @@
-import { useProgram } from "@peerbit/react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { useEffect, useReducer, useRef } from "react";
 import { CollaborativeTextDocument } from "./db";
 import { Range } from "@peerbit/string";
@@ -12,7 +12,8 @@ const ID = new Uint8Array([
 
 export const Document = () => {
     const testAreaRef = useRef<HTMLTextAreaElement>(undefined);
-    const { program } = useProgram(new CollaborativeTextDocument({ id: ID }), {
+    const { peer } = usePeer();
+    const { program } = useProgram(peer, new CollaborativeTextDocument({ id: ID }), {
         existing: "reuse",
     });
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);

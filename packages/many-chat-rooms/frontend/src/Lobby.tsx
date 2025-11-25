@@ -12,9 +12,9 @@ const lobbyConfig = new LobbyDB({
     id: new Uint8Array(32), // 0,0,....0 choose this dynamically instead? Now it is static, => same lobby for all
 });
 export const Lobby = () => {
-    const { loading: loadingPeer } = usePeer();
+    const { loading: loadingPeer, peer } = usePeer();
     const navigate = useNavigate();
-    const lobby = useProgram(lobbyConfig, {
+    const lobby = useProgram(peer, lobbyConfig, {
         args: {
             replicate: {
                 factor: 1,

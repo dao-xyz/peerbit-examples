@@ -35,7 +35,6 @@ import { Layout, ViewKind } from "../link.js";
 import { randomBytes } from "@peerbit/crypto";
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 
-
 /* ----------------------- helpers (public APIs only) ----------------------- */
 
 async function createOpenRootScope(
@@ -51,11 +50,11 @@ async function createOpenRootScope(
         opts?.seed instanceof Scope
             ? opts.seed
             : new Scope({
-                seed: opts?.seed
-                    ? new Uint8Array(opts.seed as number[])
-                    : undefined,
-                publicKey: peer.identity.publicKey,
-            }),
+                  seed: opts?.seed
+                      ? new Uint8Array(opts.seed as number[])
+                      : undefined,
+                  publicKey: peer.identity.publicKey,
+              }),
         {
             args: {
                 replicate: opts?.replicate ?? true,

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router";
-import { usePeer, useLocal, useProgram } from "@peerbit/react";
+import { useLocal } from "@peerbit/document-react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { ChessGame, Move } from "./chessGame";
 import InteractiveChessBoard from "./InteractiveChessBoard";
 import { FaCircle } from "react-icons/fa";
@@ -10,7 +11,9 @@ const ChessGamePage = () => {
     const { peer } = usePeer();
     const [isSpectator, setIsSpectator] = useState(false);
     const [isOpponentOnline, setIsOpponentOnline] = useState(false);
-    const gameInstance = useProgram<ChessGame>(address, { existing: "reuse" });
+    const gameInstance = useProgram<ChessGame>(peer, address, {
+        existing: "reuse",
+    });
 
     useEffect(() => {
         if (gameInstance.program == null || gameInstance.program?.closed) {

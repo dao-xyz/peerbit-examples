@@ -1,5 +1,6 @@
 import { useNavigate, useParams } from "react-router";
-import { useLocal, useOnline, usePeer, useProgram } from "@peerbit/react";
+import { useLocal } from "@peerbit/document-react";
+import { useOnline, usePeer, useProgram } from "@peerbit/react";
 import {
     ChessGame,
     GamesStartMessage,
@@ -27,7 +28,7 @@ export const ChessLobby = () => {
         program: lobby,
         loading,
         peers,
-    } = useProgram<Lobby>(address, {
+    } = useProgram<Lobby>(peer, address, {
         existing: "reuse",
         keepOpenOnUnmount: true,
     });

@@ -172,9 +172,13 @@ export const Content = () => {
     const [modelDate, setModelDate] = useState<Date>(null);
 
     // The p2p database of model weights
-    const modelDB = useProgram(new ModelDatabase({ id: MODEL_DATABASE_ID }), {
-        existing: "reuse",
-    });
+    const modelDB = useProgram(
+        peer,
+        new ModelDatabase({ id: MODEL_DATABASE_ID }),
+        {
+            existing: "reuse",
+        }
+    );
 
     useEffect(() => {
         if (!modelDB.program) {
