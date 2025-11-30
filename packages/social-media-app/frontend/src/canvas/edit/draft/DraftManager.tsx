@@ -31,6 +31,9 @@ type EnsureArgs =
     | { replyTo: CanvasIx; key?: CanvasKey }
     | { key: CanvasKey; replyTo?: CanvasIx };
 
+export const toBucket = (key: CanvasKey) => Canvas.createIdString(key);
+export const genKey = (): CanvasKey => randomBytes(32);
+
 export type DraftAPI = {
     ensure(args: EnsureArgs): Promise<CanvasIx>;
     ensureForParent(parent: CanvasIx, key?: CanvasKey): Promise<CanvasIx>;
@@ -108,8 +111,6 @@ export const DraftManagerProvider: React.FC<{
         if (captureEvents)
             emitDebugEvent({ source: "DraftManager", name, ...payload });
     };
-    const toBucket = (key: CanvasKey) => Canvas.createIdString(key);
-    const genKey = (): CanvasKey => randomBytes(32);
 
     const records = useRef(new Map<string, DraftRecord>());
     const parentIndex = useRef(new Map<string, string>());

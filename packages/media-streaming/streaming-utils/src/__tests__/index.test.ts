@@ -12,7 +12,7 @@ import {
 } from "../index.js";
 import { delay, hrtime, waitForResolved } from "@peerbit/time";
 import { equals } from "uint8arrays";
-import { expect } from "chai";
+import { expect, describe, test, beforeAll, afterAll, afterEach } from "vitest";
 import sinon from "sinon";
 import { Ed25519Keypair } from "@peerbit/crypto";
 import { MAX_U32, ReplicationRangeIndexable } from "@peerbit/shared-log";
@@ -23,7 +23,7 @@ import { WithContext, WithIndexedContext } from "@peerbit/document";
 const MILLISECONDS_TO_MICROSECONDS = 1e3;
 
 describe("oneVideoAndOneAudioChangeProcessor", () => {
-    it("preload tracks when end time not set", async () => {
+    test("preload tracks when end time not set", async () => {
         let preload = 10;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let already = new Track({
@@ -53,7 +53,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
         expect(diff.remove).to.be.undefined;
     });
 
-    it("preload tracks when end time set", async () => {
+    test("preload tracks when end time set", async () => {
         let preload = 10;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let already = new Track({
@@ -83,7 +83,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
         expect(diff.remove).to.be.undefined;
     });
 
-    it("not load track until preload when end time not set", async () => {
+    test("not load track until preload when end time not set", async () => {
         let preload = 0;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let already = new Track({
@@ -113,7 +113,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
         expect(diff.remove).to.be.undefined;
     });
 
-    it("not load track until preload when end time set", async () => {
+    test("not load track until preload when end time set", async () => {
         let preload = 0;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let already = new Track({
@@ -143,7 +143,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
         expect(diff.remove).to.be.undefined;
     });
 
-    it("not add track if end times are equal", async () => {
+    test("not add track if end times are equal", async () => {
         let preload = 10;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let already = new Track({
@@ -173,7 +173,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
         expect(diff.remove).to.be.undefined;
     });
 
-    it("not add track if end times are equal", async () => {
+    test("not add track if end times are equal", async () => {
         let preload = 10;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let already = new Track({
@@ -203,7 +203,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
         expect(diff.remove).to.be.undefined;
     });
 
-    it("will schedule track loading when necessary with", async () => {
+    test("will schedule track loading when necessary with", async () => {
         let preload = 500;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let end1 = 1.5e3;
@@ -236,7 +236,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
         expect(when).to.eq(end1);
     });
 
-    it("will schedule track with time when not overlapping", async () => {
+    test("will schedule track with time when not overlapping", async () => {
         let preload = 500;
         const publicKey = (await Ed25519Keypair.create()).publicKey;
         let end1 = 1.5e3;
@@ -267,7 +267,7 @@ describe("oneVideoAndOneAudioChangeProcessor", () => {
     });
 });
 describe("Track", () => {
-    it("setEnd", async () => {
+    test("setEnd", async () => {
         const now = +new Date();
         const track = new Track({
             sender: (await Ed25519Keypair.create()).publicKey,
@@ -289,7 +289,7 @@ describe("MediaStream", () => {
         cleanup: (() => Promise<void>) | undefined,
         iterator: TracksIterator;
 
-    before(async () => {
+    beforeAll(async () => {
         global.requestAnimationFrame = function (cb) {
             return setTimeout(cb, 10);
         };
@@ -299,7 +299,7 @@ describe("MediaStream", () => {
         await streamer.dial(viewer);
     });
 
-    after(async () => {
+    afterAll(async () => {
         await viewer.stop();
         await streamer.stop();
     });
@@ -334,9 +334,9 @@ describe("MediaStream", () => {
     type ScenarioReturnType<T> = (T extends TwoTracks
         ? { track1: Track; track2: Track }
         : { track1: Track }) & {
-        viewerStreams: MediaStreamDB;
-        mediaStreams: MediaStreamDB;
-    };
+            viewerStreams: MediaStreamDB;
+            mediaStreams: MediaStreamDB;
+        };
     const isTwoTracks = (
         options: OneTrack | TwoTracks
     ): options is TwoTracks => {
@@ -362,10 +362,10 @@ describe("MediaStream", () => {
                     typeof properties.first.type === "object"
                         ? properties.first.type
                         : properties.first.type === "video"
-                          ? new WebcodecsStreamDB({
+                            ? new WebcodecsStreamDB({
                                 decoderDescription: { codec: "av01" },
                             })
-                          : new AudioStreamDB({ sampleRate: 44100 }),
+                            : new AudioStreamDB({ sampleRate: 44100 }),
                 start: properties.first.start * MILLISECONDS_TO_MICROSECONDS,
                 end:
                     properties.first.end != null
@@ -402,16 +402,16 @@ describe("MediaStream", () => {
                         typeof properties.second.type === "object"
                             ? properties.second.type
                             : properties.second.type === "video"
-                              ? new WebcodecsStreamDB({
+                                ? new WebcodecsStreamDB({
                                     decoderDescription: { codec: "av01" },
                                 })
-                              : new AudioStreamDB({ sampleRate: 44100 }),
+                                : new AudioStreamDB({ sampleRate: 44100 }),
                     start:
                         properties.second.start * MILLISECONDS_TO_MICROSECONDS,
                     end:
                         properties.second.end != null
                             ? properties.second.end *
-                              MILLISECONDS_TO_MICROSECONDS
+                            MILLISECONDS_TO_MICROSECONDS
                             : undefined,
                 })
             );
@@ -454,7 +454,7 @@ describe("MediaStream", () => {
     // What is the expected option when the iterator runs out?
 
     describe("waitFor", () => {
-        it("wait for self", async () => {
+        test("wait for self", async () => {
             const mediaStreams = await streamer.open(
                 new MediaStreamDB(streamer.identity.publicKey)
             );
@@ -462,7 +462,7 @@ describe("MediaStream", () => {
         });
     });
     describe("live", () => {
-        it("one chunk", async () => {
+        test("one chunk", async () => {
             const track1 = await streamer.open(
                 new Track({
                     sender: streamer.identity.publicKey,
@@ -496,7 +496,7 @@ describe("MediaStream", () => {
             );
         });
 
-        it("second chunk", async () => {
+        test("second chunk", async () => {
             const track1 = await streamer.open(
                 new Track({
                     sender: streamer.identity.publicKey,
@@ -534,7 +534,7 @@ describe("MediaStream", () => {
             );
         });
 
-        it("multiple options", async () => {
+        test("multiple options", async () => {
             const { mediaStreams, track1, track2, viewerStreams } =
                 await createScenario({
                     first: { start: 10 },
@@ -550,7 +550,7 @@ describe("MediaStream", () => {
             );
         });
 
-        it("new", async () => {
+        test("new", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 10 },
@@ -591,7 +591,7 @@ describe("MediaStream", () => {
             expect(chunks[1].chunk.id).to.eq(c2.id);
         });
 
-        it("live after progress", async () => {
+        test("live after progress", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 0, size: 0 },
@@ -695,7 +695,7 @@ describe("MediaStream", () => {
             expect(maxTimeFromCallback).to.eq(last);
         });
 
-        it("subscribeForMaxTime for streamer", async () => {
+        test("subscribeForMaxTime for streamer", async () => {
             let start = 100;
             const { mediaStreams, track1 } = await createScenario({
                 first: { start, size: 0 },
@@ -718,7 +718,7 @@ describe("MediaStream", () => {
             );
         });
 
-        it("new track while viewing", async () => {
+        test("new track while viewing", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 0, size: 0 },
@@ -793,7 +793,7 @@ describe("MediaStream", () => {
 
         /*  TODO should this test be deleted or can we try to figure out a test case where old data can disrupt the live feed?
        
-        it("old ignored", async () => {
+        test("old ignored", async () => {
              const { mediaStreams, track1, viewerStreams } =
                  await createScenario({
                      first: { start: 10 },
@@ -829,7 +829,7 @@ describe("MediaStream", () => {
              expect(chunks).to.have.length(1);
          }); */
 
-        it("onReplicationChange", async () => {
+        test("onReplicationChange", async () => {
             const { track1, viewerStreams } = await createScenario({
                 first: { start: 0, type: "video" },
             });
@@ -871,7 +871,7 @@ describe("MediaStream", () => {
             );
         });
 
-        it("select options", async () => {
+        test("select options", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 0, type: "video" },
@@ -974,7 +974,7 @@ describe("MediaStream", () => {
             expect(iterator.options()).to.have.length(2);
         });
 
-        it("options are updated", async () => {
+        test("options are updated", async () => {
             const mediaStreams = await streamer.open(
                 new MediaStreamDB(streamer.identity.publicKey)
             );
@@ -1067,7 +1067,7 @@ describe("MediaStream", () => {
             );
         });
 
-        it("closing iterator will end track", async () => {
+        test("closing iterator will end track", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 10, size: 1 },
@@ -1099,7 +1099,7 @@ describe("MediaStream", () => {
             expect(viewerTracks[0].closed).to.be.true;
         });
 
-        it("closing iterator with keep alive with prevent further replication when closing", async () => {
+        test("closing iterator with keep alive with prevent further replication when closing", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 0, size: 0 },
@@ -1148,7 +1148,7 @@ describe("MediaStream", () => {
             expect(viewerTracks[0].source.chunks.log.log.length).to.eq(1);
         });
 
-        it("closing iterator with keep alive with prevent further replication when non-live iterating", async () => {
+        test("closing iterator with keep alive with prevent further replication when non-live iterating", async () => {
             let preCreatedTrackTime = 5000;
             let dataPoints = 100;
             let start = 0;
@@ -1238,7 +1238,7 @@ describe("MediaStream", () => {
             ).to.be.closeTo(
                 Number(
                     (endLiveFeedSubscription! - startLiveFeedSubscription!) /
-                        1000n
+                    1000n
                 ),
                 1e9 // 1 second
             );
@@ -1274,7 +1274,7 @@ describe("MediaStream", () => {
             await secondIterator.close();
         });
 
-        it("will reuse segment", async () => {
+        test("will reuse segment", async () => {
             const { mediaStreams, track1, viewerStreams } =
                 await createScenario({
                     first: { start: 0, size: 0 },
@@ -1321,7 +1321,7 @@ describe("MediaStream", () => {
             await secondIterator.close();
         });
 
-        it("will favor live track", async () => {
+        test("will favor live track", async () => {
             let track1 = await streamer.open(
                 new Track({
                     sender: streamer.identity.publicKey,
@@ -1421,7 +1421,7 @@ describe("MediaStream", () => {
             );
         });
 
-        it("keep track until the end", async () => {
+        test("keep track until the end", async () => {
             let track1 = await streamer.open(
                 new Track({
                     sender: streamer.identity.publicKey,
@@ -1487,7 +1487,7 @@ describe("MediaStream", () => {
 
     describe("progress", () => {
         describe("one track", () => {
-            it("one chunk", async () => {
+            test("one chunk", async () => {
                 // test we get 1 chunk and test that we close the track after the chunk is received
                 let framesPerTrack = 1;
 
@@ -1546,7 +1546,7 @@ describe("MediaStream", () => {
                 expect(t1! - t0).to.be.lessThan(2e3);
             });
 
-            it("start at middle", async () => {
+            test("start at middle", async () => {
                 let framesPerTrack = 2;
 
                 const { mediaStreams, track1, viewerStreams } =
@@ -1585,12 +1585,12 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                            chunks[chunks.length - 1].chunk.time
+                        chunks[chunks.length - 1].chunk.time
                     )
                 );
             });
 
-            it("start before first chunk", async () => {
+            test("start before first chunk", async () => {
                 let framesPerTrack = 2;
 
                 const { mediaStreams, track1, viewerStreams } =
@@ -1624,12 +1624,12 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                            chunks[chunks.length - 1].chunk.time
+                        chunks[chunks.length - 1].chunk.time
                     )
                 );
             });
 
-            it("current time pauses when lagging", async () => {
+            test("current time pauses when lagging", async () => {
                 const { viewerStreams } = await createScenario({
                     delta: 1,
                     first: {
@@ -1688,7 +1688,7 @@ describe("MediaStream", () => {
                 expect(iterator.time()).to.be.greaterThan(time as number);
             });
 
-            it("current time is accurate after pause resume when lagging", async () => {
+            test("current time is accurate after pause resume when lagging", async () => {
                 const { mediaStreams, track1, viewerStreams } =
                     await createScenario({
                         delta: 1,
@@ -1750,7 +1750,7 @@ describe("MediaStream", () => {
                 expect(timeAfterPlayDelay).to.eq(timeAfterPlay);
             });
 
-            it("time will progress on track with no chunks", async () => {
+            test("time will progress on track with no chunks", async () => {
                 const { viewerStreams } = await createScenario({
                     delta: 1,
                     first: {
@@ -1779,7 +1779,7 @@ describe("MediaStream", () => {
                 expect(timeAgain).to.be.greaterThan(time as number);
             });
 
-            it("time will not  progress on track while waiting for chunks", async () => {
+            test("time will not  progress on track while waiting for chunks", async () => {
                 const { track1, viewerStreams } = await createScenario({
                     delta: 1,
                     first: {
@@ -1838,7 +1838,7 @@ describe("MediaStream", () => {
                 expect(iterator.time()).to.be.greaterThan(timeAgain as number);
             });
 
-            it("will emit underflow once buffer runs out", async () => {
+            test("will emit underflow once buffer runs out", async () => {
                 let delta = 1e2;
                 const { viewerStreams } = await createScenario({
                     delta,
@@ -1910,7 +1910,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("replication segment will grow as buffering continues", async () => {
+            test("replication segment will grow as buffering continues", async () => {
                 let size = 200;
                 let delta = 10;
                 const {
@@ -1953,7 +1953,7 @@ describe("MediaStream", () => {
                 }
             });
 
-            it("merges segments on re-start at the same time", async () => {
+            test("merges segments on re-start at the same time", async () => {
                 let size = 200;
                 let delta = 10;
                 const {
@@ -1991,7 +1991,7 @@ describe("MediaStream", () => {
                     onReplicationChange: (range) => {
                         expect(
                             viewerStreams.node.identity.publicKey.hashcode() ===
-                                range.hash
+                            range.hash
                         ).to.be.false;
                     },
                 });
@@ -2001,7 +2001,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("will subscribe to max time while iterating", async () => {
+            test("will subscribe to max time while iterating", async () => {
                 let size = 1e3;
                 let delta = 10;
                 let start = 123;
@@ -2062,7 +2062,7 @@ describe("MediaStream", () => {
                 bufferPausePromise.resolve();
             });
 
-            it("will not close track until buffer is empty", async () => {
+            test("will not close track until buffer is empty", async () => {
                 // test we get 1 chunk and test that we close the track after the chunk is received
                 let framesPerTrack = 11;
 
@@ -2137,7 +2137,7 @@ describe("MediaStream", () => {
         });
 
         describe("overlapping", () => {
-            it("will deduplicate by type", async () => {
+            test("will deduplicate by type", async () => {
                 let framesPerTrack = 2;
 
                 const { mediaStreams, track1, track2, viewerStreams } =
@@ -2163,7 +2163,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("will not go back intime for same source", async () => {
+            test("will not go back intime for same source", async () => {
                 const { mediaStreams, track1, track2, viewerStreams } =
                     await createScenario({
                         delta: 1000,
@@ -2192,7 +2192,7 @@ describe("MediaStream", () => {
                 expect(chunks.length).to.eq(0);
             });
 
-            it("overlapping partly multiple media types", async () => {
+            test("overlapping partly multiple media types", async () => {
                 let framesPerTrack = 2;
 
                 const { viewerStreams } = await createScenario({
@@ -2231,7 +2231,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("overlapping partly same media types", async () => {
+            test("overlapping partly same media types", async () => {
                 let framesPerTrack = 2;
 
                 const { viewerStreams } = await createScenario({
@@ -2268,7 +2268,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("will not buffer overlapping until necessary", async () => {
+            test("will not buffer overlapping until necessary", async () => {
                 let delta = 500;
                 let preload = 500;
                 let firstTrackEndTime = 2000;
@@ -2362,7 +2362,7 @@ describe("MediaStream", () => {
                 }
             });
 
-            it("time will not progress until preload", async () => {
+            test("time will not progress until preload", async () => {
                 const { track1, track2, viewerStreams } = await createScenario({
                     delta: 1,
                     first: {
@@ -2453,7 +2453,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("can select a different track of same source type", async () => {
+            test("can select a different track of same source type", async () => {
                 let chunkCountPerTrack = 10;
 
                 const { viewerStreams, track1, track2 } = await createScenario({
@@ -2544,7 +2544,7 @@ describe("MediaStream", () => {
         });
 
         describe("sequential", () => {
-            it("start at 0", async () => {
+            test("start at 0", async () => {
                 let trackCount = 2;
                 let delta = 500;
                 let totalTime = trackCount * 2 * delta;
@@ -2592,12 +2592,12 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                            chunks[chunks.length - 1].chunk.time
+                        chunks[chunks.length - 1].chunk.time
                     )
                 );
             });
 
-            it("0.3", async () => {
+            test("0.3", async () => {
                 let framesPerTrack = 100;
 
                 const { viewerStreams } = await createScenario({
@@ -2629,7 +2629,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("0.3 long", async () => {
+            test("0.3 long", async () => {
                 let framesPerTrack = 100;
 
                 const { viewerStreams } = await createScenario({
@@ -2662,7 +2662,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("many chunks single track", async () => {
+            test("many chunks single track", async () => {
                 let size = 5e3;
 
                 const { mediaStreams, track1, viewerStreams } =
@@ -2694,7 +2694,7 @@ describe("MediaStream", () => {
                 }
             });
 
-            it("many chunks concurrently", async () => {
+            test("many chunks concurrently", async () => {
                 let size = 100;
 
                 const { mediaStreams, track1, track2, viewerStreams } =
@@ -2734,16 +2734,16 @@ describe("MediaStream", () => {
                 for (let i = 1; i < size; i++) {
                     expect(
                         chunks.get(track1.address)![i].time -
-                            chunks.get(track1.address)![i - 1].time
+                        chunks.get(track1.address)![i - 1].time
                     ).to.be.eq(delta);
                     expect(
                         chunks.get(track2.address)![i].time -
-                            chunks.get(track2.address)![i - 1].time
+                        chunks.get(track2.address)![i - 1].time
                     ).to.be.eq(delta);
                 }
             });
 
-            it("buffers evenly", async () => {
+            test("buffers evenly", async () => {
                 // TODO this test is flaky for some reason
                 const mediaStreams = await streamer.open(
                     new MediaStreamDB(streamer.identity.publicKey)
@@ -2814,7 +2814,7 @@ describe("MediaStream", () => {
                 expect(meanDiff - 1).to.be.lessThan(0.001); // TODO polyfill requestAnimationFrame better to make this test more reliable
             });
 
-            it("pause", async () => {
+            test("pause", async () => {
                 const mediaStreams = await streamer.open(
                     new MediaStreamDB(streamer.identity.publicKey)
                 );
@@ -2870,7 +2870,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("change from live subscription to progress earlier track", async () => {
+            test("change from live subscription to progress earlier track", async () => {
                 const trackCount = 2;
                 const { mediaStreams, track1, track2, viewerStreams } =
                     await createScenario({
@@ -2941,7 +2941,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("close", async () => {
+            test("close", async () => {
                 const mediaStreams = await streamer.open(
                     new MediaStreamDB(streamer.identity.publicKey)
                 );
@@ -2991,7 +2991,7 @@ describe("MediaStream", () => {
                 }
             });
 
-            it("close on end", async () => {
+            test("close on end", async () => {
                 const mediaStreams = await streamer.open(
                     new MediaStreamDB(streamer.identity.publicKey)
                 );
@@ -3051,7 +3051,7 @@ describe("MediaStream", () => {
                 clearTimeout(timeout);
             });
 
-            it("will join adjecent replication segments", async () => {
+            test("will join adjecent replication segments", async () => {
                 let allChunks = 10;
                 let halfChunks = 5;
                 const { mediaStreams, track1, viewerStreams } =
@@ -3114,7 +3114,7 @@ describe("MediaStream", () => {
                 ).to.have.length(1);
             });
 
-            it("replication segments will not join until adjecent", async () => {
+            test("replication segments will not join until adjecent", async () => {
                 let delta = 10; // ms
 
                 // 101 becaue we want 1010 ms gap, 100 because we want to make it at least 60 frames larger because the iterator will buffer ahead at least 60 (?) frames, so we dont want to close the gap
@@ -3225,7 +3225,7 @@ describe("MediaStream", () => {
                 expect(chunksFromGap.length).to.be.lessThanOrEqual(gapSize);
             });
 
-            it("can rewatch segment after streamer shuts down", async () => {
+            test("can rewatch segment after streamer shuts down", async () => {
                 let chunksCount = 1e3;
 
                 const { track1, viewerStreams } = await createScenario({
@@ -3281,7 +3281,7 @@ describe("MediaStream", () => {
                 );
             });
 
-            it("can rewatch segment after streamer shuts down - 2 tracks", async () => {
+            test("can rewatch segment after streamer shuts down - 2 tracks", async () => {
                 let chunksCount = 1e3;
 
                 const { track1, viewerStreams } = await createScenario({
@@ -3340,7 +3340,7 @@ describe("MediaStream", () => {
         });
 
         describe("life cycle", () => {
-            it("will reuse track for new iterator", async () => {
+            test("will reuse track for new iterator", async () => {
                 let chunksPerTrack = 2;
 
                 const { mediaStreams, track1, viewerStreams } =
@@ -3371,7 +3371,7 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                            chunks[chunks.length - 1].chunk.time
+                        chunks[chunks.length - 1].chunk.time
                     )
                 );
 
@@ -3426,7 +3426,7 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                            chunks[chunks.length - 1].chunk.time
+                        chunks[chunks.length - 1].chunk.time
                     )
                 );
                 expect(tracks).to.have.length(2);
@@ -3445,7 +3445,7 @@ describe("MediaStream", () => {
                 expect(closeCall.called).to.be.false; // since keepTracksOpen: true
             });
 
-            it("close all tracks", async () => {
+            test("close all tracks", async () => {
                 let chunkSize = 2;
 
                 const { viewerStreams } = await createScenario({
@@ -3475,7 +3475,7 @@ describe("MediaStream", () => {
                 expect(closeCalled.calledOnce).to.be.true;
             });
 
-            it("can drop track", async () => {
+            test("can drop track", async () => {
                 const mediaStreams = await streamer.open(
                     new MediaStreamDB(streamer.identity.publicKey)
                 );
@@ -3497,7 +3497,7 @@ describe("MediaStream", () => {
                 await mediaStreams.tracks.del(track1.id);
             });
 
-            it("can drop after end", async () => {
+            test("can drop after end", async () => {
                 const mediaStreams = await streamer.open(
                     new MediaStreamDB(streamer.identity.publicKey)
                 );
@@ -3534,7 +3534,7 @@ describe("MediaStreams", () => {
         "MediaStreams",
         String(+new Date())
     );
-    before(async () => {
+    beforeAll(async () => {
         global.requestAnimationFrame = function (cb) {
             return setTimeout(cb, 10);
         };
@@ -3546,7 +3546,7 @@ describe("MediaStreams", () => {
         await streamer.dial(replicator);
     });
 
-    after(async () => {
+    afterAll(async () => {
         await replicator.stop();
         await streamer.stop();
     });
@@ -3555,13 +3555,13 @@ describe("MediaStreams", () => {
         await cleanup?.();
     });
 
-    it("address is deterministic", async () => {
+    test("address is deterministic", async () => {
         const streamerStreams = await streamer.open(new MediaStreamDBs());
         const viewerStreams = await replicator.open(streamerStreams.clone());
         expect(viewerStreams.address).to.eq(streamerStreams.address);
     });
 
-    it("will start replicating things that are added by default", async () => {
+    test("will start replicating things that are added by default", async () => {
         const track1 = await streamer.open(
             new Track({
                 sender: streamer.identity.publicKey,

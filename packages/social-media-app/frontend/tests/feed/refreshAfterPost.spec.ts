@@ -1,10 +1,10 @@
-import { test, expect } from "./fixtures/persistentContext";
-import { OFFLINE_BASE, withSearchParams } from "./utils/url";
+import { test, expect } from "../fixtures/persistentContext";
+import { OFFLINE_BASE, withSearchParams } from "../utils/url";
 import {
     expectPersistent,
     getPeerInfo,
     waitForPeerInfo,
-} from "./utils/persistence";
+} from "../utils/persistence";
 
 function uid(prefix: string) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;

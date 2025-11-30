@@ -17,14 +17,15 @@
         "@emotion/styled": "^11.11.0",
         "@mui/icons-material": "^7.0.2",
         "@mui/material": "^5.15.7",
-        "@peerbit/document": "^10.1.2",
-        "@peerbit/react": "^0.0.37",
+        "@peerbit/document": "^11.0.0",
+        "@peerbit/react": "^0.0.38",
         "@tensorflow/tfjs": "^4.2.0",
         "peerbit": "^4.4.2",
-        "react": "^19.1.0",
+        "react": "^19.2.0",
         "react-dom": "^19.1.0",
         "react-router": "^7.9.3",
-        "react-use": "^17.6.0"
+        "react-use": "^17.6.0",
+        "events": "^3.3.0"
     },
     "devDependencies": {
         "@peerbit/vite": "^1.1.0",

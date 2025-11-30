@@ -3,6 +3,7 @@ import { useEffect, useState } from "react";
 import { PeerbitProxyHost } from "@peerbit/proxy";
 import { Peerbit } from "peerbit";
 import { BandwidthTracker } from "@peerbit/stream";
+import { ProgramClient } from "@peerbit/program";
 
 export const useNetworkUsage = () => {
     const { peer } = usePeer();
@@ -16,7 +17,7 @@ export const useNetworkUsage = () => {
 
         let client = peer;
         if (peer instanceof PeerbitProxyHost) {
-            client = peer.hostClient;
+            client = peer.hostClient as ProgramClient; // TODO why do we need this cast?
         }
         if (client instanceof Peerbit === false) {
             throw new Error(

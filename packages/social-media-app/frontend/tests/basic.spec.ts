@@ -22,7 +22,7 @@ test("debug overlay toggle appears with localStorage.debug", async ({
     await page.addInitScript(() => {
         try {
             localStorage.setItem("debug", "true");
-        } catch {}
+        } catch { }
     });
     await page.goto(OFFLINE_BASE);
     // Verify debug console was initialized

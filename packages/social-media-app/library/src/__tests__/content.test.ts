@@ -96,7 +96,7 @@ describe("canvas (updated)", () => {
         const serialized = serialize(clazz);
         const deserialized = deserialize(serialized, Canvas);
         expect(deserialized.idString).to.eq(clazz.idString);
-        expect(deserialized.selfScope.address).to.eq(clazz.selfScope.address);
+        expect(deserialized.selfScope!.address).to.eq(clazz.selfScope!.address);
         expect(deserialized.publicKey.equals(clazz.publicKey)).to.be.true;
         expect(deserialized.idString).to.deep.eq(clazz.idString);
     });
@@ -512,7 +512,7 @@ describe("canvas (updated)", () => {
 
         expect(createdNew).to.be.true;
         expect(sha256Base64Sync(moved.id)).to.eq(sha256Base64Sync(draft.id)); // id preserved
-        expect(moved.selfScope.address).to.eq(rootScope.address); // home updated
+        expect(moved.selfScope!.address).to.eq(rootScope.address); // home updated
 
         // Ensure indexes have flushed/settled in root
         await rootScope._hierarchicalReindex!.flush();

@@ -59,6 +59,7 @@ export const Feed = (
             <div
                 className="flex flex-col relative w-full mt-0 px-2"
                 ref={contentRef}
+                data-testid="feed"
             >
                 {processedReplies?.length > 0 ? (
                     <div

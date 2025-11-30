@@ -1,16 +1,88 @@
-import { test, expect } from "@playwright/test";
-import { OFFLINE_BASE } from "./utils/url";
+import { test, expect, } from "@playwright/test";
+import { OFFLINE_BASE } from "../utils/url";
 
 function uid(prefix: string) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
+
+test.describe("publish", () => {
+    test("can publish two messages in succession", async ({ page }) => {
+        await page.goto(OFFLINE_BASE);
+
+        // Switch to the chronological view to avoid “best” ranking hiding recency
+        const recentTab = page.getByRole("button", { name: "Recent" });
+        await expect(recentTab).toBeVisible();
+        await recentTab.click();
+
+        const toolbar = page.getByTestId("toolbarcreatenew").first();
+        const textArea = toolbar.locator("textarea");
+        await expect(textArea).toBeVisible();
+
+        // Publish first message
+        const message1 = uid("First message");
+        await textArea.fill(message1);
+        const sendBtn = toolbar.getByTestId("send-button");
+        await expect(sendBtn).toBeEnabled();
+        await sendBtn.click();
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            null,
+            { timeout: 10000 }
+        );
+
+        // Publish second message
+        const message2 = uid("Second message");
+        await textArea.fill(message2);
+        await expect(sendBtn).toBeEnabled();
+        await sendBtn.click();
+        await page.waitForFunction(
+            () => {
+                const el = document.querySelector(
+                    '[data-testid="toolbarcreatenew"] textarea'
+                ) as HTMLTextAreaElement | null;
+                return !el || el.value === "";
+            },
+            null,
+            { timeout: 10000 }
+        );
+
+        // expect both messages to be in the feed
+        const feed = page.getByTestId("feed");
+        await expect
+            .poll(
+                async () => {
+                    const text = (await feed.textContent()) || "";
+                    return text.includes(message1) && text.includes(message2);
+                },
+                { timeout: 15000 }
+            )
+            .toBe(true);
+        // newer message should appear before the first
+        await expect
+            .poll(
+                async () => {
+                    const text = (await feed.textContent()) || "";
+                    const i1 = text.indexOf(message1);
+                    const i2 = text.indexOf(message2);
+                    return i1 !== -1 && i2 !== -1 ? i2 <= i1 : null;
+                },
+                { timeout: 15000 }
+            )
+            .toBe(true);
+    });
+})
 
 /**
  * Captures perf:publish event emitted by DraftManager when perfEnabled is true.
  * Asserts expected marks exist and logs their ordering for analysis.
  */
 
-test.describe("publish perf marks", () => {
+test.describe("perf", () => {
     test("collect and assert timing phases", async ({ page }) => {
         // Enable perf instrumentation before app loads
         await page.addInitScript(() => {
@@ -108,8 +180,8 @@ test.describe("publish perf marks", () => {
             ...(typeof perfData.parentFlush === "number"
                 ? ["parentFlush"]
                 : typeof perfData.postParentFlush === "number"
-                  ? ["postParentFlush"]
-                  : []),
+                    ? ["postParentFlush"]
+                    : []),
         ];
         let prev = 0;
         for (const phase of phases) {

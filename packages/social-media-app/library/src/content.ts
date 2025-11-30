@@ -2091,6 +2091,25 @@ export class Scope extends Program<ScopeArgs> {
         // Used for defaults when a targetScope isn’t passed
         const defaultDestScope: Scope = publish.parent?.nearestScope ?? this;
 
+        // Ensure indexes for child (and optionally parent) are current before returning.
+        const ensureIndexed = async (child: Canvas, parent?: Canvas) => {
+            const childMgr = child.nearestScope._hierarchicalReindex!;
+            await childMgr.add({
+                canvas: child,
+                options: { onlyReplies: false, skipAncestors: true },
+            });
+            await childMgr.flush(child.idString);
+
+            if (parent) {
+                const parentMgr = parent.nearestScope._hierarchicalReindex!;
+                await parentMgr.add({
+                    canvas: parent,
+                    options: { onlyReplies: true, skipAncestors: true },
+                });
+                await parentMgr.flush(parent.idString);
+            }
+        };
+
         // Finalize: optional link under parent, optional set view, flush
         const finalize = async (dst: Canvas) => {
             if (publish.parent) {
@@ -2122,49 +2141,7 @@ export class Scope extends Program<ScopeArgs> {
                     });
                 }
 
-                // Targeted flush: only ensure the child's indexes are current.
-                // Do not force a reindex flush inline; allow manager to coalesce
-                // Parent-side indexes will converge via link listeners; no explicit flush needed here.
-
-                // Schedule child full reindex without ancestor refresh
-                // Defer child full reindex so content can appear before heavy work
-                try {
-                    const child = dst;
-                    const scopeRef = dst.nearestScope; // capture now while loaded
-                    const ms =
-                        typeof process !== "undefined" && process?.env?.VITEST
-                            ? 0
-                            : 300;
-                    globalThis.setTimeout?.(() => {
-                        try {
-                            scopeRef
-                                ._hierarchicalReindex!.add({
-                                    canvas: child,
-                                    options: {
-                                        onlyReplies: false,
-                                        skipAncestors: true,
-                                    },
-                                })
-                                .catch(() => {});
-                        } catch {}
-                    }, ms);
-                } catch {}
-
-                // Defer parent replies-only refresh
-                try {
-                    const parent = publish.parent!;
-                    globalThis.setTimeout?.(() => {
-                        parent.nearestScope
-                            ._hierarchicalReindex!.add({
-                                canvas: parent,
-                                options: {
-                                    onlyReplies: true,
-                                    skipAncestors: true,
-                                },
-                            })
-                            .catch(() => {});
-                    }, 0);
-                } catch {}
+                await ensureIndexed(dst, publish.parent);
             } else {
                 if (publish.view != null) {
                     dlog("finalize: top-level setExperience", {
@@ -2176,31 +2153,9 @@ export class Scope extends Program<ScopeArgs> {
                             scope: dst.nearestScope,
                         });
                     });
-                    // Targeted flush for the child only
-                    // Do not force a reindex flush inline; allow manager to coalesce
-                    try {
-                        const child = dst;
-                        const scopeRef = dst.nearestScope;
-                        const ms =
-                            typeof process !== "undefined" &&
-                            process?.env?.VITEST
-                                ? 0
-                                : 300;
-                        globalThis.setTimeout?.(() => {
-                            try {
-                                scopeRef
-                                    ._hierarchicalReindex!.add({
-                                        canvas: child,
-                                        options: {
-                                            onlyReplies: false,
-                                            skipAncestors: true,
-                                        },
-                                    })
-                                    .catch(() => {});
-                            } catch {}
-                        }, ms);
-                    } catch {}
                 }
+
+                await ensureIndexed(dst);
             }
         };
 
@@ -3598,8 +3553,8 @@ export class Canvas {
     @field({ type: PublicSignKey })
     publicKey: PublicSignKey;
 
-    @field({ type: AddressReference })
-    selfScope: AddressReference;
+    @field({ type: option(AddressReference) })
+    selfScope?: AddressReference;
 
     @field({ type: "u8" })
     acl: 0;
@@ -3616,11 +3571,11 @@ export class Canvas {
             ((p as { seed: Uint8Array }).seed
                 ? sha256Sync((p as { seed: Uint8Array }).seed)
                 : randomBytes(32));
-        this.selfScope = (
+        const selfScope: AddressReference | undefined =
             p.selfScope instanceof Scope
                 ? new AddressReference({ address: p.selfScope.address })
-                : p.selfScope
-        ) as AddressReference; // TODO types
+                : p.selfScope;
+        this.selfScope = selfScope;
         this.acl = 0;
     }
 

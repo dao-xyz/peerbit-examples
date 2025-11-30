@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
-import { OFFLINE_BASE } from "./utils/url";
-import { setupConsoleCapture } from "./utils/consoleCapture";
-import { getCanvasSaveStats, waitForCanvasSaveDelta } from "./utils/autosave";
+import { OFFLINE_BASE } from "../utils/url";
+import { setupConsoleCapture } from "../utils/consoleCapture";
+import { getCanvasSaveStats, waitForCanvasSaveDelta } from "../utils/autosave";
 
 function uid(prefix: string) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
@@ -53,7 +53,7 @@ test.describe("Draft rotation does not mutate previous posts in feed", () => {
                 .getByTestId("composer-textarea")
                 .first();
             await textContainer.click({ timeout: 1500 });
-        } catch {}
+        } catch { }
         const textArea = toolbar.locator("textarea");
         // Wait for a textarea to exist; on slow starts, it may mount slightly later
         await page.waitForFunction(
@@ -115,7 +115,7 @@ test.describe("Draft rotation does not mutate previous posts in feed", () => {
                 .getByTestId("composer-textarea")
                 .first();
             await textContainer.click({ timeout: 1500 });
-        } catch {}
+        } catch { }
         // Wait for a textarea to be present for the fresh draft
         await page.waitForFunction(
             () =>

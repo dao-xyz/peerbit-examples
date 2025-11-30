@@ -45,13 +45,18 @@ const AutoSaveBridge: React.FC<{ enabled?: boolean }> = ({ enabled }) => {
         };
     }, [enabled, privateScope, savePending]);
 
-    // Ensure we don't miss the initial save if privateScope becomes ready after first edits
+    // Ensure we don't miss the initial save if privateScope becomes ready after first edits.
+    // When privateScope is already available on mount we rely on the debounced flush above;
+    // running an extra catch-up here would double-save every keystroke.
+    const scopeWasMissingAtMount = React.useRef(!privateScope);
     useEffect(() => {
         if (!enabled || !privateScope) return;
+        if (!scopeWasMissingAtMount.current) return;
         const hasNonEmptyPendings = pendingRects?.some(
             (p) => !p.content.isEmpty
         );
         if (hasNonEmptyPendings) {
+            scopeWasMissingAtMount.current = false;
             (async () => {
                 try {
                     await savePending(privateScope);

@@ -15,24 +15,13 @@
  * =============================================================================
  */
 
-import {
-    arrayBufferToBase64String,
-    base64StringToArrayBuffer,
-    getModelArtifactsInfoForJSON,
-} from "@tensorflow/tfjs-core/dist/io/io_utils";
-import { ModelStoreManagerRegistry } from "@tensorflow/tfjs-core/dist/io/model_management";
-import {
-    IORouter,
-    IORouterRegistry,
-} from "@tensorflow/tfjs-core/dist/io/router_registry";
+import { getModelArtifactsInfoForJSON } from "@tensorflow/tfjs-core/dist/io/io_utils";
+
 import {
     IOHandler,
     ModelArtifacts,
-    ModelArtifactsInfo,
-    ModelStoreManager,
     SaveResult,
     WeightsManifestConfig,
-    ModelJSON,
     WeightsManifestEntry,
 } from "@tensorflow/tfjs-core/dist/io/types";
 import {

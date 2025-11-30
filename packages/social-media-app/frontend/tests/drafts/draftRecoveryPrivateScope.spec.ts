@@ -1,7 +1,7 @@
-import { test, expect } from "./fixtures/persistentContext";
-import { withConsoleCapture } from "./utils/consoleHooks";
-import { setupConsoleCapture } from "./utils/consoleCapture";
-import { OFFLINE_BASE } from "./utils/url";
+import { test, expect } from "../fixtures/persistentContext";
+import { withConsoleCapture } from "../utils/consoleHooks";
+import { setupConsoleCapture } from "../utils/consoleCapture";
+import { OFFLINE_BASE } from "../utils/url";
 
 function uid(prefix: string) {
     const rand = Math.random().toString(36).slice(2, 8);

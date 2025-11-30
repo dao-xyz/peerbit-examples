@@ -139,13 +139,12 @@ export const Upload: React.FC<Props> = ({ source }) => {
             }
             await setName(source.id, audioFile.name);
 
-            peer
-                .open<MediaStreamDBs>(libAddr, {
-                    existing: "reuse",
-                    args: {
-                        replicate: "owned",
-                    },
-                })
+            peer.open<MediaStreamDBs>(libAddr, {
+                existing: "reuse",
+                args: {
+                    replicate: "owned",
+                },
+            })
                 .then((lib) => {
                     // save lib
                     return lib.mediaStreams.put(source);

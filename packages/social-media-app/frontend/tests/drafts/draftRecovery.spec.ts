@@ -1,7 +1,7 @@
-import { test, expect } from "./fixtures/persistentContext";
-import { expectPersistent } from "./utils/persistence";
-import { OFFLINE_BASE } from "./utils/url";
-import { waitForCanvasSaveDelta, getCanvasSaveStats } from "./utils/autosave";
+import { test, expect } from "../fixtures/persistentContext";
+import { expectPersistent } from "../utils/persistence";
+import { OFFLINE_BASE } from "../utils/url";
+import { waitForCanvasSaveDelta, getCanvasSaveStats } from "../utils/autosave";
 
 const PNG_BASE64 =
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=";

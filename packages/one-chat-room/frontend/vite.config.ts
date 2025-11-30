@@ -12,7 +12,6 @@ export default defineConfig({
         },
         tsconfigRaw: {
             compilerOptions: {
-                experimentalDecorators: true,
                 useDefineForClassFields: true,
             },
         },
@@ -25,7 +24,6 @@ export default defineConfig({
             },
             tsconfigRaw: {
                 compilerOptions: {
-                    experimentalDecorators: true,
                     useDefineForClassFields: true,
                 },
             },

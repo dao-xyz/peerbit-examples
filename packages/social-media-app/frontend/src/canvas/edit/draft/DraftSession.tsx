@@ -10,7 +10,7 @@ import React, {
 import type { Canvas, IndexableCanvas } from "@giga-app/interface";
 import type { WithIndexedContext } from "@peerbit/document";
 import { randomBytes } from "@peerbit/crypto";
-import { useDraftManager } from "./DraftManager";
+import { toBucket, useDraftManager } from "./DraftManager";
 import { debugLog, isDebugEnabled } from "../../../debug/debug";
 import { PrivateScope } from "../../useScope";
 import {
@@ -101,13 +101,7 @@ export const DraftSessionProvider: React.FC<{
                 debugLog("[DraftSession] ensure", {
                     parentId: pid,
                     draftId: ensured.idString,
-                    bucket: keyRef.current
-                        ? (window as any).Buffer
-                            ? (window as any).Buffer.from(
-                                  keyRef.current
-                              ).toString("hex")
-                            : undefined
-                        : undefined,
+                    bucket: toBucket(keyRef.current!),
                 });
                 setDraft(ensured);
                 mgr.setReplyTarget(keyRef.current!, replyTo);

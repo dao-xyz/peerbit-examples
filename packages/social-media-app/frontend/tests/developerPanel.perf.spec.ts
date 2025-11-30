@@ -13,7 +13,7 @@ test.describe("DeveloperPanel: shows perf events when enabled", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
-            } catch {}
+            } catch { }
         });
     });
 

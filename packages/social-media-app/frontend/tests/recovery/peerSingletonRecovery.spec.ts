@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { OFFLINE_BASE } from "./utils/url";
+import { OFFLINE_BASE } from "../utils/url";
 const BASE_URL = OFFLINE_BASE.replace(/#\/$/, "#/?ephemeral=false");
 
 // Reproduces session lock: open one page, then a second. The second should not dead-end; it should recover after first closes.

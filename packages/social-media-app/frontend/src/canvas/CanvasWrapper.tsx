@@ -169,7 +169,7 @@ const _CanvasWrapper = (
             }
             return (...args: any[]) => console.log(logTag, ...args);
         }
-        return () => {};
+        return () => { };
     }, [debug]);
 
     const privateScope = PrivateScope.useScope();
@@ -213,7 +213,7 @@ const _CanvasWrapper = (
                     before: before.map(toInfo),
                     after: after.map(toInfo),
                 });
-            } catch {}
+            } catch { }
         },
         [debug]
     );
@@ -228,6 +228,13 @@ const _CanvasWrapper = (
     const pendingCounter = useRef(0);
     const latestBreakpoint = useRef<"xxs" | "md">("md");
     const setupForCanvasIdDone = useRef<string | undefined>(undefined);
+    const lastContentChangeRef = useRef<
+        Map<string, { text: string; at: number }>
+    >(new Map());
+    const lastTextGlobalRef = useRef<{ text?: string; at: number }>({
+        text: undefined,
+        at: 0,
+    });
 
     const canvasRef = useRef(canvasDB);
     useEffect(() => {
@@ -269,6 +276,10 @@ const _CanvasWrapper = (
             },
             updates: {
                 merge: true,
+                onBatch: (changes) => {
+                    console.log("Elements batch update", changes);
+                },
+
                 /* merge: (change) => {
                     const filtered: DocumentsChange<
                         Element<ElementContent>,
@@ -354,58 +365,61 @@ const _CanvasWrapper = (
         return [...rects, ...stillPending];
     }, [rects, pendingRects, draft]);
 
-    // prune pending that made it into the index
+    // Combined dedupe: avoid double effects when both placeholder removal and prune would run.
     useEffect(() => {
         if (pendingRects.length === 0) return;
-        const idsInQuery = new Set(rects.map((r) => r.idString));
-        if (idsInQuery.size === 0) return;
+        let changed = false;
         setPendingRects((prev) => {
-            const next = prev.filter((p) => !idsInQuery.has(p.idString));
-            if (next.length === prev.length) return prev; // avoid no-op updates
-            logPendingDiff(
-                prev as any,
-                next as any,
-                "prune-pending-that-exist-in-rects"
-            );
-            return next;
-        });
-    }, [rects]);
+            let next = prev;
+            const idsInQuery = new Set(rects.map((r) => r.idString));
+            if (idsInQuery.size > 0) {
+                const pruned = next.filter((p) => !idsInQuery.has(p.idString));
+                if (pruned.length !== next.length) {
+                    logPendingDiff(
+                        next as any,
+                        pruned as any,
+                        "prune-pending-that-exist-in-rects"
+                    );
+                    next = pruned;
+                    changed = true;
+                }
+            }
 
-    // If a non-empty text rect exists (recovered or pending), drop any empty pending text placeholders
-    useEffect(() => {
-        if (pendingRects.length === 0) return;
-        const hasNonEmptyText =
-            rects.some(
-                (r) =>
-                    r.content instanceof StaticContent &&
-                    r.content.content instanceof StaticMarkdownText &&
-                    r.content.content.isEmpty === false
-            ) ||
-            pendingRects.some(
-                (p) =>
-                    p.content instanceof StaticContent &&
-                    p.content.content instanceof StaticMarkdownText &&
-                    p.content.content.isEmpty === false
-            );
-
-        if (!hasNonEmptyText) return;
-
-        setPendingRects((prev) => {
-            const next = prev.filter(
-                (p) =>
-                    !(
+            const hasNonEmptyText =
+                rects.some(
+                    (r) =>
+                        r.content instanceof StaticContent &&
+                        r.content.content instanceof StaticMarkdownText &&
+                        r.content.content.isEmpty === false
+                ) ||
+                next.some(
+                    (p) =>
                         p.content instanceof StaticContent &&
                         p.content.content instanceof StaticMarkdownText &&
-                        p.content.content.isEmpty === true
-                    )
-            );
-            if (next.length === prev.length) return prev; // avoid no-op updates
-            logPendingDiff(
-                prev as any,
-                next as any,
-                "remove-empty-text-placeholder-because-non-empty-exists"
-            );
-            return next;
+                        p.content.content.isEmpty === false
+                );
+
+            if (hasNonEmptyText) {
+                const cleaned = next.filter(
+                    (p) =>
+                        !(
+                            p.content instanceof StaticContent &&
+                            p.content.content instanceof StaticMarkdownText &&
+                            p.content.content.isEmpty === true
+                        )
+                );
+                if (cleaned.length !== next.length) {
+                    logPendingDiff(
+                        next as any,
+                        cleaned as any,
+                        "remove-empty-text-placeholder-because-non-empty-exists"
+                    );
+                    next = cleaned;
+                    changed = true;
+                }
+            }
+
+            return changed ? next : prev;
         });
     }, [rects, pendingRects]);
 
@@ -523,6 +537,16 @@ const _CanvasWrapper = (
         }
     };
 
+    const getTextContent = (el: Element) => {
+        if (
+            el.content instanceof StaticContent &&
+            el.content.content instanceof StaticMarkdownText
+        ) {
+            return el.content.content.text;
+        }
+        return undefined;
+    };
+
     const mutate = (
         fn: (element: Element<ElementContent>, ix: number) => boolean,
         options?: { filter: (rect: Element) => boolean }
@@ -530,37 +554,82 @@ const _CanvasWrapper = (
         if (!canvasDB?.publicKey.equals(peer?.identity.publicKey)) return false;
 
         let mutated = false;
-        const updated: (Element & { _changed?: boolean })[] = [...pendingRects];
+        let updated: (Element & { _changed?: boolean })[] = [...pendingRects];
+
+        const markChanged = (
+            el: Element & { _changed?: boolean },
+            ix: number
+        ) => {
+            const beforeText = getTextContent(el);
+            if (!fn(el, ix)) return false;
+            const afterText = getTextContent(el);
+            const textChanged = beforeText !== afterText;
+            const nonText = beforeText === undefined && afterText === undefined;
+            if (textChanged || nonText) {
+                el._changed = true;
+                return true;
+            }
+            return false;
+        };
 
         // mutate pending
         for (let i = 0; i < updated.length; i++) {
             const el = updated[i];
             if (options?.filter && !options.filter(el)) continue;
-            if (fn(el, i)) {
-                updated[i] = el;
-                updated[i]._changed = true;
-                mutated = true;
-            }
+            if (markChanged(el, i)) mutated = true;
         }
+
+        const hasNonEmptyTextAlready =
+            updated.some((el) => hasTextElement(el) && !isElementEmpty(el)) ||
+            rects.some((el) => hasTextElement(el) && !isElementEmpty(el));
 
         // mutate committed rects (copy into pending; do NOT mutate originals)
         for (let i = 0; i < rects.length; i++) {
             const el = rects[i];
             if (updated.some((e) => e.idString === el.idString)) continue;
             if (options?.filter && !options.filter(el)) continue;
+            // Skip cloning empty placeholders when we already have a non-empty text
+            if (
+                hasTextElement(el) &&
+                isElementEmpty(el) &&
+                hasNonEmptyTextAlready
+            ) {
+                continue;
+            }
             // Deep clone using schema clone to avoid shared references
             const clone = el.clone();
-            if (fn(clone as any, i)) {
-                (clone as any)._changed = true;
-                updated.push(clone as any);
+            if (markChanged(clone, i)) {
+                updated.push(clone);
                 mutated = true;
             }
         }
 
         if (mutated) {
+            // Dedupe text placeholders so we never keep multiple empty text entries.
+            const texts = updated.filter((t) => hasTextElement(t));
+            const nonEmptyTexts = texts.filter((t) => !isElementEmpty(t));
+            if (nonEmptyTexts.length > 0) {
+                const keepIds = new Set(nonEmptyTexts.map((t) => t.idString));
+                updated = updated.filter(
+                    (el) =>
+                        !hasTextElement(el) ||
+                        !isElementEmpty(el) ||
+                        keepIds.has(el.idString)
+                );
+            } else if (texts.length > 1) {
+                const keepId = texts[0].idString;
+                updated = updated.filter(
+                    (el) => !hasTextElement(el) || el.idString === keepId
+                );
+            }
+
             // fire content change for the ones actually changed
             updated.forEach((e) => {
-                if ((e as any)._changed) _onContentChange(e as Element);
+                if (!(e as any)._changed) return;
+                const text = getTextContent(e);
+                // ignore empty-text placeholders but let identical texts emit per element
+                if (text !== undefined && text.trim() === "") return;
+                _onContentChange(e as Element);
             });
 
             setPendingRects((prev) => {
@@ -568,7 +637,7 @@ const _CanvasWrapper = (
                     e._changed = undefined;
                     return e;
                 });
-                logPendingDiff(prev as any, next as any, "mutate");
+                logPendingDiff(prev, next as any, "mutate");
                 return next;
             });
             debugLog("mutate: updating pending rects", updated.length);
@@ -739,7 +808,7 @@ const _CanvasWrapper = (
                         privateScope ?? targetCanvas.nearestScope
                     );
                 }
-            } catch (e) {}
+            } catch (e) { }
             onContentChange?.(newElements);
         } catch (e) {
             showError({ message: "Failed to insert image", error: e });
@@ -925,7 +994,7 @@ const _CanvasWrapper = (
                 // Ensure indexes are up to date before navigation/reload
                 try {
                     await canvas.nearestScope._hierarchicalReindex!.flush();
-                } catch {}
+                } catch { }
                 // No local snapshotting: rely solely on private scope persistence
                 const t1 = performance.now();
                 broadcastSave({
@@ -1006,15 +1075,35 @@ const _CanvasWrapper = (
                 announceReply(parent);
             }
             try {
+                const text = el.content.content.text;
+                if (!text || text.trim().length === 0) {
+                    return;
+                }
+                const now = Date.now();
+                const lastForElement = lastContentChangeRef.current.get(
+                    el.idString
+                );
+                if (lastForElement?.text === text) {
+                    return;
+                }
+                const lastGlobal = lastTextGlobalRef.current;
+                if (lastGlobal.text === text && now - lastGlobal.at < 500) {
+                    return;
+                }
+                lastContentChangeRef.current.set(el.idString, {
+                    text,
+                    at: now,
+                });
+                lastTextGlobalRef.current = { text, at: now };
                 emitDebugEvent({
                     source: "CanvasWrapper",
                     name: "contentChange",
                     canvasId: toBase64URL(canvasDB.id),
                     elementId: el.idString,
-                    text: el.content.content.text,
+                    text,
                     draft: !!draft,
                 });
-            } catch {}
+            } catch { }
         }
 
         onContentChange?.([el]);

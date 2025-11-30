@@ -11,6 +11,7 @@ import {
     DendrogramController,
     EdgeLine,
 } from "chartjs-chart-graph";
+import { ProgramClient } from "@peerbit/program";
 
 // Register controllers and plugins
 ChartJS.register(
@@ -106,7 +107,7 @@ export const NetworkTopologyGraph = () => {
         if (!peer) return;
         let client = peer;
         if (peer instanceof PeerbitProxyHost) {
-            client = peer.hostClient;
+            client = peer.hostClient as ProgramClient;
         }
         if (!(client instanceof Peerbit)) {
             throw new Error(

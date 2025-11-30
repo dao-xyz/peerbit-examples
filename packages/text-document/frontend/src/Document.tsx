@@ -13,9 +13,13 @@ const ID = new Uint8Array([
 export const Document = () => {
     const testAreaRef = useRef<HTMLTextAreaElement>(undefined);
     const { peer } = usePeer();
-    const { program } = useProgram(peer, new CollaborativeTextDocument({ id: ID }), {
-        existing: "reuse",
-    });
+    const { program } = useProgram(
+        peer,
+        new CollaborativeTextDocument({ id: ID }),
+        {
+            existing: "reuse",
+        }
+    );
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
 
     useEffect(() => {

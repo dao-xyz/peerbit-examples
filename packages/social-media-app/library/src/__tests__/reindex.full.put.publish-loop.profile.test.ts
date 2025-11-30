@@ -103,7 +103,7 @@ describe("reindex publish loop profiling", () => {
             expect(sha256Base64Sync(moved.id)).to.eq(
                 sha256Base64Sync(draft.id)
             );
-            expect(moved.selfScope.address).to.eq(publicScope.address);
+            expect(moved.selfScope!.address).to.eq(publicScope.address);
 
             const t7 = Date.now();
             // d. flush reindex queue and invoke explicit reIndex on published node to ensure __LAST_FULL_PUT is updated for it

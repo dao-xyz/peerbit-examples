@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { OFFLINE_BASE } from "./utils/url";
+import { OFFLINE_BASE } from "../utils/url";
 
 function uid(prefix: string) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;

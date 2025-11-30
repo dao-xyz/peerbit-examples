@@ -66,8 +66,8 @@ describe("templates", () => {
         expect(template.prototype.idString).to.equal(
             deserialized.prototype.idString
         );
-        expect(template.prototype.selfScope.address).to.equal(
-            deserialized.prototype.selfScope.address
+        expect(template.prototype.selfScope!.address).to.equal(
+            deserialized.prototype.selfScope!.address
         );
     });
 

@@ -1,5 +1,5 @@
 import { test, expect } from "@playwright/test";
-import { OFFLINE_BASE } from "./utils/url";
+import { OFFLINE_BASE } from "../utils/url";
 
 test.describe("Default persistence", () => {
     test("peer identity persists across reload by default (no ?ephemeral)", async ({

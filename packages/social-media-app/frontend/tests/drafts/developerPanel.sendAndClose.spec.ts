@@ -1,7 +1,7 @@
 import { test, expect } from "@playwright/test";
-import { attachConsoleHooks } from "./utils/consoleHooks";
+import { attachConsoleHooks } from "../utils/consoleHooks";
 
-import { OFFLINE_BASE } from "./utils/url";
+import { OFFLINE_BASE } from "../utils/url";
 // const BASE_URL = process.env.BASE_URL || "http://localhost:5173"; // Keeping BASE_URL for reference
 
 function uid(prefix: string) {
@@ -15,7 +15,7 @@ test.describe("DeveloperPanel: enable logs, close, then send message", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
-            } catch {}
+            } catch { }
         });
     });
 
@@ -72,10 +72,10 @@ test.describe("DeveloperPanel: enable logs, close, then send message", () => {
 
         // Dismiss any remaining menus/popovers just in case (e.g., dropdown menu)
         for (let i = 0; i < 3; i++) {
-            await page.keyboard.press("Escape").catch(() => {});
+            await page.keyboard.press("Escape").catch(() => { });
         }
         // Click a neutral area to clear focus/overlays
-        await page.mouse.click(20, 20).catch(() => {});
+        await page.mouse.click(20, 20).catch(() => { });
 
         // Compose a unique message and send
         const textArea = toolbar.locator("textarea");
