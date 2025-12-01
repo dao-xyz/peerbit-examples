@@ -1684,6 +1684,19 @@ export class Scope extends Program<ScopeArgs> {
     /*  private _typeChangeListener: (
          evt: CustomEvent<DocumentsChange<Mode, IndexedPurpose>>
      ) => void; */
+    private _recentlyIndexed: Map<string, number> = new Map();
+    private _reindexGeneration: Map<string, number> = new Map();
+
+    // Expose generation bumping so other classes (e.g., Canvas) can request
+    // a new generation when scheduling reindex work.
+    bumpGeneration(idString: string): number {
+        const next = (this._reindexGeneration.get(idString) ?? 0) + 1;
+        this._reindexGeneration.set(idString, next);
+        return next;
+    }
+    private currentGeneration(idString: string): number {
+        return this._reindexGeneration.get(idString) ?? 0;
+    }
 
     private getValueWithContext(value: string) {
         return this.address + ":" + value;
@@ -1946,7 +1959,19 @@ export class Scope extends Program<ScopeArgs> {
                         });
                     }
 
-                    return IndexableCanvas.from(arg);
+                    const ix = await IndexableCanvas.from(arg);
+                    // Mark as recently indexed to avoid redundant immediate reindex schedules.
+                    try {
+                        const ns = (arg as any).nearestScope;
+                        ns?._recentlyIndexed?.set(arg.idString, Date.now());
+                        if (ns?._reindexGeneration && !ns._reindexGeneration.has(arg.idString)) {
+                            ns._reindexGeneration.set(
+                                arg.idString,
+                                ns._reindexGeneration.get(arg.idString) ?? 0
+                            );
+                        }
+                    } catch {}
+                    return ix;
                 },
             },
         });
@@ -2093,18 +2118,31 @@ export class Scope extends Program<ScopeArgs> {
 
         // Ensure indexes for child (and optionally parent) are current before returning.
         const ensureIndexed = async (child: Canvas, parent?: Canvas) => {
-            const childMgr = child.nearestScope._hierarchicalReindex!;
-            await childMgr.add({
-                canvas: child,
-                options: { onlyReplies: false, skipAncestors: true },
-            });
-            await childMgr.flush(child.idString);
+            const childScope = child.nearestScope;
+            const generation = childScope.bumpGeneration(child.idString);
+            const recently =
+                childScope._recentlyIndexed.get(child.idString) ?? 0;
+            const freshThreshold = 500;
+            const childMgr = childScope._hierarchicalReindex!;
+            if (Date.now() - recently >= freshThreshold) {
+                await childMgr.add({
+                    canvas: child,
+                    options: { onlyReplies: false, skipAncestors: true },
+                    generation,
+                });
+                await childMgr.flush(child.idString);
+                childScope._recentlyIndexed.set(child.idString, Date.now());
+            }
 
             if (parent) {
+                const parentGen = parent.nearestScope.bumpGeneration(
+                    parent.idString
+                );
                 const parentMgr = parent.nearestScope._hierarchicalReindex!;
                 await parentMgr.add({
                     canvas: parent,
                     options: { onlyReplies: true, skipAncestors: true },
+                    generation: parentGen,
                 });
                 await parentMgr.flush(parent.idString);
             }
@@ -3165,8 +3203,15 @@ export class Scope extends Program<ScopeArgs> {
                             })
                         );
                     } catch {}
-                    // Defer child full to avoid blocking initial content paint
+                    // Defer child full to avoid blocking initial content paint.
+                    // Skip if we just indexed this canvas (e.g., publish finalized it).
+                    const recently =
+                        this._recentlyIndexed.get(child.idString) ?? 0;
+                    if (Date.now() - recently < 500) {
+                        continue;
+                    }
                     const c = child;
+                    const gen = this.currentGeneration(child.idString);
                     const scopeRef = this; // use current Scope
                     globalThis.setTimeout?.(() => {
                         try {
@@ -3177,8 +3222,13 @@ export class Scope extends Program<ScopeArgs> {
                                         onlyReplies: false,
                                         skipAncestors: true,
                                     },
+                                    generation: gen,
                                 })
-                                .catch(() => {});
+                                .catch((err) => {
+                                    if (!isClosedError(err)) {
+                                        console.debug("reindex add failed", err);
+                                    }
+                                });
                         } catch {}
                     }, 300);
                 }
@@ -3255,29 +3305,45 @@ export class Scope extends Program<ScopeArgs> {
             evt: CustomEvent<DocumentsChange<Element, IndexableElement>>
         ) => {
             const changed = [...evt.detail.added, ...evt.detail.removed];
+            const targets = new Map<string, Canvas>();
+
             for (const e of changed as any[]) {
                 const ids = [(e as any).canvasId] as Uint8Array[];
                 for (const id of ids) {
-                    const canvas = await this.replies.index.get(id);
+                    // Only schedule reindex for canvases that are registered in replies.
+                    const canvas = await this.replies.index.get(id, {
+                        resolve: true,
+                        local: true,
+                        remote: false,
+                    });
                     if (!canvas) continue;
-                    const c = canvas;
-                    const scopeRef = this;
-                    globalThis.setTimeout?.(() => {
-                        try {
-                            scopeRef
-                                ._hierarchicalReindex!.add({
-                                    canvas: c,
-                                    options: {
-                                        onlyReplies: false,
-                                        skipAncestors: true,
-                                    },
-                                    propagateParents: false,
-                                })
-                                .catch(() => {});
-                        } catch {}
-                    }, 300);
+                    const generation = this.currentGeneration(canvas.idString);
+                    // store generation alongside canvas
+                    (canvas as any).__gen = generation;
+                    targets.set(canvas.idString, canvas);
                 }
             }
+
+            if (!targets.size) return;
+
+            const scopeRef = this;
+            const mgr = this._hierarchicalReindex!;
+            globalThis.setTimeout?.(() => {
+                for (const canvas of targets.values()) {
+                    // Skip if a run is already pending for this canvas
+                    if (mgr.pending(canvas.idString)) continue;
+                    mgr.add({
+                        canvas,
+                        options: { onlyReplies: false, skipAncestors: true },
+                        propagateParents: false,
+                        generation: (canvas as any).__gen as number,
+                    }).catch((err) => {
+                        if (!isClosedError(err)) {
+                            console.debug("reindex add failed", err);
+                        }
+                    });
+                }
+            }, 300);
         };
         const _elementsHandler = this._elementsChangeListener;
         this.elements.events.addEventListener("change", (e: any) => {
@@ -4457,10 +4523,20 @@ export class Canvas {
             this._bulkInsertDepth > 0 ||
             scope.isReindexSuppressed;
         if (!suppress) {
-            await scope._hierarchicalReindex!.add({
-                canvas: this,
-                options: { onlyReplies: false, skipAncestors: true },
+            // Skip scheduling until the canvas is registered in replies; otherwise the run will be a no-op.
+            const registered = await scope.replies.index.get(this.id, {
+                resolve: false,
+                local: true,
+                remote: false,
             });
+            if (registered) {
+                const gen = scope.bumpGeneration(this.idString);
+                await scope._hierarchicalReindex!.add({
+                    canvas: this,
+                    options: { onlyReplies: false, skipAncestors: true },
+                    generation: gen,
+                });
+            }
         }
     }
 

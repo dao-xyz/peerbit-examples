@@ -18,8 +18,11 @@ describe("reindex lifecycle", () => {
 
         const fromIndexableCanvas = IndexableCanvas.from.bind(IndexableCanvas);
         let indexerCalls = 0;
+        let targetId: string | undefined;
         IndexableCanvas.from = (canvas: Canvas) => {
-            indexerCalls++;
+            if (targetId && canvas.idString === targetId) {
+                indexerCalls++;
+            }
             return fromIndexableCanvas(canvas);
         };
 
@@ -37,6 +40,7 @@ describe("reindex lifecycle", () => {
                 publicKey: peer.identity.publicKey,
                 selfScope: scope,
             });
+            targetId = post.idString;
             await post.load(peer, { args: { replicate: false } });
             await post.addTextElement("hello persistence");
             await root.upsertReply(post, { type: "link-only" });
@@ -50,6 +54,7 @@ describe("reindex lifecycle", () => {
             const postId = post.id;
             const indexerCallsBefore = indexerCalls;
             expect(indexerCallsBefore).to.be.greaterThan(0); // at least one index pass happened
+            expect(indexerCallsBefore).to.be.at.most(2); // transform + bounded reindex
             indexerCalls = 0;
 
             await session.stop(); // simulate node restart while keeping persisted data
@@ -85,8 +90,11 @@ describe("reindex lifecycle", () => {
     it("awaited upsert indexes child and parent before resolving", async () => {
         const fromIndexableCanvas = IndexableCanvas.from.bind(IndexableCanvas);
         let fromCalls = 0;
+        let targetId: string | undefined;
         IndexableCanvas.from = (canvas: Canvas) => {
-            fromCalls++;
+            if (targetId && canvas.idString === targetId) {
+                fromCalls++;
+            }
             return fromIndexableCanvas(canvas);
         };
 
@@ -102,6 +110,7 @@ describe("reindex lifecycle", () => {
                 publicKey: peer.identity.publicKey,
                 selfScope: scope,
             });
+            targetId = post.idString;
             await post.load(peer, { args: { replicate: false } });
             await post.addTextElement("hello world");
 
@@ -124,17 +133,55 @@ describe("reindex lifecycle", () => {
             const postRuns = stats.perCanvas[post.idString] || 0;
             const rootRuns = stats.perCanvas[root.idString] || 0;
 
-            // Expect one child full run and one parent replies-only run; allow a single extra child run from element change listener
-            expect(postRuns).to.be.at.least(1);
-            expect(postRuns).to.be.at.most(2);
-            expect(rootRuns).to.be.at.least(1);
+            // Child may already be fully indexed via transform; if runs occur, keep them minimal
+            expect(postRuns).to.be.at.most(1);
             expect(rootRuns).to.be.at.most(1);
-            expect(postRuns + rootRuns).to.be.at.most(3);
+            expect(postRuns + rootRuns).to.be.at.most(2);
 
-            // IndexableCanvas.from should not blow up; allow transform + a small number of reindex calls
-            expect(fromCalls).to.be.at.most(4);
+            // IndexableCanvas.from should not blow up; allow transform + minimal reindex calls
+            expect(fromCalls).to.be.at.most(3);
         } finally {
             IndexableCanvas.from = fromIndexableCanvas;
+        }
+    });
+
+    it("does not reindex drafts before first upsert and bounds indexing on upsert", async () => {
+        const original = IndexableCanvas.from.bind(IndexableCanvas);
+        let fromCalls = 0;
+        let targetId: string | undefined;
+        IndexableCanvas.from = (canvas: Canvas) => {
+            if (targetId && canvas.idString === targetId) {
+                fromCalls++;
+            }
+            return original(canvas);
+        };
+
+        try {
+            session = await TestSession.connected(1);
+            const peer = session.peers[0];
+            const { scope, canvas: root } = await createRoot(peer, {
+                persisted: false,
+                sections: [],
+            });
+
+            const draft = new Canvas({
+                publicKey: peer.identity.publicKey,
+                selfScope: scope,
+            });
+            targetId = draft.idString;
+            await draft.load(peer, { args: { replicate: false } });
+            await draft.addTextElement("pre-upsert text");
+
+            // No indexing should happen before the draft is inserted into replies
+            expect(fromCalls).to.eq(0);
+
+            await root.upsertReply(draft, { type: "link-only" });
+            await scope._hierarchicalReindex!.flush();
+
+            // One transform (on insert) + limited reindex runs
+            expect(fromCalls).to.be.at.most(3);
+        } finally {
+            IndexableCanvas.from = original;
         }
     });
 });

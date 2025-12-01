@@ -82,6 +82,8 @@ interface CanvasEntry<C extends ReindexCanvasLike> {
     cooldownTimeout?: any; // handle for deferred scheduling
     lastScheduledAt?: number; // timestamp when current run was scheduled (for idle gap measurement)
     lastRunEndedAt?: number; // timestamp when previous run finished
+    generation: number; // logical generation to avoid redundant runs
+    completedGeneration?: number; // last completed generation
 }
 
 export interface HierarchicalReindexManager<C extends ReindexCanvasLike> {
@@ -89,6 +91,7 @@ export interface HierarchicalReindexManager<C extends ReindexCanvasLike> {
         canvas: C;
         options?: { onlyReplies?: boolean; skipAncestors?: boolean };
         propagateParents?: boolean; // default true
+        generation?: number; // skip if stale
     }): Promise<void>;
     flush(canvasId?: string): Promise<void>;
     close(canvasId?: string): void;
@@ -134,12 +137,14 @@ export const createHierarchicalReindexManager = <
             running: false,
             scheduled: false,
             runs: 0,
+            generation: 0,
             debouncer: debounceFixedInterval(
                 async () => {
                     if (entry.running) return; // guard (shouldn't happen with state machine but safe)
                     entry.running = true;
                     entry.scheduled = false;
                     const mode = entry.mode;
+                    const runGeneration = entry.generation;
                     // Reset mode to minimal so subsequent upgrades during execution schedule another run if needed
                     entry.mode = "replies";
                     const skipAncestors = (entry as any).skipAncestors === true;
@@ -223,6 +228,7 @@ export const createHierarchicalReindexManager = <
                         } else {
                             entry.cooldownUntil = undefined;
                         }
+                        entry.completedGeneration = runGeneration;
                         // If mode was upgraded while running (i.e. now != 'replies') schedule another run
                         if (entry.mode !== "replies") {
                             const now = endT;
@@ -288,8 +294,32 @@ export const createHierarchicalReindexManager = <
         }
     };
 
-    const schedule = (canvas: C, mode: Mode): Promise<void> => {
+    const schedule = (
+        canvas: C,
+        mode: Mode,
+        generation?: number
+    ): Promise<void> => {
         const entry = ensureEntry(canvas);
+        if (generation != null) {
+            // Skip stale or duplicate generation when already full
+            if (
+                generation < entry.generation ||
+                generation <= (entry.completedGeneration ?? 0)
+            ) {
+                onDebug?.({
+                    phase: "schedule:skip:stale",
+                    id: entry.canvas.idString,
+                    mode,
+                    generation,
+                    currentGeneration: entry.generation,
+                    completedGeneration: entry.completedGeneration ?? null,
+                });
+                return Promise.resolve();
+            }
+            if (generation > entry.generation) {
+                entry.generation = generation;
+            }
+        }
         upgradeMode(entry, mode);
         // Coalesce: if already running or scheduled, just return resolved promise (mode already upgraded)
         if (entry.running || entry.scheduled) {
@@ -395,17 +425,19 @@ export const createHierarchicalReindexManager = <
             canvas,
             options,
             propagateParents,
+            generation,
         }: {
             canvas: C;
             options?: { onlyReplies?: boolean; skipAncestors?: boolean };
             propagateParents?: boolean;
+            generation?: number;
         }) => {
             const mode: Mode = options?.onlyReplies ? "replies" : "full";
             // Mark skipAncestors intent for this canvas run
             const entry = ensureEntry(canvas);
             if (options?.skipAncestors) (entry as any).skipAncestors = true;
             // Always schedule the target canvas; ancestor aggregation is handled inside reIndex
-            await schedule(canvas, mode);
+            await schedule(canvas, mode, generation);
         },
         flush: async (canvasId?: string) => {
             if (canvasId) {

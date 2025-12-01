@@ -36,7 +36,7 @@ import { DeveloperConfigProvider } from "./debug/DeveloperConfig";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 import { BOOTSTRAP_ADDRS } from "./bootstrap.js";
 import { enable } from '@peerbit/logger';
-enable("peerbit:document:index:*");
+enable("x");
 
 const HEADER_EXPANDED_HEIGHT = 12;
 const heightStyle: { [expanded: string]: string } = {
