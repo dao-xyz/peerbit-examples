@@ -15,7 +15,7 @@
     },
     "dependencies": {
         "@peerbit/please-lib": "workspace:^",
-        "@peerbit/react": "^0.0.38",
+        "@peerbit/react": "^0",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",
         "@radix-ui/react-slider": "^1.1.2",

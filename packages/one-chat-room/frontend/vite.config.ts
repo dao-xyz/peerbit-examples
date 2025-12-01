@@ -7,9 +7,7 @@ import peerbit from "@peerbit/vite";
 export default defineConfig({
     plugins: [react(), peerbit()],
     esbuild: {
-        supported: {
-            decorators: true,
-        },
+        target: "es2022",
         tsconfigRaw: {
             compilerOptions: {
                 useDefineForClassFields: true,
@@ -18,10 +16,7 @@ export default defineConfig({
     },
     optimizeDeps: {
         esbuildOptions: {
-            target: "esnext",
-            supported: {
-                decorators: true,
-            },
+            target: "es2022",
             tsconfigRaw: {
                 compilerOptions: {
                     useDefineForClassFields: true,
@@ -31,7 +26,7 @@ export default defineConfig({
         // disable all optimizations
     },
     build: {
-        target: "esnext",
+        target: "es2022",
     },
     define: {
         APP_VERSION: JSON.stringify(process.env.npm_package_version),

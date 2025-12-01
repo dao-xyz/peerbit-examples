@@ -381,7 +381,7 @@ export abstract class TrackSource {
     lastLivestreamingSegmentId: Uint8Array | undefined;
     lastLivestreamingSegmentStart: bigint | undefined;
 
-    async replicate(args: "live" | "streamer" | "all" | false) {
+    async replicate(args: "live" | "streamer" | "all" | false): Promise<void> {
         if (args === "live") {
             /*  // get latest chunk 
              await this.waitForStreamer()
@@ -424,11 +424,12 @@ export abstract class TrackSource {
             });
         } else {
             await this.endPreviousLivestreamSubscription();
-            return this.chunks.log.replicate(
+            await this.chunks.log.replicate(
                 args === "streamer" || args === "all"
                     ? { factor: 1 }
                     : (args ?? { factor: 1 })
             );
+            return;
         }
     }
 

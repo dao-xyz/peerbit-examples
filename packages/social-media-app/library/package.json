@@ -41,7 +41,7 @@
         "vitest": "^3.2.4"
     },
     "dependencies": {
-        "@peerbit/document": "^11.0.0",
+        "@peerbit/document": "^11.1.0",
         "peerbit": "^4.4.2",
         "qrcode": "^1.5.4",
         "uuid": "^10.0.0"
