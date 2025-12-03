@@ -35,8 +35,8 @@ import { DebugConfigProvider } from "./debug/DebugConfig";
 import { DeveloperConfigProvider } from "./debug/DeveloperConfig";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 import { BOOTSTRAP_ADDRS } from "./bootstrap.js";
-import { enable } from '@peerbit/logger';
-enable("x");
+import { enable } from "@peerbit/logger";
+enable("peerbit:react:usePeer:*");
 
 const HEADER_EXPANDED_HEIGHT = 12;
 const heightStyle: { [expanded: string]: string } = {
@@ -97,7 +97,7 @@ export const Content = () => {
                     detail: (window as any).__peerInfo,
                 })
             );
-        } catch { }
+        } catch {}
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
     return (
@@ -117,7 +117,7 @@ export const Content = () => {
                                             className={clsx(
                                                 "sticky top-0 inset-x-0  z-30",
                                                 heightStyle[
-                                                String(headerVisible)
+                                                    String(headerVisible)
                                                 ]
                                             )} /* transition-transform duration-800 ease-in-out */
                                             style={
@@ -186,9 +186,9 @@ export const App = () => {
             ? offline
                 ? [] // explicit offline sentinel
                 : bootstrapParam
-                    .split(",")
-                    .map((s) => s.trim())
-                    .filter(Boolean)
+                      .split(",")
+                      .map((s) => s.trim())
+                      .filter(Boolean)
             : undefined; // not provided at all => use default network config
     if (typeof window !== "undefined") {
         (window as any).__DBG_BOOTSTRAP = bootstrapAddrs; // aid tests/debug
@@ -198,12 +198,12 @@ export const App = () => {
     const networkConfig: NetworkOption =
         import.meta.env.MODE === "development"
             ? {
-                /* type: "local", */
-                bootstrap: [
-                    "/ip4/127.0.0.1/tcp/52585/ws/p2p/12D3KooWGHRWEnarYbd46REyhJq44HDjL1y3qJbj69yZu5WVF8b9",
-                ],
-                /*  bootstrap: ["/ip4/127.0.0.1/tcp/58027/ws/p2p/12D3KooWPpLfzjDwtLPQp8SPouVwH8aU1Zn2H6MCnSakn6vfFCaT"], */
-            }
+                  /* type: "local", */
+                  bootstrap: [
+                      "/ip4/127.0.0.1/tcp/52585/ws/p2p/12D3KooWGHRWEnarYbd46REyhJq44HDjL1y3qJbj69yZu5WVF8b9",
+                  ],
+                  /*  bootstrap: ["/ip4/127.0.0.1/tcp/58027/ws/p2p/12D3KooWPpLfzjDwtLPQp8SPouVwH8aU1Zn2H6MCnSakn6vfFCaT"], */
+              }
             : { bootstrap: BOOTSTRAP_ADDRS };
 
     return (
@@ -216,10 +216,10 @@ export const App = () => {
                                 network={
                                     bootstrapAddrs !== undefined
                                         ? {
-                                            // Explicit override: if empty we stay offline
-                                            type: "explicit",
-                                            bootstrap: bootstrapAddrs,
-                                        }
+                                              // Explicit override: if empty we stay offline
+                                              type: "explicit",
+                                              bootstrap: bootstrapAddrs,
+                                          }
                                         : networkConfig
                                 }
                                 iframe={{ type: "proxy", targetOrigin: "*" }}

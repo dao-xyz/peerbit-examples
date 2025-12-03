@@ -15,7 +15,6 @@ describe("reindex lifecycle", () => {
     });
 
     it("does not schedule reindex after restarting persisted scope", async () => {
-
         const fromIndexableCanvas = IndexableCanvas.from.bind(IndexableCanvas);
         let indexerCalls = 0;
         let targetId: string | undefined;

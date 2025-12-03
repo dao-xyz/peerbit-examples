@@ -5,22 +5,20 @@ import {
     getPeerInfo,
     waitForPeerInfo,
 } from "../utils/persistence";
+import { Page } from "@playwright/test";
 
 function uid(prefix: string) {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
 // Capture DraftManager.replyPublished events
-async function getReplyPublishedEvents(page: import("@playwright/test").Page) {
+async function getReplyPublishedEvents(page: Page) {
     return (await page.evaluate(() => (window as any).__DBG_EVENTS))?.filter(
         (e: any) => e?.source === "DraftManager" && e?.name === "replyPublished"
     );
 }
 
-async function waitForComposerReady(
-    page: import("@playwright/test").Page,
-    timeout = 30000
-) {
+async function waitForComposerReady(page: Page, timeout = 30000) {
     await page.waitForFunction(
         () => {
             const ready = (window as any).__DRAFT_READY;
@@ -34,10 +32,7 @@ async function waitForComposerReady(
     );
 }
 
-async function expectNoNonEmptyDrafts(
-    page: import("@playwright/test").Page,
-    timeout = 15000
-) {
+async function expectNoNonEmptyDrafts(page: Page, timeout = 15000) {
     const summary =
         (await page
             .waitForFunction(

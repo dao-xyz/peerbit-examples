@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, Page } from "@playwright/test";
 import { OFFLINE_BASE } from "../utils/url";
 
 function uid(prefix: string) {
@@ -6,7 +6,7 @@ function uid(prefix: string) {
 }
 
 // Helper to read replyPublished events captured on window
-async function getReplyPublishedEvents(page: import("@playwright/test").Page) {
+async function getReplyPublishedEvents(page: Page) {
     return (await page.evaluate(() => (window as any).__DBG_EVENTS))?.filter(
         (e: any) => e?.source === "DraftManager" && e?.name === "replyPublished"
     );

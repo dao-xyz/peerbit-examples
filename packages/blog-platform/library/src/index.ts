@@ -172,9 +172,8 @@ export class BlogPosts extends Program<Args> {
                         post,
                         ctx.created,
                         ctx.modified,
-                        (await this.posts.log.log.get(
-                            ctx.head
-                        ))!.signatures[0].publicKey
+                        (await this.posts.log.log.get(ctx.head))!.signatures[0]
+                            .publicKey
                     );
                 },
             },

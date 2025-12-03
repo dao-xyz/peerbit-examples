@@ -27,8 +27,8 @@ export const useAllPosts = (properties: {
         typeof process !== "undefined" &&
         Boolean(
             process.env?.PEERBIT_DEBUG_ITERATORS ||
-                process.env?.PEERBIT_DEBUG_FEED ||
-                process.env?.DEBUG_FEED
+            process.env?.PEERBIT_DEBUG_FEED ||
+            process.env?.DEBUG_FEED
         );
     const runtimeDebug =
         typeof window !== "undefined" &&

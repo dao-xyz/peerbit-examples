@@ -169,7 +169,7 @@ const _CanvasWrapper = (
             }
             return (...args: any[]) => console.log(logTag, ...args);
         }
-        return () => { };
+        return () => {};
     }, [debug]);
 
     const privateScope = PrivateScope.useScope();
@@ -213,7 +213,7 @@ const _CanvasWrapper = (
                     before: before.map(toInfo),
                     after: after.map(toInfo),
                 });
-            } catch { }
+            } catch {}
         },
         [debug]
     );
@@ -808,7 +808,7 @@ const _CanvasWrapper = (
                         privateScope ?? targetCanvas.nearestScope
                     );
                 }
-            } catch (e) { }
+            } catch (e) {}
             onContentChange?.(newElements);
         } catch (e) {
             showError({ message: "Failed to insert image", error: e });
@@ -994,7 +994,7 @@ const _CanvasWrapper = (
                 // Ensure indexes are up to date before navigation/reload
                 try {
                     await canvas.nearestScope._hierarchicalReindex!.flush();
-                } catch { }
+                } catch {}
                 // No local snapshotting: rely solely on private scope persistence
                 const t1 = performance.now();
                 broadcastSave({
@@ -1103,7 +1103,7 @@ const _CanvasWrapper = (
                     text,
                     draft: !!draft,
                 });
-            } catch { }
+            } catch {}
         }
 
         onContentChange?.([el]);

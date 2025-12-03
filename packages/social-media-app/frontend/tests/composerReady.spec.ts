@@ -1,11 +1,9 @@
 import { test, expect } from "./fixtures/persistentContext";
 import { OFFLINE_BASE, withSearchParams } from "./utils/url";
 import { expectPersistent } from "./utils/persistence";
+import { Page } from "@playwright/test";
 
-async function waitForComposerReady(
-    page: import("@playwright/test").Page,
-    timeout = 30000
-) {
+async function waitForComposerReady(page: Page, timeout = 30000) {
     await page.waitForFunction(
         () => {
             const ready = (window as any).__DRAFT_READY;

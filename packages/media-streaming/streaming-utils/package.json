@@ -40,8 +40,8 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "^11.1.0",
-        "peerbit": "^4.4.2",
+        "@peerbit/document": "^11",
+        "peerbit": "^4",
         "uuid": "^10.0.0"
     }
 }

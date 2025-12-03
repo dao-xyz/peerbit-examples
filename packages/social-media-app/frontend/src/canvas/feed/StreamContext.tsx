@@ -89,6 +89,12 @@ function useStreamContextHook() {
 
     const { peer } = usePeer();
 
+    // Session-local pinning of newly created posts (cleared on refresh/view change)
+    const pinnedIdsRef = useRef(new Set<string>());
+    const seenIdsRef = useRef(new Set<string>());
+    const hydratedRef = useRef(false);
+    const sessionStartRef = useRef<number>(Date.now());
+
     // URL-derived view state
     const [searchParams, setSearchParams] = useSearchParams();
     const settingsQuery: string = searchParams.get(
@@ -97,12 +103,12 @@ function useStreamContextHook() {
 
     const timeFilter: TimeFilter = TIME_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TIME) as TimeFilterType) ||
-        DEFAULT_TIME_FILTER
+            DEFAULT_TIME_FILTER
     );
 
     const typeFilter: TypeFilter = TYPE_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TYPE) as TypeFilterType) ||
-        DEFAULT_TYPE_FILTER
+            DEFAULT_TYPE_FILTER
     );
 
     const query: string =
@@ -188,6 +194,53 @@ function useStreamContextHook() {
         );
     }, [wantsHeaderDisabled, debouncedView, dynamicViewItems]);
 
+    // Only pin on non-chronological feeds (e.g., Best/Top/custom), never on chat.
+    const pinningEnabled = useMemo(() => {
+        if (!filterModel?.id) return false;
+        if (visualization?.view === ChildVisualization.CHAT) return false;
+        return filterModel.id !== "new" && filterModel.id !== "recent";
+    }, [filterModel?.id, visualization?.view]);
+
+    // Reset pinning state when switching views/roots.
+    useEffect(() => {
+        pinnedIdsRef.current.clear();
+        seenIdsRef.current.clear();
+        hydratedRef.current = false;
+        sessionStartRef.current = Date.now();
+    }, [filterModel?.id, feedRoot?.idString]);
+
+    const registerPins = (
+        items: WithIndexedContext<Canvas, IndexableCanvas>[]
+    ) => {
+        if (!pinningEnabled || !peer?.identity) return;
+        const myKey = peer.identity.publicKey.bytes;
+        for (const item of items) {
+            if (!item?.idString) continue;
+
+            // Skip anything we already evaluated
+            if (seenIdsRef.current.has(item.idString)) continue;
+            seenIdsRef.current.add(item.idString);
+
+            // Do not pin during the initial hydration pass
+            if (!hydratedRef.current) continue;
+
+            const author = item.__indexed?.publicKey;
+            if (!author || !equals(author, myKey)) continue;
+
+            const created = item.__context?.created;
+            const createdMs =
+                typeof created === "bigint"
+                    ? Number(created)
+                    : typeof created === "number"
+                      ? created
+                      : undefined;
+            if (createdMs == null) continue;
+            if (createdMs < sessionStartRef.current) continue;
+
+            pinnedIdsRef.current.add(item.idString);
+        }
+    };
+
     // unified replies query
     const canvasQuery = useMemo(() => {
         if (!feedRoot || !filterModel || !filterModel?.query) return undefined;
@@ -217,6 +270,38 @@ function useStreamContextHook() {
         return queryObject;
     }, [feedRoot, filterModel, timeFilter, typeFilter?.key, query]);
 
+    // Helper to grab latest local results even if the live iterator thinks it's done.
+    const fetchLocalReplies = React.useCallback(
+        async (n: number) => {
+            if (!feedRoot || !canvasQuery) return [];
+            const iter = feedRoot.nearestScope.replies.index.iterate(
+                canvasQuery,
+                {
+                    resolve: true,
+                    local: true,
+                    remote: false,
+                    closePolicy: "immediate",
+                }
+            );
+            try {
+                return (await iter.next(n)) as WithIndexedContext<
+                    Canvas,
+                    IndexableCanvas
+                >[];
+            } catch (error) {
+                console.warn("fetchLocalReplies failed", error);
+                return [];
+            } finally {
+                try {
+                    await iter.close();
+                } catch {
+                    /* ignore */
+                }
+            }
+        },
+        [feedRoot, canvasQuery]
+    );
+
     // lazy loading of replies
     const [batchSize, setBatchSize] = useState(3);
     const {
@@ -238,6 +323,99 @@ function useStreamContextHook() {
         },
         updates: {
             merge: true,
+            // Stream live updates so freshly created posts appear without a manual fetch.
+            push: true,
+        },
+        applyResults: (_prev, _incoming, { defaultMerge }) => {
+            const merged = defaultMerge();
+
+            if (pinningEnabled) {
+                registerPins(merged);
+                hydratedRef.current = true;
+
+                if (pinnedIdsRef.current.size > 0) {
+                    const pinned: typeof merged = [];
+                    const rest: typeof merged = [];
+                    for (const item of merged) {
+                        (pinnedIdsRef.current.has(item.idString)
+                            ? pinned
+                            : rest
+                        ).push(item);
+                    }
+                    return [...pinned, ...rest];
+                }
+            } else {
+                // Ensure stale state does not leak across views
+                pinnedIdsRef.current.clear();
+                seenIdsRef.current.clear();
+                hydratedRef.current = true;
+            }
+
+            return merged;
+        },
+        // Late results: iterator now reports concrete items via outOfOrder queue.
+        onLateResults: async (evt, helpers) => {
+            const amount = Math.max(evt?.amount ?? 1, batchSize ?? 1);
+            const before = helpers.items().length;
+            let loaded = false;
+
+            const pinAndReorder = () => {
+                if (!pinningEnabled) return;
+                hydratedRef.current = true;
+                registerPins(helpers.items());
+                if (pinnedIdsRef.current.size === 0) return;
+
+                const current = helpers.items();
+                const pinned: WithIndexedContext<Canvas, IndexableCanvas>[] =
+                    [];
+                const rest: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
+                for (const item of current) {
+                    (pinnedIdsRef.current.has(item.idString)
+                        ? pinned
+                        : rest
+                    ).push(item);
+                }
+                helpers.inject([...pinned, ...rest]);
+            };
+
+            const injectLate = (
+                items: (
+                    | WithIndexedContext<Canvas, IndexableCanvas>
+                    | undefined
+                )[]
+            ) => {
+                const clean = items.filter(Boolean) as WithIndexedContext<
+                    Canvas,
+                    IndexableCanvas
+                >[];
+                if (!clean.length) return;
+                helpers.inject(clean, { position: "start" });
+                loaded = true;
+            };
+
+            // Prefer concrete late items (new iterator queue mode).
+            if (
+                Array.isArray((evt as any)?.items) &&
+                (evt as any).items.length
+            ) {
+                const asValues = (evt as any).items.map(
+                    (it: any) => it?.value ?? it?.indexed ?? it
+                );
+                injectLate(asValues);
+            } else {
+                // Fallback: force a fetch; if nothing arrives, try local-only read.
+                loaded = await helpers.loadMore(amount, {
+                    force: true,
+                    reason: "late",
+                });
+                if (helpers.items().length === before) {
+                    const local = await fetchLocalReplies(amount);
+                    injectLate(local);
+                }
+            }
+
+            pinAndReorder();
+            return loaded;
         },
         /* onChange: {
             merge: async (e) => {
@@ -380,11 +558,11 @@ function useStreamContextHook() {
             }
             return sortedReplies
                 ? sortedReplies.map((reply) => ({
-                    reply,
-                    type: "reply" as const,
-                    lineType: "none" as const,
-                    id: reply.idString,
-                }))
+                      reply,
+                      type: "reply" as const,
+                      lineType: "none" as const,
+                      id: reply.idString,
+                  }))
                 : [];
         }, [sortedReplies, debouncedView, feedRoot, feedRoot?.initialized]);
 
@@ -425,16 +603,16 @@ type Ctx = ReturnType<typeof useStreamContextHook> | undefined;
 const makeInitialStreamValue = (): ReturnType<typeof useStreamContextHook> =>
     ({
         feedRoot: undefined,
-        pinToView: async () => { },
+        pinToView: async () => {},
         defaultViews: [],
         dynamicViews: [],
         createSettings: async () => undefined as any,
         filterModel: undefined,
-        setView: () => { },
-        loadMore: async () => { },
+        setView: () => {},
+        loadMore: async () => {},
         isLoading: false,
         loading: false,
-        setBatchSize: () => { },
+        setBatchSize: () => {},
         batchSize: 3,
         iteratorId: undefined,
         lastReply: undefined,
@@ -442,12 +620,12 @@ const makeInitialStreamValue = (): ReturnType<typeof useStreamContextHook> =>
         processedReplies: [],
         timeFilter: TIME_FILTERS.get(DEFAULT_TIME_FILTER)!,
         typeFilter: TYPE_FILTERS.get(DEFAULT_TYPE_FILTER)!,
-        setTimeFilter: () => { },
-        setTypeFilter: () => { },
-        setQueryParams: () => { },
+        setTimeFilter: () => {},
+        setTypeFilter: () => {},
+        setQueryParams: () => {},
         hasMore: () => false,
         query: "",
-        setQuery: () => { },
+        setQuery: () => {},
     }) as any;
 
 const StreamContext: React.Context<Ctx> =

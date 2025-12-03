@@ -8,7 +8,7 @@ function uid(prefix: string) {
 }
 
 // Capture DraftManager.replyPublished events
-async function getReplyPublishedEvents(page: import("@playwright/test").Page) {
+async function getReplyPublishedEvents(page: Page) {
     return (await page.evaluate(() => (window as any).__DBG_EVENTS))?.filter(
         (e: any) => e?.source === "DraftManager" && e?.name === "replyPublished"
     );
@@ -53,7 +53,7 @@ test.describe("Draft rotation does not mutate previous posts in feed", () => {
                 .getByTestId("composer-textarea")
                 .first();
             await textContainer.click({ timeout: 1500 });
-        } catch { }
+        } catch {}
         const textArea = toolbar.locator("textarea");
         // Wait for a textarea to exist; on slow starts, it may mount slightly later
         await page.waitForFunction(
@@ -115,7 +115,7 @@ test.describe("Draft rotation does not mutate previous posts in feed", () => {
                 .getByTestId("composer-textarea")
                 .first();
             await textContainer.click({ timeout: 1500 });
-        } catch { }
+        } catch {}
         // Wait for a textarea to be present for the fresh draft
         await page.waitForFunction(
             () =>

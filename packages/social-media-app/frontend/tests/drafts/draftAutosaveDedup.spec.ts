@@ -2,12 +2,11 @@ import { test, expect, Page } from "@playwright/test";
 import { OFFLINE_BASE } from "../utils/url";
 
 test.describe("Draft autosave dedupe", () => {
-
     const setupCapture = async (page: Page) => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "true");
-            } catch { }
+            } catch {}
             (window as any).__DBG_EVENTS = [];
         });
 
@@ -101,4 +100,4 @@ test.describe("Draft autosave dedupe", () => {
         );
         expect(uniqueNonEmptyTexts.size).toBeLessThanOrEqual(2);
     });
-}); 
+});

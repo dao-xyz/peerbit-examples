@@ -1,14 +1,17 @@
-import { test, expect } from "@playwright/test";
-import { OFFLINE_BASE } from "../utils/url";
+import { test, expect } from "../fixtures/persistentContext";
+import { OFFLINE_BASE, withSearchParams } from "../utils/url";
+import { expectPersistent } from "../utils/persistence";
 
 test.describe("Default persistence", () => {
     test("peer identity persists across reload by default (no ?ephemeral)", async ({
         page,
     }) => {
-        await page.goto(OFFLINE_BASE);
+        await page.goto(withSearchParams(OFFLINE_BASE, { ephemeral: false }));
         await page.waitForFunction(() => !!(window as any).__peerInfo, null, {
-            timeout: 30000,
+            timeout: 3e4,
         });
+        await expectPersistent(page);
+
         const first = await page.evaluate(() => (window as any).__peerInfo);
 
         await page.reload();
@@ -20,9 +23,6 @@ test.describe("Default persistence", () => {
         // We expect the app to be persistent by default; if browser grants persistence, identity should match
         expect(first?.peerHash).toBeTruthy();
         expect(second?.peerHash).toBeTruthy();
-        // Allow non-determinism if browser denies persistence: assert equality only when both report persisted
-        if (first?.persisted && second?.persisted) {
-            expect(second.peerHash).toBe(first.peerHash);
-        }
+        expect(second.peerHash).toBe(first.peerHash);
     });
 });

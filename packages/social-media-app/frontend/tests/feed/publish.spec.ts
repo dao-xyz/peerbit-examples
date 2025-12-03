@@ -1,4 +1,4 @@
-import { test, expect, } from "@playwright/test";
+import { test, expect } from "@playwright/test";
 import { OFFLINE_BASE } from "../utils/url";
 
 function uid(prefix: string) {
@@ -75,7 +75,7 @@ test.describe("publish", () => {
             )
             .toBe(true);
     });
-})
+});
 
 /**
  * Captures perf:publish event emitted by DraftManager when perfEnabled is true.
@@ -180,8 +180,8 @@ test.describe("perf", () => {
             ...(typeof perfData.parentFlush === "number"
                 ? ["parentFlush"]
                 : typeof perfData.postParentFlush === "number"
-                    ? ["postParentFlush"]
-                    : []),
+                  ? ["postParentFlush"]
+                  : []),
         ];
         let prev = 0;
         for (const phase of phases) {

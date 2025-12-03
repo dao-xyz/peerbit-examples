@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, Page } from "@playwright/test";
 import { OFFLINE_BASE } from "./utils/url";
 import { getCanvasSaveStats, waitForCanvasSaveDelta } from "./utils/autosave";
 
@@ -34,9 +34,7 @@ test.describe("ToolbarCreateNew", () => {
         });
     });
 
-    const getReplyPublishedEvents = async (
-        page: import("@playwright/test").Page
-    ) => {
+    const getReplyPublishedEvents = async (page: Page) => {
         return await page.evaluate(() => {
             const w: any = window as any;
             const topWin: any = w.top || w;
@@ -49,7 +47,7 @@ test.describe("ToolbarCreateNew", () => {
     };
 
     async function openCardMenuAndClickOpen(
-        page: import("@playwright/test").Page,
+        page: Page,
         card: import("@playwright/test").Locator
     ) {
         const triggers = card.locator("button.btn-icon.btn-icon-sm");
@@ -80,7 +78,7 @@ test.describe("ToolbarCreateNew", () => {
     }
 
     async function clickToNavigateToDetail(
-        page: import("@playwright/test").Page,
+        page: Page,
         card: import("@playwright/test").Locator,
         replyId: string
     ) {

@@ -30,10 +30,12 @@ describe("post latency: single-scope upsertReply", () => {
         );
 
         let scopeIterateCalls: any[] = [];
-        const originalIterate = scope.replies.index.iterate.bind(scope.replies.index);
+        const originalIterate = scope.replies.index.iterate.bind(
+            scope.replies.index
+        );
         // Monitor iterate calls to ensure no excessive scanning occurs during upsert
         scope.replies.index.iterate = (...args: any[]) => {
-            scopeIterateCalls.push(args)
+            scopeIterateCalls.push(args);
             return originalIterate(...args);
         };
 
@@ -45,9 +47,8 @@ describe("post latency: single-scope upsertReply", () => {
         await parent.load(peer, { args: { replicate: false } });
         await scope.getOrCreateReply(undefined, parent); // anchor parent in scope
 
-        await delay(3e3)
+        await delay(3e3);
         const reindexcalls = scope._hierarchicalReindex?.stats?.().totalRuns;
-
 
         // Create draft canvas and load it
         const draft = new Canvas({
@@ -57,8 +58,6 @@ describe("post latency: single-scope upsertReply", () => {
         await draft.load(peer, { args: { replicate: false } });
 
         const t0 = Date.now();
-
-
 
         const res = await parent.upsertReply(draft, {
             type: "sync",
@@ -82,11 +81,9 @@ describe("post latency: single-scope upsertReply", () => {
             resolve: false,
         });
 
-        await delay(3e3)
+        await delay(3e3);
         expect(!!exists).to.eq(true);
     });
-
-
 
     it("publish with one text element is fast (<1500ms)", async () => {
         const peer = session.peers[0];
@@ -118,7 +115,9 @@ describe("post latency: single-scope upsertReply", () => {
         const t0 = Date.now();
 
         let scopeIterateCalls = 0;
-        const originalIterate = scope.replies.index.iterate.bind(scope.replies.index);
+        const originalIterate = scope.replies.index.iterate.bind(
+            scope.replies.index
+        );
 
         // Monitor iterate calls to ensure no excessive scanning occurs during upsert
         scope.replies.index.iterate = (...args: any[]) => {

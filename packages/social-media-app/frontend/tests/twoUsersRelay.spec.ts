@@ -11,8 +11,8 @@ import { launchPersistentBrowserContext } from "./utils/persistentBrowser";
 const BASE_URL = process.env.BASE_URL || "http://localhost:5173";
 const DEBUG_FEED = Boolean(
     process.env.PEERBIT_DEBUG_FEED ||
-        process.env.DEBUG_FEED ||
-        process.env.PEERBIT_DEBUG_ITERATORS
+    process.env.DEBUG_FEED ||
+    process.env.PEERBIT_DEBUG_ITERATORS
 );
 
 const attachConsoleLogging = (page: Page, label: string) => {

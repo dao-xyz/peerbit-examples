@@ -334,9 +334,9 @@ describe("MediaStream", () => {
     type ScenarioReturnType<T> = (T extends TwoTracks
         ? { track1: Track; track2: Track }
         : { track1: Track }) & {
-            viewerStreams: MediaStreamDB;
-            mediaStreams: MediaStreamDB;
-        };
+        viewerStreams: MediaStreamDB;
+        mediaStreams: MediaStreamDB;
+    };
     const isTwoTracks = (
         options: OneTrack | TwoTracks
     ): options is TwoTracks => {
@@ -362,10 +362,10 @@ describe("MediaStream", () => {
                     typeof properties.first.type === "object"
                         ? properties.first.type
                         : properties.first.type === "video"
-                            ? new WebcodecsStreamDB({
+                          ? new WebcodecsStreamDB({
                                 decoderDescription: { codec: "av01" },
                             })
-                            : new AudioStreamDB({ sampleRate: 44100 }),
+                          : new AudioStreamDB({ sampleRate: 44100 }),
                 start: properties.first.start * MILLISECONDS_TO_MICROSECONDS,
                 end:
                     properties.first.end != null
@@ -402,16 +402,16 @@ describe("MediaStream", () => {
                         typeof properties.second.type === "object"
                             ? properties.second.type
                             : properties.second.type === "video"
-                                ? new WebcodecsStreamDB({
+                              ? new WebcodecsStreamDB({
                                     decoderDescription: { codec: "av01" },
                                 })
-                                : new AudioStreamDB({ sampleRate: 44100 }),
+                              : new AudioStreamDB({ sampleRate: 44100 }),
                     start:
                         properties.second.start * MILLISECONDS_TO_MICROSECONDS,
                     end:
                         properties.second.end != null
                             ? properties.second.end *
-                            MILLISECONDS_TO_MICROSECONDS
+                              MILLISECONDS_TO_MICROSECONDS
                             : undefined,
                 })
             );
@@ -1238,7 +1238,7 @@ describe("MediaStream", () => {
             ).to.be.closeTo(
                 Number(
                     (endLiveFeedSubscription! - startLiveFeedSubscription!) /
-                    1000n
+                        1000n
                 ),
                 1e9 // 1 second
             );
@@ -1585,7 +1585,7 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                        chunks[chunks.length - 1].chunk.time
+                            chunks[chunks.length - 1].chunk.time
                     )
                 );
             });
@@ -1624,7 +1624,7 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                        chunks[chunks.length - 1].chunk.time
+                            chunks[chunks.length - 1].chunk.time
                     )
                 );
             });
@@ -1991,7 +1991,7 @@ describe("MediaStream", () => {
                     onReplicationChange: (range) => {
                         expect(
                             viewerStreams.node.identity.publicKey.hashcode() ===
-                            range.hash
+                                range.hash
                         ).to.be.false;
                     },
                 });
@@ -2592,7 +2592,7 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                        chunks[chunks.length - 1].chunk.time
+                            chunks[chunks.length - 1].chunk.time
                     )
                 );
             });
@@ -2734,11 +2734,11 @@ describe("MediaStream", () => {
                 for (let i = 1; i < size; i++) {
                     expect(
                         chunks.get(track1.address)![i].time -
-                        chunks.get(track1.address)![i - 1].time
+                            chunks.get(track1.address)![i - 1].time
                     ).to.be.eq(delta);
                     expect(
                         chunks.get(track2.address)![i].time -
-                        chunks.get(track2.address)![i - 1].time
+                            chunks.get(track2.address)![i - 1].time
                     ).to.be.eq(delta);
                 }
             });
@@ -3371,7 +3371,7 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                        chunks[chunks.length - 1].chunk.time
+                            chunks[chunks.length - 1].chunk.time
                     )
                 );
 
@@ -3426,7 +3426,7 @@ describe("MediaStream", () => {
                 await waitForResolved(() =>
                     expect(maxTime).to.eq(
                         chunks[chunks.length - 1].track.startTime +
-                        chunks[chunks.length - 1].chunk.time
+                            chunks[chunks.length - 1].chunk.time
                     )
                 );
                 expect(tracks).to.have.length(2);

@@ -1,11 +1,7 @@
 {
     "compilerOptions": {
         "target": "es2022",
-        "lib": [
-            "DOM",
-            "DOM.Iterable",
-            "ES2022"
-        ],
+        "lib": ["DOM", "DOM.Iterable", "ES2022"],
         "allowJs": false,
         "skipLibCheck": true,
         "esModuleInterop": false,
@@ -19,9 +15,7 @@
         "noEmit": true,
         "jsx": "react-jsx"
     },
-    "include": [
-        "src"
-    ],
+    "include": ["src"],
     "references": [
         {
             "path": "./tsconfig.node.json"

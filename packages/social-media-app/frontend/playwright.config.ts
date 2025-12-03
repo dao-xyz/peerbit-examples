@@ -24,8 +24,8 @@ export default defineConfig({
     projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
     webServer: {
         // Spawn Vite via pnpm so the workspace-local version is used
-        command: `pnpm exec vite --port ${PORT}`,
-        url: BASE_HTTP,
+        command: `pnpm exec vite dev --port ${PORT} --host ${HOST}`,
+        port: PORT,
         reuseExistingServer: false,
     },
     workers: 1,

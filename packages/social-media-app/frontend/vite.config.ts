@@ -3,10 +3,17 @@ import react from "@vitejs/plugin-react";
 import peerbit from "@peerbit/vite";
 // @ts-ignore
 import tailwindcss from "@tailwindcss/vite";
+import basicSsl from "@vitejs/plugin-basic-ssl";
 
 // https://vitejs.dev/config/
 export default defineConfig({
-    plugins: [react(), peerbit(), tailwindcss()],
+    plugins: [
+        react(),
+        peerbit(),
+        tailwindcss(),
+        // Only enable TLS for explicit test flag; default is plain http
+        ...(process.env.VITE_TEST_HTTPS === "true" ? [basicSsl()] : []),
+    ],
     optimizeDeps: {
         esbuildOptions: {
             target: "esnext",
@@ -22,6 +29,13 @@ export default defineConfig({
         ),
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
+    server:
+        process.env.VITE_TEST_HTTPS === "true"
+            ? {
+                  https: true,
+                  host: process.env.HOST || "localhost",
+              }
+            : undefined,
     /*  server: fs.existsSync("./.cert/key.pem")
          ? {
                https: {

@@ -1964,7 +1964,10 @@ export class Scope extends Program<ScopeArgs> {
                     try {
                         const ns = (arg as any).nearestScope;
                         ns?._recentlyIndexed?.set(arg.idString, Date.now());
-                        if (ns?._reindexGeneration && !ns._reindexGeneration.has(arg.idString)) {
+                        if (
+                            ns?._reindexGeneration &&
+                            !ns._reindexGeneration.has(arg.idString)
+                        ) {
                             ns._reindexGeneration.set(
                                 arg.idString,
                                 ns._reindexGeneration.get(arg.idString) ?? 0
@@ -3226,7 +3229,10 @@ export class Scope extends Program<ScopeArgs> {
                                 })
                                 .catch((err) => {
                                     if (!isClosedError(err)) {
-                                        console.debug("reindex add failed", err);
+                                        console.debug(
+                                            "reindex add failed",
+                                            err
+                                        );
                                     }
                                 });
                         } catch {}
