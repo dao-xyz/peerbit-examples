@@ -191,7 +191,15 @@ export const App = () => {
                       .filter(Boolean)
             : undefined; // not provided at all => use default network config
     if (typeof window !== "undefined") {
-        (window as any).__DBG_BOOTSTRAP = bootstrapAddrs; // aid tests/debug
+        const w: any = window as any;
+        w.__DBG_BOOTSTRAP = bootstrapAddrs; // aid tests/debug
+        if (offline && !w.__offline_bootstrap_logged) {
+            w.__offline_bootstrap_logged = true;
+            try {
+                // aid offline e2e smoke checks
+                console.log("Offline bootstrap: skipping relay dialing");
+            } catch {}
+        }
     }
 
     // your original config stays the same, but now reuses that array

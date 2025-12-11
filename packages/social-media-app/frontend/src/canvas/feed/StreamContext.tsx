@@ -103,12 +103,12 @@ function useStreamContextHook() {
 
     const timeFilter: TimeFilter = TIME_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TIME) as TimeFilterType) ||
-            DEFAULT_TIME_FILTER
+        DEFAULT_TIME_FILTER
     );
 
     const typeFilter: TypeFilter = TYPE_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TYPE) as TypeFilterType) ||
-            DEFAULT_TYPE_FILTER
+        DEFAULT_TYPE_FILTER
     );
 
     const query: string =
@@ -232,8 +232,8 @@ function useStreamContextHook() {
                 typeof created === "bigint"
                     ? Number(created)
                     : typeof created === "number"
-                      ? created
-                      : undefined;
+                        ? created
+                        : undefined;
             if (createdMs == null) continue;
             if (createdMs < sessionStartRef.current) continue;
 
@@ -280,7 +280,7 @@ function useStreamContextHook() {
                     resolve: true,
                     local: true,
                     remote: false,
-                    closePolicy: "immediate",
+                    closePolicy: "onEmpty",
                 }
             );
             try {
@@ -304,6 +304,7 @@ function useStreamContextHook() {
 
     // lazy loading of replies
     const [batchSize, setBatchSize] = useState(3);
+
     const {
         items: sortedReplies,
         loadMore,
@@ -321,9 +322,10 @@ function useStreamContextHook() {
             // Avoid blocking initial list hydration on remote joining; rely on link visibility
             wait: { timeout: 5e3 },
         },
+
+        // prefetch: true,
         updates: {
             merge: true,
-            // Stream live updates so freshly created posts appear without a manual fetch.
             push: true,
         },
         applyResults: (_prev, _incoming, { defaultMerge }) => {
@@ -415,7 +417,6 @@ function useStreamContextHook() {
             }
 
             pinAndReorder();
-            return loaded;
         },
         /* onChange: {
             merge: async (e) => {
@@ -558,11 +559,11 @@ function useStreamContextHook() {
             }
             return sortedReplies
                 ? sortedReplies.map((reply) => ({
-                      reply,
-                      type: "reply" as const,
-                      lineType: "none" as const,
-                      id: reply.idString,
-                  }))
+                    reply,
+                    type: "reply" as const,
+                    lineType: "none" as const,
+                    id: reply.idString,
+                }))
                 : [];
         }, [sortedReplies, debouncedView, feedRoot, feedRoot?.initialized]);
 
@@ -603,16 +604,16 @@ type Ctx = ReturnType<typeof useStreamContextHook> | undefined;
 const makeInitialStreamValue = (): ReturnType<typeof useStreamContextHook> =>
     ({
         feedRoot: undefined,
-        pinToView: async () => {},
+        pinToView: async () => { },
         defaultViews: [],
         dynamicViews: [],
         createSettings: async () => undefined as any,
         filterModel: undefined,
-        setView: () => {},
-        loadMore: async () => {},
+        setView: () => { },
+        loadMore: async () => { },
         isLoading: false,
         loading: false,
-        setBatchSize: () => {},
+        setBatchSize: () => { },
         batchSize: 3,
         iteratorId: undefined,
         lastReply: undefined,
@@ -620,12 +621,12 @@ const makeInitialStreamValue = (): ReturnType<typeof useStreamContextHook> =>
         processedReplies: [],
         timeFilter: TIME_FILTERS.get(DEFAULT_TIME_FILTER)!,
         typeFilter: TYPE_FILTERS.get(DEFAULT_TYPE_FILTER)!,
-        setTimeFilter: () => {},
-        setTypeFilter: () => {},
-        setQueryParams: () => {},
+        setTimeFilter: () => { },
+        setTypeFilter: () => { },
+        setQueryParams: () => { },
         hasMore: () => false,
         query: "",
-        setQuery: () => {},
+        setQuery: () => { },
     }) as any;
 
 const StreamContext: React.Context<Ctx> =

@@ -13,14 +13,23 @@ export const isDebugEnabled = () => {
         const params = new URLSearchParams(rawSearch);
         const qp = params.get("debug");
         const ls = window.localStorage.getItem("debug");
+        const lsNormalized = ls?.trim().toLowerCase();
+        const lsEnabled =
+            lsNormalized === "1" ||
+            lsNormalized === "true" ||
+            (lsNormalized !== undefined &&
+                lsNormalized !== "" &&
+                lsNormalized !== "0" &&
+                lsNormalized !== "false");
         const g: any = (window as any) || {};
         const runtime = !!g.__DBG?.enabled;
         const env = import.meta.env?.VITE_DEBUG;
+        // Expose evaluation snapshot to aid tests/debugging
+        g.__DBG_DEBUG_LAST = { qp, ls, runtime, env };
         return (
             qp === "1" ||
             qp === "true" ||
-            ls === "1" ||
-            ls === "true" ||
+            lsEnabled ||
             runtime ||
             env === true ||
             env === "true"
@@ -71,11 +80,12 @@ const emit = (level: LogLevel, args: unknown[]) => {
 // Patch console in debug mode to add a styled prefix and emit to overlay store.
 export const setupPrettyConsole = () => {
     if (!isDebugEnabled()) return;
-    if ((window as any).__pretty_console_patched__) return;
-    // If called during render phase indirectly, postpone patching until after
+    const w: any = window as any;
+    if (w.__pretty_console_patched__) return;
+
     const doPatch = () => {
-        if ((window as any).__pretty_console_patched__) return;
-        (window as any).__pretty_console_patched__ = true;
+        if (w.__pretty_console_patched__) return;
+        w.__pretty_console_patched__ = true;
 
         const style =
             "color:#6EE7B7;background:#064E3B;border-radius:4px;padding:1px 6px;margin-right:6px;font-weight:600;";
@@ -105,8 +115,12 @@ export const setupPrettyConsole = () => {
         c.error = wrap("error", c.error ? c.error.bind(c) : c.log.bind(c));
     };
 
-    // Patch in a timeout to ensure we are post-render
-    setTimeout(doPatch, 0);
+    if (document.readyState === "loading") {
+        // In dev/strict mode React can render before DOMContentLoaded; defer to once the DOM is ready.
+        window.addEventListener("DOMContentLoaded", doPatch, { once: true });
+    } else {
+        doPatch();
+    }
 };
 
 export const debugLog = (...args: unknown[]) => {
