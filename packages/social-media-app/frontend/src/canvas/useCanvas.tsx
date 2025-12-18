@@ -167,9 +167,14 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                           }
                       );
                       if (!current) return [root];
-                      const path = await current.loadPath({
-                          includeSelf: true,
+                      // `loadPath({ includeSelf: true })` requires the canvas to already be indexed.
+                      // Right after publish, the document may exist while its indexed row is still
+                      // being built, which can throw and break navigation. Build the ancestry
+                      // without self, then index/open everything in `openAndIndex`.
+                      const parents = await current.loadPath({
+                          includeSelf: false,
                       });
+                      const path = [...parents, current];
                       console.log("done loading path canvases", path);
                       return path;
                   })();

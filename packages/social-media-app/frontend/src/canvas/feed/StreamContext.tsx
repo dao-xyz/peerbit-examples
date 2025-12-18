@@ -303,7 +303,7 @@ function useStreamContextHook() {
     );
 
     // lazy loading of replies
-    const [batchSize, setBatchSize] = useState(3);
+    const [batchSize, setBatchSize] = useState(10);
 
     const {
         items: sortedReplies,

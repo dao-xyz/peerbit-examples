@@ -16,7 +16,7 @@ const DEBUG_FEED = Boolean(
 );
 
 const attachConsoleLogging = (page: Page, label: string) => {
-    if (!DEBUG_FEED) return () => { };
+    if (!DEBUG_FEED) return () => {};
     const handler = (msg: any) => {
         const text = msg.text?.();
         console.log(`[${label}][${msg.type()}] ${text}`);
@@ -112,7 +112,7 @@ test.describe("Two users relaying via node replicator", () => {
 
         const { context: user2Context, url: user2Url } =
             await createSecondUserContext(testInfo, baseAppUrl, opts);
-        let detachSecondaryConsole = () => { };
+        let detachSecondaryConsole = () => {};
         try {
             const page2 = await user2Context.newPage();
             if (DEBUG_FEED) {
