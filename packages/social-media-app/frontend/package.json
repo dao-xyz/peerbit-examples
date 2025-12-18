@@ -1,6 +1,6 @@
 {
     "name": "@giga-app/interface-frontend",
-    "version": "0.0.2",
+    "version": "1.0.0",
     "private": true,
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "type": "module",
@@ -24,10 +24,10 @@
         "test:unit": "vitest run"
     },
     "dependencies": {
-        "@giga-app/app-service": "^0.0.25",
-        "@giga-app/interface": "^0.0.25",
-        "@giga-app/llm": "^0.0.31",
-        "@giga-app/sdk": "^0.0.21",
+        "@giga-app/app-service": "^1.0.0",
+        "@giga-app/interface": "^1.0.0",
+        "@giga-app/llm": "^1.0.0",
+        "@giga-app/sdk": "^1.0.0",
         "@headlessui/react": "^2.2.0",
         "@peerbit/document-react": "^0",
         "@peerbit/peer-names": "workspace:^",

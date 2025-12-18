@@ -1,6 +1,6 @@
 {
     "name": "chess",
-    "version": "0.0.1",
+    "version": "0.0.2",
     "private": true,
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "type": "module",
@@ -13,7 +13,7 @@
         "deploy": "pnpm run build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "@giga-app/sdk": "^0",
+        "@giga-app/sdk": "^1.0.0",
         "@peerbit/react": "^0",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",

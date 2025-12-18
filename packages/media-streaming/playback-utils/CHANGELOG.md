@@ -1,5 +1,16 @@
 # @peerbit/media-streaming-web
 
+## 1.0.0
+
+### Major Changes
+
+- Update for to reflect upstream Peerbit version
+
+### Patch Changes
+
+- Updated dependencies
+    - @peerbit/media-streaming@1.0.0
+
 ## 0.0.7
 
 ### Patch Changes
