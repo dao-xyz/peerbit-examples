@@ -1,92 +1,92 @@
 name: Upload Website
 
 on:
-  push:
-    branches: [ master ]
+    push:
+        branches: [master]
 
 jobs:
-  deploy:
-    runs-on: ubuntu-latest
-    env:
-      COMMIT_HASH: ${{ github.sha }}
-      AWS_RETRY_MODE: standard         # built-in exponential backoff
-      AWS_MAX_ATTEMPTS: 10             # more patience for throttling
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+    deploy:
+        runs-on: ubuntu-latest
+        env:
+            COMMIT_HASH: ${{ github.sha }}
+            AWS_RETRY_MODE: standard # built-in exponential backoff
+            AWS_MAX_ATTEMPTS: 10 # more patience for throttling
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 22
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
 
-      - name: Setup pnpm
-        uses: pnpm/action-setup@v4
-        with:
-          version: 10.17.1
-          run_install: false
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  version: 10.25.0
+                  run_install: false
 
-      - name: Configure AWS Credentials
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+            - name: Configure AWS Credentials
+              uses: aws-actions/configure-aws-credentials@v4
+              with:
+                  aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+                  aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+                  aws-region: us-east-1
 
-      - name: Build every frontend with the commit hash
-        run: |
-          pnpm install --frozen-lockfile
-          SHORT_SHA=$(echo $COMMIT_HASH | cut -c1-7) pnpm run build
+            - name: Build every frontend with the commit hash
+              run: |
+                  pnpm install --frozen-lockfile
+                  SHORT_SHA=$(echo $COMMIT_HASH | cut -c1-7) pnpm run build
 
-      - name: Deploy stream
-        run: |
-          aws s3 sync ./packages/media-streaming/video-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*'
-          sleep 5
+            - name: Deploy stream
+              run: |
+                  aws s3 sync ./packages/media-streaming/video-streaming/frontend/dist/ s3://stream-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E1PSJ5WBHQ2CWQ --paths '/*'
+                  sleep 5
 
-      - name: Music app
-        run: |
-          aws s3 sync ./packages/media-streaming/music-library/frontend/dist/ s3://music-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id E2SEA0JZTCXP6J --paths '/*'
-          sleep 5
+            - name: Music app
+              run: |
+                  aws s3 sync ./packages/media-streaming/music-library/frontend/dist/ s3://music-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E2SEA0JZTCXP6J --paths '/*'
+                  sleep 5
 
-      - name: Deploy chat
-        run: |
-          aws s3 sync ./packages/one-chat-room/frontend/dist/ s3://chat-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id E2KS1CGVFT7WAY --paths '/*'
-          sleep 5
+            - name: Deploy chat
+              run: |
+                  aws s3 sync ./packages/one-chat-room/frontend/dist/ s3://chat-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E2KS1CGVFT7WAY --paths '/*'
+                  sleep 5
 
-      - name: Deploy social media app demo-dao
-        run: |
-          aws s3 sync ./packages/social-media-app/frontend/dist/ s3://demo-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*'
-          sleep 5
+            - name: Deploy social media app demo-dao
+              run: |
+                  aws s3 sync ./packages/social-media-app/frontend/dist/ s3://demo-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E39RSPI7MIQNW2 --paths '/*'
+                  sleep 5
 
-      - name: Deploy social media app giga-place
-        run: |
-          aws s3 sync ./packages/social-media-app/frontend/dist/ s3://giga-place-dist --delete
-          aws cloudfront create-invalidation --distribution-id E2OYBN34VXT63X --paths '/*'
-          sleep 5
+            - name: Deploy social media app giga-place
+              run: |
+                  aws s3 sync ./packages/social-media-app/frontend/dist/ s3://giga-place-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E2OYBN34VXT63X --paths '/*'
+                  sleep 5
 
-      - name: Deploy ml demo
-        run: |
-          aws s3 sync ./packages/collaborative-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id E371A736SNF0PO --paths '/*'
-          sleep 5
+            - name: Deploy ml demo
+              run: |
+                  aws s3 sync ./packages/collaborative-learning/frontend/dist/ s3://mldemo-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E371A736SNF0PO --paths '/*'
+                  sleep 5
 
-      - name: Deploy text
-        run: |
-          aws s3 sync ./packages/text-document/frontend/dist/ s3://text-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id E20VZBTENI3CAA --paths '/*'
-          sleep 5
+            - name: Deploy text
+              run: |
+                  aws s3 sync ./packages/text-document/frontend/dist/ s3://text-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E20VZBTENI3CAA --paths '/*'
+                  sleep 5
 
-      - name: Deploy files
-        run: |
-          aws s3 sync ./packages/file-share/frontend/dist/ s3://files-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id E3UHSOW1JKZXR8 --paths '/*'
-          sleep 5
+            - name: Deploy files
+              run: |
+                  aws s3 sync ./packages/file-share/frontend/dist/ s3://files-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id E3UHSOW1JKZXR8 --paths '/*'
+                  sleep 5
 
-      - name: Chess app
-        run: |
-          aws s3 sync ./packages/chess/frontend/dist/ s3://chess-dao-xyz-dist --delete
-          aws cloudfront create-invalidation --distribution-id ERBVN30JQDG5W --paths '/*'
+            - name: Chess app
+              run: |
+                  aws s3 sync ./packages/chess/frontend/dist/ s3://chess-dao-xyz-dist --delete
+                  aws cloudfront create-invalidation --distribution-id ERBVN30JQDG5W --paths '/*'
