@@ -18,7 +18,7 @@
         "./src/hrtime.js": "./src/hrtime.browser.js"
     },
     "dependencies": {
-        "@giga-app/sdk": "^1.0.0",
+        "@giga-app/sdk": "workspace:*",
         "@peerbit/document": "^11",
         "@peerbit/document-react": "^0",
         "@peerbit/media-streaming": "workspace:*",

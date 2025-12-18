@@ -32,7 +32,7 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@giga-app/interface": "^1.0.0",
+        "@giga-app/interface": "workspace:*",
         "@peerbit/test-utils": "^2.3.2",
         "typescript": "^5.6.3"
     },

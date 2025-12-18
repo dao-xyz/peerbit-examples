@@ -43,6 +43,6 @@
         "@inquirer/editor": "^2",
         "@inquirer/input": "^2",
         "@inquirer/select": "^2",
-        "@peerbit/blog-sdk": "workspace:^"
+        "@peerbit/blog-sdk": "workspace:*"
     }
 }

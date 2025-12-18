@@ -18,7 +18,7 @@
         "@mui/icons-material": "^7.0.2",
         "@mui/material": "^5.15.7",
         "@peerbit/document": "^11",
-        "@peerbit/peer-names": "workspace:^",
+        "@peerbit/peer-names": "workspace:*",
         "@peerbit/program-react": "^0.2.0",
         "@peerbit/react": "^0",
         "peerbit": "^4",

@@ -14,7 +14,7 @@
         "deploy": "pnpm run build && NODE_DEBUG=gh-pages gh-pages -d dist"
     },
     "dependencies": {
-        "@peerbit/please-lib": "workspace:^",
+        "@peerbit/please-lib": "workspace:*",
         "@peerbit/react": "^0",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",

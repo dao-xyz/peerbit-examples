@@ -105,7 +105,7 @@ importers:
         specifier: ^2
         version: 2.5.0
       '@peerbit/blog-sdk':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../library
     devDependencies:
       '@types/inquirer':
@@ -168,7 +168,7 @@ importers:
   packages/chess/frontend:
     dependencies:
       '@giga-app/sdk':
-        specifier: ^0
+        specifier: workspace:*
         version: link:../../social-media-app/app-sdk
       '@peerbit/document-react':
         specifier: ^0
@@ -317,7 +317,7 @@ importers:
   packages/file-share/cli:
     dependencies:
       '@peerbit/please-lib':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../library
       chalk:
         specifier: ^5.3.0
@@ -339,7 +339,7 @@ importers:
   packages/file-share/frontend:
     dependencies:
       '@peerbit/please-lib':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../library
       '@peerbit/react':
         specifier: ^0
@@ -467,10 +467,10 @@ importers:
         specifier: ^11
         version: 11.2.5(react-native@0.83.0(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
       '@peerbit/example-many-chat-rooms':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../library
       '@peerbit/peer-names':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../name-service/library
       '@peerbit/react':
         specifier: ^0
@@ -525,7 +525,7 @@ importers:
   packages/media-streaming/music-library/frontend:
     dependencies:
       '@giga-app/sdk':
-        specifier: ^0
+        specifier: workspace:*
         version: link:../../../social-media-app/app-sdk
       '@peerbit/document':
         specifier: ^11
@@ -640,7 +640,7 @@ importers:
         specifier: ^11
         version: 11.2.5(react-native@0.83.0(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
       '@peerbit/media-streaming':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../streaming-utils
       peerbit:
         specifier: ^4
@@ -662,7 +662,7 @@ importers:
         specifier: ^11
         version: 11.2.5(react-native@0.83.0(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
       '@peerbit/media-streaming':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../streaming-utils
       peerbit:
         specifier: ^4
@@ -709,7 +709,7 @@ importers:
         specifier: ^2
         version: 2.5.0
       '@peerbit/media-streaming':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../streaming-utils
     devDependencies:
       '@types/inquirer':
@@ -722,7 +722,7 @@ importers:
   packages/media-streaming/video-streaming/frontend:
     dependencies:
       '@giga-app/sdk':
-        specifier: ^0
+        specifier: workspace:*
         version: link:../../../social-media-app/app-sdk
       '@peerbit/document':
         specifier: ^11
@@ -855,7 +855,7 @@ importers:
         specifier: ^11
         version: 11.2.5(react-native@0.83.0(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
       '@peerbit/peer-names':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../name-service/library
       '@peerbit/program-react':
         specifier: ^0.2.0
@@ -901,10 +901,10 @@ importers:
   packages/social-media-app/ai/cli:
     dependencies:
       '@giga-app/interface':
-        specifier: ^0.0.25
+        specifier: workspace:*
         version: link:../../library
       '@giga-app/llm':
-        specifier: ^0.0.31
+        specifier: workspace:*
         version: link:../library
       '@inquirer/editor':
         specifier: ^2
@@ -926,7 +926,7 @@ importers:
   packages/social-media-app/ai/library:
     dependencies:
       '@giga-app/interface':
-        specifier: ^0.0.25
+        specifier: workspace:*
         version: link:../../library
       '@peerbit/document':
         specifier: ^11
@@ -1000,7 +1000,7 @@ importers:
         version: 10.0.0
     devDependencies:
       '@giga-app/interface':
-        specifier: ^0.0.25
+        specifier: workspace:*
         version: link:../library
       '@peerbit/test-utils':
         specifier: ^2.3.2
@@ -1012,16 +1012,16 @@ importers:
   packages/social-media-app/frontend:
     dependencies:
       '@giga-app/app-service':
-        specifier: ^0.0.25
+        specifier: workspace:*
         version: link:../app-service
       '@giga-app/interface':
-        specifier: ^0.0.25
+        specifier: workspace:*
         version: link:../library
       '@giga-app/llm':
-        specifier: ^0.0.31
+        specifier: workspace:*
         version: link:../ai/library
       '@giga-app/sdk':
-        specifier: ^0.0.21
+        specifier: workspace:*
         version: link:../app-sdk
       '@headlessui/react':
         specifier: ^2.2.0
@@ -1030,7 +1030,7 @@ importers:
         specifier: ^0
         version: 0.4.5(react-native@0.83.0(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))(react@19.2.3)
       '@peerbit/peer-names':
-        specifier: workspace:^
+        specifier: workspace:*
         version: link:../../name-service/library
       '@peerbit/program-react':
         specifier: ^0.2.0

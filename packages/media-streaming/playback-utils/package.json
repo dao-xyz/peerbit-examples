@@ -45,7 +45,7 @@
     },
     "dependencies": {
         "@peerbit/document": "^11",
-        "@peerbit/media-streaming": "workspace:^",
+        "@peerbit/media-streaming": "workspace:*",
         "peerbit": "^4",
         "uuid": "^10.0.0"
     }

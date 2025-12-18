@@ -45,7 +45,7 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@giga-app/interface": "^1.0.0",
+        "@giga-app/interface": "workspace:*",
         "@peerbit/document": "^11",
         "ollama": "^0.5.14",
         "peerbit": "^4",
