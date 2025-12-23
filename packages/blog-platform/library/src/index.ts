@@ -38,6 +38,7 @@ export class Post {
     }
 }
 
+@variant(0)
 class PostIndexable {
     @field({ type: "string" })
     id: string;

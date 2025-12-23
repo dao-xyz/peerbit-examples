@@ -19,7 +19,7 @@
     },
     "dependencies": {
         "@giga-app/sdk": "workspace:*",
-        "@peerbit/document": "^11",
+        "@peerbit/document": "^12",
         "@peerbit/document-react": "^0",
         "@peerbit/media-streaming": "workspace:*",
         "@peerbit/media-streaming-web": "workspace:*",
