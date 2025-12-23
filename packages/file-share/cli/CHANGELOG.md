@@ -1,5 +1,16 @@
 # @peerbit/please
 
+## 2.0.0
+
+### Major Changes
+
+- Bump peerbit @peerbit/document v12. Change of wiretypes for indexed types
+
+### Patch Changes
+
+- Updated dependencies
+    - @peerbit/please-lib@2.0.0
+
 ## 1.0.0
 
 ### Major Changes

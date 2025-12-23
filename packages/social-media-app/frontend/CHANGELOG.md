@@ -1,5 +1,20 @@
 # @giga-app/interface-frontend
 
+## 2.0.0
+
+### Major Changes
+
+- Bump peerbit @peerbit/document v12. Change of wiretypes for indexed types
+
+### Patch Changes
+
+- Updated dependencies
+    - @peerbit/peer-names@2.0.0
+    - @giga-app/llm@2.0.0
+    - @giga-app/sdk@2.0.0
+    - @giga-app/app-service@2.0.0
+    - @giga-app/interface@2.0.0
+
 ## 1.0.0
 
 ### Major Changes
