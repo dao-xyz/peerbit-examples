@@ -8,6 +8,7 @@ import { Element, ElementContent } from "@giga-app/interface";
 import { useEditModeContext } from "../../edit/EditModeProvider";
 import { useCanvas } from "../../CanvasWrapper";
 import { rectIsStaticMarkdownText } from "../../utils/rect";
+import { filterOutInlineGigaImages } from "../../utils/inlineMarkdownImages";
 import { Spinner } from "../../../utils/Spinner";
 import { Frame } from "../../../content/Frame";
 
@@ -89,6 +90,9 @@ export const CanvasBase = (props: BaseProps & { config: CanvasBaseConfig }) => {
     const filteredRects = useMemo(() => {
         let all = [...rects, ...pendingRects];
         all = props.config.filterRects(all);
+        if (props.config.mode === "mixed" && !props.draft) {
+            all = filterOutInlineGigaImages(all as any) as any;
+        }
         return reduceElementsForViewing(all);
     }, [rects, pendingRects, reduceElementsForViewing, props.config]);
 

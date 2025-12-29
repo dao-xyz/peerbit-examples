@@ -38,6 +38,7 @@ import {
     rectIsStaticMarkdownText,
     rectIsStaticPartialImage,
 } from "./utils/rect.js";
+import { filterOutInlineGigaImages } from "./utils/inlineMarkdownImages.js";
 import { useReplyProgress } from "./main/useReplyProgress.js";
 import { waitFor } from "@peerbit/time";
 import { WithIndexedContext } from "@peerbit/document";
@@ -493,7 +494,12 @@ const _CanvasWrapper = (
     };
 
     const separateAndSortRects = (elems: Element[] = visibleRects) => {
-        const grouped = reduceElementsForViewing(elems);
+        let grouped = reduceElementsForViewing(elems);
+        // In published views, hide standalone image elements when they are already
+        // rendered inline inside markdown via `![...](giga://image/<ref>)`.
+        if (!draft) {
+            grouped = filterOutInlineGigaImages(grouped as any) as any;
+        }
         const out = {
             text: [] as Element<StaticContent<StaticMarkdownText>>[],
             other: [] as Element[],

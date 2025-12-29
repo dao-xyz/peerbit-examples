@@ -8,13 +8,32 @@ import {
     parseBooleanArg,
     parseIntervalMs,
     parseNumberArg,
-    publishMarkdownReply,
     readJsonFile,
     writeJsonFile,
 } from "@giga-app/bot-kit";
 import { queryChatGPT } from "@giga-app/llm";
+import {
+    Canvas,
+    Element,
+    Layout,
+    LOWEST_QUALITY,
+    HIGH_QUALITY,
+    MEDIUM_QUALITY,
+    ReplyKind,
+    StaticContent,
+    StaticImage,
+    StaticMarkdownText,
+} from "@giga-app/interface";
+import { sha256Sync } from "@peerbit/crypto";
 import { fetchArticles, fetchEvents, type NewsApiArticle } from "./newsapi.js";
 import { DedupStore, NewsApiStore, newsApiArticleKey } from "./store/index.js";
+import {
+    DEFAULT_IMAGE_TIMEOUT_MS,
+    DEFAULT_MAX_IMAGE_BYTES,
+    findLeadImage,
+    gigaImageUrlFromContentId,
+    sha256ContentId,
+} from "./images.js";
 
 type Args = {
     replicate?: boolean | string;
@@ -40,6 +59,13 @@ type Args = {
     openaiModel?: string;
 
     prefix?: string;
+
+    includeImages?: boolean | string;
+    maxImageBytes?: number | string;
+    maxImageCandidates?: number | string;
+    imageTimeoutMs?: number | string;
+
+    generateFeedSummary?: boolean | string;
 };
 
 type NewsBotState = {
@@ -129,6 +155,33 @@ async function buildMasterArticle(options: {
     return story.trim();
 }
 
+async function buildFeedSummary(options: {
+    eventTitle: string;
+    eventSummary?: string;
+    storyMarkdown: string;
+    openaiApiKey: string;
+    openaiModel?: string;
+}): Promise<string> {
+    const summary = options.eventSummary?.trim();
+    const prompt =
+        `Write a short social feed summary for the news event below.\n` +
+        `- Use ONLY information from the provided article.\n` +
+        `- Keep it brief (max ~600 characters).\n` +
+        `- Prefer 3-5 bullet points.\n` +
+        `- Preserve citations like [1], [2] when possible.\n` +
+        `- Do not use headings.\n` +
+        `- Output markdown only.\n\n` +
+        `Event title: ${options.eventTitle}\n` +
+        (summary ? `Event summary: ${summary}\n\n` : "\n") +
+        `Article markdown:\n${options.storyMarkdown}\n`;
+
+    const out = await queryChatGPT(prompt, options.openaiApiKey, {
+        model: options.openaiModel,
+        system: "You are a social media editor. Be accurate and concise.",
+    });
+    return out.trim();
+}
+
 @variant("news-bot")
 export class NewsBot extends Program<Args> {
     private runner?: BotRunner;
@@ -200,6 +253,25 @@ export class NewsBot extends Program<Args> {
         const openaiModel = args?.openaiModel;
         const prefix =
             args?.prefix === undefined ? "News bot" : args.prefix.trim();
+
+        const includeImages = parseBooleanArg(args?.includeImages, true);
+        const maxImageBytes = Math.max(
+            64 * 1024,
+            parseNumberArg(args?.maxImageBytes) ?? DEFAULT_MAX_IMAGE_BYTES
+        );
+        const maxImageCandidates = Math.max(
+            1,
+            parseNumberArg(args?.maxImageCandidates) ?? 5
+        );
+        const imageTimeoutMs = Math.max(
+            1_000,
+            parseNumberArg(args?.imageTimeoutMs) ?? DEFAULT_IMAGE_TIMEOUT_MS
+        );
+
+        const generateFeedSummary = parseBooleanArg(
+            args?.generateFeedSummary,
+            true
+        );
 
         const ctx: BotJobContext = {
             node: this.node,
@@ -282,24 +354,192 @@ export class NewsBot extends Program<Args> {
                         openaiModel,
                     });
 
+                    const feedSummary = generateFeedSummary
+                        ? await buildFeedSummary({
+                              eventTitle,
+                              eventSummary: event.summary,
+                              storyMarkdown: story,
+                              openaiApiKey,
+                              openaiModel,
+                          }).catch(() => "")
+                        : "";
+
+                    const leadImage = includeImages
+                        ? await findLeadImage({
+                              articles,
+                              maxCandidates: maxImageCandidates,
+                              maxImageBytes,
+                              timeoutMs: imageTimeoutMs,
+                          })
+                        : undefined;
+
+                    const leadImageContentId = leadImage
+                        ? sha256ContentId(leadImage.bytes)
+                        : undefined;
+                    const leadImageRef = leadImageContentId
+                        ? gigaImageUrlFromContentId(leadImageContentId)
+                        : undefined;
+
                     const references = formatReferences(articles);
+                    const referencesShort = formatReferences(articles.slice(0, 5));
                     const header = prefix ? `### ${prefix}\n\n` : "";
-                    const markdown =
+                    const imageMarkdown = leadImageRef
+                        ? `![${eventTitle}](${leadImageRef})\n\n`
+                        : "";
+
+                    const markdownHigh =
                         header +
                         `# ${eventTitle}\n\n` +
+                        imageMarkdown +
                         `${story}\n\n` +
                         `## References\n${references}\n\n` +
                         `_Event URI: ${event.uri}_\n`;
 
+                    const markdownMedium =
+                        header +
+                        `# ${eventTitle}\n\n` +
+                        imageMarkdown +
+                        (feedSummary.trim()
+                            ? `${feedSummary.trim()}\n\n`
+                            : `${truncateText(story, 700)}\n\n`) +
+                        `## References\n${referencesShort}\n\n` +
+                        `_Event URI: ${event.uri}_\n`;
+
+                    const markdownLow = (() => {
+                        const oneLiner = event.summary?.trim()
+                            ? truncateText(event.summary.trim(), 180)
+                            : "";
+                        return (
+                            `# ${eventTitle}\n` +
+                            (oneLiner ? `\n${oneLiner}\n` : "")
+                        );
+                    })();
+
                     if (dryRun) {
-                        log(markdown);
-                    } else {
-                        const post = await publishMarkdownReply({
-                            node: this.node,
-                            scope,
-                            parent: root,
-                            markdown,
+                        if (leadImage) {
+                            log(
+                                `[NewsBot] lead image: ${leadImage.url} (${leadImage.mimeType}, ${leadImage.bytes.length} bytes)`
+                            );
+                        }
+                        log("[NewsBot] markdown variants:", {
+                            low: markdownLow.length,
+                            medium: markdownMedium.length,
+                            high: markdownHigh.length,
                         });
+                        log(markdownHigh);
+                    } else {
+                        const draft = new Canvas({
+                            publicKey: this.node.identity.publicKey,
+                        });
+
+                        const [, post] = await scope.getOrCreateReply(
+                            root,
+                            draft,
+                            {
+                                kind: new ReplyKind(),
+                                visibility: "both",
+                            }
+                        );
+
+                        post.beginBulk();
+                        try {
+                            let nextY = 0;
+
+                            if (leadImage) {
+                                const loc = Layout.zero();
+                                loc.y = nextY++;
+
+                                const contentId = leadImageContentId!;
+                                await post.createElement(
+                                    new Element({
+                                        location: loc,
+                                        publicKey:
+                                            this.node.identity.publicKey,
+                                        canvasId: post.id,
+                                        content: new StaticContent({
+                                            content: new StaticImage({
+                                                data: leadImage.bytes,
+                                                mimeType: leadImage.mimeType,
+                                                width: leadImage.width,
+                                                height: leadImage.height,
+                                                alt: eventTitle,
+                                                caption: "",
+                                            }),
+                                            quality: MEDIUM_QUALITY,
+                                            contentId,
+                                        }),
+                                    })
+                                );
+                            }
+
+                            const textY = nextY++;
+                            const textContentId = sha256Sync(
+                                new TextEncoder().encode(
+                                    `news-bot:event:${event.uri}:markdown`
+                                )
+                            );
+                            const loc = () => {
+                                const l = Layout.zero();
+                                l.y = textY;
+                                return l;
+                            };
+
+                            await post.createElement(
+                                new Element({
+                                    location: loc(),
+                                    publicKey: this.node.identity.publicKey,
+                                    canvasId: post.id,
+                                    content: new StaticContent({
+                                        content: new StaticMarkdownText({
+                                            text: markdownLow,
+                                        }),
+                                        quality: LOWEST_QUALITY,
+                                        contentId: textContentId,
+                                    }),
+                                })
+                            );
+                            await post.createElement(
+                                new Element({
+                                    location: loc(),
+                                    publicKey: this.node.identity.publicKey,
+                                    canvasId: post.id,
+                                    content: new StaticContent({
+                                        content: new StaticMarkdownText({
+                                            text: markdownMedium,
+                                        }),
+                                        quality: MEDIUM_QUALITY,
+                                        contentId: textContentId,
+                                    }),
+                                })
+                            );
+                            await post.createElement(
+                                new Element({
+                                    location: loc(),
+                                    publicKey: this.node.identity.publicKey,
+                                    canvasId: post.id,
+                                    content: new StaticContent({
+                                        content: new StaticMarkdownText({
+                                            text: markdownHigh,
+                                        }),
+                                        quality: HIGH_QUALITY,
+                                        contentId: textContentId,
+                                    }),
+                                })
+                            );
+                        } finally {
+                            await post.endBulk();
+                        }
+
+                        try {
+                            await post.nearestScope._hierarchicalReindex?.flush(
+                                post.idString
+                            );
+                        } catch {}
+                        try {
+                            await root.nearestScope._hierarchicalReindex?.flush(
+                                root.idString
+                            );
+                        } catch {}
 
                         const articleKeys = articles.map((a) =>
                             newsApiArticleKey(a)

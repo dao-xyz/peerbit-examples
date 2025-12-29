@@ -4,9 +4,11 @@ import React, {
     useState,
     useCallback,
     useLayoutEffect,
+    useMemo,
 } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import * as Dialog from "@radix-ui/react-dialog";
 import {
     Element,
     LOWEST_QUALITY,
@@ -14,7 +16,7 @@ import {
     StaticMarkdownText,
 } from "@giga-app/interface";
 import { ChangeCallback } from "./types";
-import { sha256Sync } from "@peerbit/crypto";
+import { sha256Sync, toBase64URL } from "@peerbit/crypto";
 import { useCanvas } from "../../canvas/CanvasWrapper";
 import { useAIReply } from "../../ai/AIReployContext";
 import { usePeer } from "@peerbit/react";
@@ -22,6 +24,94 @@ import { FaCheck } from "react-icons/fa";
 import { Spinner } from "../../utils/Spinner";
 import debounce from "lodash.debounce";
 import { equals } from "uint8arrays";
+import { rectIsStaticImage, rectIsStaticPartialImage } from "../../canvas/utils/rect";
+import { parseGigaImageRef } from "../../canvas/utils/inlineMarkdownImages";
+
+const GigaMarkdownImage = ({
+    src,
+    alt,
+    title,
+    imagesByRef,
+}: {
+    src?: string;
+    alt?: string;
+    title?: string;
+    imagesByRef: Map<string, Element<any>>;
+}) => {
+    const ref = typeof src === "string" ? parseGigaImageRef(src) : undefined;
+    if (!ref) {
+        return (
+            <img
+                src={src}
+                alt={alt ?? ""}
+                title={title}
+                loading="lazy"
+                className="max-w-full h-auto rounded-md"
+            />
+        );
+    }
+
+    const el = imagesByRef.get(ref);
+    if (!el || !(rectIsStaticImage(el) || rectIsStaticPartialImage(el))) {
+        return (
+            <span className="text-sm italic text-neutral-500">
+                [missing image]
+            </span>
+        );
+    }
+    if (!rectIsStaticImage(el)) {
+        return (
+            <span className="text-sm italic text-neutral-500">
+                [image still loading]
+            </span>
+        );
+    }
+
+    const img = el.content.content;
+    const [imgUrl, setImgUrl] = useState<string | null>(null);
+    useEffect(() => {
+        if (!img.data || !img.mimeType) return;
+        const blob = new Blob([img.data as BlobPart], {
+            type: img.mimeType,
+        });
+        const url = URL.createObjectURL(blob);
+        setImgUrl(url);
+        return () => URL.revokeObjectURL(url);
+    }, [img.data, img.mimeType]);
+
+    const altText = alt || img.alt || "";
+
+    return (
+        <Dialog.Root>
+            <Dialog.Trigger asChild>
+                <img
+                    src={imgUrl ?? ""}
+                    alt={altText}
+                    title={title}
+                    loading="lazy"
+                    width={img.width || undefined}
+                    height={img.height || undefined}
+                    className="max-w-full max-h-[60vh] object-contain rounded-md cursor-zoom-in"
+                    style={
+                        img.width && img.height
+                            ? { aspectRatio: `${img.width}/${img.height}` }
+                            : undefined
+                    }
+                />
+            </Dialog.Trigger>
+            <Dialog.Portal>
+                <Dialog.Overlay className="fixed inset-0 bg-black/70" />
+                <Dialog.Content className="fixed inset-0 flex items-center justify-center p-4">
+                    <img
+                        src={imgUrl ?? ""}
+                        alt={altText}
+                        className="max-h-[92vh] max-w-[92vw] object-contain rounded-md"
+                    />
+                </Dialog.Content>
+            </Dialog.Portal>
+        </Dialog.Root>
+    );
+};
 
 export type MarkdownContentProps = {
     element: Element<StaticContent<StaticMarkdownText>>;
@@ -58,7 +148,14 @@ export const MarkdownContent = ({
     // Local state for the markdown text.
     const [text, setText] = useState(content.text);
 
-    const { canvas, placeholder, classNameContent } = useCanvas();
+    const {
+        canvas,
+        placeholder,
+        classNameContent,
+        rects,
+        pendingRects,
+        reduceElementsForViewing,
+    } = useCanvas();
     const { suggest, isReady } = useAIReply();
     const { peer } = usePeer();
     const [loadingSuggestedReply, setLoadingSuggestedReply] = useState(false);
@@ -374,6 +471,21 @@ export const MarkdownContent = ({
 
     const displayText = isEditing ? text : content.text;
 
+    const gigaImagesByRef = useMemo(() => {
+        try {
+            const grouped = reduceElementsForViewing([...rects, ...pendingRects]);
+            const map = new Map<string, Element<any>>();
+            for (const el of grouped) {
+                if (rectIsStaticImage(el) || rectIsStaticPartialImage(el)) {
+                    map.set(toBase64URL(el.content.contentId), el);
+                }
+            }
+            return map;
+        } catch {
+            return new Map<string, Element<any>>();
+        }
+    }, [rects, pendingRects, reduceElementsForViewing]);
+
     return (
         <div
             ref={containerRef}
@@ -446,6 +558,14 @@ export const MarkdownContent = ({
                                 <a
                                     {...props}
                                     className=" wrap-anywhere underline "
+                                />
+                            ),
+                            img: ({ node, ...props }) => (
+                                <GigaMarkdownImage
+                                    src={props.src}
+                                    alt={props.alt}
+                                    title={props.title}
+                                    imagesByRef={gigaImagesByRef}
                                 />
                             ),
 

@@ -7,7 +7,6 @@ import path from "path";
 import fs from "fs";
 import fsp from "fs/promises";
 import { fileURLToPath } from "url";
-import { NewsBot } from "../news-bot.js";
 import { fetchEvents } from "../newsapi.js";
 
 function loadDotEnvIfPresent() {
@@ -131,6 +130,7 @@ describe("NewsBot (e2e)", () => {
             await assertNewsApiKeyValid(NEWS_API_KEY!);
 
             const peer = session.peers[0];
+            const { NewsBot } = await import("../news-bot.js");
 
             const statePath = path.join(
                 os.tmpdir(),
@@ -153,6 +153,9 @@ describe("NewsBot (e2e)", () => {
                     openaiModel: "gpt-5.1",
                     /*  keyword: "Bitcoin", */
                     lang: "eng",
+
+                    includeImages: false,
+                    generateFeedSummary: false,
 
                     maxEventsPerRun: 1,
                     maxArticlesPerEvent: 3,

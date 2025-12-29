@@ -35,6 +35,12 @@ type CliArgs = {
     maxEventsPerRun?: number;
     maxArticlesPerEvent?: number;
     statePath?: string;
+
+    includeImages?: boolean;
+    maxImageBytes?: number;
+    maxImageCandidates?: number;
+    imageTimeoutMs?: number;
+    generateFeedSummary?: boolean;
 };
 
 const getFlag = (name: string) => process.argv.includes(name);
@@ -148,6 +154,25 @@ const parseArgs = (): CliArgs => {
         maxEventsPerRun: parseNumber(getValue("--maxEventsPerRun")),
         maxArticlesPerEvent: parseNumber(getValue("--maxArticlesPerEvent")),
         statePath: getValue("--statePath"),
+
+        includeImages:
+            !getFlag("--no-images") &&
+            !getFlag("--noImages") &&
+            !getFlag("--no-image"),
+        maxImageBytes: parseNumber(
+            getValue("--maxImageBytes") ?? getValue("--max-image-bytes")
+        ),
+        maxImageCandidates: parseNumber(
+            getValue("--maxImageCandidates") ??
+                getValue("--max-image-candidates")
+        ),
+        imageTimeoutMs: parseNumber(
+            getValue("--imageTimeoutMs") ?? getValue("--image-timeout-ms")
+        ),
+        generateFeedSummary:
+            !getFlag("--no-feed-summary") &&
+            !getFlag("--noFeedSummary") &&
+            !getFlag("--no-feedSummary"),
     };
 };
 
@@ -183,6 +208,15 @@ News query options:
   --locationUri             Location URI (Wikipedia URI)
   --maxEventsPerRun         How many events to post per run (default: 1)
   --maxArticlesPerEvent     How many articles to fetch per event (default: 50)
+
+Images:
+  --no-images               Disable lead image fetch + embedding
+  --maxImageBytes           Max bytes to download per image (default: 3145728)
+  --maxImageCandidates      Max articles to probe for an image (default: 5)
+  --imageTimeoutMs          Timeout per image/HTML fetch (default: 12000)
+
+Variants:
+  --no-feed-summary         Skip AI feed summary (medium variant uses a truncate fallback)
 
 Keys:
   --newsApiKey              NewsAPI.ai/EventRegistry API key (or NEWS_API_KEY / NEWSAPI_AI_KEY / EVENTREGISTRY_API_KEY)
@@ -405,6 +439,12 @@ export const start = async () => {
                 : args.maxEventsPerRun,
             maxArticlesPerEvent: args.maxArticlesPerEvent,
             statePath,
+
+            includeImages: args.includeImages,
+            maxImageBytes: args.maxImageBytes,
+            maxImageCandidates: args.maxImageCandidates,
+            imageTimeoutMs: args.imageTimeoutMs,
+            generateFeedSummary: args.generateFeedSummary,
         },
     });
 
