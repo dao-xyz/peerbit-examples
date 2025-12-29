@@ -422,7 +422,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             approximate: true,
         });
         return BigInt(n);
-    } catch { }
+    } catch {}
 
     // Fallback: aggregate children’s cached totals (Σ (1 + childDeep))
     try {
@@ -456,7 +456,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
                         | number
                         | undefined;
                 }
-            } catch { }
+            } catch {}
 
             if (typeof deep === "bigint") total += 1n + deep;
             else if (typeof deep === "number") total += 1n + BigInt(deep);
@@ -475,7 +475,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             }
         }
         return total;
-    } catch { }
+    } catch {}
 
     // Last resort: BFS traversal (with loop guards)
     return await canvas.countRepliesBFS({ immediate: false });
@@ -508,13 +508,13 @@ export const getImmediateRepliesQueryByDepth = (
     parentId: Uint8Array,
     parentDepth: number
 ) => [
-        new ByteMatchQuery({ key: "path", value: parentId }),
-        new IntegerCompare({
-            key: "pathDepth",
-            value: parentDepth + 1,
-            compare: Compare.Equal,
-        }),
-    ];
+    new ByteMatchQuery({ key: "path", value: parentId }),
+    new IntegerCompare({
+        key: "pathDepth",
+        value: parentDepth + 1,
+        compare: Compare.Equal,
+    }),
+];
 
 // If you already fetched the parent indexed doc, you can write:
 export const getImmediateRepliesQuery = (
@@ -936,8 +936,8 @@ async function unlink(
     const shouldDelete: (l: Link) => boolean = ks.includes("all")
         ? anyKind
         : (l) =>
-            (ks.includes("reply") && isReply(l)) ||
-            (ks.includes("view") && isView(l));
+              (ks.includes("reply") && isReply(l)) ||
+              (ks.includes("view") && isView(l));
 
     // 1) remove mirrors first (parent + any extra scopes)
     for (const s of mirrorScopes) {
@@ -1154,7 +1154,7 @@ async function deleteChildLinksForCanvasInScope(scope: Scope, canvas: Canvas) {
     }
 }
 
-export abstract class CanvasMessage { }
+export abstract class CanvasMessage {}
 
 @variant(0)
 export class ReplyingInProgresss extends CanvasMessage {
@@ -1186,7 +1186,7 @@ export class ReplyingNoLongerInProgresss extends CanvasMessage {
 
 /* -------------- STYLING ------------------ */
 
-export abstract class AbstractBackground { }
+export abstract class AbstractBackground {}
 
 @variant(0)
 export class ModedBackground {
@@ -1481,9 +1481,9 @@ export class Link<TKind extends LinkKind = LinkKind> {
         const enc = (r: NodeRef) =>
             r instanceof ScopedRef
                 ? concat([
-                    new TextEncoder().encode(r.scope.address),
-                    r.canvasId,
-                ])
+                      new TextEncoder().encode(r.scope.address),
+                      r.canvasId,
+                  ])
                 : (r as LocalRef).canvasId;
         return sha256Sync(
             concat([new Uint8Array([tag]), enc(parent), enc(child)])
@@ -1512,7 +1512,7 @@ const reIndexRepliesInParents = async (scope: Scope, canvas: Canvas) => {
                     options: { onlyReplies: true, skipAncestors: true },
                     propagateParents: false,
                 })
-                .catch(() => { });
+                .catch(() => {});
         }, 0);
     }
 };
@@ -1546,9 +1546,9 @@ function makeReindexListener<T, I>(
                     canvas,
                     options: opts?.onlyReplies
                         ? {
-                            onlyReplies: true,
-                            skipAncestors: opts?.skipAncestors,
-                        }
+                              onlyReplies: true,
+                              skipAncestors: opts?.skipAncestors,
+                          }
                         : { skipAncestors: opts?.skipAncestors },
                     propagateParents: false,
                 });
@@ -1720,7 +1720,7 @@ export class Scope extends Program<ScopeArgs> {
                         },
                     })
                 );
-            } catch { }
+            } catch {}
             return await fn();
         } finally {
             this._suppressReindexCount = Math.max(
@@ -1733,7 +1733,7 @@ export class Scope extends Program<ScopeArgs> {
                         detail: { phase: "suppress:exit", scope: this.address },
                     })
                 );
-            } catch { }
+            } catch {}
         }
     }
 
@@ -1755,7 +1755,7 @@ export class Scope extends Program<ScopeArgs> {
                 globalThis.window?.dispatchEvent?.(
                     new CustomEvent("reindex:debug", { detail })
                 );
-            } catch { }
+            } catch {}
         };
         this._hierarchicalReindex = createHierarchicalReindexManager<Canvas>({
             // Allow test-mode with virtually no debounce/cooldown (REINDEX_NO_DELAY=1)
@@ -1974,7 +1974,7 @@ export class Scope extends Program<ScopeArgs> {
                                 ns._reindexGeneration.get(arg.idString) ?? 0
                             );
                         }
-                    } catch { }
+                    } catch {}
                     return ix;
                 },
             },
@@ -1987,7 +1987,7 @@ export class Scope extends Program<ScopeArgs> {
             topic: sha256Base64Sync(
                 concat([this.id, new TextEncoder().encode("messages")])
             ),
-            responseHandler: async () => { }, // need an empty response handle to make response events to emit TODO fix this?
+            responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
         });
     }
 
@@ -2005,9 +2005,9 @@ export class Scope extends Program<ScopeArgs> {
                 },
             })
             .all()) as WithIndexedContext<
-                BasicVisualization,
-                IndexedVisualization
-            >[];
+            BasicVisualization,
+            IndexedVisualization
+        >[];
 
         if (!list.length) return null;
 
@@ -2024,7 +2024,7 @@ export class Scope extends Program<ScopeArgs> {
                 if (!equals(v.id, preferred.id)) {
                     try {
                         await this.visualizations.del(v.id);
-                    } catch { }
+                    } catch {}
                 }
             }
         }
@@ -2239,7 +2239,7 @@ export class Scope extends Program<ScopeArgs> {
                 publish.deferCleanup == null &&
                 updateHome === "set" &&
                 srcHome.address !==
-                (publish.targetScope ?? defaultDestScope).address
+                    (publish.targetScope ?? defaultDestScope).address
             ) {
                 try {
                     const ownedAtSource = await srcHome.elements.index
@@ -2252,7 +2252,7 @@ export class Scope extends Program<ScopeArgs> {
                         deferCleanup = true;
                         autoDeferred = true;
                     }
-                } catch { }
+                } catch {}
             }
             const existing = await dest.replies.index.get(src.id, {
                 resolve: true,
@@ -2263,13 +2263,13 @@ export class Scope extends Program<ScopeArgs> {
             const dst = existing
                 ? await dest.openWithSameSettings(existing)
                 : new Canvas({
-                    id: src.id,
-                    publicKey: dest.node.identity.publicKey,
-                    selfScope:
-                        updateHome === "set"
-                            ? new AddressReference({ address: dest.address })
-                            : src.selfScope,
-                });
+                      id: src.id,
+                      publicKey: dest.node.identity.publicKey,
+                      selfScope:
+                          updateHome === "set"
+                              ? new AddressReference({ address: dest.address })
+                              : src.selfScope,
+                  });
 
             const created = !existing;
             if (!existing) {
@@ -2285,15 +2285,15 @@ export class Scope extends Program<ScopeArgs> {
             // (debug) count elements owned by dst in dest scope before copy
             const preIds = debug
                 ? (
-                    await dest.elements.index
-                        .iterate(
-                            { query: getOwnedByCanvasQuery(dst) },
-                            { resolve: false }
-                        )
-                        .all()
-                )
-                    .map((e) => e.idString)
-                    .sort()
+                      await dest.elements.index
+                          .iterate(
+                              { query: getOwnedByCanvasQuery(dst) },
+                              { resolve: false }
+                          )
+                          .all()
+                  )
+                      .map((e) => e.idString)
+                      .sort()
                 : undefined;
 
             // Copy payload over
@@ -2316,7 +2316,7 @@ export class Scope extends Program<ScopeArgs> {
             });
             mark(
                 "sync:copyPayload" +
-                (debug ? `:${Date.now() - copyStart}ms` : "")
+                    (debug ? `:${Date.now() - copyStart}ms` : "")
             );
 
             // If we are *moving* the home, flip selfScope and clean up old home payload & child-links
@@ -2356,15 +2356,15 @@ export class Scope extends Program<ScopeArgs> {
             // (debug) count elements owned by dst in dest scope after copy
             const postIds = debug
                 ? (
-                    await dest.elements.index
-                        .iterate(
-                            { query: getOwnedByCanvasQuery(dst) },
-                            { resolve: false }
-                        )
-                        .all()
-                )
-                    .map((e) => e.idString)
-                    .sort()
+                      await dest.elements.index
+                          .iterate(
+                              { query: getOwnedByCanvasQuery(dst) },
+                              { resolve: false }
+                          )
+                          .all()
+                  )
+                      .map((e) => e.idString)
+                      .sort()
                 : undefined;
 
             if (debug) {
@@ -2410,7 +2410,7 @@ export class Scope extends Program<ScopeArgs> {
                 await srcHome._hierarchicalReindex!.flush();
                 mark(
                     "sync:deferredCleanup" +
-                    (debug ? `:${Date.now() - cleanupStart}ms` : "")
+                        (debug ? `:${Date.now() - cleanupStart}ms` : "")
                 );
                 if (autoDeferred) {
                     mark("sync:autoDeferred");
@@ -2668,7 +2668,7 @@ export class Scope extends Program<ScopeArgs> {
                 if (!equals(v.id, canonicalId)) {
                     try {
                         await this.visualizations.del(v.id);
-                    } catch { }
+                    } catch {}
                 }
             }
         }
@@ -2816,7 +2816,7 @@ export class Scope extends Program<ScopeArgs> {
                 globalThis.window?.dispatchEvent?.(
                     new CustomEvent("reindex:debug", { detail })
                 );
-            } catch { }
+            } catch {}
         };
         const tStart = globalThis.performance?.now?.() || Date.now();
 
@@ -2920,7 +2920,7 @@ export class Scope extends Program<ScopeArgs> {
         try {
             // Best-effort serialization size (can throw if deps not loaded)
             serialized = serialize(fresh) as Uint8Array;
-        } catch { }
+        } catch {}
         const bytes = serialized?.length;
 
         // 1) putWithContext (context row)
@@ -2969,7 +2969,7 @@ export class Scope extends Program<ScopeArgs> {
                     dt: tAncEnd - tAncStart,
                     count: ancestors.length,
                 });
-            } catch { }
+            } catch {}
         }
         // Test hook: expose timing breakdown for Node tests (no window events)
         if (
@@ -2986,7 +2986,7 @@ export class Scope extends Program<ScopeArgs> {
                     replies: Number(fresh.replies || 0n),
                     bytes: bytes ?? null,
                 };
-            } catch { }
+            } catch {}
         }
         const tEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
@@ -3090,8 +3090,8 @@ export class Scope extends Program<ScopeArgs> {
                                     },
                                     propagateParents: false,
                                 })
-                                .catch(() => { });
-                        } catch { }
+                                .catch(() => {});
+                        } catch {}
                     }, ms);
                 }
             }
@@ -3134,8 +3134,8 @@ export class Scope extends Program<ScopeArgs> {
                                     },
                                     propagateParents: false,
                                 })
-                                .catch(() => { });
-                        } catch { }
+                                .catch(() => {});
+                        } catch {}
                     }, ms);
                 }
             }
@@ -3170,10 +3170,10 @@ export class Scope extends Program<ScopeArgs> {
                 const child = isMirrorRow
                     ? null
                     : await resolveChild(l, this, {
-                        local: true,
-                        remote: false,
-                        waitFor: 0,
-                    });
+                          local: true,
+                          remote: false,
+                          waitFor: 0,
+                      });
 
                 const warnOnce = (side: "child" | "parent", msg: string) => {
                     const key = (l.idString || "?") + ":" + side;
@@ -3206,7 +3206,7 @@ export class Scope extends Program<ScopeArgs> {
                                 },
                             })
                         );
-                    } catch { }
+                    } catch {}
                     // Defer child full to avoid blocking initial content paint.
                     // Skip if we just indexed this canvas (e.g., publish finalized it).
                     const recently =
@@ -3236,7 +3236,7 @@ export class Scope extends Program<ScopeArgs> {
                                         );
                                     }
                                 });
-                        } catch { }
+                        } catch {}
                     }, 300);
                 }
                 if (parent) {
@@ -3255,7 +3255,7 @@ export class Scope extends Program<ScopeArgs> {
                                     },
                                 })
                             );
-                        } catch { }
+                        } catch {}
                         /*  TODO is this needed?  p.nearestScope
                               ._hierarchicalReindex!.add({
                                   canvas: p,
@@ -3477,7 +3477,8 @@ export class Scope extends Program<ScopeArgs> {
             });
             if (!canvas) {
                 throw new Error(
-                    `Canvas ${sha256Base64Sync(target)} not found in scope ${this.address
+                    `Canvas ${sha256Base64Sync(target)} not found in scope ${
+                        this.address
                     }`
                 );
             }
@@ -4105,8 +4106,8 @@ export class Canvas {
             const ctx = idxRow?.context as string | undefined;
             const matches = ctx
                 ? ctx.localeCompare(name, undefined, {
-                    sensitivity: "accent",
-                }) === 0
+                      sensitivity: "accent",
+                  }) === 0
                 : (await child.createContext()) === name;
 
             if (matches) out.push(child);
@@ -4379,8 +4380,8 @@ export class Canvas {
             i === 0
                 ? orderKeyBetween(undefined, afterKey) // strictly before first
                 : i === ordered.length
-                    ? orderKeyBetween(beforeKey, undefined) // strictly after last
-                    : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
+                  ? orderKeyBetween(beforeKey, undefined) // strictly after last
+                  : orderKeyBetween(beforeKey, afterKey); // strictly between neighbors
 
         await this.upsertViewPlacement(child, newKey);
         return newKey;
@@ -4512,7 +4513,7 @@ export class Canvas {
             this._implicitBulkTimer && clearTimeout(this._implicitBulkTimer);
             this._implicitBulkTimer = setTimeout(() => {
                 if (this._bulkInsertDepth > 0 && this._implicitBulk?.active) {
-                    this.endBulk().catch(() => { });
+                    this.endBulk().catch(() => {});
                 }
                 this._implicitBulk = undefined;
             }, 160);

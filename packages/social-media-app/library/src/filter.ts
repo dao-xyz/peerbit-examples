@@ -12,7 +12,7 @@ import {
 import { PublicSignKey, sha256Sync } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
 
-abstract class Filter { }
+abstract class Filter {}
 
 @variant(0)
 export class PinnedPosts extends Filter {
@@ -89,19 +89,19 @@ export class StreamSetting {
             query:
                 this.filter && this.filter instanceof PinnedPosts
                     ? (from: Canvas) => {
-                        let pinned = this.filter as PinnedPosts;
-                        return new SearchRequest({
-                            query: new Or(
-                                pinned.pinned.map(
-                                    (p) =>
-                                        new ByteMatchQuery({
-                                            key: "id",
-                                            value: p,
-                                        })
-                                )
-                            ),
-                        });
-                    }
+                          let pinned = this.filter as PinnedPosts;
+                          return new SearchRequest({
+                              query: new Or(
+                                  pinned.pinned.map(
+                                      (p) =>
+                                          new ByteMatchQuery({
+                                              key: "id",
+                                              value: p,
+                                          })
+                                  )
+                              ),
+                          });
+                      }
                     : undefined,
             settings: {
                 // TODO

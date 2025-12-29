@@ -1,11 +1,15 @@
 /**
  * queryChatGPT sends a prompt to the OpenAI ChatGPT API.
  * @param {string} prompt - The prompt to send.
- * @param {string} [model=DEEP_SEEK_R1] - The model to use (for context; ChatGPT uses its own engine).
  * @param {string} apiKey - Your OpenAI API key.
+ * @param {{ model?: string, system?: string }} [options] - Optional model/system overrides.
  * @returns {Promise<string>} The assistant's response.
  */
-export const queryChatGPT = async (prompt, apiKey) => {
+export const queryChatGPT = async (
+    prompt: string,
+    apiKey: string,
+    options?: { model?: string; system?: string }
+) => {
     if (!apiKey) {
         throw new Error("API key is required for ChatGPT queries");
     }
@@ -19,8 +23,13 @@ export const queryChatGPT = async (prompt, apiKey) => {
                     Authorization: `Bearer ${apiKey}`,
                 },
                 body: JSON.stringify({
-                    model: "gpt-4o",
-                    messages: [{ role: "user", content: prompt }],
+                    model: options?.model ?? "gpt-4o",
+                    messages: [
+                        ...(options?.system
+                            ? [{ role: "system", content: options.system }]
+                            : []),
+                        { role: "user", content: prompt },
+                    ],
                     stream: false,
                 }),
             }

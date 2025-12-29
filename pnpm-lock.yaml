@@ -1009,6 +1009,101 @@ importers:
         specifier: ^5.6.3
         version: 5.9.3
 
+  packages/social-media-app/bots/joke-bot:
+    dependencies:
+      '@giga-app/bot-kit':
+        specifier: workspace:*
+        version: link:../kit
+      '@giga-app/interface':
+        specifier: workspace:*
+        version: link:../../library
+    devDependencies:
+      '@peerbit/test-utils':
+        specifier: ^2.3.2
+        version: 2.3.9(react-native@0.83.1(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
+      chai:
+        specifier: ^6.2.0
+        version: 6.2.2
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/social-media-app/bots/joke-bot-cli:
+    dependencies:
+      '@giga-app/joke-bot':
+        specifier: workspace:*
+        version: link:../joke-bot
+      '@giga-app/network':
+        specifier: workspace:*
+        version: link:../../network
+      '@inquirer/input':
+        specifier: ^2
+        version: 2.3.0
+      '@inquirer/select':
+        specifier: ^2
+        version: 2.5.0
+      peerbit:
+        specifier: ^4
+        version: 4.4.9(react-native@0.83.1(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
+    devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/social-media-app/bots/kit:
+    dependencies:
+      '@giga-app/interface':
+        specifier: workspace:*
+        version: link:../../library
+    devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/social-media-app/bots/news-bot:
+    dependencies:
+      '@giga-app/bot-kit':
+        specifier: workspace:*
+        version: link:../kit
+      '@giga-app/interface':
+        specifier: workspace:*
+        version: link:../../library
+      '@giga-app/llm':
+        specifier: workspace:*
+        version: link:../../ai/library
+    devDependencies:
+      '@peerbit/test-utils':
+        specifier: ^2.3.2
+        version: 2.3.9(react-native@0.83.1(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
+      chai:
+        specifier: ^6.2.0
+        version: 6.2.2
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
+  packages/social-media-app/bots/news-bot-cli:
+    dependencies:
+      '@giga-app/network':
+        specifier: workspace:*
+        version: link:../../network
+      '@giga-app/news-bot':
+        specifier: workspace:*
+        version: link:../news-bot
+      '@inquirer/input':
+        specifier: ^2
+        version: 2.3.0
+      '@inquirer/select':
+        specifier: ^2
+        version: 2.5.0
+      peerbit:
+        specifier: ^4
+        version: 4.4.9(react-native@0.83.1(@babel/core@7.28.5)(@types/react@19.2.7)(react@19.2.3))
+    devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
+
   packages/social-media-app/frontend:
     dependencies:
       '@giga-app/app-service':
@@ -1020,6 +1115,9 @@ importers:
       '@giga-app/llm':
         specifier: workspace:*
         version: link:../ai/library
+      '@giga-app/network':
+        specifier: workspace:*
+        version: link:../network
       '@giga-app/sdk':
         specifier: workspace:*
         version: link:../app-sdk
@@ -1175,6 +1273,12 @@ importers:
       vitest:
         specifier: ^3.2.4
         version: 3.2.4(@types/debug@4.1.12)(@types/node@22.19.3)(happy-dom@20.0.11)(jiti@2.6.1)(jsdom@27.3.0)(lightningcss@1.30.2)(terser@5.44.1)(tsx@4.21.0)(yaml@2.8.2)
+
+  packages/social-media-app/network:
+    devDependencies:
+      typescript:
+        specifier: ^5.6.3
+        version: 5.9.3
 
   packages/svelte-example:
     dependencies:

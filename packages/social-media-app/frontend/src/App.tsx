@@ -34,7 +34,7 @@ import { setupPrettyConsole } from "./debug/debug";
 import { DebugConfigProvider } from "./debug/DebugConfig";
 import { DeveloperConfigProvider } from "./debug/DeveloperConfig";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
-import { BOOTSTRAP_ADDRS } from "./bootstrap.js";
+import { BOOTSTRAP_ADDRS } from "@giga-app/network";
 import { enable } from "@peerbit/logger";
 enable("peerbit:react:usePeer:*");
 

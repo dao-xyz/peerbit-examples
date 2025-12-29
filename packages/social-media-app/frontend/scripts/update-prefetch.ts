@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 import { type Multiaddr, multiaddr } from "@multiformats/multiaddr";
 
 // import your named export
-import { BOOTSTRAP_ADDRS } from "../src/bootstrap";
+import { BOOTSTRAP_ADDRS } from "@giga-app/network";
 
 function toOptions(multiaddr: Multiaddr) {
     var opts: { family: string; host: string; port: number } = {
