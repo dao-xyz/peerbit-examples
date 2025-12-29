@@ -1,5 +1,4 @@
 import { ClientBusyError, usePeer } from "@peerbit/react";
-import { PeerProvider } from "@peerbit/react";
 import { HashRouter } from "react-router";
 import { Header } from "./Header";
 import { BaseRoutes } from "./routes";
@@ -35,6 +34,11 @@ import { DebugConfigProvider } from "./debug/DebugConfig";
 import { DeveloperConfigProvider } from "./debug/DeveloperConfig";
 import { StreamSettingsProvider } from "./canvas/feed/StreamSettingsContext";
 import { BOOTSTRAP_ADDRS } from "@giga-app/network";
+import { AuthProvider } from "./auth/useAuth";
+import { IdentityNoticeProvider } from "./auth/IdentityNoticeDialog";
+import { PeerWithAuth } from "./auth/PeerWithAuth";
+import { AuthNextRedirect } from "./auth/AuthNextRedirect";
+import { SupabaseIdentityBinder } from "./auth/SupabaseIdentityBinder";
 import { enable } from "@peerbit/logger";
 enable("peerbit:react:usePeer:*");
 
@@ -216,44 +220,50 @@ export const App = () => {
                 <ThemeProvider>
                     <DebugConfigProvider>
                         <DeveloperConfigProvider>
-                            <PeerProvider
-                                network={
-                                    bootstrapAddrs !== undefined
-                                        ? {
-                                              // Explicit override: if empty we stay offline
-                                              type: "explicit",
-                                              bootstrap: bootstrapAddrs,
-                                          }
-                                        : networkConfig
-                                }
-                                iframe={{ type: "proxy", targetOrigin: "*" }}
-                                waitForConnnected={true} /* {'in-flight'} */
-                                inMemory={inMemory}
-                                singleton
-                            >
-                                <IdentitiesProvider>
-                                    <AppProvider>
-                                        <HeaderVisibilityProvider>
-                                            <BlurOnOutsidePointerProvider>
-                                                <ScopeRegistryProvider>
-                                                    <CanvasProvider>
-                                                        <ReplyProgressProvider>
-                                                            <ProfileProvider>
-                                                                <AIReplyProvider>
-                                                                    <HostRegistryProvider>
-                                                                        <Content />
-                                                                        {/* <DebugOverlay /> */}
-                                                                    </HostRegistryProvider>
-                                                                </AIReplyProvider>
-                                                            </ProfileProvider>
-                                                        </ReplyProgressProvider>
-                                                    </CanvasProvider>
-                                                </ScopeRegistryProvider>
-                                            </BlurOnOutsidePointerProvider>
-                                        </HeaderVisibilityProvider>
-                                    </AppProvider>
-                                </IdentitiesProvider>
-                            </PeerProvider>
+                            <AuthProvider>
+                                <AuthNextRedirect />
+                                <PeerWithAuth
+                                    network={
+                                        bootstrapAddrs !== undefined
+                                            ? {
+                                                  // Explicit override: if empty we stay offline
+                                                  type: "explicit",
+                                                  bootstrap: bootstrapAddrs,
+                                              }
+                                            : networkConfig
+                                    }
+                                    iframe={{ type: "proxy", targetOrigin: "*" }}
+                                    waitForConnnected={true} /* {'in-flight'} */
+                                    inMemory={inMemory}
+                                    singleton
+                                >
+                                    <IdentityNoticeProvider>
+                                        <SupabaseIdentityBinder />
+                                        <IdentitiesProvider>
+                                            <AppProvider>
+                                                <HeaderVisibilityProvider>
+                                                    <BlurOnOutsidePointerProvider>
+                                                        <ScopeRegistryProvider>
+                                                            <CanvasProvider>
+                                                                <ReplyProgressProvider>
+                                                                    <ProfileProvider>
+                                                                        <AIReplyProvider>
+                                                                            <HostRegistryProvider>
+                                                                                <Content />
+                                                                                {/* <DebugOverlay /> */}
+                                                                            </HostRegistryProvider>
+                                                                        </AIReplyProvider>
+                                                                    </ProfileProvider>
+                                                                </ReplyProgressProvider>
+                                                            </CanvasProvider>
+                                                        </ScopeRegistryProvider>
+                                                    </BlurOnOutsidePointerProvider>
+                                                </HeaderVisibilityProvider>
+                                            </AppProvider>
+                                        </IdentitiesProvider>
+                                    </IdentityNoticeProvider>
+                                </PeerWithAuth>
+                            </AuthProvider>
                         </DeveloperConfigProvider>
                     </DebugConfigProvider>
                 </ThemeProvider>

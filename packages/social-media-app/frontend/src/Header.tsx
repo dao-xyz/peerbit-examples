@@ -5,7 +5,7 @@ import { usePeer } from "@peerbit/react";
 import { Spinner } from "./utils/Spinner";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { useNavigate } from "react-router";
-import { CONNECT_DEVICES, DRAFTS } from "./routes";
+import { AUTH, CONNECT_DEVICES, DRAFTS } from "./routes";
 import { useThemeContext } from "./theme/useTheme";
 import { buildCommit } from "./utils";
 import { CanvasPathInput } from "./canvas/path/CanvasPathInput";
@@ -22,6 +22,7 @@ import { TbPlugConnected } from "react-icons/tb";
 import { ToggleEditModeButton } from "./canvas/edit/ToggleEditModeButton";
 import { DeveloperPanel } from "./debug/DeveloperPanel";
 import { MdBuild } from "react-icons/md";
+import { useAuth } from "./auth/useAuth";
 
 // Define props interface
 interface HeaderProps {
@@ -33,6 +34,7 @@ export const Header = (props: HeaderProps) => {
     // Read initial theme from localStorage or default to "light"
     const { toggleTheme, theme } = useThemeContext();
     const { peer } = usePeer();
+    const auth = useAuth();
     const { path, viewRoot } = useCanvases();
     const navigate = useNavigate();
 
@@ -147,15 +149,15 @@ export const Header = (props: HeaderProps) => {
                                                 <DropdownMenu.Item
                                                     className="menu-item"
                                                     onSelect={() =>
-                                                        console.log(
-                                                            "Change identity"
-                                                        )
+                                                        navigate(AUTH, {})
                                                     }
                                                 >
                                                     <div className="flex items-center gap-2">
                                                         <MdSwitchAccount />
                                                         <span>
-                                                            Change identity
+                                                            {auth.user
+                                                                ? "Account"
+                                                                : "Sign in"}
                                                         </span>
                                                     </div>
                                                 </DropdownMenu.Item>

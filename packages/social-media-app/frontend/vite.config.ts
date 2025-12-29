@@ -15,12 +15,17 @@ export default defineConfig({
         ...(process.env.VITE_TEST_HTTPS === "true" ? [basicSsl()] : []),
     ],
     optimizeDeps: {
+        include: ["react", "react-dom", "react/jsx-runtime"],
         esbuildOptions: {
             target: "esnext",
         },
     },
     build: {
         target: "esnext",
+    },
+    resolve: {
+        // Prevent duplicate React copies when using workspace packages / symlinks
+        dedupe: ["react", "react-dom"],
     },
 
     define: {

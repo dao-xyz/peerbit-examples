@@ -9,6 +9,7 @@ import fs from "fs";
 export default defineConfig({
     plugins: [react(), peerbit(), tailwindcss()],
     optimizeDeps: {
+        include: ["react", "react-dom", "react/jsx-runtime"],
         esbuildOptions: {
             target: "esnext",
         },
@@ -23,6 +24,8 @@ export default defineConfig({
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
     resolve: {
+        // Prevent duplicate React copies when using workspace packages / symlinks
+        dedupe: ["react", "react-dom"],
         alias: {
             process: "process/browser",
         },

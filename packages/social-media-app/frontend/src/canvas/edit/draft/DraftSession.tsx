@@ -17,6 +17,7 @@ import {
     CanvasHandleRegistryContext,
     Registrar,
 } from "../CanvasHandleRegistry";
+import { useIdentityNotice } from "../../../auth/IdentityNoticeDialog";
 
 export type CanvasIx = WithIndexedContext<Canvas, IndexableCanvas>;
 export type CanvasKey = Uint8Array;
@@ -48,6 +49,7 @@ export const DraftSessionProvider: React.FC<{
     keyish?: CanvasKey;
 }> = ({ children, replyTo, keyish }) => {
     const mgr = useDraftManager();
+    const { ensurePublishAllowed } = useIdentityNotice();
 
     // One key per *parent* (replyTo). We rotate it when parent changes.
     const keyRef = useRef<CanvasKey | undefined>(keyish);
@@ -163,6 +165,8 @@ export const DraftSessionProvider: React.FC<{
 
     // publish: flush UI → save → rotate (manager notifies; subscription updates draft)
     const publish = async () => {
+        const ok = await ensurePublishAllowed();
+        if (!ok) return;
         const k = keyRef.current!;
         try {
             debugLog("[DraftSession] publish:start", {

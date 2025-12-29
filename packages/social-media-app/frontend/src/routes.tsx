@@ -10,6 +10,7 @@ import { ConnectDevices } from "./identity/ConnectDevices";
 import { NavigationEffects } from "./NavigationEffects";
 import { useRecordLocation } from "./useNavHistory";
 import { Drafts } from "./canvas/draft/DraftsPage";
+import { AuthRoutes } from "./auth/AuthRoutes";
 
 const textDecoder = new TextDecoder();
 
@@ -122,6 +123,7 @@ export const CONNECT_DEVICES = "/connect";
 export const USER_BY_KEY_NAME = "/k/:key";
 export const NEW_SPACE = "/new";
 export const DRAFTS = "/drafts";
+export const AUTH = "/auth";
 
 export function BaseRoutes() {
     useRecordLocation();
@@ -129,6 +131,9 @@ export function BaseRoutes() {
         <>
             <NavigationEffects />
             <Routes>
+                {/* Account */}
+                <Route path={`${AUTH}/*`} element={<AuthRoutes />} />
+
                 {/* Identity / onboarding */}
                 <Route path={CONNECT_DEVICES} element={<ConnectDevices />} />
                 <Route path={MISSING_PROFILE} element={<MissingProfile />} />
