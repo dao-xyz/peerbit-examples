@@ -99,7 +99,7 @@ export const ALL_DEFAULT_FEED_SETTINGS: FilterModel[] = [
                 query: getRepliesQuery(canvas),
                 sort: new Sort({
                     key: ["__context", "created"],
-                    direction: SortDirection.ASC,
+                    direction: SortDirection.DESC,
                 }),
             }),
         id: "recent",
@@ -116,7 +116,7 @@ export const ALL_DEFAULT_FEED_SETTINGS: FilterModel[] = [
                 query: getImmediateRepliesQuery(canvas),
                 sort: new Sort({
                     key: ["__context", "created"],
-                    direction: SortDirection.ASC,
+                    direction: SortDirection.DESC,
                 }),
             }),
         id: "new",

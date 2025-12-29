@@ -313,7 +313,7 @@ function useStreamContextHook() {
         id: iteratorId,
     } = useQuery(feedRoot?.nearestScope.replies, {
         query: canvasQuery,
-        reverse: visualization?.view === ChildVisualization.CHAT ? false : true,
+        reverse: visualization?.view === ChildVisualization.CHAT ? true : false,
         batchSize,
         debug: "useQuery REPLIES",
         local: true,
