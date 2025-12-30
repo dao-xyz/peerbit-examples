@@ -232,7 +232,10 @@ export const App = () => {
                                               }
                                             : networkConfig
                                     }
-                                    iframe={{ type: "proxy", targetOrigin: "*" }}
+                                    iframe={{
+                                        type: "proxy",
+                                        targetOrigin: "*",
+                                    }}
                                     waitForConnnected={true} /* {'in-flight'} */
                                     inMemory={inMemory}
                                     singleton

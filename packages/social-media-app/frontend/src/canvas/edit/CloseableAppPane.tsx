@@ -41,30 +41,24 @@ export const CloseableAppPane = (props: {
         <div ref={toolbarRef} className={"w-full flex justify-center "}>
             <div className="flex flex-col w-full items-center safe-area-bottom max-w-[876px] ">
                 {props.children}
-                <div
-                    ref={appSelectRef}
-                    className="overflow-hidden w-full "
-                    style={
-                        appSelectOpen
-                            ? {
-                                  height: "100%",
-                                  pointerEvents: "auto",
-                              }
-                            : {
-                                  display: "none",
-                                  height: "0px",
-                                  pointerEvents: "none",
-                              }
-                    }
-                >
-                    <AppSelectPaneInline
-                        className={
-                            "p-4 pt-2 bg-neutral-100 dark:bg-neutral-900 " +
-                            props.className
-                        }
-                        onSelected={handleAppSelected}
-                    />
-                </div>
+                {appSelectOpen && (
+                    <div
+                        ref={appSelectRef}
+                        className="overflow-hidden w-full "
+                        style={{
+                            height: "100%",
+                            pointerEvents: "auto",
+                        }}
+                    >
+                        <AppSelectPaneInline
+                            className={
+                                "p-4 pt-2 bg-neutral-100 dark:bg-neutral-900 " +
+                                props.className
+                            }
+                            onSelected={handleAppSelected}
+                        />
+                    </div>
+                )}
             </div>
         </div>
     );

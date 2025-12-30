@@ -49,7 +49,12 @@ export const AppSelectPaneInline: React.FC<Props> = ({
 }) => {
     /* ---------- data sources --------------------------- */
     const { apps, search: searchApps } = useApps();
-    const { templates, search: searchTpls, insert: insertTpl } = useTemplates();
+    const {
+        templates,
+        search: searchTpls,
+        insert: insertTpl,
+        ensure: ensureTemplates,
+    } = useTemplates({ auto: false });
     const { insertDefault } = useCanvas(); // active draft canvas via CanvasWrapper
     const privateScope = PrivateScope.useScope();
     const { leaf } = useCanvases();
@@ -62,6 +67,36 @@ export const AppSelectPaneInline: React.FC<Props> = ({
     const [query, setQuery] = useState("");
     const [appsFiltered, setAppsFiltered] = useState<SimpleWebManifest[]>([]);
     const [templatesFiltered, setTemplatesFiltered] = useState<Template[]>([]);
+
+    // Lazy-init templates after the pane mounts so it doesn't interfere with initial app load.
+    useEffect(() => {
+        let cancelled = false;
+        const run = () => {
+            if (!cancelled) ensureTemplates();
+        };
+        const anyWindow = window as any;
+        const requestIdleCallback:
+            | undefined
+            | ((cb: () => void, opts?: any) => any) =
+            typeof anyWindow.requestIdleCallback === "function"
+                ? anyWindow.requestIdleCallback
+                : undefined;
+
+        if (requestIdleCallback) {
+            const id = requestIdleCallback(run, { timeout: 1500 });
+            return () => {
+                cancelled = true;
+                try {
+                    anyWindow.cancelIdleCallback?.(id);
+                } catch {}
+            };
+        }
+        const t = setTimeout(run, 0);
+        return () => {
+            cancelled = true;
+            clearTimeout(t);
+        };
+    }, [ensureTemplates]);
 
     /* search debounced ---------------------------------- */
     useEffect(() => {

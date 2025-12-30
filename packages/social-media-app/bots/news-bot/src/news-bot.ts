@@ -381,7 +381,9 @@ export class NewsBot extends Program<Args> {
                         : undefined;
 
                     const references = formatReferences(articles);
-                    const referencesShort = formatReferences(articles.slice(0, 5));
+                    const referencesShort = formatReferences(
+                        articles.slice(0, 5)
+                    );
                     const header = prefix ? `### ${prefix}\n\n` : "";
                     const imageMarkdown = leadImageRef
                         ? `![${eventTitle}](${leadImageRef})\n\n`
@@ -453,8 +455,7 @@ export class NewsBot extends Program<Args> {
                                 await post.createElement(
                                     new Element({
                                         location: loc,
-                                        publicKey:
-                                            this.node.identity.publicKey,
+                                        publicKey: this.node.identity.publicKey,
                                         canvasId: post.id,
                                         content: new StaticContent({
                                             content: new StaticImage({

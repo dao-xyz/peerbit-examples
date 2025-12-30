@@ -23,11 +23,24 @@ import {
 const TEMPLATES_ID = sha256Sync(new TextEncoder().encode("giga-templates"));
 
 /* ------------------------------------------------------------------ */
+export type UseTemplatesOptions = {
+    /**
+     * If true, initializes templates immediately on mount.
+     * If false, initialization is deferred until `ensure()` is called.
+     * Default: true (backwards compatible).
+     */
+    auto?: boolean;
+};
+
 export type UseTemplatesReturn = {
     /** All templates (live). */
     templates: Template[];
     /** While initial load is running. */
     loading: boolean;
+    /** Starts initialization if it has been deferred. Safe to call multiple times. */
+    ensure(): void;
+    /** True once initialization has been started. */
+    enabled: boolean;
     /** Insert template subtree under the given parent canvas. */
     insert(template: Template, into: Canvas): Promise<Canvas>;
     /** Add or overwrite a template. */
@@ -43,38 +56,58 @@ export type UseTemplatesReturn = {
 const TEMPLATES_DB = new Templates(TEMPLATES_ID);
 
 /* ------------------------------------------------------------------ */
-export function useTemplates(): UseTemplatesReturn {
+export function useTemplates(
+    options?: UseTemplatesOptions
+): UseTemplatesReturn {
     const { peer, persisted } = usePeer();
+    const auto = options?.auto ?? true;
+    const [enabled, setEnabled] = useState<boolean>(auto);
+
+    // If caller flips `auto` from false -> true, start initialization.
+    useEffect(() => {
+        if (auto) setEnabled(true);
+    }, [auto]);
+
+    const ensure = useCallback(() => setEnabled(true), []);
 
     /** 1) Open the Templates *program* (documents db that stores Template objects) */
-    const templatesProgram = useProgram(peer, TEMPLATES_DB, {
-        existing: "reuse",
-        args: { replicate: persisted },
-    });
+    const templatesProgram = useProgram(
+        enabled ? peer : undefined,
+        TEMPLATES_DB,
+        {
+            existing: "reuse",
+            args: { replicate: persisted },
+        }
+    );
     const prog = templatesProgram.program as Templates | undefined;
 
     /** 2) Open a dedicated *Scope* where the template prototypes live (their canvases) */
     const templatesScopeInst = useMemo(
         () =>
-            peer
+            enabled && peer
                 ? new Scope({
                       // Your Scope ctor expects { publicKey, seed }
                       publicKey: peer.identity.publicKey,
                       seed: TEMPLATES_ID,
                   })
                 : undefined,
-        [peer?.identity.publicKey.hashcode()]
+        [enabled, peer?.identity.publicKey.hashcode()]
     );
 
-    const templatesScope = useProgram(peer, templatesScopeInst, {
-        existing: "reuse",
-        args: { replicate: persisted },
-    });
+    const templatesScope = useProgram(
+        enabled ? peer : undefined,
+        templatesScopeInst,
+        {
+            existing: "reuse",
+            args: { replicate: persisted },
+        }
+    );
 
     /** 3) Bootstrap default templates once */
     const [bootstrapped, setBootstrapped] = useState(false);
 
     useEffect(() => {
+        if (!enabled) return;
         if (!peer) return;
         if (!prog || templatesProgram.loading) return; // program not ready
         if (!templatesScope.program || templatesScope.loading) return; // scope not ready
@@ -137,11 +170,11 @@ export function useTemplates(): UseTemplatesReturn {
     const { items: templates, isLoading: queryLoading } = useQuery<
         Template,
         IndexableTemplate
-    >(prog?.templates, {
+    >(enabled ? prog?.templates : undefined, {
         id: prog?.templates.address,
         query: useMemo(
-            () => (templatesProgram.loading ? undefined : {}),
-            [templatesProgram.loading]
+            () => (!enabled || templatesProgram.loading ? undefined : {}),
+            [enabled, templatesProgram.loading]
         ),
         local: true,
         prefetch: true,
@@ -189,21 +222,24 @@ export function useTemplates(): UseTemplatesReturn {
 
     /** 6) Return API */
     const loading =
-        queryLoading ||
-        templatesProgram.loading ||
-        templatesScope.loading ||
-        !bootstrapped ||
-        !prog;
+        enabled &&
+        (queryLoading ||
+            templatesProgram.loading ||
+            templatesScope.loading ||
+            !bootstrapped ||
+            !prog);
 
     return useMemo<UseTemplatesReturn>(
         () => ({
             templates,
             loading,
+            ensure,
+            enabled,
             insert,
             put,
             del,
             search,
         }),
-        [templates, loading, insert, put, del, search]
+        [templates, loading, ensure, enabled, insert, put, del, search]
     );
 }

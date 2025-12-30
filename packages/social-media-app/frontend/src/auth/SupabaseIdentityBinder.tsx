@@ -1,5 +1,8 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { getKeypairForUser, insertKeypairForUser } from "@peerbit/identity-supabase";
+import {
+    getKeypairForUser,
+    insertKeypairForUser,
+} from "@peerbit/identity-supabase";
 import { usePeer } from "@peerbit/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./useAuth";
@@ -120,4 +123,3 @@ export const SupabaseIdentityBinder = () => {
         </Dialog.Root>
     );
 };
-

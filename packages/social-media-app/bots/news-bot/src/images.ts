@@ -12,7 +12,9 @@ export type DownloadedImage = {
 export const DEFAULT_MAX_IMAGE_BYTES = 3 * 1024 * 1024; // 3MB (matches frontend chunking threshold)
 export const DEFAULT_IMAGE_TIMEOUT_MS = 12_000;
 
-function normalizeMimeType(value: string | null | undefined): string | undefined {
+function normalizeMimeType(
+    value: string | null | undefined
+): string | undefined {
     if (!value) return undefined;
     const mime = value.split(";")[0]?.trim().toLowerCase();
     if (!mime) return undefined;
@@ -142,9 +144,7 @@ async function readResponseBytesWithLimit(
         if (!value) continue;
         total += value.byteLength;
         if (total > maxBytes) {
-            throw new Error(
-                `Response exceeded max size (${maxBytes} bytes).`
-            );
+            throw new Error(`Response exceeded max size (${maxBytes} bytes).`);
         }
         chunks.push(value);
     }
@@ -236,11 +236,12 @@ function sniffMimeTypeFromBytes(bytes: Uint8Array): string | undefined {
 function readU32BE(bytes: Uint8Array, offset: number): number | undefined {
     if (offset + 4 > bytes.length) return undefined;
     return (
-        (bytes[offset] << 24) |
-        (bytes[offset + 1] << 16) |
-        (bytes[offset + 2] << 8) |
-        bytes[offset + 3]
-    ) >>> 0;
+        ((bytes[offset] << 24) |
+            (bytes[offset + 1] << 16) |
+            (bytes[offset + 2] << 8) |
+            bytes[offset + 3]) >>>
+        0
+    );
 }
 
 function readU16BE(bytes: Uint8Array, offset: number): number | undefined {
@@ -397,7 +398,10 @@ export async function findLeadImage(options: {
         64 * 1024,
         options.maxImageBytes ?? DEFAULT_MAX_IMAGE_BYTES
     );
-    const timeoutMs = Math.max(1_000, options.timeoutMs ?? DEFAULT_IMAGE_TIMEOUT_MS);
+    const timeoutMs = Math.max(
+        1_000,
+        options.timeoutMs ?? DEFAULT_IMAGE_TIMEOUT_MS
+    );
     const preferEmbeddedUrl = options.preferEmbeddedUrl ?? true;
     const fetchOpenGraphFallback = options.fetchOpenGraphFallback ?? true;
 

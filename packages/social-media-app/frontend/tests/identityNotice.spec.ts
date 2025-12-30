@@ -38,4 +38,3 @@ test.describe("Identity notice", () => {
         await expect(continueBtn).toBeHidden({ timeout: 10_000 });
     });
 });
-

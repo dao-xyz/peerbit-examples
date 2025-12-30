@@ -113,8 +113,7 @@ export const AuthScreen = ({ mode }: { mode: Mode }) => {
                     state: {
                         email: normalizedEmail,
                         password,
-                        notice:
-                            "Check your email to confirm your account. After confirming, come back here to sign in.",
+                        notice: "Check your email to confirm your account. After confirming, come back here to sign in.",
                     } satisfies AuthNavState,
                 });
                 return;

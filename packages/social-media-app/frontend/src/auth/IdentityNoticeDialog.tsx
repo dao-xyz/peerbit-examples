@@ -32,9 +32,9 @@ export const useIdentityNotice = (): IdentityNoticeContextValue => {
     return ctx;
 };
 
-export const IdentityNoticeProvider: React.FC<{ children: React.ReactNode }> = ({
-    children,
-}) => {
+export const IdentityNoticeProvider: React.FC<{
+    children: React.ReactNode;
+}> = ({ children }) => {
     const { persisted } = usePeer();
     const auth = useAuth();
     const navigate = useNavigate();

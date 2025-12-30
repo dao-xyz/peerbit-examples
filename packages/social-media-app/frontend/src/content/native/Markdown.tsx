@@ -24,7 +24,10 @@ import { FaCheck } from "react-icons/fa";
 import { Spinner } from "../../utils/Spinner";
 import debounce from "lodash.debounce";
 import { equals } from "uint8arrays";
-import { rectIsStaticImage, rectIsStaticPartialImage } from "../../canvas/utils/rect";
+import {
+    rectIsStaticImage,
+    rectIsStaticPartialImage,
+} from "../../canvas/utils/rect";
 import { parseGigaImageRef } from "../../canvas/utils/inlineMarkdownImages";
 
 const GigaMarkdownImage = ({
@@ -473,7 +476,10 @@ export const MarkdownContent = ({
 
     const gigaImagesByRef = useMemo(() => {
         try {
-            const grouped = reduceElementsForViewing([...rects, ...pendingRects]);
+            const grouped = reduceElementsForViewing([
+                ...rects,
+                ...pendingRects,
+            ]);
             const map = new Map<string, Element<any>>();
             for (const el of grouped) {
                 if (rectIsStaticImage(el) || rectIsStaticPartialImage(el)) {

@@ -57,4 +57,3 @@ export function filterOutInlineGigaImages(
         return !refs.has(ref);
     });
 }
-

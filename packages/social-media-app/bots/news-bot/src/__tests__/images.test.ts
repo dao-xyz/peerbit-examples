@@ -59,4 +59,3 @@ describe("images utils", () => {
         expect(dims).to.deep.equal({ width: 32, height: 16 });
     });
 });
-

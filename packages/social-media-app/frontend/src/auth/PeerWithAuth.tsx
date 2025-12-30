@@ -64,9 +64,12 @@ export const PeerWithAuth: React.FC<Props> = ({
         let cancelled = false;
         (async () => {
             try {
-                const keypair = await getOrCreateKeypairForUser(auth.supabase!, {
-                    userId: auth.user!.id,
-                });
+                const keypair = await getOrCreateKeypairForUser(
+                    auth.supabase!,
+                    {
+                        userId: auth.user!.id,
+                    }
+                );
                 if (cancelled) return;
                 setBoot({
                     type: "account",
