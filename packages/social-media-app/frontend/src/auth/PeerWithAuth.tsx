@@ -84,19 +84,16 @@ export const PeerWithAuth: React.FC<Props> = ({
         let cancelled = false;
         (async () => {
             try {
-                const keypair = await getKeypairForUser(
-                    auth.supabase!,
-                    {
-                        userId: auth.user!.id,
-                    }
-                );
+                const keypair = await getKeypairForUser(auth.supabase!, {
+                    userId: auth.user!.id,
+                });
                 if (cancelled) return;
                 if (!keypair) {
                     try {
                         window.localStorage.removeItem(
                             identityModeKey(auth.user!.id)
                         );
-                    } catch { }
+                    } catch {}
                     setBoot({ type: "guest" });
                     return;
                 }

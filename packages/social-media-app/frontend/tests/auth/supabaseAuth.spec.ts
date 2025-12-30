@@ -1,6 +1,7 @@
 import { test, expect } from "../fixtures/persistentContext";
 import { OFFLINE_BASE } from "../utils/url";
 import { launchPersistentBrowserContext } from "../utils/persistentBrowser";
+import { Page } from "@playwright/test";
 
 const TEST_EMAIL = process.env.TEST_EMAIL;
 const TEST_PASSWORD = process.env.TEST_PASSWORD;
@@ -10,14 +11,14 @@ const missingEnv =
         ? "Set TEST_EMAIL and TEST_PASSWORD in packages/social-media-app/frontend/.env (not VITE_)."
         : undefined;
 
-async function openProfileMenu(page: import("@playwright/test").Page) {
+async function openProfileMenu(page: Page) {
     const area = page.getByTestId("header-profile-area");
     await expect(area).toBeVisible({ timeout: 30_000 });
     // Trigger is the ProfileButton inside header-profile-area
     await area.locator("button").first().click();
 }
 
-async function goToAuthFromMenu(page: import("@playwright/test").Page) {
+async function goToAuthFromMenu(page: Page) {
     await openProfileMenu(page);
     const entry = page.getByRole("menuitem", { name: /Sign in|Account/ });
     await expect(entry).toBeVisible();
@@ -26,7 +27,7 @@ async function goToAuthFromMenu(page: import("@playwright/test").Page) {
 }
 
 async function signInFromAuthScreen(
-    page: import("@playwright/test").Page,
+    page: Page,
     opts: { email: string; password: string }
 ) {
     await expect(page.getByRole("heading", { name: "Sign in" })).toBeVisible({
@@ -52,7 +53,7 @@ async function signInFromAuthScreen(
     });
 }
 
-async function dismissMismatchIfPresent(page: import("@playwright/test").Page) {
+async function dismissMismatchIfPresent(page: Page) {
     const title = page.getByText(/Use saved identity/);
     // The Supabase identity check can resolve slightly after navigation, so give it
     // a short grace window to appear before we decide it's not present.
@@ -68,6 +69,8 @@ test.describe("Supabase auth (session + identity)", () => {
 
     test("sign in, refresh, and reuse session without reload modal", async ({
         page,
+    }: {
+        page: Page;
     }) => {
         await page.goto(OFFLINE_BASE);
         await expect(page.getByTestId("toolbarcreatenew").first()).toBeVisible({
@@ -101,7 +104,7 @@ test.describe("Supabase auth (session + identity)", () => {
 
     test("reload and switch resolves identity mismatch", async ({
         page,
-    }, testInfo) => {
+    }: { page: Page }, testInfo) => {
         // Seed: ensure the account has a saved identity in Supabase.
         await page.goto(OFFLINE_BASE);
         await expect(page.getByTestId("toolbarcreatenew").first()).toBeVisible({
