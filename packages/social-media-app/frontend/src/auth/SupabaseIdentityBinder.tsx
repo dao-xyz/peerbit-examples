@@ -7,6 +7,11 @@ import { usePeer } from "@peerbit/react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./useAuth";
 
+const useSavedKey = (userId: string) =>
+    `giga:supabaseIdentity:${userId}:useSaved`;
+const dismissedKey = (userId: string) =>
+    `giga:supabaseIdentity:${userId}:dismissedPeerHash`;
+
 export const SupabaseIdentityBinder = () => {
     const auth = useAuth();
     const { peer } = usePeer();
@@ -15,26 +20,32 @@ export const SupabaseIdentityBinder = () => {
         undefined
     );
 
-    const handledUserId = useRef<string | null>(null);
+    const handledKey = useRef<string | null>(null);
     const inflight = useRef<Promise<void> | null>(null);
 
     const peerPublicKeyHash = peer?.identity?.publicKey?.hashcode?.();
 
     useEffect(() => {
         if (!auth.enabled || !auth.user || !auth.supabase || !peer) {
-            handledUserId.current = null;
+            handledKey.current = null;
             inflight.current = null;
             setMismatchOpen(false);
             return;
         }
 
         const userId = auth.user.id;
-        if (handledUserId.current === userId) return;
+        if (peerPublicKeyHash === undefined || peerPublicKeyHash === null) {
+            return;
+        }
+
+        const nextHandledKey = `${userId}:${String(peerPublicKeyHash)}`;
+        if (handledKey.current === nextHandledKey) return;
         if (inflight.current) return;
 
         let cancelled = false;
         inflight.current = (async () => {
             try {
+                const currentPeerHash = String(peerPublicKeyHash);
                 const existing = await getKeypairForUser(auth.supabase!, {
                     userId,
                 });
@@ -47,7 +58,15 @@ export const SupabaseIdentityBinder = () => {
                             userId,
                             keypair: peer.identity as any,
                         });
-                        handledUserId.current = userId;
+                        try {
+                            // If we just saved the current identity, ensure we won't prompt to switch.
+                            window.localStorage.removeItem(useSavedKey(userId));
+                            window.localStorage.removeItem(
+                                dismissedKey(userId)
+                            );
+                        } catch {}
+                        setMismatchOpen(false);
+                        handledKey.current = nextHandledKey;
                         return;
                     } catch (e) {
                         // Might race with another device; read again.
@@ -56,25 +75,57 @@ export const SupabaseIdentityBinder = () => {
                         });
                         if (!after) throw e;
                         if (cancelled) return;
-                        if (!after.publicKey.equals(peer.identity.publicKey)) {
-                            setMismatchEmail(auth.user?.email ?? undefined);
-                            setMismatchOpen(true);
+                        if (after.publicKey.hashcode() !== currentPeerHash) {
+                            const dismissed =
+                                (() => {
+                                    try {
+                                        return window.localStorage.getItem(
+                                            dismissedKey(userId)
+                                        );
+                                    } catch {
+                                        return null;
+                                    }
+                                })() ?? null;
+                            if (dismissed !== String(peerPublicKeyHash ?? "")) {
+                                setMismatchEmail(auth.user?.email ?? undefined);
+                                setMismatchOpen(true);
+                            } else {
+                                setMismatchOpen(false);
+                            }
+                        } else {
+                            setMismatchOpen(false);
                         }
-                        handledUserId.current = userId;
+                        handledKey.current = nextHandledKey;
                         return;
                     }
                 }
 
                 // Existing account identity differs from current device identity.
-                if (!existing.publicKey.equals(peer.identity.publicKey)) {
-                    setMismatchEmail(auth.user?.email ?? undefined);
-                    setMismatchOpen(true);
+                if (existing.publicKey.hashcode() !== currentPeerHash) {
+                    const dismissed =
+                        (() => {
+                            try {
+                                return window.localStorage.getItem(
+                                    dismissedKey(userId)
+                                );
+                            } catch {
+                                return null;
+                            }
+                        })() ?? null;
+                    if (dismissed !== String(peerPublicKeyHash ?? "")) {
+                        setMismatchEmail(auth.user?.email ?? undefined);
+                        setMismatchOpen(true);
+                    } else {
+                        setMismatchOpen(false);
+                    }
+                } else {
+                    setMismatchOpen(false);
                 }
 
-                handledUserId.current = userId;
+                handledKey.current = nextHandledKey;
             } catch (e) {
                 console.error("[SupabaseIdentityBinder] failed", e);
-                handledUserId.current = userId; // avoid loops
+                handledKey.current = nextHandledKey; // avoid loops
             } finally {
                 inflight.current = null;
             }
@@ -107,13 +158,36 @@ export const SupabaseIdentityBinder = () => {
                     <div className="mt-5 flex flex-col gap-2">
                         <button
                             className="btn btn-secondary w-full"
-                            onClick={() => window.location.reload()}
+                            onClick={() => {
+                                if (auth.user?.id) {
+                                    try {
+                                        window.localStorage.setItem(
+                                            useSavedKey(auth.user.id),
+                                            "1"
+                                        );
+                                        window.localStorage.removeItem(
+                                            dismissedKey(auth.user.id)
+                                        );
+                                    } catch {}
+                                }
+                                window.location.reload();
+                            }}
                         >
                             Reload and switch
                         </button>
                         <button
                             className="btn w-full"
-                            onClick={() => setMismatchOpen(false)}
+                            onClick={() => {
+                                if (auth.user?.id) {
+                                    try {
+                                        window.localStorage.setItem(
+                                            dismissedKey(auth.user.id),
+                                            String(peerPublicKeyHash ?? "")
+                                        );
+                                    } catch {}
+                                }
+                                setMismatchOpen(false);
+                            }}
                         >
                             Continue for now
                         </button>

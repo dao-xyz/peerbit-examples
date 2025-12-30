@@ -57,6 +57,59 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
         }
 
         let cancelled = false;
+        let resolved = false;
+        let gotAuthEvent = false;
+        let gotGetSession = false;
+
+        const authCallbackHint = (() => {
+            try {
+                const url = `${window.location.href || ""}`;
+                return /access_token=|refresh_token=|type=recovery|type=signup|type=magiclink|code=/.test(
+                    url
+                );
+            } catch {
+                return false;
+            }
+        })();
+
+        let timeout: ReturnType<typeof setTimeout> | undefined;
+        const resolveLoading = () => {
+            if (cancelled || resolved) return;
+            resolved = true;
+            if (timeout) clearTimeout(timeout);
+            setLoading(false);
+        };
+        const resolveWhenReady = () => {
+            if (cancelled || resolved) return;
+            if (authCallbackHint) return;
+            if (gotAuthEvent && gotGetSession) {
+                resolveLoading();
+            }
+        };
+
+        setLoading(true);
+
+        if (authCallbackHint) {
+            // Give Supabase time to process sessions embedded in the URL (email confirm / recovery links).
+            timeout = setTimeout(resolveLoading, 5000);
+        }
+
+        const { data } = supabaseClient.auth.onAuthStateChange(
+            (event, next) => {
+                if (cancelled) return;
+                gotAuthEvent = true;
+                setLastEvent(event);
+                setSession(next ?? null);
+                setUser(next?.user ?? null);
+
+                // Callback flows: keep loading until we either have a session, or an event beyond INITIAL_SESSION arrives.
+                if (authCallbackHint && (next || event !== "INITIAL_SESSION")) {
+                    resolveLoading();
+                }
+
+                resolveWhenReady();
+            }
+        );
 
         (async () => {
             try {
@@ -65,27 +118,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({
                 if (cancelled) return;
                 setSession(data.session ?? null);
                 setUser(data.session?.user ?? null);
+                gotGetSession = true;
+                if (authCallbackHint) {
+                    if (data.session) resolveLoading();
+                    return;
+                }
+                resolveWhenReady();
             } catch (error) {
                 console.error("[Auth] getSession failed", error);
                 if (cancelled) return;
                 setSession(null);
                 setUser(null);
-            } finally {
-                if (!cancelled) setLoading(false);
+                gotGetSession = true;
+                resolveWhenReady();
             }
         })();
 
-        const { data } = supabaseClient.auth.onAuthStateChange(
-            (event, next) => {
-                if (cancelled) return;
-                setLastEvent(event);
-                setSession(next ?? null);
-                setUser(next?.user ?? null);
-            }
-        );
-
         return () => {
             cancelled = true;
+            if (timeout) clearTimeout(timeout);
             try {
                 data.subscription.unsubscribe();
             } catch {}

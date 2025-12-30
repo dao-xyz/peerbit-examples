@@ -1,4 +1,15 @@
 import { defineConfig, devices } from "@playwright/test";
+import { loadEnv } from "vite";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Load env from this package's .env/.env.local for Playwright (including non-VITE_ vars like TEST_EMAIL)
+const envDir = path.dirname(fileURLToPath(import.meta.url));
+const mode = process.env.MODE || process.env.NODE_ENV || "test";
+const loaded = loadEnv(mode, envDir, "");
+for (const [k, v] of Object.entries(loaded)) {
+    if (process.env[k] === undefined) process.env[k] = v;
+}
 
 // Use a dedicated port to avoid clashing with local dev server defaults
 const PORT = Number(process.env.PORT || 5183);

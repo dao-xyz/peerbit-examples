@@ -25,7 +25,7 @@ export default defineConfig({
     },
     resolve: {
         // Prevent duplicate React copies when using workspace packages / symlinks
-        dedupe: ["react", "react-dom"],
+        dedupe: ["react", "react-dom", "@peerbit/crypto"],
         alias: {
             process: "process/browser",
         },

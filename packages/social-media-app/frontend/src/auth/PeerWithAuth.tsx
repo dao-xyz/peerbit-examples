@@ -1,6 +1,6 @@
 import type { Ed25519Keypair } from "@peerbit/crypto";
 import { PeerProvider, type NetworkOption } from "@peerbit/react";
-import { getOrCreateKeypairForUser } from "@peerbit/identity-supabase";
+import { getKeypairForUser } from "@peerbit/identity-supabase";
 import React, { useEffect, useMemo, useState, type JSX } from "react";
 import { Spinner } from "../utils/Spinner";
 import { useAuth } from "./useAuth";
@@ -13,6 +13,9 @@ type Props = {
     singleton?: boolean;
     children: JSX.Element;
 };
+
+const identityModeKey = (userId: string) =>
+    `giga:supabaseIdentity:${userId}:useSaved`;
 
 export const PeerWithAuth: React.FC<Props> = ({
     network,
@@ -61,16 +64,42 @@ export const PeerWithAuth: React.FC<Props> = ({
             return;
         }
 
+        const shouldUseSaved = (() => {
+            try {
+                return (
+                    window.localStorage.getItem(
+                        identityModeKey(auth.user!.id)
+                    ) === "1"
+                );
+            } catch {
+                return false;
+            }
+        })();
+
+        if (!shouldUseSaved) {
+            setBoot({ type: "guest" });
+            return;
+        }
+
         let cancelled = false;
         (async () => {
             try {
-                const keypair = await getOrCreateKeypairForUser(
+                const keypair = await getKeypairForUser(
                     auth.supabase!,
                     {
                         userId: auth.user!.id,
                     }
                 );
                 if (cancelled) return;
+                if (!keypair) {
+                    try {
+                        window.localStorage.removeItem(
+                            identityModeKey(auth.user!.id)
+                        );
+                    } catch { }
+                    setBoot({ type: "guest" });
+                    return;
+                }
                 setBoot({
                     type: "account",
                     userId: auth.user!.id,
