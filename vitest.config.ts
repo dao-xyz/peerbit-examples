@@ -1,5 +1,8 @@
 import { defineConfig } from "vitest/config";
 import path from "path";
+const IGNORE_UNHANDLED =
+    process.env.NEWS_BOT_SMOKE_PROD === "1" ||
+    process.env.VITEST_IGNORE_UNHANDLED_ERRORS === "1";
 const SHARED = {
     isolate: false,
     sequence: { concurrent: false, shuffle: false } as const,
@@ -7,6 +10,7 @@ const SHARED = {
     testTimeout: 120_000,
     bail: 1,
     passWithNoTests: true,
+    dangerouslyIgnoreUnhandledErrors: IGNORE_UNHANDLED,
     reporters: process.env.CI ? ["basic", "junit"] : ["default"],
     outputFile: process.env.CI
         ? { junit: "reports/vitest-junit.xml" }

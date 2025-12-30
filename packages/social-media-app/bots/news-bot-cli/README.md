@@ -70,6 +70,21 @@ By default, the bot posts under the public Giga root canvas.
 node lib/esm/bin.js --help
 ```
 
+## Notes
+
+- Event discovery uses NewsAPI.ai `/minuteStreamEvents` (see `--recentActivityEventsMaxEventCount` and `--recentActivityEventsUpdatesAfterMinsAgo`).
+- By default the bot tries to fetch a lead image and injects it as markdown: `![alt](giga://image/<ref>)`.
+- Published posts include multiple markdown variants (low/medium/high quality) so the app can render different “resolutions” for feed vs full view.
+- `--runOnce` prints a summary (events fetched/posted + remote verification status).
+
+## Prod Smoke Test (opt-in)
+
+There is an opt-in vitest that publishes a small markdown post and checks that the bootstrap peer can read it:
+
+```sh
+NEWS_BOT_SMOKE_PROD=1 pnpm --filter @peerbit/news-bot-cli... test
+```
+
 ## Running from repo root
 
 If you prefer to run it from the repo root (instead of `packages/social-media-app/bots/news-bot-cli`), use:

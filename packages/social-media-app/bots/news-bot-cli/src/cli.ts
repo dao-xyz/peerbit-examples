@@ -6,7 +6,7 @@ import select from "@inquirer/select";
 import input from "@inquirer/input";
 import events from "events";
 import { fileURLToPath } from "url";
-import { NewsBot } from "@giga-app/news-bot";
+import { NewsBot, type NewsBotRunSummary } from "@giga-app/news-bot";
 import { BOOTSTRAP_ADDRS, type BootstrapMode } from "@giga-app/network";
 
 events.setMaxListeners(100);
@@ -35,6 +35,10 @@ type CliArgs = {
     maxEventsPerRun?: number;
     maxArticlesPerEvent?: number;
     statePath?: string;
+
+    recentActivityEventsMaxEventCount?: number;
+    recentActivityEventsUpdatesAfterMinsAgo?: number;
+    recentActivityEventsUpdatesAfterTm?: string;
 
     includeImages?: boolean;
     maxImageBytes?: number;
@@ -80,6 +84,71 @@ const parseNetwork = (): BootstrapMode => {
     if (getFlag("--prod")) return "prod";
     return "prod";
 };
+
+function truncate(value: string, max = 120): string {
+    if (value.length <= max) return value;
+    return value.slice(0, Math.max(0, max - 1)).trimEnd() + "…";
+}
+
+function formatDuration(ms: number): string {
+    if (!Number.isFinite(ms) || ms < 0) return `${ms}ms`;
+    if (ms < 1_000) return `${ms}ms`;
+    const s = ms / 1000;
+    if (s < 60) return `${s.toFixed(1)}s`;
+    const m = Math.floor(s / 60);
+    const rem = Math.round(s - m * 60);
+    return `${m}m${rem}s`;
+}
+
+function printRunSummary(summary: NewsBotRunSummary) {
+    const mode = summary.dryRun ? "dry-run" : "published";
+    const streamSuffix = summary.stream.updatesAfterTm
+        ? `after=${summary.stream.updatesAfterTm}`
+        : `lookback=${summary.stream.updatesAfterMinsAgo ?? "?"}m`;
+
+    console.log("\n--- News bot run summary ---");
+    console.log(
+        `Mode: ${mode} • Duration: ${formatDuration(
+            summary.durationMs
+        )} • Stream: max=${summary.stream.maxEventCount}, ${streamSuffix}`
+    );
+    console.log(
+        `Events: fetched=${summary.eventsFetched}, pending=${summary.eventsPending}, selected=${summary.eventsSelected}, processed=${summary.eventsProcessed.length}`
+    );
+
+    for (const e of summary.eventsProcessed) {
+        const title = e.title?.trim() || e.eventUri;
+        const parts = [
+            e.posted ? `posted=${e.postCanvasId}` : "posted=false",
+            e.articlesUsed != null
+                ? `articles=${e.articlesUsed}${
+                      e.articlesFetched != null &&
+                      e.articlesFetched !== e.articlesUsed
+                          ? `/${e.articlesFetched}`
+                          : ""
+                  }`
+                : undefined,
+            e.leadImage ? "image=true" : "image=false",
+            e.remote
+                ? e.remote.ok
+                    ? `remote=ok (${formatDuration(
+                          e.remote.durationMs
+                      )}, attempts=${e.remote.attempts}, elements=${e.remote.elementsFound ?? "?"})`
+                    : `remote=FAIL (${formatDuration(
+                          e.remote.durationMs
+                      )}, attempts=${e.remote.attempts}, error=${truncate(
+                          e.remote.error ?? "",
+                          100
+                      )})`
+                : undefined,
+            e.error ? `error=${truncate(e.error, 120)}` : undefined,
+        ].filter(Boolean);
+        console.log(
+            `- ${truncate(title, 100)} (${e.eventUri}) • ${parts.join(" • ")}`
+        );
+    }
+    console.log("----------------------------\n");
+}
 
 function loadDotEnvFileIfPresent(filePath: string) {
     if (!fs.existsSync(filePath)) return;
@@ -155,6 +224,18 @@ const parseArgs = (): CliArgs => {
         maxArticlesPerEvent: parseNumber(getValue("--maxArticlesPerEvent")),
         statePath: getValue("--statePath"),
 
+        recentActivityEventsMaxEventCount: parseNumber(
+            getValue("--recentActivityEventsMaxEventCount") ??
+                getValue("--recent-activity-events-max-event-count")
+        ),
+        recentActivityEventsUpdatesAfterMinsAgo: parseNumber(
+            getValue("--recentActivityEventsUpdatesAfterMinsAgo") ??
+                getValue("--recent-activity-events-updates-after-mins-ago")
+        ),
+        recentActivityEventsUpdatesAfterTm:
+            getValue("--recentActivityEventsUpdatesAfterTm") ??
+            getValue("--recent-activity-events-updates-after-tm"),
+
         includeImages:
             !getFlag("--no-images") &&
             !getFlag("--noImages") &&
@@ -208,6 +289,11 @@ News query options:
   --locationUri             Location URI (Wikipedia URI)
   --maxEventsPerRun         How many events to post per run (default: 1)
   --maxArticlesPerEvent     How many articles to fetch per event (default: 50)
+
+Event stream (minuteStreamEvents):
+  --recentActivityEventsMaxEventCount       Max events returned per poll (default: 50, max: 2000)
+  --recentActivityEventsUpdatesAfterMinsAgo Return events updated in last N minutes (default: derived from interval, max: 240)
+  --recentActivityEventsUpdatesAfterTm      Return events updated after UTC time (YYYY-MM-DDTHH:MM:SS, max 4h old)
 
 Images:
   --no-images               Disable lead image fetch + embedding
@@ -313,6 +399,45 @@ async function promptIfInteractive(defaults: CliArgs): Promise<CliArgs> {
                 : "Enter a positive number",
     }).then((value) => Number(value));
 
+    const effectiveIntervalMinutes =
+        intervalMinutes ??
+        (defaults.intervalMs != null
+            ? Math.max(0, Math.ceil(defaults.intervalMs / 60_000))
+            : (defaults.intervalMinutes ?? 10));
+    const computedAfterMinsAgo = Math.min(
+        240,
+        Math.max(1, effectiveIntervalMinutes + 1)
+    );
+
+    const recentActivityEventsMaxEventCount = await input({
+        message: "Event stream: max events per poll (1-2000)",
+        default: String(defaults.recentActivityEventsMaxEventCount ?? 50),
+        validate: (value) => {
+            const n = Number(value);
+            if (!Number.isFinite(n) || !Number.isInteger(n))
+                return "Enter an integer";
+            if (n < 1) return "Must be at least 1";
+            if (n > 2000) return "Max is 2000";
+            return true;
+        },
+    }).then((value) => Number(value));
+
+    const recentActivityEventsUpdatesAfterMinsAgo = await input({
+        message: "Event stream: lookback window minutes (1-240)",
+        default: String(
+            defaults.recentActivityEventsUpdatesAfterMinsAgo ??
+                computedAfterMinsAgo
+        ),
+        validate: (value) => {
+            const n = Number(value);
+            if (!Number.isFinite(n) || !Number.isInteger(n))
+                return "Enter an integer";
+            if (n < 1) return "Must be at least 1";
+            if (n > 240) return "Max is 240";
+            return true;
+        },
+    }).then((value) => Number(value));
+
     const targetMode = await select({
         message: "Post target",
         choices: [
@@ -353,6 +478,8 @@ async function promptIfInteractive(defaults: CliArgs): Promise<CliArgs> {
         keyword,
         lang,
         maxArticlesPerEvent,
+        recentActivityEventsMaxEventCount,
+        recentActivityEventsUpdatesAfterMinsAgo,
         scopeAddress,
         parentCanvasId,
     };
@@ -414,43 +541,62 @@ export const start = async () => {
             ? path.join(args.directory, "state", "news-bot.json")
             : undefined);
 
-    await client.open(new NewsBot(), {
-        existing: "reuse",
-        args: {
-            replicate: args.replicate,
-            scopeAddress: args.scopeAddress,
-            parentCanvasId: args.parentCanvasId,
-            intervalMs: args.intervalMs,
-            intervalMinutes: args.intervalMinutes,
-            runOnStart: args.runOnStart,
-            runOnce: args.runOnce,
-            dryRun: args.dryRun,
-            prefix: args.prefix ?? "",
+    const bot = new NewsBot();
+    try {
+        await client.open(bot, {
+            existing: "reuse",
+            args: {
+                replicate: args.replicate,
+                scopeAddress: args.scopeAddress,
+                parentCanvasId: args.parentCanvasId,
+                intervalMs: args.intervalMs,
+                intervalMinutes: args.intervalMinutes,
+                runOnStart: args.runOnStart,
+                runOnce: args.runOnce,
+                dryRun: args.dryRun,
+                prefix: args.prefix ?? "",
 
-            newsApiKey,
-            openaiApiKey,
-            openaiModel: args.openaiModel,
-            keyword: args.keyword,
-            lang: args.lang ?? "eng",
-            categoryUri: args.categoryUri,
-            locationUri: args.locationUri,
-            maxEventsPerRun: args.runOnce
-                ? (args.maxEventsPerRun ?? 1)
-                : args.maxEventsPerRun,
-            maxArticlesPerEvent: args.maxArticlesPerEvent,
-            statePath,
+                newsApiKey,
+                openaiApiKey,
+                openaiModel: args.openaiModel,
+                keyword: args.keyword,
+                lang: args.lang ?? "eng",
+                categoryUri: args.categoryUri,
+                locationUri: args.locationUri,
+                maxEventsPerRun: args.runOnce
+                    ? (args.maxEventsPerRun ?? 1)
+                    : args.maxEventsPerRun,
+                maxArticlesPerEvent: args.maxArticlesPerEvent,
+                statePath,
 
-            includeImages: args.includeImages,
-            maxImageBytes: args.maxImageBytes,
-            maxImageCandidates: args.maxImageCandidates,
-            imageTimeoutMs: args.imageTimeoutMs,
-            generateFeedSummary: args.generateFeedSummary,
-        },
-    });
+                recentActivityEventsMaxEventCount:
+                    args.recentActivityEventsMaxEventCount,
+                recentActivityEventsUpdatesAfterMinsAgo:
+                    args.recentActivityEventsUpdatesAfterMinsAgo,
+                recentActivityEventsUpdatesAfterTm:
+                    args.recentActivityEventsUpdatesAfterTm,
 
-    if (args.runOnce) {
-        await client.stop();
-        return;
+                includeImages: args.includeImages,
+                maxImageBytes: args.maxImageBytes,
+                maxImageCandidates: args.maxImageCandidates,
+                imageTimeoutMs: args.imageTimeoutMs,
+                generateFeedSummary: args.generateFeedSummary,
+            },
+        });
+
+        if (args.runOnce) {
+            const summary = bot.getLastRunSummary();
+            if (summary) printRunSummary(summary);
+            await client.stop();
+            return;
+        }
+    } catch (e) {
+        if (args.runOnce) {
+            const summary = bot.getLastRunSummary();
+            if (summary) printRunSummary(summary);
+            await client.stop();
+        }
+        throw e;
     }
 
     console.log("News bot running. Press Ctrl+C to stop.");

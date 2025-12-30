@@ -16,6 +16,18 @@ export type NewsApiEventQuery = {
     eventsSortBy?: string;
 };
 
+export type NewsApiEventStreamQuery = {
+    categoryUri?: string;
+    locationUri?: string;
+    keyword?: string | string[];
+    keywordOper?: "or" | "and";
+    lang?: string | string[];
+
+    recentActivityEventsMaxEventCount?: number;
+    recentActivityEventsUpdatesAfterMinsAgo?: number;
+    recentActivityEventsUpdatesAfterTm?: string;
+};
+
 export type NewsApiArticleQuery = {
     eventUri?: string;
     keyword?: string | string[];
@@ -195,6 +207,82 @@ export async function fetchEvents(
 
         out.push(evt);
     }
+    return out;
+}
+
+export async function fetchEventStream(
+    client: NewsApiClientOptions,
+    query: NewsApiEventStreamQuery
+): Promise<NewsApiEvent[]> {
+    const baseUrl = client.baseUrl ?? DEFAULT_BASE_URL;
+    const raw = await requestJson({
+        baseUrl,
+        endpoint: "/minuteStreamEvents",
+        apiKey: client.apiKey,
+        timeoutMs: client.timeoutMs,
+        params: {
+            recentActivityEventsMaxEventCount:
+                query.recentActivityEventsMaxEventCount ?? 50,
+            ...(query.recentActivityEventsUpdatesAfterTm
+                ? {
+                      recentActivityEventsUpdatesAfterTm:
+                          query.recentActivityEventsUpdatesAfterTm,
+                  }
+                : {}),
+            ...(query.recentActivityEventsUpdatesAfterTm == null &&
+            query.recentActivityEventsUpdatesAfterMinsAgo != null
+                ? {
+                      recentActivityEventsUpdatesAfterMinsAgo:
+                          query.recentActivityEventsUpdatesAfterMinsAgo,
+                  }
+                : {}),
+            ...(query.categoryUri ? { categoryUri: query.categoryUri } : {}),
+            ...(query.locationUri ? { locationUri: query.locationUri } : {}),
+            ...(query.keyword ? { keyword: query.keyword } : {}),
+            ...(query.keywordOper ? { keywordOper: query.keywordOper } : {}),
+            ...(query.lang ? { lang: query.lang } : {}),
+        },
+    });
+
+    const recent = raw?.recentActivityEvents;
+    const activity = asArray<string>(recent?.activity) ?? [];
+    const eventInfo = recent?.eventInfo;
+
+    const out: NewsApiEvent[] = [];
+    const seen = new Set<string>();
+
+    const pushEvent = (e: any, fallbackUri?: string) => {
+        const uri = asString(e?.uri) ?? asString(e?.id) ?? fallbackUri;
+        if (!uri) return;
+        if (seen.has(uri)) return;
+        seen.add(uri);
+
+        const evt: NewsApiEvent = { uri, raw: e };
+        const title = pickLangText(e?.title);
+        if (title) evt.title = title;
+        const summary =
+            pickLangText(e?.summary) ?? pickLangText(e?.description);
+        if (summary) evt.summary = summary;
+        out.push(evt);
+    };
+
+    if (activity.length && eventInfo && typeof eventInfo === "object") {
+        for (const id of activity) {
+            const info = (eventInfo as any)[id];
+            if (info) pushEvent(info, id);
+        }
+        return out;
+    }
+
+    // Fallbacks: tolerate schema changes / alternate wrappers.
+    const results = firstNonEmpty(
+        extractResultsArray(recent?.events),
+        extractResultsArray(recent?.event),
+        extractResultsArray(raw?.events),
+        extractResultsArray(raw?.event),
+        extractResultsArray(raw)
+    );
+    for (const e of results) pushEvent(e);
     return out;
 }
 
