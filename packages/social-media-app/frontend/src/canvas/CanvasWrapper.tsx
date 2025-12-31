@@ -260,6 +260,15 @@ const _CanvasWrapper = (
         };
     }, [canvasDB?.idString, canvasDB?.initialized, quality, typeFilter.key]);
 
+    const remote = useMemo(
+        () => ({
+            // Do not block local rendering on remote joining; keep eager but with zero wait
+            reach: { eager: true },
+            wait: { timeout: 5e3 },
+        }),
+        []
+    );
+
     const { items: rawRects, isLoading } = useQuery(
         privateScope && publicScope
             ? [privateScope?.elements, publicScope?.elements]
@@ -270,11 +279,7 @@ const _CanvasWrapper = (
             local: true,
             /* debug: !!debug && "useQuery ELEMENTS", */
             prefetch: true,
-            remote: {
-                // Do not block local rendering on remote joining; keep eager but with zero wait
-                reach: { eager: true },
-                wait: { timeout: 5e3 },
-            },
+            remote,
             updates: {
                 merge: true,
                 onBatch: (changes) => {

@@ -6,16 +6,21 @@ import {
     rectIsStaticPartialImage,
 } from "./rect";
 
+export function normalizeGigaImageRef(ref: string): string {
+    return ref.trim().replace(/=+$/, "");
+}
+
 export function parseGigaImageRef(src: string): string | undefined {
-    const m = /^giga:\/\/image\/([A-Za-z0-9_-]+)$/i.exec(src.trim());
-    return m?.[1];
+    const m = /^giga:\/\/image\/([A-Za-z0-9_-]+)(?:=+)?$/i.exec(src.trim());
+    if (!m?.[1]) return undefined;
+    return normalizeGigaImageRef(m[1]);
 }
 
 export function extractGigaImageRefsFromMarkdown(markdown: string): string[] {
     const refs: string[] = [];
     const seen = new Set<string>();
     for (const m of markdown.matchAll(/giga:\/\/image\/([A-Za-z0-9_-]+)/gi)) {
-        const ref = m[1];
+        const ref = normalizeGigaImageRef(m[1] ?? "");
         if (!ref || seen.has(ref)) continue;
         seen.add(ref);
         refs.push(ref);
@@ -53,7 +58,7 @@ export function filterOutInlineGigaImages(
 
     return rects.filter((r) => {
         if (!(rectIsStaticImage(r) || rectIsStaticPartialImage(r))) return true;
-        const ref = toBase64URL(r.content.contentId);
+        const ref = normalizeGigaImageRef(toBase64URL(r.content.contentId));
         return !refs.has(ref);
     });
 }

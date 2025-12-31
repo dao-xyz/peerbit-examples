@@ -44,6 +44,15 @@ export const useAllPosts = (properties: {
         (window as any).__PEERBIT_DEBUG__ = true;
     }
 
+    const remote = useMemo(
+        () => ({
+            // Keep remote iterators alive longer so relay-only peers (ephemeral sessions)
+            // don't get their subscriptions GC'd by the server before updates arrive.
+            wait: { timeout: 60000 },
+        }),
+        []
+    );
+
     const {
         items: posts,
         isLoading,
@@ -72,11 +81,7 @@ export const useAllPosts = (properties: {
         batchSize: 100,
         debug: debugEnabled ? "feed" : false, // { id: "replies" },
         local: true,
-        remote: {
-            // Keep remote iterators alive longer so relay-only peers (ephemeral sessions)
-            // don't get their subscriptions GC'd by the server before updates arrive.
-            wait: { timeout: 60000 },
-        },
+        remote,
 
         prefetch: true,
         updates: {

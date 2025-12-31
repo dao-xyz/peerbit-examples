@@ -29,6 +29,14 @@ const useVisualization = (properies: { canvas: Canvas }) => {
         Visualization | undefined
     >();
 
+    const remote = useMemo(
+        () => ({
+            reach: { eager: true },
+            wait: { timeout: 5000 },
+        }),
+        []
+    );
+
     const query = useMemo(() => {
         return !canvas
             ? null
@@ -45,10 +53,7 @@ const useVisualization = (properies: { canvas: Canvas }) => {
         },
         resolve: true,
         local: true,
-        remote: {
-            reach: { eager: true },
-            wait: { timeout: 5000 },
-        },
+        remote,
         prefetch: true,
     });
 

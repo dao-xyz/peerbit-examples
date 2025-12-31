@@ -413,6 +413,9 @@ async function ensureOpenedInScope(
     return scope.openWithSameSettings(canvas);
 }
 
+const toIntegerCount = (n: number | { estimate: number }): number =>
+    Math.max(0, Math.round(typeof n === "number" ? n : n.estimate));
+
 /** Fast deep count: prefer indexed direct count (path), then children aggregate, then BFS. */
 async function countRepliesFast(canvas: Canvas): Promise<bigint> {
     // Try direct path-based count (O(1) on index)
@@ -421,7 +424,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
             query: [new ByteMatchQuery({ key: "path", value: canvas.id })],
             approximate: true,
         });
-        return BigInt(n);
+        return BigInt(toIntegerCount(n));
     } catch {}
 
     // Fallback: aggregate children’s cached totals (Σ (1 + childDeep))
@@ -471,7 +474,7 @@ async function countRepliesFast(canvas: Canvas): Promise<bigint> {
                     ],
                     approximate: true,
                 });
-                total += 1n + BigInt(n);
+                total += 1n + BigInt(toIntegerCount(n));
             }
         }
         return total;
@@ -2791,10 +2794,11 @@ export class Scope extends Program<ScopeArgs> {
     }
 
     async countOwnedElements(canvas: Canvas): Promise<number> {
-        return this.elements.count({
+        const n = await this.elements.count({
             query: getOwnedElementsQuery(canvas),
             approximate: true,
         });
+        return toIntegerCount(n);
     }
 
     async reIndex(
@@ -3875,7 +3879,7 @@ export class Canvas {
             ],
             approximate: true,
         });
-        return BigInt(n);
+        return BigInt(toIntegerCount(n));
     }
 
     /** O(1) index count of IMMEDIATE children using materialized path + depth. */
@@ -3894,7 +3898,7 @@ export class Canvas {
             ],
             approximate: true,
         });
-        return BigInt(n);
+        return BigInt(toIntegerCount(n));
     }
 
     /** O(n) count of replies using BFS traversal with loop & duplicate protection, across scopes. */
@@ -4750,7 +4754,6 @@ export class Canvas {
     async isEmpty(): Promise<boolean> {
         const count = await this.elements.count({
             query: getOwnedElementsQuery(this),
-            approximate: true,
         });
         if (count > 0) {
             return false;

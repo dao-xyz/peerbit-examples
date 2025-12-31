@@ -6,7 +6,7 @@ import React, {
     useLayoutEffect,
     useMemo,
 } from "react";
-import Markdown from "react-markdown";
+import Markdown, { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
@@ -28,7 +28,10 @@ import {
     rectIsStaticImage,
     rectIsStaticPartialImage,
 } from "../../canvas/utils/rect";
-import { parseGigaImageRef } from "../../canvas/utils/inlineMarkdownImages";
+import {
+    normalizeGigaImageRef,
+    parseGigaImageRef,
+} from "../../canvas/utils/inlineMarkdownImages";
 
 const GigaMarkdownImage = ({
     src,
@@ -474,6 +477,17 @@ export const MarkdownContent = ({
 
     const displayText = isEditing ? text : content.text;
 
+    const urlTransform = useCallback(
+        (url: string, key: string, node: any) => {
+            // react-markdown sanitizes unknown protocols to `""`; keep our internal image URLs intact.
+            if (key === "src" && parseGigaImageRef(url)) {
+                return url;
+            }
+            return defaultUrlTransform(url, key, node);
+        },
+        []
+    );
+
     const gigaImagesByRef = useMemo(() => {
         try {
             const grouped = reduceElementsForViewing([
@@ -483,7 +497,10 @@ export const MarkdownContent = ({
             const map = new Map<string, Element<any>>();
             for (const el of grouped) {
                 if (rectIsStaticImage(el) || rectIsStaticPartialImage(el)) {
-                    map.set(toBase64URL(el.content.contentId), el);
+                    map.set(
+                        normalizeGigaImageRef(toBase64URL(el.content.contentId)),
+                        el
+                    );
                 }
             }
             return map;
@@ -559,6 +576,7 @@ export const MarkdownContent = ({
                         }
                         unwrapDisallowed
                         remarkPlugins={[remarkGfm]}
+                        urlTransform={urlTransform}
                         components={{
                             a: ({ node, ...props }) => (
                                 <a

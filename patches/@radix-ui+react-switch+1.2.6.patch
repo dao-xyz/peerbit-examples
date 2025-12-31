@@ -1,0 +1,26 @@
+diff --git a/node_modules/@radix-ui/react-switch/dist/index.js b/node_modules/@radix-ui/react-switch/dist/index.js
+index 466a7d6..d4ebf09 100644
+--- a/node_modules/@radix-ui/react-switch/dist/index.js
++++ b/node_modules/@radix-ui/react-switch/dist/index.js
+@@ -67,7 +67,7 @@ var Switch = React.forwardRef(
+       ...switchProps
+     } = props;
+     const [button, setButton] = React.useState(null);
+-    const composedRefs = (0, import_react_compose_refs.useComposedRefs)(forwardedRef, (node) => setButton(node));
++    const composedRefs = (0, import_react_compose_refs.useComposedRefs)(forwardedRef, setButton);
+     const hasConsumerStoppedPropagationRef = React.useRef(false);
+     const isFormControl = button ? form || !!button.closest("form") : true;
+     const [checked, setChecked] = (0, import_react_use_controllable_state.useControllableState)({
+diff --git a/node_modules/@radix-ui/react-switch/dist/index.mjs b/node_modules/@radix-ui/react-switch/dist/index.mjs
+index e9a3fd5..51c0f1f 100644
+--- a/node_modules/@radix-ui/react-switch/dist/index.mjs
++++ b/node_modules/@radix-ui/react-switch/dist/index.mjs
+@@ -28,7 +28,7 @@ var Switch = React.forwardRef(
+       ...switchProps
+     } = props;
+     const [button, setButton] = React.useState(null);
+-    const composedRefs = useComposedRefs(forwardedRef, (node) => setButton(node));
++    const composedRefs = useComposedRefs(forwardedRef, setButton);
+     const hasConsumerStoppedPropagationRef = React.useRef(false);
+     const isFormControl = button ? form || !!button.closest("form") : true;
+     const [checked, setChecked] = useControllableState({

@@ -42,6 +42,10 @@ export const StreamSettingsProvider: React.FC<{
     children: React.ReactNode;
 }> = ({ children }) => {
     const { peer } = usePeer();
+    const remote = useMemo(
+        () => ({ reach: { eager: true }, wait: { timeout: 5e3 } }),
+        []
+    );
     const program = useProgram(
         peer,
         useMemo(
@@ -59,7 +63,7 @@ export const StreamSettingsProvider: React.FC<{
         updates: { merge: true },
         prefetch: true,
         local: true,
-        remote: { reach: { eager: true }, wait: { timeout: 5e3 } },
+        remote,
     });
 
     const createSettings = async (

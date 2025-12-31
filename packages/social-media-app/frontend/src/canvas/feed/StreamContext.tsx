@@ -305,6 +305,15 @@ function useStreamContextHook() {
     // lazy loading of replies
     const [batchSize, setBatchSize] = useState(10);
 
+    const remote = React.useMemo(
+        () => ({
+            reach: { eager: true },
+            // Avoid blocking initial list hydration on remote joining; rely on link visibility
+            wait: { timeout: 5e3 },
+        }),
+        []
+    );
+
     const {
         items: sortedReplies,
         loadMore,
@@ -317,11 +326,7 @@ function useStreamContextHook() {
         batchSize,
         debug: "useQuery REPLIES",
         local: true,
-        remote: {
-            reach: { eager: true },
-            // Avoid blocking initial list hydration on remote joining; rely on link visibility
-            wait: { timeout: 5e3 },
-        },
+        remote,
 
         // prefetch: true,
         updates: {

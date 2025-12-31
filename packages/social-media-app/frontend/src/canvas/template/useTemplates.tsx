@@ -167,6 +167,10 @@ export function useTemplates(
     ]);
 
     /** 4) Live query of templates */
+    const remote = useMemo(
+        () => ({ reach: { eager: true }, wait: { timeout: 5_000 } }),
+        []
+    );
     const { items: templates, isLoading: queryLoading } = useQuery<
         Template,
         IndexableTemplate
@@ -179,7 +183,7 @@ export function useTemplates(
         local: true,
         prefetch: true,
         batchSize: 1000,
-        remote: { reach: { eager: true }, wait: { timeout: 5_000 } },
+        remote,
         updates: { merge: true },
     });
 
