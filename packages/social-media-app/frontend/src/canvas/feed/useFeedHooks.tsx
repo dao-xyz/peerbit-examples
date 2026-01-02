@@ -418,10 +418,12 @@ export const useFeedHooks = (props: {
         }
     }, [iteratorId]);
 
+    // Recompute when hidden window changes; `indexIsReadyToRender` reads from a ref so
+    // it won't otherwise invalidate memoization when we reveal after timeout.
     const visibleReplies = useMemo(() => {
         if (!processedReplies) return [];
         return processedReplies.filter((_, i) => indexIsReadyToRender(i));
-    }, [processedReplies, indexIsReadyToRender]);
+    }, [processedReplies, indexIsReadyToRender, hidden.head, hidden.tail]);
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: visibleReplies,

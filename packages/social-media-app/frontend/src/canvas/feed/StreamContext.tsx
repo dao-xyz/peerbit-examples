@@ -396,7 +396,14 @@ function useStreamContextHook() {
                     IndexableCanvas
                 >[];
                 if (!clean.length) return;
-                helpers.inject(clean, { position: "start" });
+                // Respect iterator ordering: in chat we display oldest→newest (reverse=true),
+                // so late results (which are "earlier" in iterator order) belong at the end.
+                helpers.inject(clean, {
+                    position:
+                        visualization?.view === ChildVisualization.CHAT
+                            ? "end"
+                            : "start",
+                });
                 loaded = true;
             };
 

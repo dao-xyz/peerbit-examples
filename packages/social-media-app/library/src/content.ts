@@ -2127,19 +2127,17 @@ export class Scope extends Program<ScopeArgs> {
         const ensureIndexed = async (child: Canvas, parent?: Canvas) => {
             const childScope = child.nearestScope;
             const generation = childScope.bumpGeneration(child.idString);
-            const recently =
-                childScope._recentlyIndexed.get(child.idString) ?? 0;
-            const freshThreshold = 500;
             const childMgr = childScope._hierarchicalReindex!;
-            if (Date.now() - recently >= freshThreshold) {
-                await childMgr.add({
-                    canvas: child,
-                    options: { onlyReplies: false, skipAncestors: true },
-                    generation,
-                });
-                await childMgr.flush(child.idString);
-                childScope._recentlyIndexed.set(child.idString, Date.now());
-            }
+            // Always schedule a fresh full index for publish, even if the canvas was indexed
+            // moments ago as a draft. The publish step adds/changes parent links (path/kind),
+            // which requires a full reindex for the canvas to become queryable immediately.
+            await childMgr.add({
+                canvas: child,
+                options: { onlyReplies: false, skipAncestors: true },
+                generation,
+            });
+            await childMgr.flush(child.idString);
+            childScope._recentlyIndexed.set(child.idString, Date.now());
 
             if (parent) {
                 const parentGen = parent.nearestScope.bumpGeneration(
@@ -2155,8 +2153,11 @@ export class Scope extends Program<ScopeArgs> {
             }
         };
 
-        // Finalize: optional link under parent, optional set view, flush
-        const finalize = async (dst: Canvas) => {
+        // Finalize: optional link under parent, optional set view, ensure replies row exists
+        // and flush indexes. Important: when linking under a parent, ensure the parent link
+        // exists BEFORE we insert into `replies`, so the initial IndexableCanvas transform
+        // computes the correct `path/kind` and becomes queryable immediately.
+        const finalize = async (dst: Canvas, registerIn: Scope) => {
             if (publish.parent) {
                 dlog("finalize: addReply", {
                     parent: publish.parent.idString,
@@ -2186,6 +2187,9 @@ export class Scope extends Program<ScopeArgs> {
                     });
                 }
 
+                // Ensure the replies row exists in the target scope *after* the parent link
+                // so the first index row includes the correct path/kind.
+                await ensureInReplies(registerIn, dst);
                 await ensureIndexed(dst, publish.parent);
             } else {
                 if (publish.view != null) {
@@ -2200,6 +2204,7 @@ export class Scope extends Program<ScopeArgs> {
                     });
                 }
 
+                await ensureInReplies(registerIn, dst);
                 await ensureIndexed(dst);
             }
         };
@@ -2210,7 +2215,7 @@ export class Scope extends Program<ScopeArgs> {
             await ensureInReplies(srcHome, src);
             await srcHome.openWithSameSettings(src);
             mark("link-only:ensure+open");
-            await finalize(src);
+            await finalize(src, srcHome);
             dlog("done: link-only");
             mark("end");
             if (perfMarks) {
@@ -2276,11 +2281,6 @@ export class Scope extends Program<ScopeArgs> {
 
             const created = !existing;
             if (!existing) {
-                dlog("sync: ensureInReplies(dest) for dst", {
-                    dest: dest.address,
-                    dst: dst.idString,
-                });
-                await ensureInReplies(dest, dst);
                 await dest.openWithSameSettings(dst);
                 mark("sync:ensure+openDest");
             }
@@ -2381,7 +2381,7 @@ export class Scope extends Program<ScopeArgs> {
             }
 
             // finalize (link, view, reindex)
-            await finalize(dst);
+            await finalize(dst, dest);
             mark("sync:finalize");
             dlog("done: sync", { createdAtDest: created, autoDeferred });
             if (
@@ -2452,7 +2452,6 @@ export class Scope extends Program<ScopeArgs> {
                         : src.selfScope,
             });
 
-            await ensureInReplies(dest, dst);
             await dest.openWithSameSettings(dst);
             mark("fork:ensure+openDest");
 
@@ -2474,7 +2473,7 @@ export class Scope extends Program<ScopeArgs> {
             });
             mark("fork:copyPayload");
 
-            await finalize(dst);
+            await finalize(dst, dest);
             mark("fork:finalize");
             dlog("done: fork", { dst: dst.idString });
             mark("end");

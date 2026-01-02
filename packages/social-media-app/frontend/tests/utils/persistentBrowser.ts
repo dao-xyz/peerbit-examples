@@ -45,6 +45,11 @@ export async function launchPersistentBrowserContext(
             },
             configurable: true,
         });
+        try {
+            // Avoid modal prompts in most e2e specs that publish drafts.
+            localStorage.setItem("giga.identity.notice.guest.v1", "true");
+            localStorage.setItem("giga.identity.notice.temporary.v1", "true");
+        } catch {}
     });
 
     const origin = new URL(baseURL).origin;

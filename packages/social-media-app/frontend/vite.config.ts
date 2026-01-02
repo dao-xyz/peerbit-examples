@@ -1,4 +1,4 @@
-import { defineConfig, loadEnv } from "vite";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 import peerbit from "@peerbit/vite";
 // @ts-ignore
@@ -34,13 +34,19 @@ export default defineConfig({
         ),
         APP_VERSION: JSON.stringify(process.env.npm_package_version),
     },
-    server:
-        process.env.VITE_TEST_HTTPS === "true"
+    // Required for SharedArrayBuffer / OPFS sqlite persistence in the browser.
+    server: {
+        headers: {
+            "Cross-Origin-Opener-Policy": "same-origin",
+            "Cross-Origin-Embedder-Policy": "require-corp",
+        },
+        ...(process.env.VITE_TEST_HTTPS === "true"
             ? {
                   https: true,
                   host: process.env.HOST || "localhost",
               }
-            : undefined,
+            : {}),
+    },
     /*  server: fs.existsSync("./.cert/key.pem")
          ? {
                https: {

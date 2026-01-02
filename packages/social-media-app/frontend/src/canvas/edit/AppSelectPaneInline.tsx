@@ -13,6 +13,8 @@ import { GrArticle } from "react-icons/gr";
 import { PrivateScope } from "../useScope";
 import { useCanvases } from "../useCanvas";
 import { useDraftSession } from "./draft/DraftSession";
+import { emitDebugEvent } from "../../debug/debug";
+import { toBase64URL } from "@peerbit/crypto";
 
 export const TEMPATE_ICON_MAP: Record<string, JSX.Element> = {
     "Photo album": <BiPhotoAlbum />,
@@ -132,10 +134,57 @@ export const AppSelectPaneInline: React.FC<Props> = ({
     };
 
     const onTemplateSelected = async (tpl: Template) => {
-        if (!privateScope) return;
-        await insertTpl(tpl, leaf); // insert relative to current leaf
-        await saveDebounced();
-        setQuery("");
+        const leafId = leaf?.idString;
+        try {
+            emitDebugEvent({
+                source: "AppSelectPaneInline",
+                name: "templateInsert:start",
+                templateName: tpl.name,
+                leafId,
+            });
+        } catch {}
+
+        if (!leaf) {
+            try {
+                emitDebugEvent({
+                    source: "AppSelectPaneInline",
+                    name: "templateInsert:skipNoLeaf",
+                    templateName: tpl.name,
+                });
+            } catch {}
+            return;
+        }
+
+        const t0 = performance.now();
+        try {
+            const inserted = await insertTpl(tpl, leaf); // insert relative to current leaf
+            try {
+                emitDebugEvent({
+                    source: "AppSelectPaneInline",
+                    name: "templateInsert:done",
+                    templateName: tpl.name,
+                    leafId,
+                    insertedId: toBase64URL(inserted.id),
+                    insertedIdString: inserted.idString,
+                    scope: inserted.nearestScope.address,
+                    ms: Math.round(performance.now() - t0),
+                });
+            } catch {}
+        } catch (e: any) {
+            try {
+                emitDebugEvent({
+                    source: "AppSelectPaneInline",
+                    name: "templateInsert:error",
+                    templateName: tpl.name,
+                    leafId,
+                    error: e?.message ?? String(e),
+                });
+            } catch {}
+            throw e;
+        } finally {
+            await saveDebounced();
+            setQuery("");
+        }
     };
 
     /* render -------------------------------------------- */

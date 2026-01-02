@@ -272,7 +272,12 @@ test.describe("Chat view ordering", () => {
         }
     });
 
-    test("right order after refresh", async ({ page }) => {
+    test("right order after refresh", async ({ page }, testInfo) => {
+        const consoleHook = attachConsoleHooks(page, {
+            echoErrors: true,
+            capturePageErrors: true,
+        });
+        try {
         const parentId = await publishPost(page, uid("ChatParent"));
 
         await openChat(page, parentId);
@@ -300,9 +305,26 @@ test.describe("Chat view ordering", () => {
             )
             .toBe(true);
 
+        const peerHashBefore = await page.evaluate(
+            () => (window as any).__peerInfo?.peerHash
+        );
+        await testInfo.attach("peerHash:beforeReload", {
+            body: Buffer.from(String(peerHashBefore ?? ""), "utf8"),
+            contentType: "text/plain",
+        });
+
         await page.reload({ waitUntil: "networkidle" });
         await expectPersistent(page);
         await waitForComposerReady(page);
+
+        const peerHashAfter = await page.evaluate(
+            () => (window as any).__peerInfo?.peerHash
+        );
+        await testInfo.attach("peerHash:afterReload", {
+            body: Buffer.from(String(peerHashAfter ?? ""), "utf8"),
+            contentType: "text/plain",
+        });
+
         await page.waitForTimeout(2000); // some timeout to trigger re-render (TODO why do we need this)
         await expect
             .poll(
@@ -318,5 +340,19 @@ test.describe("Chat view ordering", () => {
             .toBe(true);
 
         await page.waitForTimeout(1e4);
+        } finally {
+            const consoleErrors = consoleHook.errors().map((msg) => msg.text());
+            const pageErrors = consoleHook
+                .pageErrors()
+                .map((err) => err.stack || err.message || String(err));
+            const allErrors = [...consoleErrors, ...pageErrors].filter(Boolean);
+            if (allErrors.length) {
+                await testInfo.attach("console+pageErrors", {
+                    body: Buffer.from(allErrors.join("\n"), "utf8"),
+                    contentType: "text/plain",
+                });
+            }
+            consoleHook.stop();
+        }
     });
 });

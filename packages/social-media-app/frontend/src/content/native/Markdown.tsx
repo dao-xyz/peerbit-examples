@@ -477,16 +477,16 @@ export const MarkdownContent = ({
 
     const displayText = isEditing ? text : content.text;
 
-    const urlTransform = useCallback(
-        (url: string, key: string, node: any) => {
-            // react-markdown sanitizes unknown protocols to `""`; keep our internal image URLs intact.
-            if (key === "src" && parseGigaImageRef(url)) {
-                return url;
-            }
-            return defaultUrlTransform(url, key, node);
-        },
-        []
-    );
+	    const urlTransform = useCallback(
+	        (url: string, key: string, node: any) => {
+	            // react-markdown sanitizes unknown protocols to `""`; keep our internal image URLs intact.
+	            if (key === "src" && parseGigaImageRef(url)) {
+	                return url;
+	            }
+	            return defaultUrlTransform(url);
+	        },
+	        []
+	    );
 
     const gigaImagesByRef = useMemo(() => {
         try {

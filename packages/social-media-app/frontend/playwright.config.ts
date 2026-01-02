@@ -64,7 +64,8 @@ export default defineConfig({
     webServer: {
         // Spawn Vite via pnpm so the workspace-local version is used
         command: `pnpm exec vite dev --port ${PORT} --strictPort --host ${HOST}`,
-        port: PORT,
+        // Use an explicit URL to avoid IPv6/localhost port checks conflicting with our IPv4 host.
+        url: BASE_HTTP,
         reuseExistingServer: false,
     },
     workers: 1,

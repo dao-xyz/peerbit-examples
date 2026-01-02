@@ -12,6 +12,12 @@ test.describe("Developer panel / debug signals", () => {
         await page.addInitScript(() => {
             try {
                 localStorage.setItem("debug", "false");
+                // Avoid modal prompts in publish-focused specs.
+                localStorage.setItem("giga.identity.notice.guest.v1", "true");
+                localStorage.setItem(
+                    "giga.identity.notice.temporary.v1",
+                    "true"
+                );
             } catch {}
         });
     });

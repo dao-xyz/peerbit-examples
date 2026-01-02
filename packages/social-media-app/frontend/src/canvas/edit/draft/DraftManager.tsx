@@ -195,7 +195,13 @@ export const DraftManagerProvider: React.FC<{
             const [, created] = await home.getOrCreateReply(
                 options?.replyTo,
                 draft,
-                { kind: new ReplyKind() }
+                {
+                    kind: new ReplyKind(),
+                    // Draft links are private-only; never mirror into the public parent scope.
+                    // Mirrored draft links can accumulate and slow down reloads, and are not needed
+                    // for draft recovery (which reads from the private scope).
+                    visibility: "child",
+                }
             );
             const createdIx = await created.getSelfIndexedCoerced();
             if (!createdIx)
@@ -623,29 +629,37 @@ export const DraftManagerProvider: React.FC<{
                                 } catch {}
                                 perfMark("parentFlush");
 
-                                // Drop the published draft from the private scope so it does not linger
-                                // as a recoverable draft (and show up in DraftsRow) after refresh.
-                                try {
-                                    if (
-                                        draftScope &&
-                                        draftScope !== parent.nearestScope
-                                    ) {
-                                        await draftScope.remove(toPublish, {
-                                            drop: true,
-                                        });
-                                        if (captureEvents) {
-                                            logEvt("publish:cleanupDraft", {
-                                                bucket,
-                                                draftId: toPublish.idString,
-                                                parentId: parent.idString,
-                                            });
-                                        }
+                                // Cleanup: the publish flow already moves the canvas home scope (updateHome="set")
+                                // and deletes payload + reply row in the old (private) scope. Do *not* call
+                                // `Scope.remove()` here: it unlinks across scopes and can delete the published
+                                // reply relationship, making the thread empty after a hard reload.
+                                if (
+                                    draftScope &&
+                                    draftScope !== parent.nearestScope
+                                ) {
+                                    try {
+                                        // Best-effort: ensure the draft isn't recoverable from the private scope.
+                                        // Keep this local-only (no cross-scope unlinking).
+                                        await draftScope.replies.del(
+                                            toPublish.id
+                                        );
+                                    } catch {
+                                        // ignore (already deleted by Scope.publish cleanup)
                                     }
-                                } catch (cleanupError) {
-                                    console.warn(
-                                        "[DraftManager] publish: cleanup error",
-                                        cleanupError
-                                    );
+                                    try {
+                                        await draftScope._hierarchicalReindex?.flush(
+                                            toPublish.idString
+                                        );
+                                    } catch {
+                                        // ignore
+                                    }
+                                    if (captureEvents) {
+                                        logEvt("publish:cleanupDraft", {
+                                            bucket,
+                                            draftId: toPublish.idString,
+                                            parentId: parent.idString,
+                                        });
+                                    }
                                 }
                             } catch (e) {
                                 console.error(
@@ -855,12 +869,14 @@ export const DraftManagerProvider: React.FC<{
         };
 
         return API;
-        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [
         peer?.identity.publicKey.hashcode(),
         privateScope?.address,
         publicScope?.address,
         debug,
+        debugOpts.enabled,
+        debugOpts.captureEvents,
+        debugOpts.parent,
         debugOpts.perfEnabled,
     ]);
 

@@ -159,13 +159,13 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             const canvases = !idBytes
                 ? [root]
                 : await (async () => {
-                      const current = await loadCanvasFromScopes(
-                          idBytes,
-                          candidateScopes,
-                          {
-                              local: true,
-                          }
-                      );
+	                      const current = await loadCanvasFromScopes(
+	                          idBytes,
+	                          candidateScopes,
+	                          {
+	                              local: true,
+	                          }
+	                      );
                       if (!current) return [root];
                       // `loadPath({ includeSelf: true })` requires the canvas to already be indexed.
                       // Right after publish, the document may exist while its indexed row is still
