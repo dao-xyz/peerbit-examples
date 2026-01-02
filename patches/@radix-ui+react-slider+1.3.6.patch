@@ -18,6 +18,7 @@ diff --git a/node_modules/@radix-ui/react-slider/dist/index.js b/node_modules/@r
      const index = React.useMemo(
        () => thumb ? getItems().findIndex((item) => item.ref.current === thumb) : -1,
        [getItems, thumb]
+     );
 @@ -444,7 +444,7 @@ var SliderThumbImpl = React.forwardRef(
      const context = useSliderContext(THUMB_NAME, __scopeSlider);
      const orientation = useSliderOrientationContext(THUMB_NAME, __scopeSlider);
@@ -47,6 +48,7 @@ diff --git a/node_modules/@radix-ui/react-slider/dist/index.mjs b/node_modules/@
      const index = React.useMemo(
        () => thumb ? getItems().findIndex((item) => item.ref.current === thumb) : -1,
        [getItems, thumb]
+     );
 @@ -401,7 +401,7 @@ var SliderThumbImpl = React.forwardRef(
      const context = useSliderContext(THUMB_NAME, __scopeSlider);
      const orientation = useSliderOrientationContext(THUMB_NAME, __scopeSlider);

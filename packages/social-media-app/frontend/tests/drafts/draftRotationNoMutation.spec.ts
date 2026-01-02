@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import { OFFLINE_BASE } from "../utils/url";
 import { setupConsoleCapture } from "../utils/consoleCapture";
 import { getCanvasSaveStats, waitForCanvasSaveDelta } from "../utils/autosave";

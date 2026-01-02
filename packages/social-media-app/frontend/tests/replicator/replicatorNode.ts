@@ -6,11 +6,15 @@ import {
     ReplyKind,
     Scope,
 } from "@giga-app/interface";
+import { create as createSimpleIndexer } from "@peerbit/indexer-simple";
 import { webSockets } from "@libp2p/websockets";
 import { noise } from "@chainsafe/libp2p-noise";
 
 export async function startReplicator() {
     const client = await Peerbit.create({
+        // The node replicator doesn't need sqlite indexes; use the in-memory indexer
+        // to drastically speed up bulk seeding in bench specs.
+        indexer: createSimpleIndexer,
         libp2p: {
             connectionEncrypters: [noise()],
             addresses: {
