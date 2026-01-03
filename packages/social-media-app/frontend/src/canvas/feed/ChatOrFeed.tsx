@@ -54,7 +54,8 @@ export const CanvasAndReplies = () => {
     const [showInlineEditor, setShowInlineEditor] = useState(false);
     const [navType, setNavType] = useState<"tabs" | "rows">("tabs");
 
-    const { pathname, key } = useLocation();
+    const location = useLocation();
+    const { pathname } = location;
 
     useEffect(() => {
         setShowInlineEditor(false);
@@ -148,7 +149,7 @@ export const CanvasAndReplies = () => {
         setTimeout(() => (scrollToSnapEnabled.current = true), 100);
     });
 
-    const hasSnap = !!getSnapshot(key);
+    const hasSnap = !!getSnapshot(location);
     const { focused: repliesFocused, setFocused: _setRepliesFocused } =
         useFocusProvider();
 

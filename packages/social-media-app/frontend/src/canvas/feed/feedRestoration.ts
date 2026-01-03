@@ -18,11 +18,41 @@ export interface FeedSnapshot {
     offsetY: number; // pixels between viewport‑top and anchor‑top
     loadedUntil: number; // how many replies had been fetched
 }
+
+type MinimalLocation = { key: string; pathname: string; search: string };
+
+const idxKey = () => {
+    try {
+        const idx = (window.history.state as any)?.idx;
+        return typeof idx === "number" ? `idx:${idx}` : undefined;
+    } catch {
+        return undefined;
+    }
+};
+
+const urlKey = (loc: MinimalLocation) => `url:${loc.pathname}${loc.search}`;
+
+const keysForLocation = (loc: MinimalLocation) => {
+    const keys = [urlKey(loc)];
+    const k = idxKey();
+    if (k) keys.unshift(k);
+    return keys;
+};
+
 const cache = new Map<string, FeedSnapshot>();
-export const saveSnapshot = (key: string, snap: FeedSnapshot) =>
-    cache.set(key, snap);
-export const getSnapshot = (key: string) => cache.get(key);
-export const consumeSnapshot = (key: string) => cache.delete(key);
+export const saveSnapshot = (loc: MinimalLocation, snap: FeedSnapshot) => {
+    for (const k of keysForLocation(loc)) cache.set(k, snap);
+};
+export const getSnapshot = (loc: MinimalLocation) => {
+    for (const k of keysForLocation(loc)) {
+        const snap = cache.get(k);
+        if (snap) return snap;
+    }
+    return undefined;
+};
+export const consumeSnapshot = (loc: MinimalLocation) => {
+    for (const k of keysForLocation(loc)) cache.delete(k);
+};
 
 /* 2 ────────────────────────────────────────────────────────────────────────── */
 interface LeaveArgs {
@@ -39,10 +69,13 @@ export function useLeaveSnapshot(args: LeaveArgs) {
         const idx = replies.findIndex(
             (r) => r.reply.idString === from.idString
         );
+        if (idx === -1) return;
 
-        const nodeTop = replyRefs[idx]!.getBoundingClientRect().top; // << screen-relative
+        const node = replyRefs[idx];
+        if (!node) return;
+        const nodeTop = node.getBoundingClientRect().top; // << screen-relative
 
-        saveSnapshot(location.key, {
+        saveSnapshot(location, {
             queryParams: location.search,
             rootId: feedRoot.idString,
             anchorId: from.idString,
@@ -54,9 +87,10 @@ export function useLeaveSnapshot(args: LeaveArgs) {
 
 /* 3 ────────────────────────────────────────────────────────────────────────── */
 interface RestoreArgs {
-    replies: { reply: { idString: string } }[];
-    loadMore: () => Promise<boolean>;
+    replies: { reply: { idString: string } }[] | undefined;
+    loadMore: (n?: number) => Promise<boolean>;
     hasMore: () => boolean;
+    iteratorId?: string;
     replyRefs: (HTMLDivElement | null)[];
     setView: (v: string) => void;
     setViewRootById: (id: string) => void;
@@ -73,23 +107,45 @@ const nextFrame = () =>
 const tag = "[restore]"; // ⇠ easy filter
 
 export function useRestoreFeed(a: RestoreArgs) {
-    const { key } = useLocation();
+    const location = useLocation();
+    const id = `${idxKey() ?? ""}|${urlKey(location)}`;
     const snapRef = useRef<FeedSnapshot | undefined>(undefined);
     const doneRef = useRef(false);
     const [restoring, setRestoring] = useState(false);
-    let log = a.debug ? console.log : (args: any) => {};
+    const log = (...args: any[]) => {
+        if (!a.debug) return;
+        // eslint-disable-next-line no-console
+        console.log(...args);
+    };
 
     /* ────────────────────────────────────────────────────────────────── */
     /* 1. restore view & root (once)                                     */
     /* ────────────────────────────────────────────────────────────────── */
     useLayoutEffect(() => {
-        const next = getSnapshot(key);
+        const next = getSnapshot(location);
         const current = snapRef.current;
         const setParams = (snap: FeedSnapshot) => {
             if (snap.queryParams) {
-                const url = new URL(window.location.href);
-                url.search = snap.queryParams;
-                window.history.replaceState({}, "", url.toString());
+                try {
+                    const url = new URL(window.location.href);
+                    const hash = url.hash || "";
+                    const qIndex = hash.indexOf("?");
+                    const base = qIndex === -1 ? hash : hash.substring(0, qIndex);
+                    const nextQuery = snap.queryParams.startsWith("?")
+                        ? snap.queryParams
+                        : `?${snap.queryParams}`;
+                    const nextHash = base + nextQuery;
+                    if (url.hash === nextHash) return;
+                    url.hash = nextHash;
+                    // Preserve existing history state; react-router stores keys there.
+                    window.history.replaceState(
+                        window.history.state,
+                        "",
+                        url.toString()
+                    );
+                } catch {
+                    /* ignore */
+                }
             }
         };
         if (current !== next && next) {
@@ -107,69 +163,65 @@ export function useRestoreFeed(a: RestoreArgs) {
             setParams(snapRef.current);
             a.setViewRootById(snapRef.current.rootId);
         }
-    }, [key]);
+    }, [id]);
 
     /* ────────────────────────────────────────────────────────────────── */
     /* 2. fetch missing pages                                            */
     /* ────────────────────────────────────────────────────────────────── */
     const fetching = useRef(false);
-    const lenRef = useRef(a.replies?.length || 0);
-    useEffect(() => {
-        lenRef.current = a.replies?.length || 0;
-    }, [a.replies?.length]);
-
+    const lenRef = useRef(0);
     const repliesRef = useRef(a.replies);
-    useEffect(() => {
-        repliesRef.current = a.replies;
-    }, [a.replies]);
+    // Keep these refs in sync *synchronously* so layout effects don't see stale values.
+    lenRef.current = a.replies?.length || 0;
+    repliesRef.current = a.replies;
 
-    const loadMoreAndWait = async (): Promise<boolean> => {
+    const loadMoreAndWait = async (n?: number): Promise<boolean> => {
         const before = lenRef.current;
         const maxWaitTime = 5e3; // ms
-        let ticks = 0;
-
-        log(tag, "loadMore()");
-        await a.loadMore();
+        log(tag, "loadMore()", { n });
+        let didLoad = false;
+        try {
+            didLoad = await a.loadMore(n);
+        } catch (error) {
+            log(tag, "loadMore() threw", error);
+            return false;
+        }
+        if (!didLoad) return false;
         let t0 = Date.now();
         while (lenRef.current === before) {
             await nextFrame();
-            ticks++;
             if (Date.now() - t0 > maxWaitTime) {
                 log(tag, "loadMore() timeout");
-                break;
+                return false;
             }
         }
 
         log(
             tag,
-            `loadMore finished – list ${
-                lenRef.current > before ? "grew" : "timeout"
-            }`,
+            `loadMore finished – list grew`,
             { before, after: lenRef.current }
         );
 
-        return true;
+        return lenRef.current > before;
     };
 
     const needMore = () => {
-        if (!snapRef.current) {
-            return false;
+        const snap = snapRef.current;
+        if (!snap) return false;
+        const replies = repliesRef.current ?? [];
+        const found = replies.some((r) => r.reply.idString === snap.anchorId);
+        if (a.debug) {
+            log(tag, "needMore?", {
+                len: lenRef.current,
+                loadedUntil: snap.loadedUntil,
+                found,
+                lookingFor: snap.anchorId,
+            });
         }
-        log(tag, "done?", {
-            len: lenRef.current,
-            len2: repliesRef.current.length,
-            found: repliesRef.current.some(
-                (r) => r.reply.idString === snapRef.current.anchorId
-            ),
-            lookingFor: snapRef.current.anchorId,
-            set: new Set(repliesRef.current.map((r) => r.reply.idString)),
-        });
 
         return (
-            lenRef.current < snapRef.current.loadedUntil ||
-            !repliesRef.current.some(
-                (r) => r.reply.idString === snapRef.current.anchorId
-            )
+            lenRef.current < snap.loadedUntil ||
+            !replies.some((r) => r.reply.idString === snap.anchorId)
         );
     };
 
@@ -183,78 +235,142 @@ export function useRestoreFeed(a: RestoreArgs) {
 
         if (!snap || doneRef.current || fetching.current) return;
 
+        // Avoid kicking off the restore loop before the stream iterator is ready.
+        // When `iteratorId` is missing, the provider can still be returning stubbed loadMore/empty lists.
+        if (!a.iteratorId) return;
+
         if (!needMore()) return;
 
         log(tag, "start fetching loop", { snap });
         fetching.current = true;
 
         (async () => {
-            let guard = 30;
-            while (guard-- && needMore()) {
-                log(tag, `loop guard=${guard + 1}`);
-                await loadMoreAndWait();
-                if (!a.hasMore) {
-                    log(tag, "No more elements to load");
-                    break;
+            try {
+                let guard = 0;
+                const maxIterations = 200; // safety against broken iterators
+                while (
+                    guard++ < maxIterations &&
+                    !doneRef.current &&
+                    needMore()
+                ) {
+                    if (!a.hasMore()) {
+                        // `hasMore()` can transiently return false while the iterator is still initializing.
+                        // Prefer `loadMore()` as the authoritative signal (it returns false when exhausted).
+                        log(
+                            tag,
+                            "hasMore() returned false; attempting loadMore anyway"
+                        );
+                    }
+                    const currentLen = lenRef.current;
+                    const remaining = Math.max(0, snap.loadedUntil - currentLen);
+                    // Prefer a single big fetch to reach the previous depth quickly.
+                    // If we already reached loadedUntil but the anchor is still missing, fetch a small extra batch.
+                    const n = remaining > 0 ? remaining : 25;
+                    log(tag, `loop ${guard}/${maxIterations}`, {
+                        currentLen,
+                        remaining,
+                        n,
+                    });
+                    const grew = await loadMoreAndWait(n);
+                    if (!grew) {
+                        log(tag, "loadMore produced no growth; stopping");
+                        break;
+                    }
                 }
+                log(tag, "fetching loop done");
+            } finally {
+                fetching.current = false;
             }
+        })().catch((error) => {
             fetching.current = false;
-            log(tag, "fetching loop done");
-        })();
-    }, [key, a.enabled]);
+            log(tag, "fetching loop crashed", error);
+        });
+    }, [id, a.enabled, a.iteratorId]);
 
     /* ────────────────────────────────────────────────────────────────── */
     /* 3. scroll correction                                              */
     /* ────────────────────────────────────────────────────────────────── */
     useEffect(() => {
+        if (doneRef.current) return;
         const snap = snapRef.current;
-        if (doneRef.current) {
-            log(tag, "Already done");
-            return;
-        }
-        if (!snap) {
-            log(tag, "Missing snapshot");
-            return;
-        }
+        if (!snap) return;
 
-        const idx = repliesRef.current.findIndex(
-            (r) => r.reply.idString === snap.anchorId
-        );
-        if (idx === -1) {
-            log(tag, "anchor reply not found yet");
-            return;
-        }
+        let cancelled = false;
+        const tolerancePx = 2;
+        const settleFramesRequired = 2;
+        const maxWaitMs = 30_000; // allow time to fetch/paint deep items
+        let settled = 0;
+        const t0 = performance.now();
 
-        const node = a.replyRefs[idx];
-        if (!node) {
-            log(tag, "anchor DOM node not attached yet");
-            return;
-        }
+        const finish = () => {
+            if (doneRef.current) return;
+            doneRef.current = true;
+            consumeSnapshot(location);
+            setRestoring(false);
+            a.onRestore(snap);
+        };
 
-        if (!a.isReplyVisible(a.replies[idx].reply.idString)) {
-            log(tag, "anchor reply not visible yet");
-            return;
-        }
+        const tick = () => {
+            if (cancelled || doneRef.current) return;
+            const elapsed = performance.now() - t0;
+            if (elapsed > maxWaitMs) {
+                log(tag, "scroll correction timeout");
+                finish();
+                return;
+            }
 
-        setTimeout(() => {
+            const replies = repliesRef.current ?? [];
+            const idx = replies.findIndex(
+                (r) => r.reply.idString === snap.anchorId
+            );
+            if (idx === -1) {
+                requestAnimationFrame(tick);
+                return;
+            }
+
+            const node = a.replyRefs[idx];
+            if (!node) {
+                requestAnimationFrame(tick);
+                return;
+            }
+
+            const reply = replies[idx];
+            if (!reply || !a.isReplyVisible(reply.reply.idString)) {
+                requestAnimationFrame(tick);
+                return;
+            }
+
             const delta = node.getBoundingClientRect().top - snap.offsetY;
-            log(tag, "scroll correction", { idx, delta });
-            if (delta !== 0) {
+            if (a.debug)
+                log(tag, "scroll correction", {
+                    idx,
+                    delta,
+                    elapsedMs: Math.round(elapsed),
+                });
+
+            if (Math.abs(delta) <= tolerancePx) {
+                settled++;
+                if (settled >= settleFramesRequired) {
+                    finish();
+                    return;
+                }
+            } else {
+                settled = 0;
                 window.scrollBy(0, delta);
             }
-        }, 0);
 
-        doneRef.current = true;
-        consumeSnapshot(key);
-        setRestoring(false);
-        a.onRestore(snap);
+            requestAnimationFrame(tick);
+        };
+
+        requestAnimationFrame(tick);
+        return () => {
+            cancelled = true;
+        };
     }, [
         a.isReplyVisible,
         a.replyRefs,
         a.replies,
-        fetching.current,
-        key,
-        snapRef,
+        id,
     ]);
 
     return { restoring };

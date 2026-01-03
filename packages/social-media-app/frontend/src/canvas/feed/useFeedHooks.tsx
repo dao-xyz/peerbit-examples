@@ -13,6 +13,7 @@ import { useAutoScroll, ScrollSettings } from "../main/useAutoScroll";
 import {
     useLeaveSnapshot,
     useRestoreFeed,
+    getSnapshot,
     FeedSnapshot,
 } from "./feedRestoration";
 import { useDeveloperConfig } from "../../debug/DeveloperConfig";
@@ -20,6 +21,7 @@ import { Canvas, ChildVisualization } from "@giga-app/interface";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { useCanvases } from "../useCanvas";
 import { useStream } from "./StreamContext";
+import { useLocation } from "react-router";
 
 const DEFAULT_REVEAL_TIMEOUT = 3e3;
 
@@ -51,6 +53,8 @@ export const useFeedHooks = (props: {
 
     const { path } = useCanvases();
     const { peer } = usePeer();
+    const location = useLocation();
+    const hasSnapshot = !!getSnapshot(location);
 
     const repliesContainerRef = useRef<HTMLDivElement>(null);
     const { replyTo, typedOnce } = useAutoReply();
@@ -78,9 +82,9 @@ export const useFeedHooks = (props: {
         prevScrollHeight: number | undefined;
     } | null>(null);
 
-    const loadMore = () => {
+    const loadMore = (n?: number) => {
         if (props.disableLoadMore) {
-            return;
+            return Promise.resolve(false);
         }
 
         if (!firstBatchHandled.current) {
@@ -91,7 +95,7 @@ export const useFeedHooks = (props: {
             };
         }
 
-        return _loadMore();
+        return _loadMore(n);
     };
 
     /* ------------------------------------------------------------------ */
@@ -100,6 +104,25 @@ export const useFeedHooks = (props: {
     useLayoutEffect(() => {
         const list = processedReplies;
         if (!list || list.length === 0) return;
+
+        if (hasSnapshot) {
+            // During feed restoration we prefer continuity over fancy reveal:
+            // show whatever we have immediately so scroll correction can run.
+            if (loadTimeoutRef.current) {
+                clearTimeout(loadTimeoutRef.current);
+                loadTimeoutRef.current = null;
+            }
+            committedIds.current.firstId = list[0]?.reply.idString ?? null;
+            committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
+            committedLengthRef.current = list.length;
+            hiddenToLoadRef.current.clear();
+            revealRef.current = null;
+            if (hiddenRef.current.head !== 0 || hiddenRef.current.tail !== 0) {
+                hiddenRef.current = { head: 0, tail: 0 };
+                setHidden({ head: 0, tail: 0 });
+            }
+            return;
+        }
 
         const oldFirst = committedIds.current.firstId;
         const oldLast = committedIds.current.lastId;
@@ -175,7 +198,7 @@ export const useFeedHooks = (props: {
                 loadTimeoutRef.current = null;
             }
         };
-    }, [processedReplies]);
+    }, [processedReplies, hasSnapshot, revealTimeout]);
 
     useEffect(() => {
         if (
@@ -395,6 +418,7 @@ export const useFeedHooks = (props: {
         hasMore,
         replies: processedReplies,
         loadMore,
+        iteratorId,
         replyRefs: replyContentRefs.current,
         setView,
         setViewRootById: (id) => {
@@ -408,13 +432,13 @@ export const useFeedHooks = (props: {
             restoredScrollPositionOnce.current = true;
         },
         isReplyVisible,
-        debug: false,
+        debug: dev.scrollRestoreDebug ?? false,
         enabled: true,
     });
 
     useEffect(() => {
         if (iteratorId) {
-            loadMore?.();
+            loadMore?.().catch(() => {});
         }
     }, [iteratorId]);
 
@@ -479,7 +503,7 @@ export const useFeedHooks = (props: {
         contentRef,
         replyTo,
         typedOnce,
-        processedReplies: visibleReplies,
+        processedReplies,
         loadMore,
         isLoadingAnything,
         isAtBottom,

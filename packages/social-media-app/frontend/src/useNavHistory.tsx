@@ -5,6 +5,16 @@ import { useLocation, useNavigationType, NavigationType } from "react-router";
 type Entry = { key: string; path: string };
 
 const stack: Entry[] = [];
+let currentIdx: number | undefined;
+
+const historyIdx = () => {
+    try {
+        const idx = (window.history.state as any)?.idx;
+        return typeof idx === "number" ? idx : undefined;
+    } catch {
+        return undefined;
+    }
+};
 
 /**
  * Call this hook once near the top of your app (e.g. in <App /> or
@@ -18,33 +28,52 @@ export function useRecordLocation() {
 
     useEffect(() => {
         const path = loc.pathname + loc.search;
+        const idx = historyIdx();
 
-        // If the stack is empty just push.
-        if (stack.length === 0) {
-            stack.push({ key: loc.key, path });
+        if (typeof idx === "number") {
+            // When a user goes "back" and then navigates forward via PUSH,
+            // the browser discards forward history. Mirror that in our stack.
+            if (navType === NavigationType.Push) {
+                stack.length = idx + 1;
+            } else if (stack.length <= idx) {
+                stack.length = idx + 1;
+            }
+
+            stack[idx] = { key: loc.key, path };
+            currentIdx = idx;
             return;
         }
 
-        if (navType === "REPLACE") {
-            // Overwrite the last entry
+        // Fallback: no history idx (non-browser environments). Keep best-effort stack order.
+        if (stack.length === 0) {
+            stack.push({ key: loc.key, path });
+            currentIdx = 0;
+            return;
+        }
+
+        if (navType === NavigationType.Replace) {
             stack[stack.length - 1] = { key: loc.key, path };
-        } else if (navType === "PUSH") {
-            // Avoid duplicates caused by React remounting the same entry
+            currentIdx = stack.length - 1;
+        } else if (navType === NavigationType.Push) {
             if (stack[stack.length - 1].key !== loc.key) {
                 stack.push({ key: loc.key, path });
             }
+            currentIdx = stack.length - 1;
+        } else if (navType === NavigationType.Pop) {
+            currentIdx = stack.length - 1;
         }
-        // "POP" doesn’t modify the stack because the browser
-        // is moving among entries we already recorded.
     }, [loc.key, loc.pathname, loc.search, navType]);
 }
 
 /** Returns the path of the previous history entry, or null if none. */
 export function peekPrevPaths(i: number): string | null {
-    return i < stack.length ? stack[stack.length - 1 - i].path : null;
+    const idx = (currentIdx ?? stack.length - 1) - i;
+    if (idx < 0) return null;
+    return stack[idx]?.path ?? null;
 }
 
-/** Remove the last `i` paths from the stack. */
-export function consumePaths(i: number) {
-    stack.splice(-i, i);
+/** Best-effort: drop forward history from the current index. */
+export function consumePaths() {
+    const idx = currentIdx ?? stack.length - 1;
+    if (idx >= 0) stack.length = idx + 1;
 }

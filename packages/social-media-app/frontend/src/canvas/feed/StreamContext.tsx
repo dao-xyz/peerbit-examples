@@ -21,10 +21,9 @@ import {
     ReplyKind,
 } from "@giga-app/interface";
 import { useCanvases } from "../useCanvas";
-import type { WithContext } from "@peerbit/document";
-import { useSearchParams } from "react-router";
+import type { Documents, WithContext, WithIndexedContext } from "@peerbit/document";
+import { useLocation, useSearchParams } from "react-router";
 import { ALL_DEFAULT_FEED_SETTINGS as ALL_DEFAULT_SETTINGS } from "./defaultFeedSettings.js";
-import type { WithIndexedContext } from "@peerbit/document";
 import {
     DEFAULT_TIME_FILTER,
     DEFAULT_TYPE_FILTER,
@@ -75,7 +74,251 @@ function getParentId(
         : undefined;
 }
 
-function useStreamContextHook() {
+type QuerySlotConfig = {
+    db: Documents<Canvas, IndexableCanvas> | undefined;
+    query: any | undefined;
+    reverse: boolean;
+    batchSize: number;
+    remote: any;
+    debug: boolean | string;
+    pinningEnabled: boolean;
+    pinResetKey: string;
+};
+
+type QuerySlotState = {
+    items: WithIndexedContext<Canvas, IndexableCanvas>[];
+    loadMore: (n?: number) => Promise<boolean>;
+    isLoading: boolean;
+    empty: boolean;
+    id: string | undefined;
+};
+
+const MAX_STREAM_QUERY_SLOTS = 25;
+
+type MinimalLocation = { key?: string; pathname: string; search: string };
+const idxKey = () => {
+    try {
+        const idx = (window.history.state as any)?.idx;
+        return typeof idx === "number" ? `idx:${idx}` : undefined;
+    } catch {
+        return undefined;
+    }
+};
+const urlKey = (loc: MinimalLocation) => `url:${loc.pathname}${loc.search}`;
+const entryKeyForLocation = (loc: MinimalLocation) =>
+    // Prefer `history.state.idx` because it is stable for a given history entry even across REPLACE.
+    // `location.key` can change on REPLACE (and may be "default" on the initial entry), which would
+    // accidentally tear down and recreate iterators.
+    idxKey() ?? loc.key ?? urlKey(loc);
+
+const StreamQuerySlot = React.memo(function StreamQuerySlot({
+    slotKey,
+    config,
+    report,
+}: {
+    slotKey: string;
+    config?: QuerySlotConfig;
+    report: (slotKey: string, state: QuerySlotState) => void;
+}) {
+    const { peer } = usePeer();
+
+    // Session-local pinning of newly created posts (per slot)
+    const pinnedIdsRef = useRef(new Set<string>());
+    const seenIdsRef = useRef(new Set<string>());
+    const hydratedRef = useRef(false);
+    const sessionStartRef = useRef<number>(Date.now());
+
+    useEffect(() => {
+        pinnedIdsRef.current.clear();
+        seenIdsRef.current.clear();
+        hydratedRef.current = false;
+        sessionStartRef.current = Date.now();
+    }, [config?.pinResetKey]);
+
+    const registerPins = React.useCallback(
+        (items: WithIndexedContext<Canvas, IndexableCanvas>[]) => {
+            if (!config?.pinningEnabled || !peer?.identity) return;
+            const myKey = peer.identity.publicKey.bytes;
+            for (const item of items) {
+                if (!item?.idString) continue;
+
+                // Skip anything we already evaluated
+                if (seenIdsRef.current.has(item.idString)) continue;
+                seenIdsRef.current.add(item.idString);
+
+                // Do not pin during the initial hydration pass
+                if (!hydratedRef.current) continue;
+
+                const author = item.__indexed?.publicKey;
+                if (!author || !equals(author, myKey)) continue;
+
+                const created = item.__context?.created;
+                const createdMs =
+                    typeof created === "bigint"
+                        ? Number(created)
+                        : typeof created === "number"
+                          ? created
+                          : undefined;
+                if (createdMs == null) continue;
+                if (createdMs < sessionStartRef.current) continue;
+
+                pinnedIdsRef.current.add(item.idString);
+            }
+        },
+        [config?.pinningEnabled, peer?.identity?.toString()]
+    );
+
+    const fetchLocalReplies = React.useCallback(
+        async (n: number) => {
+            if (!config?.db || !config?.query) return [];
+            const iter = config.db.index.iterate(config.query, {
+                resolve: true,
+                local: true,
+                remote: false,
+                closePolicy: "onEmpty",
+            });
+            try {
+                return (await iter.next(n)) as WithIndexedContext<
+                    Canvas,
+                    IndexableCanvas
+                >[];
+            } catch (error) {
+                console.warn("fetchLocalReplies failed", error);
+                return [];
+            } finally {
+                try {
+                    await iter.close();
+                } catch {
+                    /* ignore */
+                }
+            }
+        },
+        [config?.db, config?.query]
+    );
+
+    const {
+        items,
+        loadMore,
+        isLoading,
+        empty,
+        id: iteratorId,
+    } = useQuery(config?.db, {
+        query: config?.query,
+        reverse: config?.reverse ?? false,
+        batchSize: config?.batchSize ?? 10,
+        debug: config?.debug ?? false,
+        local: true,
+        remote: config?.remote,
+
+        updates: {
+            merge: true,
+            push: true,
+        },
+        applyResults: (_prev, _incoming, { defaultMerge }) => {
+            const merged = defaultMerge();
+
+            if (config?.pinningEnabled) {
+                registerPins(merged);
+                hydratedRef.current = true;
+
+                if (pinnedIdsRef.current.size > 0) {
+                    const pinned: typeof merged = [];
+                    const rest: typeof merged = [];
+                    for (const item of merged) {
+                        (pinnedIdsRef.current.has(item.idString)
+                            ? pinned
+                            : rest
+                        ).push(item);
+                    }
+                    return [...pinned, ...rest];
+                }
+            } else {
+                // Ensure stale state does not leak across views
+                pinnedIdsRef.current.clear();
+                seenIdsRef.current.clear();
+                hydratedRef.current = true;
+            }
+
+            return merged;
+        },
+        onLateResults: async (evt, helpers) => {
+            const amount = Math.max(evt?.amount ?? 1, config?.batchSize ?? 1);
+            const before = helpers.items().length;
+            let loaded = false;
+
+            const pinAndReorder = () => {
+                if (!config?.pinningEnabled) return;
+                hydratedRef.current = true;
+                registerPins(helpers.items());
+                if (pinnedIdsRef.current.size === 0) return;
+
+                const current = helpers.items();
+                const pinned: WithIndexedContext<Canvas, IndexableCanvas>[] =
+                    [];
+                const rest: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
+                for (const item of current) {
+                    (pinnedIdsRef.current.has(item.idString)
+                        ? pinned
+                        : rest
+                    ).push(item);
+                }
+                helpers.inject([...pinned, ...rest]);
+            };
+
+            const injectLate = (
+                incoming: (
+                    | WithIndexedContext<Canvas, IndexableCanvas>
+                    | undefined
+                )[]
+            ) => {
+                const clean = incoming.filter(Boolean) as WithIndexedContext<
+                    Canvas,
+                    IndexableCanvas
+                >[];
+                if (!clean.length) return;
+                helpers.inject(clean, {
+                    position: config?.reverse ? "end" : "start",
+                });
+                loaded = true;
+            };
+
+            if (
+                Array.isArray((evt as any)?.items) &&
+                (evt as any).items.length
+            ) {
+                const asValues = (evt as any).items.map(
+                    (it: any) => it?.value ?? it?.indexed ?? it
+                );
+                injectLate(asValues);
+            } else {
+                loaded = await helpers.loadMore(amount, {
+                    force: true,
+                    reason: "late",
+                });
+                if (helpers.items().length === before) {
+                    const local = await fetchLocalReplies(amount);
+                    injectLate(local);
+                }
+            }
+
+            pinAndReorder();
+        },
+    });
+
+    useEffect(() => {
+        report(slotKey, {
+            items,
+            loadMore,
+            isLoading,
+            empty: empty(),
+            id: iteratorId,
+        });
+    }, [slotKey, items, loadMore, isLoading, iteratorId, report]);
+
+    return null;
+});
+
+function useStreamUiState() {
     const { path: canvases, loading: loadingCanvases, leaf } = useCanvases();
     const [feedRoot, setFeedRoot] = useState<
         WithIndexedContext<CanvasDB, IndexableCanvas> | undefined
@@ -86,14 +329,6 @@ function useStreamContextHook() {
         if (!leaf) return;
         setFeedRoot(leaf);
     }, [leaf]);
-
-    const { peer } = usePeer();
-
-    // Session-local pinning of newly created posts (cleared on refresh/view change)
-    const pinnedIdsRef = useRef(new Set<string>());
-    const seenIdsRef = useRef(new Set<string>());
-    const hydratedRef = useRef(false);
-    const sessionStartRef = useRef<number>(Date.now());
 
     // URL-derived view state
     const [searchParams, setSearchParams] = useSearchParams();
@@ -201,46 +436,6 @@ function useStreamContextHook() {
         return filterModel.id !== "new" && filterModel.id !== "recent";
     }, [filterModel?.id, visualization?.view]);
 
-    // Reset pinning state when switching views/roots.
-    useEffect(() => {
-        pinnedIdsRef.current.clear();
-        seenIdsRef.current.clear();
-        hydratedRef.current = false;
-        sessionStartRef.current = Date.now();
-    }, [filterModel?.id, feedRoot?.idString]);
-
-    const registerPins = (
-        items: WithIndexedContext<Canvas, IndexableCanvas>[]
-    ) => {
-        if (!pinningEnabled || !peer?.identity) return;
-        const myKey = peer.identity.publicKey.bytes;
-        for (const item of items) {
-            if (!item?.idString) continue;
-
-            // Skip anything we already evaluated
-            if (seenIdsRef.current.has(item.idString)) continue;
-            seenIdsRef.current.add(item.idString);
-
-            // Do not pin during the initial hydration pass
-            if (!hydratedRef.current) continue;
-
-            const author = item.__indexed?.publicKey;
-            if (!author || !equals(author, myKey)) continue;
-
-            const created = item.__context?.created;
-            const createdMs =
-                typeof created === "bigint"
-                    ? Number(created)
-                    : typeof created === "number"
-                      ? created
-                      : undefined;
-            if (createdMs == null) continue;
-            if (createdMs < sessionStartRef.current) continue;
-
-            pinnedIdsRef.current.add(item.idString);
-        }
-    };
-
     // unified replies query
     const canvasQuery = useMemo(() => {
         if (!feedRoot || !filterModel || !filterModel?.query) return undefined;
@@ -270,38 +465,6 @@ function useStreamContextHook() {
         return queryObject;
     }, [feedRoot, filterModel, timeFilter, typeFilter?.key, query]);
 
-    // Helper to grab latest local results even if the live iterator thinks it's done.
-    const fetchLocalReplies = React.useCallback(
-        async (n: number) => {
-            if (!feedRoot || !canvasQuery) return [];
-            const iter = feedRoot.nearestScope.replies.index.iterate(
-                canvasQuery,
-                {
-                    resolve: true,
-                    local: true,
-                    remote: false,
-                    closePolicy: "onEmpty",
-                }
-            );
-            try {
-                return (await iter.next(n)) as WithIndexedContext<
-                    Canvas,
-                    IndexableCanvas
-                >[];
-            } catch (error) {
-                console.warn("fetchLocalReplies failed", error);
-                return [];
-            } finally {
-                try {
-                    await iter.close();
-                } catch {
-                    /* ignore */
-                }
-            }
-        },
-        [feedRoot, canvasQuery]
-    );
-
     // lazy loading of replies
     const [batchSize, setBatchSize] = useState(10);
 
@@ -313,167 +476,29 @@ function useStreamContextHook() {
         }),
         []
     );
-
-    const {
-        items: sortedReplies,
-        loadMore,
-        isLoading: isLoadingQuery,
-        empty,
-        id: iteratorId,
-    } = useQuery(feedRoot?.nearestScope.replies, {
-        query: canvasQuery,
-        reverse: visualization?.view === ChildVisualization.CHAT ? true : false,
-        batchSize,
-        debug: "useQuery REPLIES",
-        local: true,
-        remote,
-
-        // prefetch: true,
-        updates: {
-            merge: true,
-            push: true,
-        },
-        applyResults: (_prev, _incoming, { defaultMerge }) => {
-            const merged = defaultMerge();
-
-            if (pinningEnabled) {
-                registerPins(merged);
-                hydratedRef.current = true;
-
-                if (pinnedIdsRef.current.size > 0) {
-                    const pinned: typeof merged = [];
-                    const rest: typeof merged = [];
-                    for (const item of merged) {
-                        (pinnedIdsRef.current.has(item.idString)
-                            ? pinned
-                            : rest
-                        ).push(item);
-                    }
-                    return [...pinned, ...rest];
-                }
-            } else {
-                // Ensure stale state does not leak across views
-                pinnedIdsRef.current.clear();
-                seenIdsRef.current.clear();
-                hydratedRef.current = true;
-            }
-
-            return merged;
-        },
-        // Late results: iterator now reports concrete items via outOfOrder queue.
-        onLateResults: async (evt, helpers) => {
-            const amount = Math.max(evt?.amount ?? 1, batchSize ?? 1);
-            const before = helpers.items().length;
-            let loaded = false;
-
-            const pinAndReorder = () => {
-                if (!pinningEnabled) return;
-                hydratedRef.current = true;
-                registerPins(helpers.items());
-                if (pinnedIdsRef.current.size === 0) return;
-
-                const current = helpers.items();
-                const pinned: WithIndexedContext<Canvas, IndexableCanvas>[] =
-                    [];
-                const rest: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
-                for (const item of current) {
-                    (pinnedIdsRef.current.has(item.idString)
-                        ? pinned
-                        : rest
-                    ).push(item);
-                }
-                helpers.inject([...pinned, ...rest]);
-            };
-
-            const injectLate = (
-                items: (
-                    | WithIndexedContext<Canvas, IndexableCanvas>
-                    | undefined
-                )[]
-            ) => {
-                const clean = items.filter(Boolean) as WithIndexedContext<
-                    Canvas,
-                    IndexableCanvas
-                >[];
-                if (!clean.length) return;
-                // Respect iterator ordering: in chat we display oldest→newest (reverse=true),
-                // so late results (which are "earlier" in iterator order) belong at the end.
-                helpers.inject(clean, {
-                    position:
-                        visualization?.view === ChildVisualization.CHAT
-                            ? "end"
-                            : "start",
-                });
-                loaded = true;
-            };
-
-            // Prefer concrete late items (new iterator queue mode).
-            if (
-                Array.isArray((evt as any)?.items) &&
-                (evt as any).items.length
-            ) {
-                const asValues = (evt as any).items.map(
-                    (it: any) => it?.value ?? it?.indexed ?? it
-                );
-                injectLate(asValues);
-            } else {
-                // Fallback: force a fetch; if nothing arrives, try local-only read.
-                loaded = await helpers.loadMore(amount, {
-                    force: true,
-                    reason: "late",
-                });
-                if (helpers.items().length === before) {
-                    const local = await fetchLocalReplies(amount);
-                    injectLate(local);
-                }
-            }
-
-            pinAndReorder();
-        },
-        /* onChange: {
-            merge: async (e) => {
-                // merge optimistic updates signed by me
-                for (const change of e.added) {
-                    const hash = change.__context.head;
-                    const entry = await feedRoot!.replies.log.log.get(hash);
-                    for (const signer of await entry.getSignatures()) {
-                        if (signer.publicKey.equals(peer.identity.publicKey)) {
-                            return e;
-                        }
-                    }
-                }
-                return undefined;
-            },
-            update: async (prev, filtered) => {
-                const merged = await feedRoot.replies.index.updateResults(
-                    prev,
-                    filtered,
-                    canvasQuery,
-                    true
-                );
-                if (visualization?.view !== ChildVisualization.CHAT) {
-                    // Put added to the top (non-chat)
-                    for (const added of filtered.added) {
-                        const index = merged.findIndex(
-                            (item) => item.idString === added.idString
-                        );
-                        if (index !== -1) {
-                            merged.splice(index, 1);
-                            merged.unshift(added);
-                        }
-                    }
-                }
-                return merged;
-            },
-        }, */
-    });
-
-    const lastReply = useMemo(() => {
-        if (sortedReplies && sortedReplies.length > 0) {
-            return sortedReplies[sortedReplies.length - 1];
-        }
-        return undefined;
-    }, [sortedReplies]);
+    const queryConfig: QuerySlotConfig = useMemo(
+        () => ({
+            db: feedRoot?.nearestScope.replies,
+            query: canvasQuery,
+            reverse:
+                visualization?.view === ChildVisualization.CHAT ? true : false,
+            batchSize,
+            remote,
+            debug: "useQuery REPLIES",
+            pinningEnabled,
+            pinResetKey: `${filterModel?.id ?? ""}|${feedRoot?.idString ?? ""}`,
+        }),
+        [
+            feedRoot?.nearestScope?.replies,
+            canvasQuery,
+            visualization?.view,
+            batchSize,
+            remote,
+            pinningEnabled,
+            filterModel?.id,
+            feedRoot?.idString,
+        ]
+    );
 
     // --- Reply Processing for "chat" view, inserting quotes ---
     function replyLineTypes({
@@ -558,27 +583,6 @@ function useStreamContextHook() {
         });
     }
 
-    const processedReplies: ReturnType<typeof insertQuotes> | undefined =
-        useMemo(() => {
-            if (!feedRoot?.initialized) return undefined;
-            if (
-                debouncedView === "chat" &&
-                sortedReplies &&
-                sortedReplies.length > 0 &&
-                feedRoot
-            ) {
-                return insertQuotes(sortedReplies, feedRoot);
-            }
-            return sortedReplies
-                ? sortedReplies.map((reply) => ({
-                      reply,
-                      type: "reply" as const,
-                      lineType: "none" as const,
-                      id: reply.idString,
-                  }))
-                : [];
-        }, [sortedReplies, debouncedView, feedRoot, feedRoot?.initialized]);
-
     return {
         feedRoot,
         pinToView, // from settings provider
@@ -587,33 +591,91 @@ function useStreamContextHook() {
         createSettings, // from settings provider
         filterModel,
         setView: changeSettings,
-        loadMore,
-        loading: loadingCanvases || isLoadingQuery,
         setBatchSize,
         batchSize,
-        iteratorId,
-        lastReply,
-        sortedReplies,
-        processedReplies,
-
+        loadingCanvases,
         timeFilter,
         typeFilter,
         setTimeFilter: setTimeFilterParam,
         setTypeFilter: setTypeFilterParam,
         setQueryParams,
-
-        hasMore: () => !empty(),
-
         query,
         setQuery: setQueryParam,
+        debouncedView,
+        queryConfig,
     };
 }
 
 const CTX_KEY = "__STREAM_CONTEXT_SINGLETON__";
-type Ctx = ReturnType<typeof useStreamContextHook> | undefined;
+type StreamUiState = ReturnType<typeof useStreamUiState>;
+
+const buildStreamValue = (
+    ui: StreamUiState,
+    queryState: QuerySlotState | undefined
+) => {
+    const sortedReplies = queryState?.items ?? [];
+    const lastReply =
+        sortedReplies.length > 0
+            ? sortedReplies[sortedReplies.length - 1]
+            : undefined;
+
+    const processedReplies: any[] | undefined = (() => {
+        if (!ui.feedRoot?.initialized) return undefined;
+        if (
+            ui.debouncedView === "chat" &&
+            sortedReplies.length > 0 &&
+            ui.feedRoot
+        ) {
+            // note: insertQuotes is not implemented; keep legacy behaviour
+            return (sortedReplies as any).map((reply: any) => ({
+                reply,
+                type: "reply" as const,
+                lineType: "none" as const,
+                id: reply.idString,
+            }));
+        }
+        return sortedReplies.map((reply) => ({
+            reply,
+            type: "reply" as const,
+            lineType: "none" as const,
+            id: reply.idString,
+        }));
+    })();
+
+    return {
+        feedRoot: ui.feedRoot,
+        pinToView: ui.pinToView,
+        defaultViews: ui.defaultViews,
+        dynamicViews: ui.dynamicViews,
+        createSettings: ui.createSettings,
+        filterModel: ui.filterModel,
+        setView: ui.setView,
+        loadMore: queryState?.loadMore ?? (async () => false),
+        loading: ui.loadingCanvases || (queryState?.isLoading ?? false),
+        setBatchSize: ui.setBatchSize,
+        batchSize: ui.batchSize,
+        iteratorId: queryState?.id,
+        lastReply,
+        sortedReplies,
+        processedReplies,
+
+        timeFilter: ui.timeFilter,
+        typeFilter: ui.typeFilter,
+        setTimeFilter: ui.setTimeFilter,
+        setTypeFilter: ui.setTypeFilter,
+        setQueryParams: ui.setQueryParams,
+
+        hasMore: () => !(queryState?.empty ?? true),
+
+        query: ui.query,
+        setQuery: ui.setQuery,
+    };
+};
+
+type Ctx = ReturnType<typeof buildStreamValue> | undefined;
 
 // (In dev, I recommend throwing to catch wiring issues early.)
-const makeInitialStreamValue = (): ReturnType<typeof useStreamContextHook> =>
+const makeInitialStreamValue = (): ReturnType<typeof buildStreamValue> =>
     ({
         feedRoot: undefined,
         pinToView: async () => {},
@@ -648,16 +710,79 @@ const StreamContext: React.Context<Ctx> =
 export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     children,
 }) => {
-    const value = useStreamContextHook();
+    const ui = useStreamUiState();
+    const location = useLocation();
+    const activeUrl = urlKey(location);
+    const activeKey = entryKeyForLocation(location);
+
+    const configsRef = useRef(new Map<string, QuerySlotConfig>());
+    const statesRef = useRef(new Map<string, QuerySlotState>());
+    const urlsRef = useRef(new Map<string, string>());
+    const [slotKeys, setSlotKeys] = useState<string[]>(() => [activeKey]);
+    const activeKeyRef = useRef(activeKey);
+    activeKeyRef.current = activeKey;
+    const [, forceRender] = useState(0);
+
+    // Keep config for the active entry only; cached entries stay frozen.
+    // We only update the active entry's config when its URL changes (e.g. REPLACE param updates),
+    // not when we simply re-activate a previous history entry via back/forward.
+    if (urlsRef.current.get(activeKey) !== activeUrl) {
+        configsRef.current.set(activeKey, ui.queryConfig);
+        urlsRef.current.set(activeKey, activeUrl);
+    }
+
+    useEffect(() => {
+        setSlotKeys((prev) => {
+            const without = prev.filter((k) => k !== activeKey);
+            const next = [...without, activeKey];
+            const removed =
+                next.length > MAX_STREAM_QUERY_SLOTS
+                    ? next.splice(0, next.length - MAX_STREAM_QUERY_SLOTS)
+                    : [];
+            for (const k of removed) {
+                configsRef.current.delete(k);
+                statesRef.current.delete(k);
+                urlsRef.current.delete(k);
+            }
+            return next;
+        });
+    }, [activeKey]);
+
+    const report = React.useCallback((slotKey: string, state: QuerySlotState) => {
+        statesRef.current.set(slotKey, state);
+        if (slotKey === activeKeyRef.current) {
+            forceRender((x) => x + 1);
+        }
+    }, []);
+
+    const renderKeys = useMemo(() => {
+        const base = slotKeys.includes(activeKey)
+            ? slotKeys
+            : [...slotKeys, activeKey];
+        return base.slice(-MAX_STREAM_QUERY_SLOTS);
+    }, [slotKeys, activeKey]);
+
+    const slots = renderKeys.map((k) => (
+        <StreamQuerySlot
+            key={k}
+            slotKey={k}
+            config={configsRef.current.get(k)}
+            report={report}
+        />
+    ));
+
+    const activeState = statesRef.current.get(activeKey);
+    const value = buildStreamValue(ui, activeState);
     return (
         <StreamContext.Provider value={value}>
+            {slots}
             {children}
         </StreamContext.Provider>
     );
 };
 
 // Define the context type from the hook’s return type.
-export type StreamContextType = ReturnType<typeof useStreamContextHook>;
+export type StreamContextType = ReturnType<typeof buildStreamValue>;
 
 export const useStream = () => {
     const ctx = useContext(StreamContext);

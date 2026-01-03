@@ -25,7 +25,11 @@ export const UpdatePasswordScreen = () => {
             const url = new URL(window.location.href);
             if (url.searchParams.has("next")) {
                 url.searchParams.delete("next");
-                window.history.replaceState({}, "", url.toString());
+                window.history.replaceState(
+                    window.history.state,
+                    "",
+                    url.toString()
+                );
             }
         } catch {}
     }, [location.key]);

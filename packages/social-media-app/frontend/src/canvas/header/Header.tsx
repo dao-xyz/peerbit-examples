@@ -67,6 +67,8 @@ export const Header = ({
 
                     <button
                         className="btn flex p-2 flex-row items-center gap-1"
+                        data-testid="open-comments"
+                        aria-label="Open comments"
                         onClick={open}
                     >
                         <FaRegComment size={16} />
@@ -90,6 +92,8 @@ export const Header = ({
                     {/* Show a "go to post" buttom */}
                     <button
                         className="btn flex p-2 flex-row items-center gap-1"
+                        data-testid="open-post"
+                        aria-label="Open post"
                         onClick={open}
                     >
                         <IoEnterOutline className="ml-[-4px]" size={20} />

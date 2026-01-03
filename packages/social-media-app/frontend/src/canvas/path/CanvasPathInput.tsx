@@ -166,6 +166,8 @@ export const CanvasPathInput: React.FC<{
             {path.length > 1 && (
                 <button
                     className=" btn btn-bouncy btn-icon bg-neutral-200 dark:bg-neutral-700 rounded-full flex flex-row gap-1 h-6"
+                    data-testid="nav-back"
+                    aria-label="Back"
                     onClick={() => {
                         backToParent();
                     }}

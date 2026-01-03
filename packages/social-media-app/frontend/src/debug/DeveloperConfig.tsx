@@ -9,6 +9,8 @@ import React, {
 export type DeveloperOptions = {
     /** If set, overrides default reveal timeout for posts (milliseconds) */
     revealTimeoutMs?: number;
+    /** Enables verbose scroll restoration logging */
+    scrollRestoreDebug?: boolean;
 };
 
 type Ctx = {
@@ -52,12 +54,24 @@ export const DeveloperConfigProvider: React.FC<{
                 ? ({ revealTimeoutMs: n } as DeveloperOptions)
                 : ({} as DeveloperOptions);
         })();
+        const fromUrlBool = (() => {
+            const v = mergedParams.get("devScrollRestoreDebug");
+            if (v == null || v === "") return {} as DeveloperOptions;
+            const on = v === "1" || v.toLowerCase() === "true";
+            return { scrollRestoreDebug: on } as DeveloperOptions;
+        })();
         const options: DeveloperOptions = {
             revealTimeoutMs:
                 typeof global.revealTimeoutMs === "number"
                     ? global.revealTimeoutMs
                     : typeof fromUrl.revealTimeoutMs === "number"
                       ? fromUrl.revealTimeoutMs
+                      : undefined,
+            scrollRestoreDebug:
+                typeof global.scrollRestoreDebug === "boolean"
+                    ? global.scrollRestoreDebug
+                    : typeof fromUrlBool.scrollRestoreDebug === "boolean"
+                      ? fromUrlBool.scrollRestoreDebug
                       : undefined,
         };
         // sync back to global for easy ad-hoc tweaking
@@ -100,13 +114,25 @@ export const setDeveloperOptions = (partial: Partial<DeveloperOptions>) => {
             const base = qIndex === -1 ? hash : hash.substring(0, qIndex);
             const queryStr = qIndex === -1 ? "" : hash.substring(qIndex + 1);
             const params = new URLSearchParams(queryStr);
-            const key = "devRevealTimeout";
-            if (next.revealTimeoutMs == null) params.delete(key);
-            else params.set(key, String(next.revealTimeoutMs));
+            {
+                const key = "devRevealTimeout";
+                if (next.revealTimeoutMs == null) params.delete(key);
+                else params.set(key, String(next.revealTimeoutMs));
+            }
+            {
+                const key = "devScrollRestoreDebug";
+                if (next.scrollRestoreDebug == null) params.delete(key);
+                else
+                    params.set(key, next.scrollRestoreDebug ? "1" : "0");
+            }
             const newQuery = params.toString();
             const url = new URL(window.location.href);
             url.hash = base + (newQuery ? "?" + newQuery : "");
-            window.history.replaceState(null, "", url.toString());
+            window.history.replaceState(
+                window.history.state,
+                "",
+                url.toString()
+            );
         } catch {}
         window.dispatchEvent(new Event("__DEV:changed"));
     } catch {}
