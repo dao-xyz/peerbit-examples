@@ -726,8 +726,23 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     // Keep config for the active entry only; cached entries stay frozen.
     // We only update the active entry's config when its URL changes (e.g. REPLACE param updates),
     // not when we simply re-activate a previous history entry via back/forward.
-    if (urlsRef.current.get(activeKey) !== activeUrl) {
-        configsRef.current.set(activeKey, ui.queryConfig);
+    const prevUrl = urlsRef.current.get(activeKey);
+    const prevConfig = configsRef.current.get(activeKey);
+    const nextConfig = ui.queryConfig;
+
+    const prevRunnable = !!(prevConfig?.db && prevConfig?.query);
+    const nextRunnable = !!(nextConfig?.db && nextConfig?.query);
+
+    // Important: on initial load (or after navigating to a canvas route) the canvas leaf can lag
+    // behind the URL while it loads/indexes. If we freeze an "empty" or "wrong-root" config for
+    // the active entry, the iterator never starts and the feed appears blank. Allow the active
+    // entry to hydrate its config while keeping inactive entries frozen for fast back/forward.
+    if (
+        prevUrl !== activeUrl ||
+        (nextRunnable && !prevRunnable) ||
+        (nextRunnable && prevConfig?.pinResetKey !== nextConfig.pinResetKey)
+    ) {
+        configsRef.current.set(activeKey, nextConfig);
         urlsRef.current.set(activeKey, activeUrl);
     }
 
