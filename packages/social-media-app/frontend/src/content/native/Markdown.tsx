@@ -477,16 +477,13 @@ export const MarkdownContent = ({
 
     const displayText = isEditing ? text : content.text;
 
-	    const urlTransform = useCallback(
-	        (url: string, key: string, node: any) => {
-	            // react-markdown sanitizes unknown protocols to `""`; keep our internal image URLs intact.
-	            if (key === "src" && parseGigaImageRef(url)) {
-	                return url;
-	            }
-	            return defaultUrlTransform(url);
-	        },
-	        []
-	    );
+    const urlTransform = useCallback((url: string, key: string, node: any) => {
+        // react-markdown sanitizes unknown protocols to `""`; keep our internal image URLs intact.
+        if (key === "src" && parseGigaImageRef(url)) {
+            return url;
+        }
+        return defaultUrlTransform(url);
+    }, []);
 
     const gigaImagesByRef = useMemo(() => {
         try {
@@ -498,7 +495,9 @@ export const MarkdownContent = ({
             for (const el of grouped) {
                 if (rectIsStaticImage(el) || rectIsStaticPartialImage(el)) {
                     map.set(
-                        normalizeGigaImageRef(toBase64URL(el.content.contentId)),
+                        normalizeGigaImageRef(
+                            toBase64URL(el.content.contentId)
+                        ),
                         el
                     );
                 }

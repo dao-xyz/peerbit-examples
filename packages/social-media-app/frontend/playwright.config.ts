@@ -8,9 +8,12 @@ function pickFreePort(host: string): number {
     // Note: keep this as a single line; passing `\n` to `node -e` can break on some shells.
     const script =
         "const net=require('net');const host=process.argv[1]||'127.0.0.1';const server=net.createServer();server.on('error',()=>process.exit(1));server.listen(0,host,()=>{const addr=server.address();const port=addr&&typeof addr==='object'?addr.port:0;process.stdout.write(String(port||''));server.close();});";
-    const out = execSync(`${process.execPath} -e ${JSON.stringify(script)} ${host}`, {
-        stdio: ["ignore", "pipe", "ignore"],
-    })
+    const out = execSync(
+        `${process.execPath} -e ${JSON.stringify(script)} ${host}`,
+        {
+            stdio: ["ignore", "pipe", "ignore"],
+        }
+    )
         .toString()
         .trim();
     const port = Number(out);

@@ -278,68 +278,72 @@ test.describe("Chat view ordering", () => {
             capturePageErrors: true,
         });
         try {
-        const parentId = await publishPost(page, uid("ChatParent"));
+            const parentId = await publishPost(page, uid("ChatParent"));
 
-        await openChat(page, parentId);
-        await page.getByRole("button", { name: "Feed", exact: true }).click();
-        await page.getByRole("menuitem", { name: "Chat", exact: true }).click();
-        await expect(page).toHaveURL(/([?&]v=chat)/, { timeout: 15000 });
-        await initDebugEvents(page);
-        await waitForComposerReady(page);
-        const first = uid("Chat-msg-1");
-        const second = uid("Chat-msg-2");
+            await openChat(page, parentId);
+            await page
+                .getByRole("button", { name: "Feed", exact: true })
+                .click();
+            await page
+                .getByRole("menuitem", { name: "Chat", exact: true })
+                .click();
+            await expect(page).toHaveURL(/([?&]v=chat)/, { timeout: 15000 });
+            await initDebugEvents(page);
+            await waitForComposerReady(page);
+            const first = uid("Chat-msg-1");
+            const second = uid("Chat-msg-2");
 
-        await sendReply(page, first);
-        await sendReply(page, second);
+            await sendReply(page, first);
+            await sendReply(page, second);
 
-        await expect
-            .poll(
-                async () => {
-                    const [a, b] = await orderForMessages(page, [
-                        first,
-                        second,
-                    ]);
-                    return a >= 0 && b >= 0 && b > a;
-                },
-                { timeout: 15000 }
-            )
-            .toBe(true);
+            await expect
+                .poll(
+                    async () => {
+                        const [a, b] = await orderForMessages(page, [
+                            first,
+                            second,
+                        ]);
+                        return a >= 0 && b >= 0 && b > a;
+                    },
+                    { timeout: 15000 }
+                )
+                .toBe(true);
 
-        const peerHashBefore = await page.evaluate(
-            () => (window as any).__peerInfo?.peerHash
-        );
-        await testInfo.attach("peerHash:beforeReload", {
-            body: Buffer.from(String(peerHashBefore ?? ""), "utf8"),
-            contentType: "text/plain",
-        });
+            const peerHashBefore = await page.evaluate(
+                () => (window as any).__peerInfo?.peerHash
+            );
+            await testInfo.attach("peerHash:beforeReload", {
+                body: Buffer.from(String(peerHashBefore ?? ""), "utf8"),
+                contentType: "text/plain",
+            });
 
-        await page.reload({ waitUntil: "networkidle" });
-        await expectPersistent(page);
-        await waitForComposerReady(page);
+            await page.reload({ waitUntil: "networkidle" });
+            await expectPersistent(page);
+            await waitForComposerReady(page);
 
-        const peerHashAfter = await page.evaluate(
-            () => (window as any).__peerInfo?.peerHash
-        );
-        await testInfo.attach("peerHash:afterReload", {
-            body: Buffer.from(String(peerHashAfter ?? ""), "utf8"),
-            contentType: "text/plain",
-        });
+            const peerHashAfter = await page.evaluate(
+                () => (window as any).__peerInfo?.peerHash
+            );
+            await testInfo.attach("peerHash:afterReload", {
+                body: Buffer.from(String(peerHashAfter ?? ""), "utf8"),
+                contentType: "text/plain",
+            });
 
-        await page.waitForTimeout(2000); // some timeout to trigger re-render (TODO why do we need this)
-        await expect
-            .poll(
-                async () => {
-                    const [a, b] = await orderForMessages(page, [
-                        first,
-                        second,
-                    ]);
-                    return a >= 0 && b >= 0 && b > a;
-                },
-                { timeout: 20000 }
-            )
-            .toBe(true);
+            await page.waitForTimeout(2000); // some timeout to trigger re-render (TODO why do we need this)
+            await expect
+                .poll(
+                    async () => {
+                        const [a, b] = await orderForMessages(page, [
+                            first,
+                            second,
+                        ]);
+                        return a >= 0 && b >= 0 && b > a;
+                    },
+                    { timeout: 20000 }
+                )
+                .toBe(true);
 
-        await page.waitForTimeout(1e4);
+            await page.waitForTimeout(1e4);
         } finally {
             const consoleErrors = consoleHook.errors().map((msg) => msg.text());
             const pageErrors = consoleHook

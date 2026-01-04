@@ -29,6 +29,7 @@ export const Feed = (
         visualization,
         isChat,
         isLoadingAnything,
+        initialHydrated,
         leaveSnapshot,
         processedReplies,
         repliesContainerRef,
@@ -43,6 +44,8 @@ export const Feed = (
         handleLoad,
         indexIsReadyToRender,
     } = props.type === "feed" ? props.feed : useFeedHooks(props);
+
+    const hasReplies = (processedReplies?.length || 0) > 0;
 
     /* --------------------------- RENDER ------------------------------ */
     return (
@@ -61,7 +64,7 @@ export const Feed = (
                 ref={contentRef}
                 data-testid="feed"
             >
-                {processedReplies?.length > 0 ? (
+                {hasReplies ? (
                     <div
                         ref={repliesContainerRef}
                         className={"max-w-[876px] w-full mx-auto flex relative"}
@@ -120,6 +123,10 @@ export const Feed = (
                             ))}
                         </div>
                     </div>
+                ) : isLoadingAnything || !initialHydrated ? (
+                    <div className="flex-grow flex items-center justify-center h-40 font font-ganja">
+                        <Spinner />
+                    </div>
                 ) : (
                     <div className="flex-grow flex items-center justify-center h-40 font font-ganja">
                         Nothing to see here
@@ -150,7 +157,7 @@ export const Feed = (
             </div>
 
             {/* Spinner at bottom (append lazy-load) */}
-            {!isChat && isLoadingAnything && (
+            {!isChat && isLoadingAnything && hasReplies && (
                 <div
                     className="w-full flex absolute bottom-1 z-1 justify-center items-center overflow-hidden"
                     style={{ height: SPINNER_HEIGHT }}

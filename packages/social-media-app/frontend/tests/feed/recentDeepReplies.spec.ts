@@ -43,7 +43,8 @@ async function waitForComposerReady(page: Page, timeout = 30000) {
 async function ensurePublic(toolbar: Locator) {
     const privacySwitch = toolbar.getByRole("switch", { name: /Private/i });
     if ((await privacySwitch.count()) === 0) return;
-    const checked = (await privacySwitch.getAttribute("aria-checked")) === "true";
+    const checked =
+        (await privacySwitch.getAttribute("aria-checked")) === "true";
     if (checked) await privacySwitch.click();
 }
 
@@ -102,10 +103,9 @@ async function switchToChatView(page: Page) {
 }
 
 test.describe("Recent feed includes deep replies", () => {
-    test("root Recent shows replies from sub-contexts", async (
-        { page },
-        testInfo
-    ) => {
+    test("root Recent shows replies from sub-contexts", async ({
+        page,
+    }, testInfo) => {
         const consoleHook = attachConsoleHooks(page, {
             echoErrors: true,
             capturePageErrors: true,

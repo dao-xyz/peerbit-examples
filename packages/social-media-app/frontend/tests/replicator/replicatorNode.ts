@@ -41,8 +41,9 @@ export async function seedReplicatorPosts(options: {
     scope?: Scope;
     count: number;
     prefix?: string;
+    delayMs?: number;
 }) {
-    const { client, count, prefix } = options;
+    const { client, count, prefix, delayMs } = options;
     const { scope, canvas } = await createRoot(client, {
         scope: options.scope,
         persisted: true,
@@ -50,6 +51,7 @@ export async function seedReplicatorPosts(options: {
 
     const root = await scope.openWithSameSettings(canvas);
     const messages: string[] = [];
+    const posts: Canvas[] = [];
     await scope.suppressReindex(async () => {
         for (let i = 0; i < count; i++) {
             const msg = `${prefix ?? "E2E post"} ${i}`;
@@ -64,8 +66,43 @@ export async function seedReplicatorPosts(options: {
             await root.addReply(post, new ReplyKind(), "both");
             await scope.replies.put(post);
             messages.push(msg);
+            posts.push(post);
+
+            if (delayMs && i < count - 1) {
+                await new Promise((r) => setTimeout(r, delayMs));
+            }
         }
     });
 
-    return { scope, root, messages };
+    return { scope, root, messages, posts };
+}
+
+export async function addReplicatorReply(options: {
+    client: Peerbit;
+    scope: Scope;
+    parent: Canvas;
+    message: string;
+    reindexParent?: boolean;
+}) {
+    const { client, scope, message } = options;
+    const parent = await scope.openWithSameSettings(options.parent);
+
+    const draft = new Canvas({
+        publicKey: client.identity.publicKey,
+        selfScope: scope,
+    });
+    const reply = await scope.openWithSameSettings(draft);
+    await reply.addTextElement(message, { skipReindex: true });
+
+    // Ensure parent link exists before the first replies.put so the indexed row includes correct path/kind.
+    await parent.addReply(reply, new ReplyKind(), "both");
+    await scope.replies.put(reply);
+
+    if (options.reindexParent) {
+        // Force an indexed reply-count refresh for the parent so UI peers can observe the update.
+        // (Some listeners intentionally skip scheduling parent replies-only reindex on link changes.)
+        await scope.reIndex(parent, { onlyReplies: true });
+    }
+
+    return { parent, reply };
 }

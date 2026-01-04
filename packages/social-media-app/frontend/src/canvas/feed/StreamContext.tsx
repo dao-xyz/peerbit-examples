@@ -21,7 +21,11 @@ import {
     ReplyKind,
 } from "@giga-app/interface";
 import { useCanvases } from "../useCanvas";
-import type { Documents, WithContext, WithIndexedContext } from "@peerbit/document";
+import type {
+    Documents,
+    WithContext,
+    WithIndexedContext,
+} from "@peerbit/document";
 import { useLocation, useSearchParams } from "react-router";
 import { ALL_DEFAULT_FEED_SETTINGS as ALL_DEFAULT_SETTINGS } from "./defaultFeedSettings.js";
 import {
@@ -81,6 +85,9 @@ type QuerySlotConfig = {
     batchSize: number;
     remote: any;
     debug: boolean | string;
+    // When true, preserve the first-seen order in the UI and append new items.
+    // This avoids jarring "best" re-ranks as cached reply totals update asynchronously.
+    stableOrdering: boolean;
     pinningEnabled: boolean;
     pinResetKey: string;
 };
@@ -104,12 +111,29 @@ const idxKey = () => {
         return undefined;
     }
 };
-const urlKey = (loc: MinimalLocation) => `url:${loc.pathname}${loc.search}`;
+const canonicalizeSearch = (search: string) => {
+    const params = new URLSearchParams(search);
+    // Treat the default view (`v=feed`) as absent so URL REPLACEs that only
+    // add this param don't tear down cached stream iterators.
+    if (params.get("v") === "feed") params.delete("v");
+
+    const entries = Array.from(params.entries()).sort(([ak, av], [bk, bv]) => {
+        const keyCmp = ak.localeCompare(bk);
+        return keyCmp !== 0 ? keyCmp : av.localeCompare(bv);
+    });
+    const canonical = new URLSearchParams();
+    for (const [k, v] of entries) canonical.append(k, v);
+
+    const qs = canonical.toString();
+    return qs ? `?${qs}` : "";
+};
+const urlKey = (loc: MinimalLocation) =>
+    `url:${loc.pathname}${canonicalizeSearch(loc.search)}`;
 const entryKeyForLocation = (loc: MinimalLocation) =>
     // Prefer `history.state.idx` because it is stable for a given history entry even across REPLACE.
     // `location.key` can change on REPLACE (and may be "default" on the initial entry), which would
     // accidentally tear down and recreate iterators.
-    idxKey() ?? loc.key ?? urlKey(loc);
+    idxKey() ?? urlKey(loc);
 
 const StreamQuerySlot = React.memo(function StreamQuerySlot({
     slotKey,
@@ -122,6 +146,9 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
 }) {
     const { peer } = usePeer();
 
+    // Stabilize ordering for "best"/ranked feeds to prevent large reorders on async reply-count updates.
+    const stableOrderRef = useRef<string[]>([]);
+
     // Session-local pinning of newly created posts (per slot)
     const pinnedIdsRef = useRef(new Set<string>());
     const seenIdsRef = useRef(new Set<string>());
@@ -129,6 +156,7 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
     const sessionStartRef = useRef<number>(Date.now());
 
     useEffect(() => {
+        stableOrderRef.current = [];
         pinnedIdsRef.current.clear();
         seenIdsRef.current.clear();
         hydratedRef.current = false;
@@ -217,14 +245,59 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
         applyResults: (_prev, _incoming, { defaultMerge }) => {
             const merged = defaultMerge();
 
+            const applyStableOrdering = (
+                items: WithIndexedContext<Canvas, IndexableCanvas>[]
+            ) => {
+                if (!config?.stableOrdering) {
+                    stableOrderRef.current = items.map((x) => x.idString);
+                    return items;
+                }
+
+                // First batch: commit the iterator's initial order.
+                if (stableOrderRef.current.length === 0) {
+                    stableOrderRef.current = items.map((x) => x.idString);
+                    return items;
+                }
+
+                const byId = new Map<string, (typeof items)[number]>();
+                for (const item of items) byId.set(item.idString, item);
+
+                const next: typeof items = [];
+                const nextOrder: string[] = [];
+                const seen = new Set<string>();
+
+                // Preserve previously committed order for any items still present.
+                for (const id of stableOrderRef.current) {
+                    const item = byId.get(id);
+                    if (!item) continue;
+                    next.push(item);
+                    nextOrder.push(id);
+                    seen.add(id);
+                }
+
+                // Append any newly discovered items.
+                for (const item of items) {
+                    const id = item.idString;
+                    if (seen.has(id)) continue;
+                    next.push(item);
+                    nextOrder.push(id);
+                    seen.add(id);
+                }
+
+                stableOrderRef.current = nextOrder;
+                return next;
+            };
+
+            const stabilized = applyStableOrdering(merged);
+
             if (config?.pinningEnabled) {
-                registerPins(merged);
+                registerPins(stabilized);
                 hydratedRef.current = true;
 
                 if (pinnedIdsRef.current.size > 0) {
-                    const pinned: typeof merged = [];
-                    const rest: typeof merged = [];
-                    for (const item of merged) {
+                    const pinned: typeof stabilized = [];
+                    const rest: typeof stabilized = [];
+                    for (const item of stabilized) {
                         (pinnedIdsRef.current.has(item.idString)
                             ? pinned
                             : rest
@@ -239,7 +312,7 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
                 hydratedRef.current = true;
             }
 
-            return merged;
+            return stabilized;
         },
         onLateResults: async (evt, helpers) => {
             const amount = Math.max(evt?.amount ?? 1, config?.batchSize ?? 1);
@@ -277,7 +350,12 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
                 >[];
                 if (!clean.length) return;
                 helpers.inject(clean, {
-                    position: config?.reverse ? "end" : "start",
+                    // In stable ordering mode, never prepend; it causes the visible list to "scramble"
+                    // as late results arrive.
+                    position:
+                        config?.reverse || config?.stableOrdering
+                            ? "end"
+                            : "start",
                 });
                 loaded = true;
             };
@@ -437,6 +515,8 @@ function useStreamUiState() {
     }, [filterModel?.id, visualization?.view]);
 
     // unified replies query
+    const feedRootIdString = feedRoot?.idString;
+    const feedRootPathDepth = feedRoot?.__indexed?.pathDepth;
     const canvasQuery = useMemo(() => {
         if (!feedRoot || !filterModel || !filterModel?.query) return undefined;
         const queryObject = filterModel.query(feedRoot);
@@ -463,7 +543,14 @@ function useStreamUiState() {
         }
 
         return queryObject;
-    }, [feedRoot, filterModel, timeFilter, typeFilter?.key, query]);
+    }, [
+        feedRootIdString,
+        feedRootPathDepth,
+        filterModel,
+        timeFilter?.key,
+        typeFilter?.key,
+        query,
+    ]);
 
     // lazy loading of replies
     const [batchSize, setBatchSize] = useState(10);
@@ -485,6 +572,7 @@ function useStreamUiState() {
             batchSize,
             remote,
             debug: "useQuery REPLIES",
+            stableOrdering: filterModel?.id === "best",
             pinningEnabled,
             pinResetKey: `${filterModel?.id ?? ""}|${feedRoot?.idString ?? ""}`,
         }),
@@ -651,7 +739,16 @@ const buildStreamValue = (
         filterModel: ui.filterModel,
         setView: ui.setView,
         loadMore: queryState?.loadMore ?? (async () => false),
-        loading: ui.loadingCanvases || (queryState?.isLoading ?? false),
+        loading:
+            ui.loadingCanvases ||
+            (queryState?.isLoading ?? false) ||
+            // Avoid a misleading empty-state flash while the feed query config/iterator is still
+            // being established (common on initial navigation and deep-link loads).
+            !(ui.queryConfig?.db && ui.queryConfig?.query) ||
+            // Even when the config is runnable, the underlying iterator ID can lag behind by a tick.
+            // Treat that gap as loading so we show a spinner instead of "Nothing to see here".
+            (!!(ui.queryConfig?.db && ui.queryConfig?.query) &&
+                !queryState?.id),
         setBatchSize: ui.setBatchSize,
         batchSize: ui.batchSize,
         iteratorId: queryState?.id,
@@ -737,11 +834,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     // behind the URL while it loads/indexes. If we freeze an "empty" or "wrong-root" config for
     // the active entry, the iterator never starts and the feed appears blank. Allow the active
     // entry to hydrate its config while keeping inactive entries frozen for fast back/forward.
-    if (
-        prevUrl !== activeUrl ||
-        (nextRunnable && !prevRunnable) ||
-        (nextRunnable && prevConfig?.pinResetKey !== nextConfig.pinResetKey)
-    ) {
+    if (prevUrl !== activeUrl || (nextRunnable && !prevRunnable)) {
         configsRef.current.set(activeKey, nextConfig);
         urlsRef.current.set(activeKey, activeUrl);
     }
@@ -763,12 +856,15 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
         });
     }, [activeKey]);
 
-    const report = React.useCallback((slotKey: string, state: QuerySlotState) => {
-        statesRef.current.set(slotKey, state);
-        if (slotKey === activeKeyRef.current) {
-            forceRender((x) => x + 1);
-        }
-    }, []);
+    const report = React.useCallback(
+        (slotKey: string, state: QuerySlotState) => {
+            statesRef.current.set(slotKey, state);
+            if (slotKey === activeKeyRef.current) {
+                forceRender((x) => x + 1);
+            }
+        },
+        []
+    );
 
     const renderKeys = useMemo(() => {
         const base = slotKeys.includes(activeKey)

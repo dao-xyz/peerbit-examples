@@ -130,18 +130,23 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     const [draft, setDraft] = useState<BasicVisualization | undefined>();
 
     const [searchParams, setSearchParams] = useSearchParams();
+    const rawViewParam = searchParams.get(VIEW_PARAM_QUERY_KEY) as
+        | string
+        | null;
+    const hasViewParam = rawViewParam != null;
     const childrenVisualizationFromParam: ChildVisualization =
-        CHILDREN_VISUALIZATION_PARAM_MAP[
-            (searchParams.get(VIEW_PARAM_QUERY_KEY) as string) || "feed"
-        ];
+        CHILDREN_VISUALIZATION_PARAM_MAP[rawViewParam || "feed"];
 
     const setChildrenVisualizationParam = (
         childrenVisualization: ChildVisualization
     ) => {
+        const newView =
+            CHILDREN_VISUALIZATION_PARAM_MAP_REVERSE[childrenVisualization];
+        if (!newView) return;
+        if (rawViewParam === newView) return; // already in sync; avoid replaceState churn
+
         const newParams = new URLSearchParams(searchParams);
         if (childrenVisualization != null) {
-            const newView =
-                CHILDREN_VISUALIZATION_PARAM_MAP_REVERSE[childrenVisualization];
             newParams.set(VIEW_PARAM_QUERY_KEY, newView);
             if (childrenVisualization === ChildVisualization.CHAT) {
                 // if we are in chat mode, remove the filter param
@@ -151,7 +156,6 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             newParams.delete(VIEW_PARAM_QUERY_KEY);
         }
 
-        console.log("SET PARAMS", childrenVisualization, newParams.toString());
         setSearchParams(newParams, { replace: true });
     };
 
@@ -271,23 +275,32 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
             // if we already have a draft, do not create a new one
             return;
         }
-        if (visualization) {
-            // create a new draft based on the last saved visualization
-            setDraft(new BasicVisualization({ ...visualization }));
-        } else {
-            if (!canvas) {
-                throw new Error("No canvas available to create a draft.");
-            }
-            // create a new empty draft
-            setDraft(
-                new BasicVisualization({
-                    canvasId: canvas.id,
-                    view:
-                        childrenVisualizationFromParam ??
-                        ChildVisualization.FEED,
-                })
-            );
+        if (!canvas) {
+            throw new Error("No canvas available to create a draft.");
         }
+
+        // URL param is authoritative when present; otherwise fall back to the saved visualization.
+        const desiredView =
+            (hasViewParam
+                ? childrenVisualizationFromParam
+                : (visualization as BasicVisualization | undefined)?.view) ??
+            ChildVisualization.FEED;
+
+        if (visualization) {
+            // create a new draft based on the last saved visualization, but keep view in sync with URL
+            const next = new BasicVisualization({ ...visualization });
+            next.view = desiredView;
+            setDraft(next);
+            return;
+        }
+
+        // create a new empty draft
+        setDraft(
+            new BasicVisualization({
+                canvasId: canvas.id,
+                view: desiredView,
+            })
+        );
     };
 
     useEffect(() => {

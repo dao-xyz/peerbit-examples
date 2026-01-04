@@ -30,7 +30,25 @@ const idxKey = () => {
     }
 };
 
-const urlKey = (loc: MinimalLocation) => `url:${loc.pathname}${loc.search}`;
+const canonicalizeSearch = (search: string) => {
+    const params = new URLSearchParams(search);
+    // Treat the default view (`v=feed`) as absent so REPLACEs that only add this
+    // param still resolve to the same snapshot key.
+    if (params.get("v") === "feed") params.delete("v");
+
+    const entries = Array.from(params.entries()).sort(([ak, av], [bk, bv]) => {
+        const keyCmp = ak.localeCompare(bk);
+        return keyCmp !== 0 ? keyCmp : av.localeCompare(bv);
+    });
+    const canonical = new URLSearchParams();
+    for (const [k, v] of entries) canonical.append(k, v);
+
+    const qs = canonical.toString();
+    return qs ? `?${qs}` : "";
+};
+
+const urlKey = (loc: MinimalLocation) =>
+    `url:${loc.pathname}${canonicalizeSearch(loc.search)}`;
 
 const keysForLocation = (loc: MinimalLocation) => {
     const keys = [urlKey(loc)];
@@ -130,7 +148,8 @@ export function useRestoreFeed(a: RestoreArgs) {
                     const url = new URL(window.location.href);
                     const hash = url.hash || "";
                     const qIndex = hash.indexOf("?");
-                    const base = qIndex === -1 ? hash : hash.substring(0, qIndex);
+                    const base =
+                        qIndex === -1 ? hash : hash.substring(0, qIndex);
                     const nextQuery = snap.queryParams.startsWith("?")
                         ? snap.queryParams
                         : `?${snap.queryParams}`;
@@ -196,11 +215,10 @@ export function useRestoreFeed(a: RestoreArgs) {
             }
         }
 
-        log(
-            tag,
-            `loadMore finished – list grew`,
-            { before, after: lenRef.current }
-        );
+        log(tag, `loadMore finished – list grew`, {
+            before,
+            after: lenRef.current,
+        });
 
         return lenRef.current > before;
     };
@@ -262,7 +280,10 @@ export function useRestoreFeed(a: RestoreArgs) {
                         );
                     }
                     const currentLen = lenRef.current;
-                    const remaining = Math.max(0, snap.loadedUntil - currentLen);
+                    const remaining = Math.max(
+                        0,
+                        snap.loadedUntil - currentLen
+                    );
                     // Prefer a single big fetch to reach the previous depth quickly.
                     // If we already reached loadedUntil but the anchor is still missing, fetch a small extra batch.
                     const n = remaining > 0 ? remaining : 25;
@@ -366,12 +387,7 @@ export function useRestoreFeed(a: RestoreArgs) {
         return () => {
             cancelled = true;
         };
-    }, [
-        a.isReplyVisible,
-        a.replyRefs,
-        a.replies,
-        id,
-    ]);
+    }, [a.isReplyVisible, a.replyRefs, a.replies, id]);
 
     return { restoring };
 }

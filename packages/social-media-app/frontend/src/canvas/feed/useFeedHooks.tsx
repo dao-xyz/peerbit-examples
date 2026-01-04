@@ -22,6 +22,7 @@ import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { useCanvases } from "../useCanvas";
 import { useStream } from "./StreamContext";
 import { useLocation } from "react-router";
+import { debugLog, emitDebugEvent } from "../../debug/debug";
 
 const DEFAULT_REVEAL_TIMEOUT = 3e3;
 
@@ -70,11 +71,15 @@ export const useFeedHooks = (props: {
     }>({ firstId: null, lastId: null });
     const committedLengthRef = useRef(0);
     const hiddenToLoadRef = useRef<Set<string>>(new Set());
-    const revealRef = useRef<(() => void) | null>(undefined);
+    const revealRef = useRef<((reason?: string) => void) | null>(undefined);
+    const revealCountRef = useRef(0);
 
     const restoredScrollPositionOnce = useRef(false);
     const alreadySeen = useRef(new Set<string>());
     const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const maxWaitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+        null
+    );
     const firstBatchHandled = useRef(false);
     const pendingScrollAdjust = useRef<{
         isWindow: boolean;
@@ -106,11 +111,20 @@ export const useFeedHooks = (props: {
         if (!list || list.length === 0) return;
 
         if (hasSnapshot) {
+            emitDebugEvent({
+                source: "feed",
+                name: "reveal:skip",
+                reason: "snapshot",
+            });
             // During feed restoration we prefer continuity over fancy reveal:
             // show whatever we have immediately so scroll correction can run.
             if (loadTimeoutRef.current) {
                 clearTimeout(loadTimeoutRef.current);
                 loadTimeoutRef.current = null;
+            }
+            if (maxWaitTimeoutRef.current) {
+                clearTimeout(maxWaitTimeoutRef.current);
+                maxWaitTimeoutRef.current = null;
             }
             committedIds.current.firstId = list[0]?.reply.idString ?? null;
             committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
@@ -127,30 +141,111 @@ export const useFeedHooks = (props: {
         const oldFirst = committedIds.current.firstId;
         const oldLast = committedIds.current.lastId;
 
-        let newHead = 0;
-        let newTail = 0;
+        // First non-empty render after a reset: commit immediately so we don't hide the whole list.
+        // The lazy-reveal logic is meant to hide *new* items relative to a committed range; without
+        // a committed range it can only produce an empty viewport.
+        if (!oldFirst || !oldLast) {
+            debugLog("feed:reveal:commit-initial", {
+                listLength: list.length,
+                iteratorId,
+                url: window.location.href,
+            });
+            committedIds.current.firstId = list[0]?.reply.idString ?? null;
+            committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
+            committedLengthRef.current = list.length;
+            hiddenToLoadRef.current.clear();
+            revealRef.current = null;
+            if (loadTimeoutRef.current) {
+                clearTimeout(loadTimeoutRef.current);
+                loadTimeoutRef.current = null;
+            }
+            if (maxWaitTimeoutRef.current) {
+                clearTimeout(maxWaitTimeoutRef.current);
+                maxWaitTimeoutRef.current = null;
+            }
+            if (hiddenRef.current.head !== 0 || hiddenRef.current.tail !== 0) {
+                hiddenRef.current = { head: 0, tail: 0 };
+                setHidden({ head: 0, tail: 0 });
+            }
+            return;
+        }
 
-        if (oldFirst) {
-            const idx = list.findIndex((r) => r.reply.idString === oldFirst);
-            newHead = idx === -1 ? list.length : idx;
-        } else {
-            newHead = list.length; // first paint → hide all
+        const firstIdx = list.findIndex((r) => r.reply.idString === oldFirst);
+        const lastIdx = list.findIndex((r) => r.reply.idString === oldLast);
+
+        // If our committed anchors disappeared or the order changed (e.g. dynamic "best" ranking),
+        // don't try to compute "new head/tail" by index — it can hide everything.
+        if (firstIdx === -1 || lastIdx === -1 || firstIdx > lastIdx) {
+            debugLog("feed:reveal:reset-anchors", {
+                listLength: list.length,
+                iteratorId,
+                oldFirst,
+                oldLast,
+                firstIdx,
+                lastIdx,
+                url: window.location.href,
+            });
+            committedIds.current.firstId = list[0]?.reply.idString ?? null;
+            committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
+            committedLengthRef.current = list.length;
+            hiddenToLoadRef.current.clear();
+            revealRef.current = null;
+            if (loadTimeoutRef.current) {
+                clearTimeout(loadTimeoutRef.current);
+                loadTimeoutRef.current = null;
+            }
+            if (maxWaitTimeoutRef.current) {
+                clearTimeout(maxWaitTimeoutRef.current);
+                maxWaitTimeoutRef.current = null;
+            }
+            if (hiddenRef.current.head !== 0 || hiddenRef.current.tail !== 0) {
+                hiddenRef.current = { head: 0, tail: 0 };
+                setHidden({ head: 0, tail: 0 });
+            }
+            return;
         }
-        if (oldLast) {
-            const idx = list.findIndex((r) => r.reply.idString === oldLast);
-            newTail = idx === -1 ? list.length : list.length - 1 - idx;
-        } else {
-            newTail = list.length;
-        }
+
+        const newHead = firstIdx;
+        const newTail = list.length - 1 - lastIdx;
 
         if (newHead === 0 && newTail === 0) {
+            if (hiddenRef.current.head !== 0 || hiddenRef.current.tail !== 0) {
+                if (loadTimeoutRef.current) {
+                    clearTimeout(loadTimeoutRef.current);
+                    loadTimeoutRef.current = null;
+                }
+                if (maxWaitTimeoutRef.current) {
+                    clearTimeout(maxWaitTimeoutRef.current);
+                    maxWaitTimeoutRef.current = null;
+                }
+                hiddenToLoadRef.current.clear();
+                revealRef.current = null;
+                hiddenRef.current = { head: 0, tail: 0 };
+                setHidden({ head: 0, tail: 0 });
+            }
             return;
         }
 
         const nextHidden = {
-            head: hiddenRef.current.head + newHead,
-            tail: hiddenRef.current.tail + newTail,
+            // `newHead/newTail` are computed relative to the committed anchors, so they already
+            // represent the total "pending" items. Do not accumulate across updates.
+            head: newHead,
+            tail: newTail,
         };
+        debugLog("feed:reveal:hide", {
+            hidden: nextHidden,
+            listLength: list.length,
+            iteratorId,
+            url: window.location.href,
+        });
+        emitDebugEvent({
+            source: "feed",
+            name: "reveal:hide",
+            head: nextHidden.head,
+            tail: nextHidden.tail,
+            listLength: list.length,
+            iteratorId,
+        });
         hiddenRef.current = nextHidden; // ← sync update
         setHidden(nextHidden); // ← async render update
 
@@ -165,7 +260,32 @@ export const useFeedHooks = (props: {
         hiddenToLoadRef.current = new Set(hiddenIds);
 
         // reveal function, (show pending messages)
-        const reveal = () => {
+        const reveal = (reason?: string) => {
+            revealCountRef.current += 1;
+            const count = revealCountRef.current;
+            debugLog("feed:reveal:show", {
+                count,
+                reason: reason || "unknown",
+                listLength: list.length,
+                iteratorId,
+                url: window.location.href,
+            });
+            emitDebugEvent({
+                source: "feed",
+                name: "reveal:show",
+                count,
+                reason: reason || "unknown",
+                listLength: list.length,
+                iteratorId,
+            });
+            if (loadTimeoutRef.current) {
+                clearTimeout(loadTimeoutRef.current);
+                loadTimeoutRef.current = null;
+            }
+            if (maxWaitTimeoutRef.current) {
+                clearTimeout(maxWaitTimeoutRef.current);
+                maxWaitTimeoutRef.current = null;
+            }
             committedIds.current.firstId = list[0]?.reply.idString ?? null;
             committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
             committedLengthRef.current = list.length;
@@ -173,32 +293,61 @@ export const useFeedHooks = (props: {
             hiddenRef.current = { head: 0, tail: 0 };
             setHidden({ head: 0, tail: 0 });
 
-            loadTimeoutRef.current = null;
             hiddenToLoadRef.current.clear();
         };
 
-        // stash it so handleLoad can call it
+        // stash it so handleLoad (and timeout) can call it
         revealRef.current = reveal;
 
+        // Debounce reveal so incremental head/tail growth collapses into a single reveal once the
+        // stream quiets down, while still ensuring we eventually reveal.
         if (loadTimeoutRef.current) {
             clearTimeout(loadTimeoutRef.current);
+            loadTimeoutRef.current = null;
         }
-
         loadTimeoutRef.current = setTimeout(() => {
-            // print the canvases that where not loaded
-            console.log("Reveal after timeout. Canvases that were not loaded", [
-                ...hiddenToLoadRef.current,
-            ]);
-            reveal();
+            debugLog("feed:reveal:timeout", {
+                pendingCount: hiddenToLoadRef.current.size,
+                pendingIds: [...hiddenToLoadRef.current].slice(0, 10),
+                listLength: list.length,
+                iteratorId,
+                url: window.location.href,
+            });
+            revealRef.current?.("timeout");
         }, revealTimeout);
 
+        if (!maxWaitTimeoutRef.current) {
+            const maxWaitMs = Math.max(revealTimeout * 2, revealTimeout);
+            maxWaitTimeoutRef.current = setTimeout(() => {
+                if (loadTimeoutRef.current) {
+                    clearTimeout(loadTimeoutRef.current);
+                    loadTimeoutRef.current = null;
+                }
+                debugLog("feed:reveal:max-wait", {
+                    pendingCount: hiddenToLoadRef.current.size,
+                    pendingIds: [...hiddenToLoadRef.current].slice(0, 10),
+                    listLength: list.length,
+                    iteratorId,
+                    url: window.location.href,
+                });
+                revealRef.current?.("maxWait");
+            }, maxWaitMs);
+        }
+    }, [processedReplies, hasSnapshot, revealTimeout]);
+
+    // Ensure any pending reveal timeout is cleared on unmount.
+    useEffect(() => {
         return () => {
             if (loadTimeoutRef.current) {
                 clearTimeout(loadTimeoutRef.current);
                 loadTimeoutRef.current = null;
             }
+            if (maxWaitTimeoutRef.current) {
+                clearTimeout(maxWaitTimeoutRef.current);
+                maxWaitTimeoutRef.current = null;
+            }
         };
-    }, [processedReplies, hasSnapshot, revealTimeout]);
+    }, []);
 
     useEffect(() => {
         if (
@@ -245,6 +394,28 @@ export const useFeedHooks = (props: {
     }, [visualization?.view, feedRoot]);
 
     const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
+    const [initialHydrated, setInitialHydrated] = useState(false);
+    const hydrationIteratorRef = useRef<string | undefined>(undefined);
+
+    useLayoutEffect(() => {
+        if (hydrationIteratorRef.current !== iteratorId) {
+            hydrationIteratorRef.current = iteratorId;
+            setInitialHydrated(false);
+        }
+        if (!iteratorId) return;
+        if (props.disableLoadMore) return;
+        const myId = iteratorId;
+        // Trigger the first batch ASAP so we don't flash the empty-state placeholder before results arrive.
+        loadMore?.()
+            .catch(() => {})
+            .finally(() => {
+                // Only mark hydrated if we're still on the same iterator.
+                if (hydrationIteratorRef.current === myId) {
+                    setInitialHydrated(true);
+                }
+            });
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [iteratorId]);
 
     const scrollUpForMore = visualization?.view === ChildVisualization.CHAT;
 
@@ -363,7 +534,7 @@ export const useFeedHooks = (props: {
     const sentinelIndexPadding = Math.floor(batchSize / 2);
     const sentinelIndex = scrollUpForMore
         ? sentinelIndexPadding
-        : (processedReplies?.length || 0) - 1 - sentinelIndexPadding;
+        : (processedReplies?.length || 0) - 1;
 
     const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
     const processedRepliesLength = processedReplies?.length || 0;
@@ -409,7 +580,11 @@ export const useFeedHooks = (props: {
                     clearTimeout(loadTimeoutRef.current);
                     loadTimeoutRef.current = null;
                 }
-                revealRef.current();
+                if (maxWaitTimeoutRef.current) {
+                    clearTimeout(maxWaitTimeoutRef.current);
+                    maxWaitTimeoutRef.current = null;
+                }
+                revealRef.current("allLoaded");
             }
         }
     }, []);
@@ -435,12 +610,6 @@ export const useFeedHooks = (props: {
         debug: dev.scrollRestoreDebug ?? false,
         enabled: true,
     });
-
-    useEffect(() => {
-        if (iteratorId) {
-            loadMore?.().catch(() => {});
-        }
-    }, [iteratorId]);
 
     // Recompute when hidden window changes; `indexIsReadyToRender` reads from a ref so
     // it won't otherwise invalidate memoization when we reveal after timeout.
@@ -521,5 +690,6 @@ export const useFeedHooks = (props: {
         isChat,
         visualization,
         handleLoad,
+        initialHydrated,
     } as const;
 };

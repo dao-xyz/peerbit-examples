@@ -56,9 +56,8 @@ test.describe("Feed direct landing", () => {
         });
 
         const feed = page.getByTestId("feed");
-        await expect(feed.getByText(`${prefix} 24`, { exact: true })).toBeVisible(
-            { timeout: 180_000 }
-        );
+        await expect(
+            feed.getByText(`${prefix} 24`, { exact: true })
+        ).toBeVisible({ timeout: 180_000 });
     });
 });
-

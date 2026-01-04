@@ -102,34 +102,42 @@ async function waitForFeedCardsById(
 ) {
     const feed = page.getByTestId("feed");
     await expect
-        .poll(async () => {
-            const found = new Set(
-                await feed.evaluate(() =>
-                    Array.from(
-                        document.querySelectorAll("[data-testid='feed'] [data-canvas-id]")
+        .poll(
+            async () => {
+                const found = new Set(
+                    await feed.evaluate(
+                        () =>
+                            Array.from(
+                                document.querySelectorAll(
+                                    "[data-testid='feed'] [data-canvas-id]"
+                                )
+                            )
+                                .map((n) => n.getAttribute("data-canvas-id"))
+                                .filter(Boolean) as string[]
                     )
-                        .map((n) => n.getAttribute("data-canvas-id"))
-                        .filter(Boolean) as string[]
-                )
-            );
-            return ids.every((id) => found.has(id));
-        }, { timeout: timeoutMs })
+                );
+                return ids.every((id) => found.has(id));
+            },
+            { timeout: timeoutMs }
+        )
         .toBe(true);
 }
 
 test.describe("Persistent reload perf (template posts)", () => {
-    test("insert Photo album templates → reload → same posts visible (timed)", async (
-        { page },
-        testInfo
-    ) => {
+    test("insert Photo album templates → reload → same posts visible (timed)", async ({
+        page,
+    }, testInfo) => {
         setupConsoleCapture(page, testInfo, {
             printAll: true,
             capturePageErrors: true,
         });
 
-        const url = withSearchParams(OFFLINE_BASE.replace("#/", "#/?s=recent"), {
-            ephemeral: false,
-        });
+        const url = withSearchParams(
+            OFFLINE_BASE.replace("#/", "#/?s=recent"),
+            {
+                ephemeral: false,
+            }
+        );
         await page.goto(url);
         await expectPersistent(page);
 
@@ -154,10 +162,9 @@ test.describe("Persistent reload perf (template posts)", () => {
         expect(dt).toBeLessThan(15_000);
     });
 
-    test("Photo album navigation children render as tabs, not feed posts", async (
-        { page },
-        testInfo
-    ) => {
+    test("Photo album navigation children render as tabs, not feed posts", async ({
+        page,
+    }, testInfo) => {
         setupConsoleCapture(page, testInfo, {
             printAll: true,
             capturePageErrors: true,
@@ -171,23 +178,33 @@ test.describe("Persistent reload perf (template posts)", () => {
         const albumId = ids[0];
 
         // Parent feed should only show the album root post.
-        await expect(page.getByTestId("feed").locator("[data-canvas-id]")).toHaveCount(1);
+        await expect(
+            page.getByTestId("feed").locator("[data-canvas-id]")
+        ).toHaveCount(1);
 
         // Open the album post
         await page.goto(`${OFFLINE_BASE}c/${albumId}`);
         await expectPersistent(page);
 
         // Navigational children should appear as "Places" tabs/rows
-        await expect(page.getByRole("button", { name: "Photos", exact: true })).toBeVisible({
+        await expect(
+            page.getByRole("button", { name: "Photos", exact: true })
+        ).toBeVisible({
             timeout: 30_000,
         });
-        await expect(page.getByRole("button", { name: "Comments", exact: true })).toBeVisible({
+        await expect(
+            page.getByRole("button", { name: "Comments", exact: true })
+        ).toBeVisible({
             timeout: 30_000,
         });
 
         // Feed should not render navigational children as posts.
         const feed = page.getByTestId("feed");
-        await expect(feed.locator("[data-canvas-id]", { hasText: "Photos" })).toHaveCount(0);
-        await expect(feed.locator("[data-canvas-id]", { hasText: "Comments" })).toHaveCount(0);
+        await expect(
+            feed.locator("[data-canvas-id]", { hasText: "Photos" })
+        ).toHaveCount(0);
+        await expect(
+            feed.locator("[data-canvas-id]", { hasText: "Comments" })
+        ).toHaveCount(0);
     });
 });

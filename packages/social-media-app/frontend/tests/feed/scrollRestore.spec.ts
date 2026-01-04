@@ -123,7 +123,8 @@ test.describe("Feed scroll restoration", () => {
         await page.waitForTimeout(150);
 
         const anchorId = await card.getAttribute("data-canvas-id");
-        if (!anchorId) throw new Error("Missing data-canvas-id for target card");
+        if (!anchorId)
+            throw new Error("Missing data-canvas-id for target card");
 
         const beforeTop = await card.evaluate(
             (el) => (el as HTMLElement).getBoundingClientRect().top
@@ -142,7 +143,9 @@ test.describe("Feed scroll restoration", () => {
         await expect(feed).toBeVisible({ timeout: 60_000 });
         await attachHistory("afterBack");
 
-        const cardAfter = feed.locator(`[data-canvas-id="${anchorId}"]`).first();
+        const cardAfter = feed
+            .locator(`[data-canvas-id="${anchorId}"]`)
+            .first();
         await expect(cardAfter).toBeVisible({
             timeout: RECOVERY_ASSERT_TIMEOUT_MS,
         });

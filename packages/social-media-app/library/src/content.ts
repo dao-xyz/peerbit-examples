@@ -3245,6 +3245,7 @@ export class Scope extends Program<ScopeArgs> {
                 if (parent) {
                     // Defer parent replies-only refresh out of the current frame
                     const p = parent;
+                    const scopeRef = this;
                     globalThis.setTimeout?.(() => {
                         try {
                             globalThis.window?.dispatchEvent?.(
@@ -3259,15 +3260,29 @@ export class Scope extends Program<ScopeArgs> {
                                 })
                             );
                         } catch {}
-                        /*  TODO is this needed?  p.nearestScope
-                              ._hierarchicalReindex!.add({
-                                  canvas: p,
-                                  options: {
-                                      onlyReplies: true,
-                                      skipAncestors: true,
-                                  },
-                              })
-                              .catch(() => { }); */
+                        // Keep parent reply counters fresh even when child canvases aren't replicated/loaded
+                        // (e.g. feed view). This lets Best ordering + UI counts react to new comments.
+                        try {
+                            const gen = scopeRef.bumpGeneration(p.idString);
+                            scopeRef
+                                ._hierarchicalReindex!.add({
+                                    canvas: p,
+                                    options: {
+                                        onlyReplies: true,
+                                        skipAncestors: true,
+                                    },
+                                    propagateParents: false,
+                                    generation: gen,
+                                })
+                                .catch((err) => {
+                                    if (!isClosedError(err)) {
+                                        console.debug(
+                                            "reindex add failed",
+                                            err
+                                        );
+                                    }
+                                });
+                        } catch {}
                     }, 0);
                 }
             }

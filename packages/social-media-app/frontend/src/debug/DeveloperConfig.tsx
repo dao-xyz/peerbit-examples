@@ -122,8 +122,7 @@ export const setDeveloperOptions = (partial: Partial<DeveloperOptions>) => {
             {
                 const key = "devScrollRestoreDebug";
                 if (next.scrollRestoreDebug == null) params.delete(key);
-                else
-                    params.set(key, next.scrollRestoreDebug ? "1" : "0");
+                else params.set(key, next.scrollRestoreDebug ? "1" : "0");
             }
             const newQuery = params.toString();
             const url = new URL(window.location.href);
