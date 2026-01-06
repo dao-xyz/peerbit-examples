@@ -16,6 +16,13 @@ const RECOVERY_BUDGET_MS = Number(
 const RECOVERY_ASSERT_TIMEOUT_MS = Math.max(RECOVERY_BUDGET_MS * 2, 30_000);
 const MAX_OFFSET_ERROR_PX = 300;
 const DEBUG_HISTORY = process.env.PW_SCROLL_RESTORE_DEBUG_HISTORY === "1";
+const KEEP_ARTIFACTS = process.env.PW_SCROLL_RESTORE_ARTIFACTS === "1";
+
+// This spec scrolls and renders a lot of DOM; Playwright tracing/video can grow unbounded
+// and OOM the worker process. Keep artifacts off here by default.
+if (!KEEP_ARTIFACTS) {
+    test.use({ trace: "off", video: "off" });
+}
 
 test.describe("Feed scroll restoration", () => {
     test.setTimeout(300_000);

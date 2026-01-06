@@ -96,15 +96,6 @@ test.describe("Best feed stability on live reply updates", () => {
     test("does not reorder when an older post gets a new comment, but updates the count", async ({
         page,
     }, testInfo) => {
-        await page.addInitScript(() => {
-            (window as any).__REINDEX_EVENTS = [];
-            window.addEventListener("reindex:debug", (e: any) => {
-                try {
-                    (window as any).__REINDEX_EVENTS.push(e.detail);
-                } catch {}
-            });
-        });
-
         setupConsoleCapture(page, testInfo, {
             printAll: false,
             capturePageErrors: true,
@@ -189,6 +180,7 @@ test.describe("Best feed stability on live reply updates", () => {
 
         // Critical assertion: even though Best ranking would change (replies DESC),
         // the visible feed order remains stable within this session.
+
         const afterOrder = await orderForIdsInFeed(page, olderId, newerId);
         expect(afterOrder.a).toBeGreaterThanOrEqual(0);
         expect(afterOrder.b).toBeGreaterThanOrEqual(0);

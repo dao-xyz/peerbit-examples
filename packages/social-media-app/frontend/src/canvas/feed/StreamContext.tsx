@@ -42,6 +42,7 @@ import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { equals } from "uint8arrays";
 import { useStreamSettings } from "./StreamSettingsContext";
+import { getCanvasIdFromPath } from "../../routes.js";
 
 export const STREAM_QUERY_PARAMS = {
     SETTINGS: "s", // stream view
@@ -148,6 +149,8 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
 
     // Stabilize ordering for "best"/ranked feeds to prevent large reorders on async reply-count updates.
     const stableOrderRef = useRef<string[]>([]);
+    const stableOrderSetRef = useRef<Set<string>>(new Set());
+    const lastPinResetKeyRef = useRef<string | null>(null);
 
     // Session-local pinning of newly created posts (per slot)
     const pinnedIdsRef = useRef(new Set<string>());
@@ -156,7 +159,12 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
     const sessionStartRef = useRef<number>(Date.now());
 
     useEffect(() => {
+        const nextKey = config?.pinResetKey ?? null;
+        if (lastPinResetKeyRef.current === nextKey) return;
+        lastPinResetKeyRef.current = nextKey;
+
         stableOrderRef.current = [];
+        stableOrderSetRef.current = new Set();
         pinnedIdsRef.current.clear();
         seenIdsRef.current.clear();
         hydratedRef.current = false;
@@ -250,41 +258,38 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
             ) => {
                 if (!config?.stableOrdering) {
                     stableOrderRef.current = items.map((x) => x.idString);
+                    stableOrderSetRef.current = new Set(stableOrderRef.current);
                     return items;
                 }
 
                 // First batch: commit the iterator's initial order.
                 if (stableOrderRef.current.length === 0) {
                     stableOrderRef.current = items.map((x) => x.idString);
+                    stableOrderSetRef.current = new Set(stableOrderRef.current);
                     return items;
                 }
 
                 const byId = new Map<string, (typeof items)[number]>();
                 for (const item of items) byId.set(item.idString, item);
 
-                const next: typeof items = [];
-                const nextOrder: string[] = [];
-                const seen = new Set<string>();
+                // Keep a monotonic order list: items can temporarily disappear when the underlying
+                // iterator refreshes (e.g. due to sort-key updates). If we drop missing IDs, they
+                // will be re-appended later and appear to "jump" in the list.
+                const stable = stableOrderRef.current;
+                const stableSet = stableOrderSetRef.current;
 
-                // Preserve previously committed order for any items still present.
-                for (const id of stableOrderRef.current) {
-                    const item = byId.get(id);
-                    if (!item) continue;
-                    next.push(item);
-                    nextOrder.push(id);
-                    seen.add(id);
-                }
-
-                // Append any newly discovered items.
                 for (const item of items) {
                     const id = item.idString;
-                    if (seen.has(id)) continue;
-                    next.push(item);
-                    nextOrder.push(id);
-                    seen.add(id);
+                    if (stableSet.has(id)) continue;
+                    stable.push(id);
+                    stableSet.add(id);
                 }
 
-                stableOrderRef.current = nextOrder;
+                const next: typeof items = [];
+                for (const id of stable) {
+                    const item = byId.get(id);
+                    if (item) next.push(item);
+                }
                 return next;
             };
 
@@ -808,6 +813,7 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     children,
 }) => {
     const ui = useStreamUiState();
+    const { root } = useCanvases();
     const location = useLocation();
     const activeUrl = urlKey(location);
     const activeKey = entryKeyForLocation(location);
@@ -830,13 +836,50 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     const prevRunnable = !!(prevConfig?.db && prevConfig?.query);
     const nextRunnable = !!(nextConfig?.db && nextConfig?.query);
 
+    const pinResetKeyChanged =
+        prevConfig?.pinResetKey !== nextConfig?.pinResetKey;
+
+    // Only commit a config when the canvas context has caught up with the URL.
+    // Otherwise we can transiently "borrow" the previous view's leaf and accidentally
+    // pin the root feed iterator into a post's comment thread (or overwrite cached
+    // iterators on back/forward).
+    const feedRootMatchesLocation = (() => {
+        const pathname = location.pathname || "";
+
+        // Canvas route: `/c/:id`
+        const routeCanvasId = getCanvasIdFromPath(pathname);
+        if (routeCanvasId) {
+            return !!(ui.feedRoot && equals(ui.feedRoot.id, routeCanvasId));
+        }
+
+        // Root route: expect the origin/root canvas (path depth 0).
+        if (pathname === "/" || pathname === "") {
+            // Prefer explicit root ID matching (path depth can be temporarily wrong/zero
+            // while a non-root canvas is still indexing during navigation).
+            if (root?.id) {
+                return !!(ui.feedRoot && equals(ui.feedRoot.id, root.id));
+            }
+
+            const depth = ui.feedRoot?.__indexed?.pathDepth;
+            return typeof depth === "number" ? depth === 0 : false;
+        }
+
+        // Non-canvas routes don't drive the feed query.
+        return true;
+    })();
+
+    const canCommitConfig = nextRunnable && feedRootMatchesLocation;
+
     // Important: on initial load (or after navigating to a canvas route) the canvas leaf can lag
-    // behind the URL while it loads/indexes. If we freeze an "empty" or "wrong-root" config for
-    // the active entry, the iterator never starts and the feed appears blank. Allow the active
-    // entry to hydrate its config while keeping inactive entries frozen for fast back/forward.
-    if (prevUrl !== activeUrl || (nextRunnable && !prevRunnable)) {
-        configsRef.current.set(activeKey, nextConfig);
+    // behind the URL while it loads/indexes. If we freeze an "empty" config the iterator never
+    // starts; if we freeze a "wrong-root" config, we can show the root feed inside a comment
+    // thread. Allow the active entry to hydrate its config once the leaf matches the URL, while
+    // keeping inactive entries frozen for fast back/forward.
+    if (prevUrl !== activeUrl) {
         urlsRef.current.set(activeKey, activeUrl);
+        if (canCommitConfig) configsRef.current.set(activeKey, nextConfig);
+    } else if (canCommitConfig && (!prevRunnable || pinResetKeyChanged)) {
+        configsRef.current.set(activeKey, nextConfig);
     }
 
     useEffect(() => {

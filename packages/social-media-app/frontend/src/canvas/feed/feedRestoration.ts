@@ -89,7 +89,11 @@ export function useLeaveSnapshot(args: LeaveArgs) {
         );
         if (idx === -1) return;
 
-        const node = replyRefs[idx];
+        const node =
+            replyRefs[idx] ||
+            (document.querySelector(
+                `[data-testid="feed"] [data-canvas-id="${from.idString}"]`
+            ) as HTMLDivElement | null);
         if (!node) return;
         const nodeTop = node.getBoundingClientRect().top; // << screen-relative
 
