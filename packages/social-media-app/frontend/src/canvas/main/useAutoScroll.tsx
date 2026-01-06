@@ -41,6 +41,8 @@ export const useAutoScroll = (properties: {
     enabled: boolean;
     debug?: boolean;
     scrollOnViewChange?: boolean;
+    /** When true, disables programmatic scroll jumps (used for feed restoration). */
+    suppressAutoScroll?: boolean;
 }) => {
     const {
         replies: processedReplies,
@@ -71,6 +73,9 @@ export const useAutoScroll = (properties: {
         if (!properties.scrollOnViewChange) {
             return;
         }
+        if (properties.suppressAutoScroll) {
+            return;
+        }
         /* 
         // TODO is this needed?
         if (viewIsShouldScrollToBottom) {
@@ -94,7 +99,12 @@ export const useAutoScroll = (properties: {
         properties.debug &&
             console.log("trigger scroll because the view changed", setting);
         triggerScroll();
-    }, [setting?.scrollDirection, properties.enabled]);
+    }, [
+        setting?.scrollDirection,
+        properties.enabled,
+        properties.scrollOnViewChange,
+        properties.suppressAutoScroll,
+    ]);
 
     // Refs for scroll adjustments.
     const resizeScrollBottomRef = useRef(getScrollBottomOffset(getScrollTop()));
@@ -179,6 +189,19 @@ export const useAutoScroll = (properties: {
             return;
         }
         if (processedReplies.length > 0) {
+            if (properties.suppressAutoScroll) {
+                // Avoid programmatic jumps while restoring scroll; instead, treat the current
+                // boundary reply as "already seen" so we don't jump when suppression lifts.
+                const boundary = viewIsShouldScrollToBottom
+                    ? processedReplies[processedReplies.length - 1]
+                    : processedReplies[0];
+                if (boundary) {
+                    lastScrollToSee.current = boundary.reply.idString;
+                }
+
+                bodyResizeScrollPositionRef.current = getScrollTop();
+                return;
+            }
             if (viewIsShouldScrollToBottom) {
                 let last = processedReplies[processedReplies.length - 1];
                 latestReplyRef.current =

@@ -539,7 +539,14 @@ export const useFeedHooks = (props: {
     const replyContentRefs = useRef<(HTMLDivElement | null)[]>([]);
     const processedRepliesLength = processedReplies?.length || 0;
     if (replyContentRefs.current.length !== processedRepliesLength) {
-        replyContentRefs.current = new Array(processedRepliesLength).fill(null);
+        const current = replyContentRefs.current;
+        if (current.length < processedRepliesLength) {
+            current.push(
+                ...new Array(processedRepliesLength - current.length).fill(null)
+            );
+        } else {
+            current.length = processedRepliesLength;
+        }
     }
 
     const indexIsReadyToRender = useCallback(
@@ -626,6 +633,7 @@ export const useFeedHooks = (props: {
         scrollOnViewChange: !restoredScrollPositionOnce.current,
         enabled: true,
         debug: false,
+        suppressAutoScroll: hasSnapshot,
         lastElementRef: () =>
             replyContentRefs.current[replyContentRefs.current.length - 1],
     });

@@ -176,6 +176,7 @@ export const Reply = ({
                     : ""
             } ${styleFromFromMode} ${className}`}
             data-canvas-id={toBase64URL(canvas.id)}
+            data-canvas-id-string={canvas.idString}
             data-variant={variant}
             data-align={align}
         >

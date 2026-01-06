@@ -9,11 +9,13 @@ import {
 } from "react";
 import type { WithContext } from "@peerbit/document";
 import type { Canvas as CanvasDB } from "@giga-app/interface";
+import { toBase64URL } from "@peerbit/crypto";
 
 /* 1 ────────────────────────────────────────────────────────────────────────── */
 export interface FeedSnapshot {
     queryParams?: string; // query params of the current location
     rootId: string; // idString of the canvas you were inside
+    rootCanvasId: string; // base64url(canvas.id) for URL keying
     anchorId: string; // first reply visible when you left
     offsetY: number; // pixels between viewport‑top and anchor‑top
     loadedUntil: number; // how many replies had been fetched
@@ -50,6 +52,14 @@ const canonicalizeSearch = (search: string) => {
 const urlKey = (loc: MinimalLocation) =>
     `url:${loc.pathname}${canonicalizeSearch(loc.search)}`;
 
+const canvasIdFromPathname = (pathname: string) => {
+    const parts = pathname.split("/").filter(Boolean);
+    const idx = parts.indexOf("c");
+    return idx >= 0 ? parts[idx + 1] : undefined;
+};
+
+const rootKey = (rootCanvasId: string) => `root:${rootCanvasId}`;
+
 const keysForLocation = (loc: MinimalLocation) => {
     const keys = [urlKey(loc)];
     const k = idxKey();
@@ -60,16 +70,24 @@ const keysForLocation = (loc: MinimalLocation) => {
 const cache = new Map<string, FeedSnapshot>();
 export const saveSnapshot = (loc: MinimalLocation, snap: FeedSnapshot) => {
     for (const k of keysForLocation(loc)) cache.set(k, snap);
+    if (snap.rootCanvasId) cache.set(rootKey(snap.rootCanvasId), snap);
 };
 export const getSnapshot = (loc: MinimalLocation) => {
     for (const k of keysForLocation(loc)) {
         const snap = cache.get(k);
         if (snap) return snap;
     }
+    const rootCanvasId = canvasIdFromPathname(loc.pathname);
+    if (rootCanvasId) {
+        const snap = cache.get(rootKey(rootCanvasId));
+        if (snap) return snap;
+    }
     return undefined;
 };
-export const consumeSnapshot = (loc: MinimalLocation) => {
+export const consumeSnapshot = (loc: MinimalLocation, snap?: FeedSnapshot) => {
     for (const k of keysForLocation(loc)) cache.delete(k);
+    const rootCanvasId = snap?.rootCanvasId || canvasIdFromPathname(loc.pathname);
+    if (rootCanvasId) cache.delete(rootKey(rootCanvasId));
 };
 
 /* 2 ────────────────────────────────────────────────────────────────────────── */
@@ -84,24 +102,59 @@ export function useLeaveSnapshot(args: LeaveArgs) {
     return (from: CanvasDB) => {
         if (!feedRoot) return;
 
+        const rootCanvasId = toBase64URL(feedRoot.id);
+
         const idx = replies.findIndex(
             (r) => r.reply.idString === from.idString
         );
-        if (idx === -1) return;
+        const explicitNode =
+            idx === -1
+                ? null
+                : replyRefs[idx] ||
+                  (document.querySelector(
+                      `[data-testid="feed"] [data-canvas-id-string="${from.idString}"]`
+                  ) as HTMLDivElement | null);
 
-        const node =
-            replyRefs[idx] ||
-            (document.querySelector(
-                `[data-testid="feed"] [data-canvas-id="${from.idString}"]`
-            ) as HTMLDivElement | null);
-        if (!node) return;
-        const nodeTop = node.getBoundingClientRect().top; // << screen-relative
+        // Fallback: if the clicked item's ref hasn't re-attached yet (common right after a loadMore()),
+        // anchor to the first visible reply in the feed so we still restore near the same place.
+        const fallbackNode = (() => {
+            const container = document.querySelector(
+                `[data-testid="feed"]`
+            ) as HTMLElement | null;
+            if (!container) return null;
+            const nodes = Array.from(
+                container.querySelectorAll("[data-canvas-id]")
+            ) as HTMLElement[];
+            const viewportH = window.innerHeight || 0;
+            let best: { node: HTMLElement; top: number } | null = null;
+            for (const node of nodes) {
+                const rect = node.getBoundingClientRect();
+                // Visible (intersects viewport)
+                if (rect.bottom <= 0) continue;
+                if (rect.top >= viewportH) continue;
+                if (!best || rect.top < best.top) {
+                    best = { node, top: rect.top };
+                }
+            }
+            return best;
+        })();
+
+        const node = explicitNode || fallbackNode?.node;
+        const anchorId =
+            (explicitNode ? from.idString : null) ||
+            fallbackNode?.node.getAttribute("data-canvas-id-string") ||
+            null;
+        const offsetY =
+            explicitNode?.getBoundingClientRect().top ?? fallbackNode?.top;
+
+        if (!node || !anchorId || offsetY == null) return;
 
         saveSnapshot(location, {
             queryParams: location.search,
             rootId: feedRoot.idString,
-            anchorId: from.idString,
-            offsetY: nodeTop, // screen relative
+            rootCanvasId,
+            anchorId,
+            offsetY, // screen relative
             loadedUntil: replies.length,
         });
     };
@@ -322,15 +375,17 @@ export function useRestoreFeed(a: RestoreArgs) {
 
         let cancelled = false;
         const tolerancePx = 2;
-        const settleFramesRequired = 2;
+        // Layout can still shift after we restore (e.g., images above the anchor loading).
+        // Keep correcting until we've been stable for a short window.
+        const settleMsRequired = 1000;
         const maxWaitMs = 30_000; // allow time to fetch/paint deep items
-        let settled = 0;
+        let stableSince: number | null = null;
         const t0 = performance.now();
 
         const finish = () => {
             if (doneRef.current) return;
             doneRef.current = true;
-            consumeSnapshot(location);
+            consumeSnapshot(location, snap);
             setRestoring(false);
             a.onRestore(snap);
         };
@@ -374,13 +429,14 @@ export function useRestoreFeed(a: RestoreArgs) {
                 });
 
             if (Math.abs(delta) <= tolerancePx) {
-                settled++;
-                if (settled >= settleFramesRequired) {
+                if (stableSince == null) stableSince = performance.now();
+                const stableFor = performance.now() - stableSince;
+                if (stableFor >= settleMsRequired) {
                     finish();
                     return;
                 }
             } else {
-                settled = 0;
+                stableSince = null;
                 window.scrollBy(0, delta);
             }
 

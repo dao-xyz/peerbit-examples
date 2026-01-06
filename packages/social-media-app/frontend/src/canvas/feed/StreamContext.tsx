@@ -104,10 +104,24 @@ type QuerySlotState = {
 const MAX_STREAM_QUERY_SLOTS = 25;
 
 type MinimalLocation = { key?: string; pathname: string; search: string };
-const idxKey = () => {
+const idxKey = (loc?: MinimalLocation) => {
     try {
-        const idx = (window.history.state as any)?.idx;
-        return typeof idx === "number" ? `idx:${idx}` : undefined;
+        const state: any = window.history.state;
+        const idx = state?.idx;
+        if (typeof idx !== "number") return undefined;
+
+        // React Router location updates can race `window.history.state` on PUSH/POP.
+        // If the state key doesn't match the location key, don't trust `idx` or we may
+        // accidentally overwrite the previous entry's cached iterator/config.
+        const locKey = loc?.key;
+        if (typeof locKey === "string" && locKey && locKey !== "default") {
+            const stateKey = state?.key;
+            if (typeof stateKey !== "string" || stateKey !== locKey) {
+                return undefined;
+            }
+        }
+
+        return `idx:${idx}`;
     } catch {
         return undefined;
     }
@@ -134,7 +148,7 @@ const entryKeyForLocation = (loc: MinimalLocation) =>
     // Prefer `history.state.idx` because it is stable for a given history entry even across REPLACE.
     // `location.key` can change on REPLACE (and may be "default" on the initial entry), which would
     // accidentally tear down and recreate iterators.
-    idxKey() ?? urlKey(loc);
+    idxKey(loc) ?? urlKey(loc);
 
 const StreamQuerySlot = React.memo(function StreamQuerySlot({
     slotKey,

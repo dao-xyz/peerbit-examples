@@ -87,6 +87,9 @@ test.describe("Feed scroll restoration", () => {
                         : null,
                 };
             });
+            // Helpful when running locally with PW_SCROLL_RESTORE_DEBUG_HISTORY=1.
+            // eslint-disable-next-line no-console
+            console.log(`history:${label}`, snapshot);
             await testInfo.attach(`history:${label}`, {
                 body: Buffer.from(JSON.stringify(snapshot, null, 2), "utf8"),
                 contentType: "application/json",
@@ -137,6 +140,23 @@ test.describe("Feed scroll restoration", () => {
             (el) => (el as HTMLElement).getBoundingClientRect().top
         );
 
+        if (DEBUG_HISTORY) {
+            const info = await page.evaluate(({ anchorId }) => {
+                const feed = document.querySelector(
+                    '[data-testid="feed"]'
+                ) as HTMLElement | null;
+                const count = feed
+                    ? feed.querySelectorAll("[data-canvas-id]").length
+                    : 0;
+                const exists = feed
+                    ? !!feed.querySelector(`[data-canvas-id="${anchorId}"]`)
+                    : false;
+                return { count, exists };
+            }, { anchorId });
+            // eslint-disable-next-line no-console
+            console.log("feed:beforeOpen", info);
+        }
+
         // Open the post (avoid clicking markdown/text elements which are non-navigating).
         await card
             .getByTestId("open-post")
@@ -149,6 +169,23 @@ test.describe("Feed scroll restoration", () => {
         await page.getByTestId("nav-back").click();
         await expect(feed).toBeVisible({ timeout: 60_000 });
         await attachHistory("afterBack");
+
+        if (DEBUG_HISTORY) {
+            const info = await page.evaluate(({ anchorId }) => {
+                const feed = document.querySelector(
+                    '[data-testid="feed"]'
+                ) as HTMLElement | null;
+                const count = feed
+                    ? feed.querySelectorAll("[data-canvas-id]").length
+                    : 0;
+                const exists = feed
+                    ? !!feed.querySelector(`[data-canvas-id="${anchorId}"]`)
+                    : false;
+                return { count, exists };
+            }, { anchorId });
+            // eslint-disable-next-line no-console
+            console.log("feed:afterBack", info);
+        }
 
         const cardAfter = feed
             .locator(`[data-canvas-id="${anchorId}"]`)
@@ -169,6 +206,15 @@ test.describe("Feed scroll restoration", () => {
                 { timeout: RECOVERY_ASSERT_TIMEOUT_MS }
             )
             .toBeLessThanOrEqual(MAX_OFFSET_ERROR_PX);
+
+        // Regression: ensure we don't drift after restoration converges.
+        await page.waitForTimeout(1000);
+        const topLater = await cardAfter.evaluate(
+            (el) => (el as HTMLElement).getBoundingClientRect().top
+        );
+        expect(Math.abs(topLater - beforeTop)).toBeLessThanOrEqual(
+            MAX_OFFSET_ERROR_PX
+        );
 
         const recoveredMs = Date.now() - tBack;
         await testInfo.attach("timing:backToFeedRecoveredMs", {
