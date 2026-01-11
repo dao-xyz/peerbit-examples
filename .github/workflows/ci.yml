@@ -33,6 +33,9 @@ jobs:
                   aws-region: us-east-1
 
             - name: Build every frontend with the commit hash
+              env:
+                  VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+                  VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
               run: |
                   pnpm install --frozen-lockfile
                   SHORT_SHA=$(echo $COMMIT_HASH | cut -c1-7) pnpm run build
