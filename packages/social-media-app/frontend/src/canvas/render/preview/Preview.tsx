@@ -1090,9 +1090,11 @@ export const CanvasPreview = ({
 
     const onEmpty = useMemo(() => whenEmpty ?? <></>, [whenEmpty]);
 
-    // If we truly have nothing yet, allow placeholder/empty.
+    // If we truly have nothing yet, render an explicit placeholder if provided.
+    // Default `whenEmpty` is an empty fragment, so this preserves the old `null`
+    // behavior unless callers opt in.
     if (!hasLocalRects && isEmpty) {
-        return null;
+        return onEmpty;
     }
     if (isEmpty) {
         return onEmpty;

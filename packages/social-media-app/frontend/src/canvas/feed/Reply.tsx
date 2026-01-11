@@ -266,6 +266,11 @@ export const Reply = ({
                                 variant="post"
                                 className="w-full "
                                 onLoad={onLoad}
+                                whenEmpty={
+                                    <div className="px-2">
+                                        <div className="h-6 w-2/3 rounded bg-neutral-200/70 dark:bg-neutral-700/40 animate-pulse" />
+                                    </div>
+                                }
                             />
                         )}
                     </CanvasWrapper>
