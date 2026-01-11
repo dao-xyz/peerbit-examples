@@ -41,7 +41,7 @@ const ThemedIframe = (properties: {
                 minHeight: "400px",
                 border: 0,
             }}
-            src={properties.src}
+            src={properties.src || undefined}
             allow="camera; microphone;  display-capture; fullscreen; autoplay; clipboard-write;"
         ></iframe>
     );
@@ -127,11 +127,13 @@ export const Frame = (properties: {
             <div className="p-4 border rounded-md flex flex-col items-center justify-center">
                 {curatedWebApp.manifest && (
                     <div className="flex items-center space-x-2 mb-2">
-                        <img
-                            src={curatedWebApp.manifest.icon}
-                            alt={curatedWebApp.manifest.title}
-                            className="w-8 h-8"
-                        />
+                        {curatedWebApp.manifest.icon ? (
+                            <img
+                                src={curatedWebApp.manifest.icon}
+                                alt={curatedWebApp.manifest.title}
+                                className="w-8 h-8"
+                            />
+                        ) : null}
                         <span className="text-xl font-semibold">
                             {curatedWebApp.manifest.title}
                         </span>

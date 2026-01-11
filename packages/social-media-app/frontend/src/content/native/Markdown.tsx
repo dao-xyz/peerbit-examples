@@ -44,11 +44,19 @@ const GigaMarkdownImage = ({
     title?: string;
     imagesByRef: Map<string, Element<any>>;
 }) => {
+    const safeSrc = src && src.length > 0 ? src : undefined;
     const ref = typeof src === "string" ? parseGigaImageRef(src) : undefined;
     if (!ref) {
+        if (!safeSrc) {
+            return (
+                <span className="text-sm italic text-neutral-500">
+                    [missing image]
+                </span>
+            );
+        }
         return (
             <img
-                src={src}
+                src={safeSrc}
                 alt={alt ?? ""}
                 title={title}
                 loading="lazy"
@@ -91,7 +99,7 @@ const GigaMarkdownImage = ({
         <Dialog.Root>
             <Dialog.Trigger asChild>
                 <img
-                    src={imgUrl ?? ""}
+                    src={imgUrl ?? undefined}
                     alt={altText}
                     title={title}
                     loading="lazy"
@@ -109,7 +117,7 @@ const GigaMarkdownImage = ({
                 <Dialog.Overlay className="fixed inset-0 bg-black/70" />
                 <Dialog.Content className="fixed inset-0 flex items-center justify-center p-4">
                     <img
-                        src={imgUrl ?? ""}
+                        src={imgUrl ?? undefined}
                         alt={altText}
                         className="max-h-[92vh] max-w-[92vw] object-contain rounded-md"
                     />

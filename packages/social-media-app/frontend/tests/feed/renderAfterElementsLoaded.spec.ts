@@ -34,19 +34,6 @@ async function waitForObservedAppearance(page: any, id: string) {
         )
         .not.toBeNull();
 
-    await expect
-        .poll(
-            async () =>
-                await page.evaluate((id: string) => {
-                    return (
-                        (window as any).__E2E_RENDER_GUARD__?.appear?.[id]
-                            ?.heightAtAppearPx ?? null
-                    );
-                }, id),
-            { timeout: 10_000 }
-        )
-        .not.toBeNull();
-
     return (await page.evaluate((id: string) => {
         return (window as any).__E2E_RENDER_GUARD__?.appear?.[id] ?? null;
     }, id)) as { appeared: number; heightAtAppearPx: number };
@@ -139,47 +126,48 @@ test.describe("Feed render gating: don't render post shells before elements load
                 } catch {}
             };
 
-            const record = (el: HTMLElement) => {
-                const id = el.getAttribute("data-canvas-id");
-                if (!id) return;
-                if (state.appear[id]) return;
-                state.appear[id] = { appeared: now(), heightAtAppearPx: null };
-                pushTL({ phase: "container:appear", id });
-                requestAnimationFrame(() => {
-                    try {
-                        if (!state.appear[id]) return;
-                        state.appear[id].heightAtAppearPx =
-                            el.getBoundingClientRect().height;
-                        pushTL({
-                            phase: "container:appearHeight",
-                            id,
-                            height: state.appear[id].heightAtAppearPx,
-                        });
-                    } catch {}
-                });
+            const isVisible = (el: Element) => {
+                const node = el as HTMLElement;
+                const style = window.getComputedStyle(node);
+                if (style.display === "none" || style.visibility === "hidden")
+                    return false;
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
             };
 
-            const scanNode = (n: Node) => {
-                if (!(n instanceof HTMLElement)) return;
-                if (n.hasAttribute("data-canvas-id")) record(n);
-                for (const el of Array.from(
-                    n.querySelectorAll("[data-canvas-id]")
-                )) {
-                    record(el as HTMLElement);
+            const scan = () => {
+                const nodes = Array.from(
+                    document.querySelectorAll("[data-canvas-id]")
+                );
+                for (const node of nodes) {
+                    if (!isVisible(node)) continue;
+                    const el = node as HTMLElement;
+                    const id = el.getAttribute("data-canvas-id");
+                    if (!id) continue;
+                    if (state.appear[id]) continue;
+                    state.appear[id] = {
+                        appeared: now(),
+                        heightAtAppearPx: el.getBoundingClientRect().height,
+                    };
+                    pushTL({
+                        phase: "container:visible",
+                        id,
+                        height: state.appear[id].heightAtAppearPx,
+                    });
                 }
             };
 
-            const obs = new MutationObserver((muts) => {
-                for (const m of muts) {
-                    for (const n of Array.from(m.addedNodes)) {
-                        scanNode(n);
-                    }
-                }
-            });
+            const obs = new MutationObserver(scan);
 
             // On some PW navigations the init script can run before `document.body` exists.
             // Observing `document` avoids a hard failure and still captures mutations.
-            obs.observe(document, { childList: true, subtree: true });
+            obs.observe(document, {
+                childList: true,
+                subtree: true,
+                attributes: true,
+            });
+            setInterval(scan, 50);
+            scan();
             pushTL({ phase: "observer:installed" });
         });
 
@@ -190,6 +178,22 @@ test.describe("Feed render gating: don't render post shells before elements load
 
         if (!client) throw new Error("Missing replicator client");
         if (!scope) throw new Error("Missing replicator scope");
+
+        // Seed one baseline post up-front so we can confirm the browser has
+        // actually connected to the replicator before testing live insertion.
+        const prefixBase = `E2E-RenderGating-${Date.now()}`;
+        const baseline = await seedReplicatorPosts({
+            client,
+            scope,
+            count: 1,
+            prefix: `${prefixBase}-baseline`,
+        });
+        const baselinePost = baseline.posts?.[0];
+        const baselineMessage = baseline.messages?.[0];
+        if (!baselinePost || !baselineMessage) {
+            throw new Error("Failed to seed baseline post via replicator");
+        }
+        const baselineId = toBase64URL(baselinePost.id);
 
         const url = withSearchParams(`${BASE_HTTP}#/?v=feed&s=new`, {
             ephemeral: true,
@@ -204,12 +208,20 @@ test.describe("Feed render gating: don't render post shells before elements load
         });
         const feed = page.getByTestId("feed");
 
-        const prefix = `E2E-RenderGating-${Date.now()}`;
+        // Confirm the feed is connected by waiting for the baseline post to appear.
+        await expect(feed.locator(`[data-canvas-id="${baselineId}"]`).first()).toBeVisible({
+            timeout: 180_000,
+        });
+        await expect(feed.getByText(baselineMessage, { exact: true })).toBeVisible({
+            timeout: 180_000,
+        });
+
+        // Now insert the post we want to measure while the feed is already "hot".
         const seeded = await seedReplicatorPosts({
             client,
             scope,
             count: 1,
-            prefix,
+            prefix: `${prefixBase}-insert`,
         });
 
         const insertedPost = seeded.posts?.[0];
@@ -387,4 +399,3 @@ test.describe("Feed render gating: don't render post shells before elements load
         }
     });
 });
-

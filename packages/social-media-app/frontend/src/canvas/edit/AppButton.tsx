@@ -23,6 +23,7 @@ export const AppButton: React.FC<AppButtonProps> = ({
     showTitle = false,
 }) => {
     const Trigger = resolveTrigger(app);
+    const iconSrc = app.icon && app.icon.length > 0 ? app.icon : undefined;
 
     if (Trigger) {
         return (
@@ -39,15 +40,19 @@ export const AppButton: React.FC<AppButtonProps> = ({
             } items-center btn ${className || ""}`}
         >
             {/* Fixed container for the icon */}
-            <div className="w-8 h-8">
-                <img
-                    src={app.icon}
-                    alt={app.title}
-                    className={`w-full h-full object-contain ${getIconClassName(
-                        app.icon,
-                        ""
-                    )}`}
-                />
+            <div className="w-8 h-8 flex items-center justify-center">
+                {iconSrc ? (
+                    <img
+                        src={iconSrc}
+                        alt={app.title}
+                        className={`w-full h-full object-contain ${getIconClassName(
+                            iconSrc,
+                            ""
+                        )}`}
+                    />
+                ) : (
+                    <div className="w-full h-full rounded bg-neutral-200/70 dark:bg-neutral-700/40" />
+                )}
             </div>
             {showTitle && (
                 <span
