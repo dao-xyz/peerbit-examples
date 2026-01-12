@@ -71,6 +71,7 @@ export const useFeedHooks = (props: {
     }>({ firstId: null, lastId: null });
     const committedLengthRef = useRef(0);
     const hiddenToLoadRef = useRef<Set<string>>(new Set());
+    const loadedIdsRef = useRef<Set<string>>(new Set());
     const revealRef = useRef<((reason?: string) => void) | null>(undefined);
     const revealCountRef = useRef(0);
 
@@ -110,63 +111,113 @@ export const useFeedHooks = (props: {
         const list = processedReplies;
         if (!list || list.length === 0) return;
 
-        if (hasSnapshot) {
-            emitDebugEvent({
-                source: "feed",
-                name: "reveal:skip",
-                reason: "snapshot",
-            });
-            // During feed restoration we prefer continuity over fancy reveal:
-            // show whatever we have immediately so scroll correction can run.
-            if (loadTimeoutRef.current) {
-                clearTimeout(loadTimeoutRef.current);
-                loadTimeoutRef.current = null;
-            }
-            if (maxWaitTimeoutRef.current) {
-                clearTimeout(maxWaitTimeoutRef.current);
-                maxWaitTimeoutRef.current = null;
-            }
-            committedIds.current.firstId = list[0]?.reply.idString ?? null;
-            committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
-            committedLengthRef.current = list.length;
-            hiddenToLoadRef.current.clear();
-            revealRef.current = null;
-            if (hiddenRef.current.head !== 0 || hiddenRef.current.tail !== 0) {
-                hiddenRef.current = { head: 0, tail: 0 };
-                setHidden({ head: 0, tail: 0 });
-            }
-            return;
-        }
-
         const oldFirst = committedIds.current.firstId;
         const oldLast = committedIds.current.lastId;
 
-        // First non-empty render after a reset: commit immediately so we don't hide the whole list.
-        // The lazy-reveal logic is meant to hide *new* items relative to a committed range; without
-        // a committed range it can only produce an empty viewport.
+        // First non-empty render after a reset: keep items hidden until they have
+        // actually loaded, otherwise we can show blank shells that later expand
+        // (breaking scroll stability + snapshot restoration assumptions).
         if (!oldFirst || !oldLast) {
-            debugLog("feed:reveal:commit-initial", {
+            debugLog("feed:reveal:initial-hide", {
                 listLength: list.length,
                 iteratorId,
                 url: window.location.href,
             });
-            committedIds.current.firstId = list[0]?.reply.idString ?? null;
-            committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
-            committedLengthRef.current = list.length;
-            hiddenToLoadRef.current.clear();
-            revealRef.current = null;
+
+            const nextHidden = { head: list.length, tail: 0 };
+            hiddenRef.current = nextHidden;
+            setHidden(nextHidden);
+
+            // Avoid re-adding IDs that have already reported `onLoad` during incremental list growth.
+            hiddenToLoadRef.current = new Set(
+                list
+                    .map((r) => r.reply.idString)
+                    .filter((id) => !loadedIdsRef.current.has(id))
+            );
+
+            const reveal = (reason?: string) => {
+                revealCountRef.current += 1;
+                const count = revealCountRef.current;
+                debugLog("feed:reveal:show", {
+                    count,
+                    reason: reason || "unknown",
+                    listLength: list.length,
+                    iteratorId,
+                    url: window.location.href,
+                });
+                emitDebugEvent({
+                    source: "feed",
+                    name: "reveal:show",
+                    count,
+                    reason: reason || "unknown",
+                    listLength: list.length,
+                    iteratorId,
+                });
+                if (loadTimeoutRef.current) {
+                    clearTimeout(loadTimeoutRef.current);
+                    loadTimeoutRef.current = null;
+                }
+                if (maxWaitTimeoutRef.current) {
+                    clearTimeout(maxWaitTimeoutRef.current);
+                    maxWaitTimeoutRef.current = null;
+                }
+                committedIds.current.firstId = list[0]?.reply.idString ?? null;
+                committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
+                committedLengthRef.current = list.length;
+
+                hiddenRef.current = { head: 0, tail: 0 };
+                setHidden({ head: 0, tail: 0 });
+
+                hiddenToLoadRef.current.clear();
+                revealRef.current = null;
+            };
+
+            revealRef.current = reveal;
+
+            if (hiddenToLoadRef.current.size === 0) {
+                reveal("alreadyLoaded");
+                return;
+            }
+
             if (loadTimeoutRef.current) {
                 clearTimeout(loadTimeoutRef.current);
                 loadTimeoutRef.current = null;
             }
+            loadTimeoutRef.current = setTimeout(() => {
+                debugLog("feed:reveal:timeout", {
+                    pendingCount: hiddenToLoadRef.current.size,
+                    pendingIds: [...hiddenToLoadRef.current].slice(0, 10),
+                    listLength: list.length,
+                    iteratorId,
+                    url: window.location.href,
+                });
+                const pendingCount = hiddenToLoadRef.current.size;
+                if (pendingCount === 0) {
+                    revealRef.current?.("timeout");
+                }
+                loadTimeoutRef.current = null;
+            }, revealTimeout);
+
             if (maxWaitTimeoutRef.current) {
                 clearTimeout(maxWaitTimeoutRef.current);
                 maxWaitTimeoutRef.current = null;
             }
-            if (hiddenRef.current.head !== 0 || hiddenRef.current.tail !== 0) {
-                hiddenRef.current = { head: 0, tail: 0 };
-                setHidden({ head: 0, tail: 0 });
-            }
+            const maxWaitMs = Math.max(revealTimeout * 2, revealTimeout);
+            maxWaitTimeoutRef.current = setTimeout(() => {
+                if (loadTimeoutRef.current) {
+                    clearTimeout(loadTimeoutRef.current);
+                    loadTimeoutRef.current = null;
+                }
+                debugLog("feed:reveal:max-wait", {
+                    pendingCount: hiddenToLoadRef.current.size,
+                    pendingIds: [...hiddenToLoadRef.current].slice(0, 10),
+                    listLength: list.length,
+                    iteratorId,
+                    url: window.location.href,
+                });
+                revealRef.current?.("maxWait");
+            }, maxWaitMs);
+
             return;
         }
 
@@ -258,6 +309,10 @@ export const useFeedHooks = (props: {
             .map((r) => r.reply.idString);
 
         hiddenToLoadRef.current = new Set(hiddenIds);
+        // Do not block reveal on items we've already observed as loaded.
+        for (const id of loadedIdsRef.current) {
+            hiddenToLoadRef.current.delete(id);
+        }
 
         // reveal function, (show pending messages)
         const reveal = (reason?: string) => {
@@ -299,6 +354,11 @@ export const useFeedHooks = (props: {
         // stash it so handleLoad (and timeout) can call it
         revealRef.current = reveal;
 
+        if (hiddenToLoadRef.current.size === 0) {
+            reveal("alreadyLoaded");
+            return;
+        }
+
         // Debounce reveal so incremental head/tail growth collapses into a single reveal once the
         // stream quiets down, while still ensuring we eventually reveal.
         if (loadTimeoutRef.current) {
@@ -313,7 +373,15 @@ export const useFeedHooks = (props: {
                 iteratorId,
                 url: window.location.href,
             });
-            revealRef.current?.("timeout");
+            const pendingCount = hiddenToLoadRef.current.size;
+            // Only reveal on this debounce timeout if everything is already loaded.
+            // If items are still pending, keep them hidden and rely on:
+            // - `handleLoad` (fast path) to reveal when all elements load, or
+            // - `maxWait` (safety valve) to avoid hiding forever.
+            if (pendingCount === 0) {
+                revealRef.current?.("timeout");
+            }
+            loadTimeoutRef.current = null;
         }, revealTimeout);
 
         if (!maxWaitTimeoutRef.current) {
@@ -366,11 +434,19 @@ export const useFeedHooks = (props: {
             clearTimeout(loadTimeoutRef.current);
             loadTimeoutRef.current = null;
         }
+        if (maxWaitTimeoutRef.current) {
+            clearTimeout(maxWaitTimeoutRef.current);
+            maxWaitTimeoutRef.current = null;
+        }
         setHidden({ head: 0, tail: 0 });
         hiddenRef.current = { head: 0, tail: 0 };
+        hiddenToLoadRef.current.clear();
+        revealRef.current = null;
+        revealCountRef.current = 0;
         committedIds.current = { firstId: null, lastId: null };
         committedLengthRef.current = 0;
         alreadySeen.current.clear();
+        loadedIdsRef.current.clear();
         pendingScrollAdjust.current = null;
         firstBatchHandled.current = false;
         restoredScrollPositionOnce.current = false;
@@ -576,6 +652,7 @@ export const useFeedHooks = (props: {
 
     const handleLoad = useCallback((canvas: Canvas, index: number) => {
         const id = canvas.idString;
+        loadedIdsRef.current.add(id);
         const hiddenSet = hiddenToLoadRef.current;
 
         if (hiddenSet.has(id)) {
