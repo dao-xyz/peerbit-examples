@@ -3,6 +3,7 @@ import * as React from "react";
 import { usePeer } from "@peerbit/react";
 import { Scope, createRootScope } from "@giga-app/interface";
 import { concat } from "uint8arrays";
+import { publishStartupPerfSnapshot, startupMark } from "../debug/perf";
 
 /* ────────────────────────────────────────────────────────────────────────────
  * Registry context
@@ -64,6 +65,10 @@ export function ScopeRegistryProvider({
             if (inflight) return inflight;
 
             // open
+            startupMark(`scope:${key}:open:start`, {
+                private: isPrivate,
+                persisted,
+            });
             const p = (async () => {
                 let s: Scope;
                 if (key === "@public" && !isPrivate) {
@@ -95,6 +100,11 @@ export function ScopeRegistryProvider({
 
                 scopesRef.current.set(key, s);
                 inflightRef.current.delete(key);
+                startupMark(`scope:${key}:open:end`, {
+                    private: isPrivate,
+                    address: s?.address,
+                });
+                publishStartupPerfSnapshot(`scope:${key}:open:end`);
                 return s;
             })().catch((e) => {
                 inflightRef.current.delete(key);

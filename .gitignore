@@ -18,3 +18,4 @@ nginx
 **/.pw-user-data/*
 test-results
 .pw-user-data
+.pw-debug

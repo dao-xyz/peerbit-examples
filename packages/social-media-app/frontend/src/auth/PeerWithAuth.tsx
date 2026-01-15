@@ -1,9 +1,16 @@
 import type { Ed25519Keypair } from "@peerbit/crypto";
 import { PeerProvider, type NetworkOption } from "@peerbit/react";
 import { getKeypairForUser } from "@peerbit/identity-supabase";
-import React, { useEffect, useMemo, useState, type JSX } from "react";
+import React, {
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useState,
+    type JSX,
+} from "react";
 import { Spinner } from "../utils/Spinner";
 import { useAuth } from "./useAuth";
+import { startupMark } from "../debug/perf";
 
 type Props = {
     network: "local" | "remote" | NetworkOption;
@@ -33,6 +40,10 @@ export const PeerWithAuth: React.FC<Props> = ({
         | null
     >(null);
 
+    useEffect(() => {
+        startupMark("auth:mount");
+    }, []);
+
     const normalizeKeypairLoadError = (e: any): string => {
         const msg = String(e?.message || "");
         const lowered = msg.toLowerCase();
@@ -48,22 +59,33 @@ export const PeerWithAuth: React.FC<Props> = ({
 
     useEffect(() => {
         if (boot) return;
+        startupMark("auth:boot:check", {
+            enabled: auth.enabled,
+            loading: auth.loading,
+            hasUser: !!auth.user,
+        });
 
         // If Supabase isn't configured, just boot as guest.
         if (!auth.enabled) {
+            startupMark("auth:mode:guest", { reason: "supabase-disabled" });
             setBoot({ type: "guest" });
             return;
         }
 
         // Wait for Supabase to hydrate persisted sessions.
-        if (auth.loading) return;
+        if (auth.loading) {
+            startupMark("auth:waiting", { reason: "supabase-loading" });
+            return;
+        }
 
         // No session => guest identity.
         if (!auth.user || !auth.supabase) {
+            startupMark("auth:mode:guest", { reason: "no-session" });
             setBoot({ type: "guest" });
             return;
         }
 
+        const userIdTail = auth.user.id.slice(-6);
         const shouldUseSaved = (() => {
             try {
                 return (
@@ -77,6 +99,10 @@ export const PeerWithAuth: React.FC<Props> = ({
         })();
 
         if (!shouldUseSaved) {
+            startupMark("auth:mode:guest", {
+                reason: "saved-identity-disabled",
+                user: `…${userIdTail}`,
+            });
             setBoot({ type: "guest" });
             return;
         }
@@ -84,19 +110,37 @@ export const PeerWithAuth: React.FC<Props> = ({
         let cancelled = false;
         (async () => {
             try {
+                startupMark("auth:keypair:fetch:start", {
+                    user: `…${userIdTail}`,
+                });
                 const keypair = await getKeypairForUser(auth.supabase!, {
                     userId: auth.user!.id,
                 });
                 if (cancelled) return;
                 if (!keypair) {
+                    startupMark("auth:keypair:fetch:end", {
+                        ok: true,
+                        found: false,
+                        user: `…${userIdTail}`,
+                    });
                     try {
                         window.localStorage.removeItem(
                             identityModeKey(auth.user!.id)
                         );
                     } catch {}
+                    startupMark("auth:mode:guest", {
+                        reason: "missing-keypair",
+                        user: `…${userIdTail}`,
+                    });
                     setBoot({ type: "guest" });
                     return;
                 }
+                startupMark("auth:keypair:fetch:end", {
+                    ok: true,
+                    found: true,
+                    user: `…${userIdTail}`,
+                });
+                startupMark("auth:mode:account", { user: `…${userIdTail}` });
                 setBoot({
                     type: "account",
                     userId: auth.user!.id,
@@ -104,6 +148,11 @@ export const PeerWithAuth: React.FC<Props> = ({
                 });
             } catch (e: any) {
                 console.error("[PeerWithAuth] failed to load keypair", e);
+                startupMark("auth:keypair:fetch:end", {
+                    ok: false,
+                    user: `…${userIdTail}`,
+                    error: String(e?.message || e),
+                });
                 if (cancelled) return;
                 setBoot({
                     type: "error",
@@ -124,6 +173,11 @@ export const PeerWithAuth: React.FC<Props> = ({
             return `boot:account:${boot.userId}:${boot.keypair.publicKey.hashcode()}`;
         return "boot:error";
     }, [boot]);
+
+    useLayoutEffect(() => {
+        if (!boot || boot.type === "error") return;
+        startupMark("peer:init:start", { identity: boot.type });
+    }, [peerKey, boot?.type]);
 
     if (!boot || boot.type === "error") {
         const title =

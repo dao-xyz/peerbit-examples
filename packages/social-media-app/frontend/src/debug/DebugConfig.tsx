@@ -43,7 +43,15 @@ export const DebugConfigProvider: React.FC<{ children: React.ReactNode }> = ({
         const tags = Array.isArray(globalDbg.tags) ? globalDbg.tags : undefined;
         const searchPerf = (() => {
             try {
-                return new URLSearchParams(window.location.search).has("perf");
+                // Support both regular and hash-router query params
+                const merged = new URLSearchParams(window.location.search);
+                if (merged.has("perf")) return true;
+                const hash = window.location.hash || "";
+                const qIndex = hash.indexOf("?");
+                if (qIndex === -1) return false;
+                const hashQuery = hash.substring(qIndex + 1);
+                const clean = hashQuery.replace(/^\/?/, "");
+                return new URLSearchParams(clean).has("perf");
             } catch {
                 return false;
             }

@@ -19,6 +19,7 @@ import { PrivateScope, PublicScope } from "./useScope";
 import { WithIndexedContext } from "@peerbit/document";
 import { getCanvasIdFromPart, getScopeAddrsFromSearch } from "../routes";
 import { useLocation, useMatch } from "react-router";
+import { publishStartupPerfSnapshot, startupMark } from "../debug/perf";
 
 export interface ICanvasContext {
     scope?: Scope; // kept for compatibility
@@ -153,6 +154,10 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
 
         const token = ++reqToken.current;
         setIsLoading(true);
+        startupMark("canvas:path:sync:start", {
+            idParam,
+            scopes: candidateScopes.map((s) => s.address),
+        });
 
         let cancelled = false;
         (async () => {
@@ -185,6 +190,10 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         })()
             .catch(console.error)
             .finally(() => {
+                startupMark("canvas:path:sync:end", {
+                    idParam,
+                });
+                publishStartupPerfSnapshot("canvas:path:sync:end");
                 if (!cancelled && token === reqToken.current)
                     setIsLoading(false);
             });
@@ -208,6 +217,10 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         if (root) {
             if (!root.initialized) {
                 setIsLoading(true);
+                startupMark("canvas:root:load:start", {
+                    persisted,
+                    peerHash: peer.identity.publicKey.hashcode(),
+                });
                 let cancelled = false;
                 root.load(peer, { args: { replicate: persisted } })
                     .then((c) => c.getSelfIndexedCoerced())
@@ -216,6 +229,8 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                     })
                     .catch(console.error)
                     .finally(() => {
+                        startupMark("canvas:root:load:end");
+                        publishStartupPerfSnapshot("canvas:root:load:end");
                         if (!cancelled) setIsLoading(false);
                     });
 
@@ -229,6 +244,10 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         // Guard: avoid launching multiple createRoot calls during HMR
         if (!creatingRootRef.current) {
             setIsLoading(true);
+            startupMark("canvas:root:create:start", {
+                persisted,
+                peerHash: peer.identity.publicKey.hashcode(),
+            });
             creatingRootRef.current = (async () => {
                 const res = await createRoot(peer, {
                     persisted,
@@ -240,11 +259,26 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             })()
                 .catch((e) => console.error("Error creating root canvas:", e))
                 .finally(() => {
+                    startupMark("canvas:root:create:end");
+                    publishStartupPerfSnapshot("canvas:root:create:end");
                     creatingRootRef.current = null;
                     setIsLoading(false);
                 });
         }
     }, [peer?.identity?.toString(), publicScope, persisted, root?.idString]);
+
+    useEffect(() => {
+        if (!root?.idString) return;
+        startupMark("canvas:root:ready", { idString: root.idString });
+        publishStartupPerfSnapshot("canvas:root:ready");
+    }, [root?.idString]);
+
+    useEffect(() => {
+        const viewRoot = standalone?.[0];
+        if (!viewRoot?.idString) return;
+        startupMark("canvas:viewRoot:ready", { idString: viewRoot.idString });
+        publishStartupPerfSnapshot("canvas:viewRoot:ready");
+    }, [standalone?.[0]?.idString]);
 
     // Compose loading: only block on usePeer while peer is actually missing.
     const loading = useMemo(

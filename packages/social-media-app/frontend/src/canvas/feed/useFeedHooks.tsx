@@ -24,7 +24,7 @@ import { useStream } from "./StreamContext";
 import { useLocation } from "react-router";
 import { debugLog, emitDebugEvent } from "../../debug/debug";
 
-const DEFAULT_REVEAL_TIMEOUT = 3e3;
+const DEFAULT_REVEAL_TIMEOUT = 5e3; // 5s
 
 interface HiddenState {
     head: number; // hidden items at start
@@ -483,7 +483,7 @@ export const useFeedHooks = (props: {
         const myId = iteratorId;
         // Trigger the first batch ASAP so we don't flash the empty-state placeholder before results arrive.
         loadMore?.()
-            .catch(() => {})
+            .catch(() => { })
             .finally(() => {
                 // Only mark hydrated if we're still on the same iterator.
                 if (hydrationIteratorRef.current === myId) {

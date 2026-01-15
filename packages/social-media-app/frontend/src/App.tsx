@@ -40,6 +40,11 @@ import { PeerWithAuth } from "./auth/PeerWithAuth";
 import { AuthNextRedirect } from "./auth/AuthNextRedirect";
 import { SupabaseIdentityBinder } from "./auth/SupabaseIdentityBinder";
 import { enable } from "@peerbit/logger";
+import {
+    markStorageSnapshot,
+    publishStartupPerfSnapshot,
+    startupMark,
+} from "./debug/perf";
 enable("peerbit:react:usePeer:*");
 
 const HEADER_EXPANDED_HEIGHT = 12;
@@ -49,7 +54,7 @@ const heightStyle: { [expanded: string]: string } = {
 };
 
 export const Content = () => {
-    const { error: peerError, peer, persisted } = usePeer();
+    const { error: peerError, peer, persisted, status, loading } = usePeer();
     const { showError } = useErrorDialog();
 
     useEffect(() => {
@@ -75,6 +80,22 @@ export const Content = () => {
             }
         }
     }, [peerError, showError]);
+
+    useEffect(() => {
+        if (status) startupMark(`peer:status:${status}`, { loading });
+        if (loading === false) startupMark("peer:loading:false");
+    }, [status, loading]);
+
+    useEffect(() => {
+        if (!peer) return;
+        startupMark("peer:context:ready", {
+            peerHash: peer.identity.publicKey.hashcode(),
+            persisted,
+            status,
+        });
+        markStorageSnapshot("afterPeerReady");
+        publishStartupPerfSnapshot("peer:context:ready");
+    }, [peer?.identity?.publicKey?.hashcode?.(), persisted, status]);
 
     // Use our new hook to control header visibility.
     const { visible: headerVisible } = useHeaderVisibilityContext();
@@ -179,6 +200,19 @@ export const App = () => {
     // Default behavior: persistent (inMemory=false). Override with ?ephemeral=true when desired.
     const eph = flagTrue(params.get("ephemeral"));
     const inMemory = eph === undefined ? false : eph;
+    const waitForConnnected = (() => {
+        const raw =
+            params.get("waitForConnected") ??
+            params.get("waitForConnnected") ??
+            null;
+        if (raw == null) return true;
+        const v = raw.trim().toLowerCase();
+        if (v === "" || v === "1" || v === "true") return true;
+        if (v === "0" || v === "false") return false;
+        if (v === "in-flight" || v === "inflight" || v === "in_flight")
+            return "in-flight" as const;
+        return true;
+    })();
     const bootstrapParam = params.get("bootstrap");
     // Support an "offline" mode (or empty ?bootstrap=) for tests/e2e to avoid dialing any relays
     // If bootstrap is explicitly provided (even if empty or 'offline'), we pass an explicit network option
@@ -214,6 +248,16 @@ export const App = () => {
               }
             : { bootstrap: BOOTSTRAP_ADDRS };
 
+    useEffect(() => {
+        startupMark("app:config", {
+            inMemory,
+            offline,
+            bootstrapCount: bootstrapAddrs?.length ?? null,
+            waitForConnnected,
+        });
+        publishStartupPerfSnapshot("app:config");
+    }, [inMemory, offline, bootstrapAddrs?.join(","), waitForConnnected]);
+
     return (
         <HashRouter basename="/">
             <ErrorProvider>
@@ -236,7 +280,7 @@ export const App = () => {
                                         type: "proxy",
                                         targetOrigin: "*",
                                     }}
-                                    waitForConnnected={true} /* {'in-flight'} */
+                                    waitForConnnected={waitForConnnected}
                                     inMemory={inMemory}
                                     singleton
                                 >
