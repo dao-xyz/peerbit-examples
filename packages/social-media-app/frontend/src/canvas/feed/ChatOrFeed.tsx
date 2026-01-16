@@ -7,7 +7,6 @@ import { BottomControls, SubHeader } from "./StreamControls";
 import { AnimatedStickyToolbar } from "../edit/AnimatedStickyToolbar";
 import { CanvasEditorProvider } from "../edit/CanvasEditorProvider"; // wraps Toolbar UI + delegates to CanvasEditorSessionProvider
 import { ScrollSettings } from "../main/useAutoScroll";
-import { getSnapshot } from "./feedRestoration";
 import { useLocation } from "react-router";
 import { Feed } from "./Feed";
 import { ToolbarCreateNew } from "../edit/ToolbarCreateNew";
@@ -25,6 +24,7 @@ import { EditModeProvider } from "../edit/EditModeProvider";
 import { DraftsRow } from "../draft/DraftsRow";
 import { WaitingForFeed } from "./WaitingForFeed";
 import { useActiveDraftIds } from "../draft/useActiveDraftIds";
+import { useIsActiveLayer } from "../../layers/ActiveLayerContext";
 
 const EXTRA_PADDING_BOTTOM = 15;
 const SNAP_TO_REPLIES_EXTRA_SCROLL_HEIGHT = 15;
@@ -38,6 +38,7 @@ const getSnapToRepliesViewThreshold = (offset: number) =>
     offset + window.innerHeight / 3;
 
 export const CanvasAndReplies = () => {
+    const isActiveLayer = useIsActiveLayer();
     const scrollContainerRef = useRef<HTMLDivElement | null>(null);
     const [collapsed, setCollapsed] = useState(false);
 
@@ -149,14 +150,11 @@ export const CanvasAndReplies = () => {
         setTimeout(() => (scrollToSnapEnabled.current = true), 100);
     });
 
-    const hasSnap = !!getSnapshot(location);
     const { focused: repliesFocused, setFocused: _setRepliesFocused } =
         useFocusProvider();
 
     useEffect(() => {
-        _setRepliesFocused(
-            hasSnap || shouldFocusRepliesByDefault(visualization)
-        );
+        _setRepliesFocused(shouldFocusRepliesByDefault(visualization));
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, []);
 
@@ -176,8 +174,9 @@ export const CanvasAndReplies = () => {
     );
 
     useEffect(() => {
+        if (!isActiveLayer) return;
         setToolbarVisibilityDisabled(!!hidePost);
-    }, [hidePost, setToolbarVisibilityDisabled]);
+    }, [hidePost, setToolbarVisibilityDisabled, isActiveLayer]);
 
     const [scrollSettings, setScrollSettings] =
         useState<ScrollSettings>(undefined);
@@ -460,9 +459,6 @@ export const CanvasAndReplies = () => {
                                                 }
                                                 scrollSettings={scrollSettings}
                                                 parentRef={repliesScrollRef}
-                                                onSnapshot={() =>
-                                                    setRepliesFocused(true)
-                                                }
                                                 provider={useStream}
                                                 disableLoadMore={
                                                     showInlineEditor

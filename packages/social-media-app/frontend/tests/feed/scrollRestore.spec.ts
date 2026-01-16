@@ -11,7 +11,7 @@ const SEED_COUNT = 160;
 const TARGET_INDEX = 80;
 const RECOVERY_BUDGET_MS = Number(
     process.env.PW_SCROLL_RECOVERY_BUDGET_MS ||
-        (process.env.CI ? "15000" : "8000")
+    (process.env.CI ? "15000" : "8000")
 );
 const RECOVERY_ASSERT_TIMEOUT_MS = Math.max(RECOVERY_BUDGET_MS * 2, 30_000);
 const MAX_OFFSET_ERROR_PX = 300;
@@ -46,7 +46,7 @@ test.describe("Feed scroll restoration", () => {
         stop = async () => {
             try {
                 await client.stop();
-            } catch {}
+            } catch { }
         };
     });
 

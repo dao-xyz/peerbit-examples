@@ -43,6 +43,9 @@ import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { equals } from "uint8arrays";
 import { useStreamSettings } from "./StreamSettingsContext";
 import { getCanvasIdFromPath } from "../../routes.js";
+import { emitDebugEvent } from "../../debug/debug";
+import { useIsActiveLayer } from "../../layers/ActiveLayerContext";
+import { useLayerEntry } from "../../layers/LayerEntryContext";
 
 export const STREAM_QUERY_PARAMS = {
     SETTINGS: "s", // stream view
@@ -104,28 +107,6 @@ type QuerySlotState = {
 const MAX_STREAM_QUERY_SLOTS = 25;
 
 type MinimalLocation = { key?: string; pathname: string; search: string };
-const idxKey = (loc?: MinimalLocation) => {
-    try {
-        const state: any = window.history.state;
-        const idx = state?.idx;
-        if (typeof idx !== "number") return undefined;
-
-        // React Router location updates can race `window.history.state` on PUSH/POP.
-        // If the state key doesn't match the location key, don't trust `idx` or we may
-        // accidentally overwrite the previous entry's cached iterator/config.
-        const locKey = loc?.key;
-        if (typeof locKey === "string" && locKey && locKey !== "default") {
-            const stateKey = state?.key;
-            if (typeof stateKey !== "string" || stateKey !== locKey) {
-                return undefined;
-            }
-        }
-
-        return `idx:${idx}`;
-    } catch {
-        return undefined;
-    }
-};
 const canonicalizeSearch = (search: string) => {
     const params = new URLSearchParams(search);
     // Treat the default view (`v=feed`) as absent so URL REPLACEs that only
@@ -144,11 +125,6 @@ const canonicalizeSearch = (search: string) => {
 };
 const urlKey = (loc: MinimalLocation) =>
     `url:${loc.pathname}${canonicalizeSearch(loc.search)}`;
-const entryKeyForLocation = (loc: MinimalLocation) =>
-    // Prefer `history.state.idx` because it is stable for a given history entry even across REPLACE.
-    // `location.key` can change on REPLACE (and may be "default" on the initial entry), which would
-    // accidentally tear down and recreate iterators.
-    idxKey(loc) ?? urlKey(loc);
 
 const StreamQuerySlot = React.memo(function StreamQuerySlot({
     slotKey,
@@ -160,6 +136,7 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
     report: (slotKey: string, state: QuerySlotState) => void;
 }) {
     const { peer } = usePeer();
+    const lastIteratorIdRef = useRef<string | undefined>(undefined);
 
     // Stabilize ordering for "best"/ranked feeds to prevent large reorders on async reply-count updates.
     const stableOrderRef = useRef<string[]>([]);
@@ -207,8 +184,8 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
                     typeof created === "bigint"
                         ? Number(created)
                         : typeof created === "number"
-                          ? created
-                          : undefined;
+                            ? created
+                            : undefined;
                 if (createdMs == null) continue;
                 if (createdMs < sessionStartRef.current) continue;
 
@@ -403,6 +380,16 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
     });
 
     useEffect(() => {
+        if (iteratorId && lastIteratorIdRef.current !== iteratorId) {
+            lastIteratorIdRef.current = iteratorId;
+            emitDebugEvent({
+                source: "stream",
+                name: "iterator",
+                slotKey,
+                iteratorId,
+            });
+        }
+
         report(slotKey, {
             items,
             loadMore,
@@ -435,12 +422,12 @@ function useStreamUiState() {
 
     const timeFilter: TimeFilter = TIME_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TIME) as TimeFilterType) ||
-            DEFAULT_TIME_FILTER
+        DEFAULT_TIME_FILTER
     );
 
     const typeFilter: TypeFilter = TYPE_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TYPE) as TypeFilterType) ||
-            DEFAULT_TYPE_FILTER
+        DEFAULT_TYPE_FILTER
     );
 
     const query: string =
@@ -505,10 +492,12 @@ function useStreamUiState() {
 
     const headerVisibility = useHeaderVisibilityContext();
     const wantsHeaderDisabled = visualization?.view === ChildVisualization.CHAT;
+    const isActiveLayer = useIsActiveLayer();
 
     useEffect(() => {
+        if (!isActiveLayer) return;
         headerVisibility.setDisabled(!!wantsHeaderDisabled);
-    }, [wantsHeaderDisabled, headerVisibility]);
+    }, [wantsHeaderDisabled, headerVisibility, isActiveLayer]);
 
     // --- filter model (pure; no side-effects in render)
     const filterModel = useMemo(() => {
@@ -572,7 +561,7 @@ function useStreamUiState() {
     ]);
 
     // lazy loading of replies
-    const [batchSize, setBatchSize] = useState(10);
+    const [batchSize, setBatchSize] = useState(1);
 
     const remote = React.useMemo(
         () => ({
@@ -794,16 +783,16 @@ type Ctx = ReturnType<typeof buildStreamValue> | undefined;
 const makeInitialStreamValue = (): ReturnType<typeof buildStreamValue> =>
     ({
         feedRoot: undefined,
-        pinToView: async () => {},
+        pinToView: async () => { },
         defaultViews: [],
         dynamicViews: [],
         createSettings: async () => undefined as any,
         filterModel: undefined,
-        setView: () => {},
-        loadMore: async () => {},
+        setView: () => { },
+        loadMore: async () => { },
         isLoading: false,
         loading: false,
-        setBatchSize: () => {},
+        setBatchSize: () => { },
         batchSize: 3,
         iteratorId: undefined,
         lastReply: undefined,
@@ -811,12 +800,12 @@ const makeInitialStreamValue = (): ReturnType<typeof buildStreamValue> =>
         processedReplies: [],
         timeFilter: TIME_FILTERS.get(DEFAULT_TIME_FILTER)!,
         typeFilter: TYPE_FILTERS.get(DEFAULT_TYPE_FILTER)!,
-        setTimeFilter: () => {},
-        setTypeFilter: () => {},
-        setQueryParams: () => {},
+        setTimeFilter: () => { },
+        setTypeFilter: () => { },
+        setQueryParams: () => { },
         hasMore: () => false,
         query: "",
-        setQuery: () => {},
+        setQuery: () => { },
     }) as any;
 
 const StreamContext: React.Context<Ctx> =
@@ -828,9 +817,10 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
 }) => {
     const ui = useStreamUiState();
     const { root } = useCanvases();
+    const { idx: layerIdx } = useLayerEntry();
     const location = useLocation();
     const activeUrl = urlKey(location);
-    const activeKey = entryKeyForLocation(location);
+    const activeKey = `idx:${layerIdx}`;
 
     const configsRef = useRef(new Map<string, QuerySlotConfig>());
     const statesRef = useRef(new Map<string, QuerySlotState>());

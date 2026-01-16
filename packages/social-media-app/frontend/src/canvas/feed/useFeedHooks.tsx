@@ -10,21 +10,14 @@ import React, {
 import { usePeer } from "@peerbit/react";
 import { useAutoReply } from "../AutoReplyContext";
 import { useAutoScroll, ScrollSettings } from "../main/useAutoScroll";
-import {
-    useLeaveSnapshot,
-    useRestoreFeed,
-    getSnapshot,
-    FeedSnapshot,
-} from "./feedRestoration";
 import { useDeveloperConfig } from "../../debug/DeveloperConfig";
 import { Canvas, ChildVisualization } from "@giga-app/interface";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
-import { useCanvases } from "../useCanvas";
 import { useStream } from "./StreamContext";
-import { useLocation } from "react-router";
 import { debugLog, emitDebugEvent } from "../../debug/debug";
+import { useIsActiveLayer } from "../../layers/ActiveLayerContext";
 
-const DEFAULT_REVEAL_TIMEOUT = 5e3; // 5s
+const DEFAULT_REVEAL_TIMEOUT = 3e3; // 3s
 
 interface HiddenState {
     head: number; // hidden items at start
@@ -35,7 +28,6 @@ export const useFeedHooks = (props: {
     scrollSettings: ScrollSettings;
     parentRef: React.RefObject<HTMLDivElement>;
     viewRef: HTMLElement;
-    onSnapshot: (snap: FeedSnapshot) => void;
     disableLoadMore?: boolean; // if true, will not load more items
     provider: typeof useStream;
 }) => {
@@ -52,10 +44,7 @@ export const useFeedHooks = (props: {
         iteratorId,
     } = props.provider();
 
-    const { path } = useCanvases();
     const { peer } = usePeer();
-    const location = useLocation();
-    const hasSnapshot = !!getSnapshot(location);
 
     const repliesContainerRef = useRef<HTMLDivElement>(null);
     const { replyTo, typedOnce } = useAutoReply();
@@ -75,7 +64,6 @@ export const useFeedHooks = (props: {
     const revealRef = useRef<((reason?: string) => void) | null>(undefined);
     const revealCountRef = useRef(0);
 
-    const restoredScrollPositionOnce = useRef(false);
     const alreadySeen = useRef(new Set<string>());
     const loadTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
     const maxWaitTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
@@ -102,6 +90,17 @@ export const useFeedHooks = (props: {
         }
 
         return _loadMore(n);
+    };
+
+    const loadMoreWithReason = (reason: string, n?: number) => {
+        emitDebugEvent({
+            source: "feed",
+            name: "loadMore",
+            reason,
+            n,
+            iteratorId,
+        });
+        return loadMore(n);
     };
 
     /* ------------------------------------------------------------------ */
@@ -401,7 +400,7 @@ export const useFeedHooks = (props: {
                 revealRef.current?.("maxWait");
             }, maxWaitMs);
         }
-    }, [processedReplies, hasSnapshot, revealTimeout]);
+    }, [processedReplies, revealTimeout]);
 
     // Ensure any pending reveal timeout is cleared on unmount.
     useEffect(() => {
@@ -449,7 +448,6 @@ export const useFeedHooks = (props: {
         loadedIdsRef.current.clear();
         pendingScrollAdjust.current = null;
         firstBatchHandled.current = false;
-        restoredScrollPositionOnce.current = false;
     };
 
     const visualization = useVisualizationContext().visualization;
@@ -482,7 +480,7 @@ export const useFeedHooks = (props: {
         if (props.disableLoadMore) return;
         const myId = iteratorId;
         // Trigger the first batch ASAP so we don't flash the empty-state placeholder before results arrive.
-        loadMore?.()
+        loadMoreWithReason("hydrate")
             .catch(() => { })
             .finally(() => {
                 // Only mark hydrated if we're still on the same iterator.
@@ -494,13 +492,15 @@ export const useFeedHooks = (props: {
     }, [iteratorId]);
 
     const scrollUpForMore = visualization?.view === ChildVisualization.CHAT;
+    const isActiveLayer = useIsActiveLayer();
 
     useEffect(() => {
+        if (!isActiveLayer) return;
         document.documentElement.style.setProperty(
             "--overflow-anchor",
             scrollUpForMore ? "none" : "auto"
         );
-    }, [scrollUpForMore]);
+    }, [scrollUpForMore, isActiveLayer]);
 
     /* -------------------------- UI helpers --------------------------- */
     const [showNewMessagesToast, setShowNewMessagesToast] = useState(false);
@@ -530,7 +530,7 @@ export const useFeedHooks = (props: {
                         sentinel,
                         prevScrollHeight: props.viewRef.scrollHeight,
                     };
-                    loadMore();
+                    loadMoreWithReason("intersection");
 
                     /* console.log("set cache scroll height", {
                         scrollHeight: props.viewRef.scrollHeight,
@@ -644,11 +644,6 @@ export const useFeedHooks = (props: {
         [indexIsReadyToRender, hidden.head, hidden.tail, processedReplies]
     );
 
-    const leaveSnapshot = useLeaveSnapshot({
-        replies: processedReplies,
-        replyRefs: replyContentRefs.current,
-        feedRoot: feedRoot,
-    });
 
     const handleLoad = useCallback((canvas: Canvas, index: number) => {
         const id = canvas.idString;
@@ -673,28 +668,6 @@ export const useFeedHooks = (props: {
         }
     }, []);
 
-    useRestoreFeed({
-        hasMore,
-        replies: processedReplies,
-        loadMore,
-        iteratorId,
-        replyRefs: replyContentRefs.current,
-        setView,
-        setViewRootById: (id) => {
-            if (feedRoot?.idString !== id) {
-                const found = path.find((c) => c.idString === id);
-                return found;
-            }
-        },
-        onSnapshot: props.onSnapshot,
-        onRestore: () => {
-            restoredScrollPositionOnce.current = true;
-        },
-        isReplyVisible,
-        debug: dev.scrollRestoreDebug ?? false,
-        enabled: true,
-    });
-
     // Recompute when hidden window changes; `indexIsReadyToRender` reads from a ref so
     // it won't otherwise invalidate memoization when we reveal after timeout.
     const visibleReplies = useMemo(() => {
@@ -707,10 +680,9 @@ export const useFeedHooks = (props: {
         repliesContainerRef,
         parentRef: props.parentRef,
         setting: props.scrollSettings,
-        scrollOnViewChange: !restoredScrollPositionOnce.current,
+        scrollOnViewChange: true,
         enabled: true,
         debug: false,
-        suppressAutoScroll: hasSnapshot,
         lastElementRef: () =>
             replyContentRefs.current[replyContentRefs.current.length - 1],
     });
@@ -769,7 +741,6 @@ export const useFeedHooks = (props: {
         hidden,
         setHidden,
         isReplyVisible,
-        leaveSnapshot,
         showNewMessagesToast,
         setShowNewMessagesToast,
         isChat,

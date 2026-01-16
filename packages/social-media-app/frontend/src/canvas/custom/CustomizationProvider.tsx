@@ -22,6 +22,7 @@ import {
 import { equals } from "uint8arrays";
 import { STREAM_QUERY_PARAMS } from "../feed/StreamContext";
 import { useCanvases } from "../useCanvas";
+import { useIsActiveLayer } from "../../layers/ActiveLayerContext";
 
 const useVisualization = (properies: { canvas: Canvas }) => {
     const { canvas } = properies;
@@ -120,6 +121,7 @@ export const VIEW_PARAM_QUERY_KEY = "v";
 export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     children,
 }) => {
+    const isActiveLayer = useIsActiveLayer();
     const { viewRoot: canvas } = useCanvases();
     const { theme } = useThemeContext(); // 'light' | 'dark'
 
@@ -160,6 +162,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     };
 
     useEffect(() => {
+        if (!isActiveLayer) return;
         // if we have a draft, update the children visualization param
         if (draft) {
             setChildrenVisualizationParam(draft.view);
@@ -168,7 +171,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
                 (visualization as BasicVisualization).view
             );
         }
-    }, [visualization, draft]);
+    }, [visualization, draft, isActiveLayer]);
 
     const resetThemeVars = () => {
         const root = document.documentElement;
@@ -210,6 +213,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
     };
 
     useEffect(() => {
+        if (!isActiveLayer) return;
         // apply theme styles
         const visualizationToUse = draft || visualization;
         if (visualizationToUse instanceof BasicVisualization) {
@@ -239,7 +243,7 @@ export const CustomizationProvider: React.FC<{ children: React.ReactNode }> = ({
         } else {
             resetThemeVars();
         }
-    }, [visualization, draft, theme]);
+    }, [visualization, draft, theme, isActiveLayer]);
 
     const updateDraft = (d: BasicVisualization): void => {
         setDraft(

@@ -125,11 +125,14 @@ export const NEW_SPACE = "/new";
 export const DRAFTS = "/drafts";
 export const AUTH = "/auth";
 
-export function BaseRoutes() {
-    useRecordLocation();
+export function BaseRoutes(props?: { enableEffects?: boolean }) {
+    const enableEffects = props?.enableEffects ?? true;
+    if (enableEffects) {
+        useRecordLocation();
+    }
     return (
         <>
-            <NavigationEffects />
+            {enableEffects && <NavigationEffects />}
             <Routes>
                 {/* Account */}
                 <Route path={`${AUTH}/*`} element={<AuthRoutes />} />

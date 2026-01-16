@@ -4,7 +4,6 @@ import { Reply } from "./Reply";
 import { ScrollSettings } from "../main/useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
 import { Spinner } from "../../utils/Spinner";
-import { LeaveSnapshotContext, FeedSnapshot } from "./feedRestoration";
 
 import { useFeedHooks } from "./useFeedHooks";
 import { useStream } from "./StreamContext";
@@ -18,7 +17,6 @@ export const Feed = (
               scrollSettings: ScrollSettings;
               parentRef: React.RefObject<HTMLDivElement>;
               viewRef: HTMLElement;
-              onSnapshot: (snap: FeedSnapshot) => void;
               disableLoadMore?: boolean; // if true, will not load more items
               provider: typeof useStream;
           }
@@ -30,7 +28,6 @@ export const Feed = (
         isChat,
         isLoadingAnything,
         initialHydrated,
-        leaveSnapshot,
         processedReplies,
         repliesContainerRef,
         replyContentRefs,
@@ -49,7 +46,7 @@ export const Feed = (
 
     /* --------------------------- RENDER ------------------------------ */
     return (
-        <LeaveSnapshotContext.Provider value={leaveSnapshot}>
+        <>
             {isChat && isLoadingAnything && (
                 <div
                     className="w-full flex absolute top-1 z-1 justify-center items-center overflow-hidden"
@@ -165,6 +162,6 @@ export const Feed = (
                     <Spinner />
                 </div>
             )}
-        </LeaveSnapshotContext.Provider>
+        </>
     );
 };

@@ -1,30 +1,19 @@
 import { ClientBusyError, usePeer } from "@peerbit/react";
 import { HashRouter } from "react-router";
-import { Header } from "./Header";
-import { BaseRoutes } from "./routes";
 import { AppProvider } from "./content/useApps";
-import { inIframe } from "@peerbit/react";
 import { ProfileProvider } from "./profile/useProfiles";
 import { IdentitiesProvider } from "./identity/useIdentities";
 import { ErrorProvider, useErrorDialog } from "./dialogs/useErrorDialog";
 import { HostRegistryProvider } from "@giga-app/sdk";
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { useEffect } from "react";
 import { ThemeProvider } from "./theme/useTheme";
 import { ReplyProgressProvider } from "./canvas/main/useReplyProgress";
 import { AIReplyProvider } from "./ai/AIReployContext";
-import {
-    HeaderVisibilityProvider,
-    useHeaderVisibilityContext,
-} from "./HeaderVisibilitiyProvider";
+import { HeaderVisibilityProvider } from "./HeaderVisibilitiyProvider";
 import useRemoveFocusWhenNotTab from "./canvas/utils/outline";
 import type { NetworkOption } from "@peerbit/react";
 import { BlurOnOutsidePointerProvider } from "./canvas/feed/BlurOnScrollProvider";
-import { CustomizedBackground } from "./canvas/custom/applyVisualization";
-import { CustomizationProvider } from "./canvas/custom/CustomizationProvider";
-import clsx from "clsx";
 import { FocusProvider } from "./FocusProvider";
-import { CanvasProvider } from "./canvas/useCanvas";
-import { StreamProvider } from "./canvas/feed/StreamContext";
 import { EditModeProvider } from "./canvas/edit/EditModeProvider";
 import { ToolbarVisibilityProvider } from "./canvas/edit/ToolbarVisibilityProvider";
 import { ScopeRegistryProvider } from "./canvas/useScope";
@@ -45,13 +34,8 @@ import {
     publishStartupPerfSnapshot,
     startupMark,
 } from "./debug/perf";
+import { LayeredContent } from "./LayeredContent";
 enable("peerbit:react:usePeer:*");
-
-const HEADER_EXPANDED_HEIGHT = 12;
-const heightStyle: { [expanded: string]: string } = {
-    true: `min-h-${HEADER_EXPANDED_HEIGHT}`,
-    false: `min-h-${HEADER_EXPANDED_HEIGHT}`,
-};
 
 export const Content = () => {
     const { error: peerError, peer, persisted, status, loading } = usePeer();
@@ -97,19 +81,7 @@ export const Content = () => {
         publishStartupPerfSnapshot("peer:context:ready");
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted, status]);
 
-    // Use our new hook to control header visibility.
-    const { visible: headerVisible } = useHeaderVisibilityContext();
-
-    const [headerHeight, setHeaderHeight] = useState(0);
-    const headerRef = useRef<HTMLDivElement>(null);
-
     useRemoveFocusWhenNotTab();
-
-    useLayoutEffect(() => {
-        if (headerRef.current) {
-            setHeaderHeight(headerRef.current.offsetHeight);
-        }
-    }, []);
 
     // Expose peer identity & persistence info for tests/debugging across reloads
     useEffect(() => {
@@ -126,50 +98,17 @@ export const Content = () => {
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
     return (
-        <CustomizationProvider>
-            <CustomizedBackground className=" h-full">
-                <StreamSettingsProvider>
-                    <StreamProvider>
-                        <DraftManagerProvider debug>
-                            <ToolbarVisibilityProvider>
-                                <EditModeProvider>
-                                    {" "}
-                                    {/* influences whether canvases are editable or not */}
-                                    <FocusProvider>
-                                        {/* Main header with transform animation */}
-                                        <div
-                                            ref={headerRef}
-                                            className={clsx(
-                                                "sticky top-0 inset-x-0  z-30",
-                                                heightStyle[
-                                                    String(headerVisible)
-                                                ]
-                                            )} /* transition-transform duration-800 ease-in-out */
-                                            style={
-                                                {
-                                                    /*  transform: headerVisible
-                                                     ? "translateY(0)"
-                                                     : `translateY(-${headerHeight}px)`, */
-                                                    /* transition: "max-height 0.3s ease-in-out", */
-                                                    /*     transform: "translateY(0)",
-                                                    backfaceVisibility: "hidden", */
-                                                }
-                                            }
-                                        >
-                                            <Header fullscreen={inIframe()} />
-                                        </div>
-
-                                        {/* Add padding so content isn’t hidden by the fixed header */}
-                                        <BaseRoutes />
-                                    </FocusProvider>
-                                </EditModeProvider>
-                            </ToolbarVisibilityProvider>
-                        </DraftManagerProvider>
-                        {/* This is the main content area, which will be scrolled */}
-                    </StreamProvider>
-                </StreamSettingsProvider>
-            </CustomizedBackground>
-        </CustomizationProvider>
+        <StreamSettingsProvider>
+            <DraftManagerProvider debug>
+                <ToolbarVisibilityProvider>
+                    <EditModeProvider>
+                        <FocusProvider>
+                            <LayeredContent />
+                        </FocusProvider>
+                    </EditModeProvider>
+                </ToolbarVisibilityProvider>
+            </DraftManagerProvider>
+        </StreamSettingsProvider>
     );
 };
 
@@ -291,18 +230,16 @@ export const App = () => {
                                                 <HeaderVisibilityProvider>
                                                     <BlurOnOutsidePointerProvider>
                                                         <ScopeRegistryProvider>
-                                                            <CanvasProvider>
-                                                                <ReplyProgressProvider>
-                                                                    <ProfileProvider>
-                                                                        <AIReplyProvider>
-                                                                            <HostRegistryProvider>
-                                                                                <Content />
-                                                                                {/* <DebugOverlay /> */}
-                                                                            </HostRegistryProvider>
-                                                                        </AIReplyProvider>
-                                                                    </ProfileProvider>
-                                                                </ReplyProgressProvider>
-                                                            </CanvasProvider>
+                                                            <ReplyProgressProvider>
+                                                                <ProfileProvider>
+                                                                    <AIReplyProvider>
+                                                                        <HostRegistryProvider>
+                                                                            <Content />
+                                                                            {/* <DebugOverlay /> */}
+                                                                        </HostRegistryProvider>
+                                                                    </AIReplyProvider>
+                                                                </ProfileProvider>
+                                                            </ReplyProgressProvider>
                                                         </ScopeRegistryProvider>
                                                     </BlurOnOutsidePointerProvider>
                                                 </HeaderVisibilityProvider>

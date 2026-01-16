@@ -16,7 +16,6 @@ import { getCanvasPath } from "../../routes.js";
 import { Header } from "../header/Header.js";
 import { CanvasWrapper } from "../CanvasWrapper.js";
 import { rectIsStaticImage, rectIsStaticMarkdownText } from "../utils/rect.js";
-import { useLeaveSnapshotFn } from "./feedRestoration.js";
 import { useCanvases } from "../useCanvas.js";
 
 const ReplyButton = ({
@@ -77,7 +76,6 @@ export const Reply = ({
     const { peer } = usePeer();
 
     const navigate = useNavigate();
-    const leaveSnapshot = useLeaveSnapshotFn();
 
     // Use useLayoutEffect with a ResizeObserver to measure the container after the layout
     /* Rework this to handle text + image, text, image, overflow correctly 
@@ -134,7 +132,6 @@ export const Reply = ({
             return;
         }
 
-        leaveSnapshot(canvas);
         let viewAfterNavigation = "chat";
         /*  canvas = canvas.closed
              ? await viewRoot.nearestScope.openWithSameSettings(canvas)
