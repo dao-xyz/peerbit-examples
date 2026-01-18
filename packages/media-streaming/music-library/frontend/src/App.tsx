@@ -14,18 +14,20 @@ export const App = () => {
     return (
         <ErrorProvider>
             <PeerProvider
-                inMemory={false} // TODO mobile in memory? Weak devices in memory? https://github.com/dao-xyz/peerbit/issues/18
-                waitForConnnected={true}
-                singleton={true}
-                network={
-                    import.meta.env.MODE === "development"
-                        ? "local"
-                        : {
-                              bootstrap: [
-                                  "/dns4/72e2dee3b6cc99167ecfb6114874cd9bf02f49e3.peerchecker.com/tcp/4003/wss/p2p/12D3KooWHVop5CpMVrBDtRtRnX4Z5ytVS2764DALemTbuZDzV11V",
-                              ],
-                          }
-                }
+                config={{
+                    runtime: "node",
+                    inMemory: false, // TODO mobile in memory? Weak devices in memory? https://github.com/dao-xyz/peerbit/issues/18
+                    waitForConnected: true,
+                    singleton: true,
+                    network:
+                        import.meta.env.MODE === "development"
+                            ? "local"
+                            : {
+                                  bootstrap: [
+                                      "/dns4/72e2dee3b6cc99167ecfb6114874cd9bf02f49e3.peerchecker.com/tcp/4003/wss/p2p/12D3KooWHVop5CpMVrBDtRtRnX4Z5ytVS2764DALemTbuZDzV11V",
+                                  ],
+                              },
+                }}
             >
                 <NamesProvider>
                     <LibrariesProvider>

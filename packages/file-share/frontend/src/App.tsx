@@ -14,15 +14,10 @@ document.documentElement.classList.add("dark");
 export const App = () => {
     return (
         <PeerProvider
-            /*    inMemory={true} */
-            iframe={{ type: "proxy", targetOrigin: "*" }}
-            top={{
-                /* inMemory: true, */
-                type: "node",
-                network:
-                    import.meta.env.MODE === "development" ? "local" : "remote",
-                host: true,
-                waitForConnnected: true,
+            config={{
+                runtime: "node",
+                network: import.meta.env.MODE === "development" ? "local" : "remote",
+                waitForConnected: true,
             }}
         >
             <div className="h-screen">

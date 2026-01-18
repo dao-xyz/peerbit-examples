@@ -114,6 +114,7 @@ export function useTemplates(
         if (bootstrapped) return;
 
         (async () => {
+            const peerClient = peer as any;
             const ensure = async (tpl: Template) => {
                 if (prog.templates.closed) return;
                 const exists = await prog.templates.index.get(tpl.id, {
@@ -128,28 +129,36 @@ export function useTemplates(
             // Create default templates with their prototype canvases in templatesScope
             const scope = templatesScope.program;
             await ensure(
-                await createAlbumTemplate({ peer, scope, name: "Photo album" })
+                await createAlbumTemplate({
+                    peer: peerClient,
+                    scope,
+                    name: "Photo album",
+                })
             );
             await ensure(
                 await createProfileTemplate({
-                    peer,
+                    peer: peerClient,
                     scope,
                     name: "Personal profile",
                 })
             );
             await ensure(
                 await createCommunityTemplate({
-                    peer,
+                    peer: peerClient,
                     scope,
                     name: "Community",
                 })
             );
             await ensure(
-                await createArticleTemplate({ peer, scope, name: "Article" })
+                await createArticleTemplate({
+                    peer: peerClient,
+                    scope,
+                    name: "Article",
+                })
             );
             await ensure(
                 await createPlaylistTemplate({
-                    peer,
+                    peer: peerClient,
                     scope,
                     name: "Music playlist",
                 })

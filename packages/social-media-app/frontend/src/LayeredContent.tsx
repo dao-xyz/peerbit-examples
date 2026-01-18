@@ -12,7 +12,7 @@ import { StreamProvider } from "./canvas/feed/StreamContext";
 import { ActiveLayerProvider } from "./layers/ActiveLayerContext";
 import { LayerEntryProvider } from "./layers/LayerEntryContext";
 
-const DEFAULT_STACK_DEPTH = 5;
+const DEFAULT_STACK_DEPTH = 10;
 const HEADER_EXPANDED_HEIGHT = 12;
 const heightStyle: { [expanded: string]: string } = {
     true: `min-h-${HEADER_EXPANDED_HEIGHT}`,

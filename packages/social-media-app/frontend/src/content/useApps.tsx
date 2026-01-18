@@ -78,7 +78,7 @@ export const AppProvider = ({ children }: { children: JSX.Element }) => {
     const { program: historyDB } = useProgram(
         peer,
         peer
-            ? new BrowsingHistory({ rootTrust: peer.identity.publicKey })
+            ? new BrowsingHistory({ rootTrust: peer.identity.publicKey as any })
             : undefined
     );
 

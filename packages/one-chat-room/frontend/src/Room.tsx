@@ -64,7 +64,7 @@ export const Room = () => {
     const { peer, loading: loadingPeer } = usePeer();
 
     /// aliases
-    const names = useProgram(peer, new Names(), {
+    const names = useProgram(peer as any, new Names(), {
         args: {
             replicate: {
                 factor: 1,
@@ -75,8 +75,8 @@ export const Room = () => {
 
     /// messages
     const room = useProgram(
-        peer,
-        params.key && new RoomDB({ creator: getKeyFromPath(params.key) }),
+        peer as any,
+        params.key ? new RoomDB({ creator: getKeyFromPath(params.key) }) : undefined,
         {
             args: {
                 replicate: {
@@ -197,13 +197,13 @@ export const Room = () => {
         }
         room.program.messages
             .put(new Post({ message: text, from: peer.identity.publicKey }), {
-                encryption: {
-                    // TODO do once for performance
-                    keypair: await X25519Keypair.from(
-                        await peer.services.keychain.exportByKey(
-                            peer.identity.publicKey
-                        )
-                    ),
+                    encryption: {
+                        // TODO do once for performance
+                        keypair: await X25519Keypair.from(
+                            await (peer as any).services.keychain.exportByKey(
+                                peer.identity.publicKey
+                            )
+                        ),
 
                     // Set reciever of message parts
                     receiver: {

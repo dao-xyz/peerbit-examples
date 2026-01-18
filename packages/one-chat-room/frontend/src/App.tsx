@@ -35,9 +35,10 @@ theme = responsiveFontSizes(theme);
 export const App = () => {
     return (
         <PeerProvider
-            network={
-                import.meta.env.MODE === "development" ? "local" : "remote"
-            }
+            config={{
+                runtime: "node",
+                network: import.meta.env.MODE === "development" ? "local" : "remote",
+            }}
         >
             <ThemeProvider theme={theme}>
                 <CssBaseline />

@@ -49,6 +49,8 @@ const BASE_HTTP = `http://${HOST}:${PORT}`;
 
 // Ensure tests that read process.env.BASE_URL get the same host:port
 process.env.BASE_URL = BASE_HTTP;
+// Allow running the Vite dev server in a non-default mode (e.g. production bootstraps)
+const VITE_MODE = process.env.PW_VITE_MODE || "development";
 export default defineConfig({
     testDir: "./tests",
     timeout: 60_000,
@@ -66,7 +68,7 @@ export default defineConfig({
     projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
     webServer: {
         // Spawn Vite via pnpm so the workspace-local version is used
-        command: `pnpm exec vite dev --port ${PORT} --strictPort --host ${HOST}`,
+        command: `pnpm exec vite dev --mode ${VITE_MODE} --port ${PORT} --strictPort --host ${HOST}`,
         // Use an explicit URL to avoid IPv6/localhost port checks conflicting with our IPv4 host.
         url: BASE_HTTP,
         reuseExistingServer: false,

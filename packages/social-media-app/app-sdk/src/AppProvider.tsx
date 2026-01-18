@@ -68,11 +68,9 @@ export const AppProvider = ({
 }: AppProviderProps) => {
     const peerContext = usePeer();
 
-    // Determine targetOrigin from PeerContext if available, or fallback.
-    const targetOrigin =
-        peerContext.type === "proxy"
-            ? peerContext.targetOrigin
-            : targetOriginProp || "*";
+    // `@peerbit/react` no longer exposes iframe proxy targetOrigin on the peer context.
+    // Keep a simple override for embedding use-cases.
+    const targetOrigin = targetOriginProp || "*";
 
     // Create a ref for an AppClient instance to send events.
     const statusClientRef = useRef<AppClient | null>(null);

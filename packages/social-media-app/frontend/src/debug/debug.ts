@@ -138,6 +138,18 @@ export type DebugEvent = {
     [key: string]: unknown;
 };
 
+type DebugEventSubscriber = (event: DebugEvent) => void;
+const eventSubscribers = new Set<DebugEventSubscriber>();
+
+export const subscribeDebugEvents = (fn: DebugEventSubscriber) => {
+    eventSubscribers.add(fn);
+    return () => {
+        try {
+            eventSubscribers.delete(fn);
+        } catch {}
+    };
+};
+
 export const emitDebugEvent = (event: DebugEvent) => {
     try {
         const w: any = typeof window !== "undefined" ? (window as any) : {};
@@ -152,5 +164,13 @@ export const emitDebugEvent = (event: DebugEvent) => {
         }
         g.__DBG_EVENTS.push(event);
         g.__DBG_EVENTS_COUNT = (g.__DBG_EVENTS_COUNT ?? 0) + 1;
+        // Defer subscriber callbacks so they run after React commits / current call stack.
+        setTimeout(() => {
+            eventSubscribers.forEach((s) => {
+                try {
+                    s(event);
+                } catch {}
+            });
+        }, 0);
     } catch {}
 };

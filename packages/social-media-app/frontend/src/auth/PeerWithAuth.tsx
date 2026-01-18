@@ -14,8 +14,7 @@ import { startupMark } from "../debug/perf";
 
 type Props = {
     network: "local" | "remote" | NetworkOption;
-    iframe: any;
-    waitForConnnected?: boolean | "in-flight";
+    waitForConnected?: boolean | "in-flight";
     inMemory?: boolean;
     singleton?: boolean;
     children: JSX.Element;
@@ -26,8 +25,7 @@ const identityModeKey = (userId: string) =>
 
 export const PeerWithAuth: React.FC<Props> = ({
     network,
-    iframe,
-    waitForConnnected,
+    waitForConnected,
     inMemory,
     singleton,
     children,
@@ -218,12 +216,14 @@ export const PeerWithAuth: React.FC<Props> = ({
     return (
         <PeerProvider
             key={peerKey}
-            network={network}
-            iframe={iframe}
-            waitForConnnected={waitForConnnected}
-            inMemory={inMemory}
-            singleton={singleton}
-            keypair={boot.type === "account" ? boot.keypair : undefined}
+            config={{
+                runtime: "node",
+                network,
+                waitForConnected,
+                inMemory,
+                singleton,
+                keypair: boot.type === "account" ? boot.keypair : undefined,
+            }}
         >
             {children}
         </PeerProvider>

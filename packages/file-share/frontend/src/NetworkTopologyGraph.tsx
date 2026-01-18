@@ -2,7 +2,6 @@ import { Chart as ChartJS } from "chart.js/auto";
 import { Peerbit } from "peerbit";
 import { useEffect, useRef, useState } from "react";
 import { usePeer } from "@peerbit/react";
-import { PeerbitProxyHost } from "@peerbit/proxy";
 import ChartDataLabels from "chartjs-plugin-datalabels";
 import {
     TreeChart,
@@ -106,8 +105,9 @@ export const NetworkTopologyGraph = () => {
     useEffect(() => {
         if (!peer) return;
         let client = peer;
-        if (peer instanceof PeerbitProxyHost) {
-            client = peer.hostClient as ProgramClient;
+        const hostClient = (peer as any)?.hostClient as ProgramClient | undefined;
+        if (hostClient) {
+            client = hostClient;
         }
         if (!(client instanceof Peerbit)) {
             throw new Error(

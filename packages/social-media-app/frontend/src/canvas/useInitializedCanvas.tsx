@@ -65,7 +65,7 @@ export const useInitializeCanvas = (
         (async () => {
             // 1) Fast path: already indexed
             if (isIndexedCanvas(canvasLike)) {
-                await canvasLike.load(peer, { args });
+                await canvasLike.load(peer as any, { args });
                 if (alive)
                     setIndexed(
                         canvasLike as WithIndexedContext<
@@ -78,11 +78,11 @@ export const useInitializeCanvas = (
 
             // 2) CanvasReference path (has .resolve)
             if (canvasLike instanceof CanvasReference) {
-                const opened = await canvasLike.resolve(peer, {
+                const opened = await canvasLike.resolve(peer as any, {
                     existing: "reuse",
                     args,
                 });
-                await opened.load(peer, { args });
+                await opened.load(peer as any, { args });
                 if (alive) setIndexed(opened);
                 return;
             }
@@ -91,7 +91,7 @@ export const useInitializeCanvas = (
             const raw = canvasLike as Canvas;
 
             // Ensure the Canvas is loaded so nearestScope is available
-            await raw.load(peer, { args });
+            await raw.load(peer as any, { args });
 
             // Open with its home scope (nearestScope) if not already initialized
             const opened = raw.initialized

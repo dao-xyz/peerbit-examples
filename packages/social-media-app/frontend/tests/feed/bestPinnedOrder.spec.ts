@@ -33,18 +33,14 @@ test.describe("Best feed pins new posts in-session", () => {
         page,
     }) => {
         const url = withSearchParams(OFFLINE_BASE, { ephemeral: false });
-        await page.goto(url);
-        await expectPersistent(page);
-        await page.evaluate(() => {
+        // Ensure the readiness signal + debug event buffer are clean *before* app boot,
+        // otherwise we might clear the ready flag after it has already been set.
+        await page.addInitScript(() => {
             (window as any).__DRAFT_READY = null;
             (window as any).__DBG_EVENTS = [];
-            if (!(window as any).__LISTENING_PUBLISH) {
-                (window as any).__LISTENING_PUBLISH = true;
-                window.addEventListener("debug:event", (e: any) => {
-                    (window as any).__DBG_EVENTS.push(e.detail);
-                });
-            }
         });
+        await page.goto(url);
+        await expectPersistent(page);
         await waitForComposerReady(page);
 
         const toolbar = page.getByTestId("toolbarcreatenew").first();

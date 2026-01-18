@@ -41,9 +41,10 @@ import {
 import { useHeaderVisibilityContext } from "../../HeaderVisibilitiyProvider";
 import { useVisualizationContext } from "../custom/CustomizationProvider";
 import { equals } from "uint8arrays";
+import { toBase64URL } from "@peerbit/crypto";
 import { useStreamSettings } from "./StreamSettingsContext";
 import { getCanvasIdFromPath } from "../../routes.js";
-import { emitDebugEvent } from "../../debug/debug";
+import { emitDebugEvent, subscribeDebugEvents } from "../../debug/debug";
 import { useIsActiveLayer } from "../../layers/ActiveLayerContext";
 import { useLayerEntry } from "../../layers/LayerEntryContext";
 
@@ -105,6 +106,7 @@ type QuerySlotState = {
 };
 
 const MAX_STREAM_QUERY_SLOTS = 25;
+const NS_PER_MS = 1_000_000n;
 
 type MinimalLocation = { key?: string; pathname: string; search: string };
 const canonicalizeSearch = (search: string) => {
@@ -136,6 +138,7 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
     report: (slotKey: string, state: QuerySlotState) => void;
 }) {
     const { peer } = usePeer();
+    const [pinRevision, bumpPinRevision] = useState(0);
     const lastIteratorIdRef = useRef<string | undefined>(undefined);
 
     // Stabilize ordering for "best"/ranked feeds to prevent large reorders on async reply-count updates.
@@ -145,9 +148,14 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
 
     // Session-local pinning of newly created posts (per slot)
     const pinnedIdsRef = useRef(new Set<string>());
-    const seenIdsRef = useRef(new Set<string>());
+    const pinnedSeqRef = useRef(new Map<string, number>());
+    const publishedSeqByCanvasIdRef = useRef(new Map<string, number>());
+    const pinnedSeqCounterRef = useRef(0);
     const hydratedRef = useRef(false);
-    const sessionStartRef = useRef<number>(Date.now());
+    const sessionStartRef = useRef<bigint>(BigInt(Date.now()) * NS_PER_MS);
+    const latestItemsRef = useRef<
+        WithIndexedContext<Canvas, IndexableCanvas>[]
+    >([]);
 
     useEffect(() => {
         const nextKey = config?.pinResetKey ?? null;
@@ -157,42 +165,112 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
         stableOrderRef.current = [];
         stableOrderSetRef.current = new Set();
         pinnedIdsRef.current.clear();
-        seenIdsRef.current.clear();
+        pinnedSeqRef.current.clear();
+        publishedSeqByCanvasIdRef.current.clear();
+        pinnedSeqCounterRef.current = 0;
         hydratedRef.current = false;
-        sessionStartRef.current = Date.now();
+        sessionStartRef.current = BigInt(Date.now()) * NS_PER_MS;
+        bumpPinRevision((x) => x + 1);
     }, [config?.pinResetKey]);
 
     const registerPins = React.useCallback(
         (items: WithIndexedContext<Canvas, IndexableCanvas>[]) => {
-            if (!config?.pinningEnabled || !peer?.identity) return;
-            const myKey = peer.identity.publicKey.bytes;
+            if (!config?.pinningEnabled) return false;
+            let changed = false;
+
+            const myKey = peer?.identity?.publicKey?.bytes;
+
+            const createdNs = (item: WithIndexedContext<Canvas, IndexableCanvas>) => {
+                const created = (item as any).__context?.created;
+                if (typeof created === "bigint") return created;
+                if (typeof created === "number") return BigInt(Math.floor(created));
+                return undefined;
+            };
+
             for (const item of items) {
                 if (!item?.idString) continue;
+                const idString = item.idString;
 
-                // Skip anything we already evaluated
-                if (seenIdsRef.current.has(item.idString)) continue;
-                seenIdsRef.current.add(item.idString);
+                // If DraftManager emitted a publish event for this canvas ID, pin deterministically.
+                const canvasId = (() => {
+                    try {
+                        return toBase64URL((item as any).id);
+                    } catch {
+                        return undefined;
+                    }
+                })();
+                if (canvasId) {
+                    const seqFromPublish =
+                        publishedSeqByCanvasIdRef.current.get(canvasId);
+                    if (typeof seqFromPublish === "number") {
+                        const prevSeq = pinnedSeqRef.current.get(idString) ?? 0;
+                        if (!pinnedIdsRef.current.has(idString)) {
+                            pinnedIdsRef.current.add(idString);
+                            pinnedSeqRef.current.set(idString, seqFromPublish);
+                            changed = true;
+                        } else if (seqFromPublish > prevSeq) {
+                            pinnedSeqRef.current.set(idString, seqFromPublish);
+                            changed = true;
+                        }
+                        continue;
+                    }
+                }
 
-                // Do not pin during the initial hydration pass
-                if (!hydratedRef.current) continue;
-
+                // Fallback pinning: if authored by me and created in this session, pin.
+                if (!myKey) continue;
                 const author = item.__indexed?.publicKey;
                 if (!author || !equals(author, myKey)) continue;
+                const ns = createdNs(item);
+                if (ns == null) continue;
+                if (ns < sessionStartRef.current) continue;
 
-                const created = item.__context?.created;
-                const createdMs =
-                    typeof created === "bigint"
-                        ? Number(created)
-                        : typeof created === "number"
-                            ? created
-                            : undefined;
-                if (createdMs == null) continue;
-                if (createdMs < sessionStartRef.current) continue;
-
-                pinnedIdsRef.current.add(item.idString);
+                if (!pinnedIdsRef.current.has(idString)) {
+                    pinnedIdsRef.current.add(idString);
+                    pinnedSeqCounterRef.current += 1;
+                    pinnedSeqRef.current.set(idString, pinnedSeqCounterRef.current);
+                    changed = true;
+                }
             }
+
+            return changed;
         },
         [config?.pinningEnabled, peer?.identity?.toString()]
+    );
+
+    const applyPinning = React.useCallback(
+        (items: WithIndexedContext<Canvas, IndexableCanvas>[]) => {
+            if (!config?.pinningEnabled) return items;
+            if (pinnedIdsRef.current.size === 0) return items;
+
+            const pinned: typeof items = [];
+            const rest: typeof items = [];
+            for (const item of items) {
+                (pinnedIdsRef.current.has(item.idString) ? pinned : rest).push(
+                    item
+                );
+            }
+
+            const createdNs = (item: (typeof pinned)[number]) => {
+                const created = (item as any).__context?.created;
+                if (typeof created === "bigint") return created;
+                if (typeof created === "number") return BigInt(Math.floor(created));
+                return -1n;
+            };
+            const seq = (id: string) => pinnedSeqRef.current.get(id) ?? 0;
+            pinned.sort((a, b) => {
+                const sa = seq(a.idString);
+                const sb = seq(b.idString);
+                if (sb !== sa) return sb - sa;
+                const ca = createdNs(a);
+                const cb = createdNs(b);
+                if (cb > ca) return 1;
+                if (cb < ca) return -1;
+                return 0;
+            });
+
+            return [...pinned, ...rest];
+        },
+        [config?.pinningEnabled]
     );
 
     const fetchLocalReplies = React.useCallback(
@@ -289,49 +367,77 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
             if (config?.pinningEnabled) {
                 registerPins(stabilized);
                 hydratedRef.current = true;
-
-                if (pinnedIdsRef.current.size > 0) {
-                    const pinned: typeof stabilized = [];
-                    const rest: typeof stabilized = [];
-                    for (const item of stabilized) {
-                        (pinnedIdsRef.current.has(item.idString)
-                            ? pinned
-                            : rest
-                        ).push(item);
-                    }
-                    return [...pinned, ...rest];
-                }
+                return applyPinning(stabilized);
             } else {
                 // Ensure stale state does not leak across views
                 pinnedIdsRef.current.clear();
-                seenIdsRef.current.clear();
                 hydratedRef.current = true;
             }
 
             return stabilized;
         },
         onLateResults: async (evt, helpers) => {
+            const position: "start" | "end" =
+                config?.reverse || config?.stableOrdering ? "end" : "start";
             const amount = Math.max(evt?.amount ?? 1, config?.batchSize ?? 1);
             const before = helpers.items().length;
             let loaded = false;
+
+            const summarize = (
+                item: WithIndexedContext<Canvas, IndexableCanvas> | undefined
+            ) => {
+                if (!item) return undefined;
+                const created = (item as any).__context?.created;
+                const replies = (item as any).__indexed?.replies;
+                const createdMs =
+                    typeof created === "bigint"
+                        ? Number(created)
+                        : typeof created === "number"
+                            ? created
+                            : undefined;
+                const repliesN =
+                    typeof replies === "bigint"
+                        ? Number(replies)
+                        : typeof replies === "number"
+                            ? replies
+                            : undefined;
+                return {
+                    id: item.idString,
+                    created: createdMs,
+                    replies: repliesN,
+                };
+            };
+
+            const evtItems = Array.isArray((evt as any)?.items)
+                ? ((evt as any).items as any[])
+                : [];
+            const evtValues = evtItems
+                .map((it: any) => it?.value ?? it?.indexed ?? it)
+                .filter(Boolean) as WithIndexedContext<Canvas, IndexableCanvas>[];
+
+            emitDebugEvent({
+                source: "stream",
+                name: "lateResults",
+                phase: "start",
+                slotKey,
+                iteratorId,
+                amount: (evt as any)?.amount,
+                peerHash: (evt as any)?.peer?.hashcode?.(),
+                position,
+                stableOrdering: config?.stableOrdering,
+                reverse: config?.reverse,
+                batchSize: config?.batchSize,
+                beforeCount: before,
+                beforeTop: helpers.items().slice(0, 3).map(summarize),
+                incoming: evtValues.slice(0, 5).map(summarize),
+            });
 
             const pinAndReorder = () => {
                 if (!config?.pinningEnabled) return;
                 hydratedRef.current = true;
                 registerPins(helpers.items());
-                if (pinnedIdsRef.current.size === 0) return;
-
-                const current = helpers.items();
-                const pinned: WithIndexedContext<Canvas, IndexableCanvas>[] =
-                    [];
-                const rest: WithIndexedContext<Canvas, IndexableCanvas>[] = [];
-                for (const item of current) {
-                    (pinnedIdsRef.current.has(item.idString)
-                        ? pinned
-                        : rest
-                    ).push(item);
-                }
-                helpers.inject([...pinned, ...rest]);
+                const next = applyPinning(helpers.items());
+                if (next !== helpers.items()) helpers.inject(next);
             };
 
             const injectLate = (
@@ -348,10 +454,7 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
                 helpers.inject(clean, {
                     // In stable ordering mode, never prepend; it causes the visible list to "scramble"
                     // as late results arrive.
-                    position:
-                        config?.reverse || config?.stableOrdering
-                            ? "end"
-                            : "start",
+                    position,
                 });
                 loaded = true;
             };
@@ -376,8 +479,49 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
             }
 
             pinAndReorder();
+
+            emitDebugEvent({
+                source: "stream",
+                name: "lateResults",
+                phase: "end",
+                slotKey,
+                iteratorId,
+                loaded,
+                afterCount: helpers.items().length,
+                afterTop: helpers.items().slice(0, 3).map(summarize),
+            });
         },
     });
+
+    useEffect(() => {
+        latestItemsRef.current = items;
+        if (registerPins(items)) {
+            bumpPinRevision((x) => x + 1);
+        }
+    }, [items, registerPins]);
+
+    useEffect(() => {
+        if (!config?.pinningEnabled) return;
+        return subscribeDebugEvents((evt) => {
+            if (evt?.source !== "DraftManager") return;
+            if (evt?.name !== "replyPublished") return;
+
+            const replyId = (evt as any)?.replyId;
+            if (typeof replyId !== "string" || !replyId) return;
+
+            if (!publishedSeqByCanvasIdRef.current.has(replyId)) {
+                pinnedSeqCounterRef.current += 1;
+                publishedSeqByCanvasIdRef.current.set(
+                    replyId,
+                    pinnedSeqCounterRef.current
+                );
+            }
+
+            if (registerPins(latestItemsRef.current)) {
+                bumpPinRevision((x) => x + 1);
+            }
+        });
+    }, [config?.pinningEnabled, config?.pinResetKey, registerPins]);
 
     useEffect(() => {
         if (iteratorId && lastIteratorIdRef.current !== iteratorId) {
@@ -391,13 +535,22 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
         }
 
         report(slotKey, {
-            items,
+            items: applyPinning(items),
             loadMore,
             isLoading,
             empty: empty(),
             id: iteratorId,
         });
-    }, [slotKey, items, loadMore, isLoading, iteratorId, report]);
+    }, [
+        slotKey,
+        items,
+        loadMore,
+        isLoading,
+        iteratorId,
+        report,
+        applyPinning,
+        pinRevision,
+    ]);
 
     return null;
 });

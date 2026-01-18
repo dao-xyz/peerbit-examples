@@ -222,7 +222,7 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                     peerHash: peer.identity.publicKey.hashcode(),
                 });
                 let cancelled = false;
-                root.load(peer, { args: { replicate: persisted } })
+                root.load(peer as any, { args: { replicate: persisted } })
                     .then((c) => c.getSelfIndexedCoerced())
                     .then((c) => {
                         if (!cancelled) setRoot(c);
@@ -249,7 +249,7 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
                 peerHash: peer.identity.publicKey.hashcode(),
             });
             creatingRootRef.current = (async () => {
-                const res = await createRoot(peer, {
+                const res = await createRoot(peer as any, {
                     persisted,
                     scope: publicScope,
                     sections: ["About", "Help"],

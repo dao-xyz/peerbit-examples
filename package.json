@@ -37,6 +37,7 @@
         "clean": "pnpm -r run clean",
         "build": "pnpm -r --sort --workspace-concurrency=1 run build",
         "build-node": "if [ -d ./packages/node ]; then (cd ./packages/node && pnpm run build); else echo \"packages/node not present\"; fi",
+        "dev:prod": "pnpm --filter @giga-app/interface-frontend run dev:prod",
         "pub": "pnpm changeset publish",
         "version-packages": "pnpm changeset version",
         "changeset": "changeset",

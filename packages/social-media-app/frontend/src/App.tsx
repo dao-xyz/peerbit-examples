@@ -139,7 +139,7 @@ export const App = () => {
     // Default behavior: persistent (inMemory=false). Override with ?ephemeral=true when desired.
     const eph = flagTrue(params.get("ephemeral"));
     const inMemory = eph === undefined ? false : eph;
-    const waitForConnnected = (() => {
+    const waitForConnected = (() => {
         const raw =
             params.get("waitForConnected") ??
             params.get("waitForConnnected") ??
@@ -192,10 +192,10 @@ export const App = () => {
             inMemory,
             offline,
             bootstrapCount: bootstrapAddrs?.length ?? null,
-            waitForConnnected,
+            waitForConnected,
         });
         publishStartupPerfSnapshot("app:config");
-    }, [inMemory, offline, bootstrapAddrs?.join(","), waitForConnnected]);
+    }, [inMemory, offline, bootstrapAddrs?.join(","), waitForConnected]);
 
     return (
         <HashRouter basename="/">
@@ -215,11 +215,7 @@ export const App = () => {
                                               }
                                             : networkConfig
                                     }
-                                    iframe={{
-                                        type: "proxy",
-                                        targetOrigin: "*",
-                                    }}
-                                    waitForConnnected={waitForConnnected}
+                                    waitForConnected={waitForConnected}
                                     inMemory={inMemory}
                                     singleton
                                 >

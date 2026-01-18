@@ -24,14 +24,12 @@ export const App = () => {
     setTheme();
     return (
         <PeerProvider
-            inMemory={false}
-            waitForConnnected={true}
-            top={{
-                type: "node",
-                network:
-                    import.meta.env.MODE === "development" ? "local" : "remote",
+            config={{
+                runtime: "node",
+                inMemory: false,
+                waitForConnected: true,
+                network: import.meta.env.MODE === "development" ? "local" : "remote",
             }}
-            iframe={{ type: "proxy", targetOrigin: "*" }}
         >
             <AppProvider navigation="emit-all" theme={{ useClasses: true }}>
                 <HashRouter basename="/">
