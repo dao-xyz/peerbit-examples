@@ -60,6 +60,26 @@ export default defineConfig({
     use: {
         // Default: persistent mode; tests explicitly opt into ephemeral via URL when needed
         baseURL: `${BASE_HTTP}#/`,
+        // Pre-seed localStorage for most tests to avoid the "Posting as guest"/"Quick session"
+        // modal blocking publish flows. Specs that validate the modal explicitly clear these keys.
+        storageState: {
+            cookies: [],
+            origins: [
+                {
+                    origin: BASE_HTTP,
+                    localStorage: [
+                        {
+                            name: "giga.identity.notice.guest.v1",
+                            value: "true",
+                        },
+                        {
+                            name: "giga.identity.notice.temporary.v1",
+                            value: "true",
+                        },
+                    ],
+                },
+            ],
+        },
         trace: "retain-on-failure",
         video: "retain-on-failure",
         screenshot: "only-on-failure",
