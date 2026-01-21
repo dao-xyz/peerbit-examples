@@ -1,0 +1,29 @@
+import React from "react";
+import { createRoot } from "react-dom/client";
+import { PeerProvider } from "@peerbit/react";
+import { documentAdapter } from "@peerbit/document-proxy/auto";
+import { App } from "./ui/App";
+import "./ui/styles.css";
+
+const workerUrl = new URL("./worker/canonicalTodo.worker.ts", import.meta.url);
+
+createRoot(document.getElementById("root")!).render(
+    <React.StrictMode>
+        <PeerProvider
+            config={{
+                runtime: "canonical",
+                transport: {
+                    kind: "shared-worker",
+                    worker: {
+                        url: workerUrl,
+                        name: "peerbit-canonical-todo",
+                        type: "module",
+                    },
+                },
+                open: { adapters: [documentAdapter], mode: "canonical" },
+            }}
+        >
+            <App />
+        </PeerProvider>
+    </React.StrictMode>
+);

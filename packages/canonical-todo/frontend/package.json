@@ -1,0 +1,32 @@
+{
+    "name": "canonical-todo",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite",
+        "start": "vite",
+        "build": "tsc && vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "@dao-xyz/borsh": "^6.0.0",
+        "@peerbit/canonical-host": "^1.0.0",
+        "@peerbit/document": "^12",
+        "@peerbit/document-react": "^0",
+        "@peerbit/document-proxy": "^1.0.0",
+        "@peerbit/react": "^0",
+        "@libp2p/circuit-relay-v2": "^4.1.0",
+        "@libp2p/websockets": "^10.1.0",
+        "react": "^19.2.0",
+        "react-dom": "^19.1.0"
+    },
+    "devDependencies": {
+        "@peerbit/vite": "^1.1.0",
+        "@types/react": "^19.1.8",
+        "@types/react-dom": "^19.1.6",
+        "@vitejs/plugin-react": "^5",
+        "typescript": "^5.6.3",
+        "vite": "^7.1.3"
+    }
+}
