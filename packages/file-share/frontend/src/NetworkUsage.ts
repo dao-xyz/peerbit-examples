@@ -2,7 +2,6 @@ import { usePeer } from "@peerbit/react";
 import { useEffect, useState } from "react";
 import { Peerbit } from "peerbit";
 import { BandwidthTracker } from "@peerbit/stream";
-import { ProgramClient } from "@peerbit/program";
 
 export const useNetworkUsage = () => {
     const { peer } = usePeer();
@@ -14,25 +13,25 @@ export const useNetworkUsage = () => {
             return;
         }
 
-        let client = peer;
-        const hostClient = (peer as any)?.hostClient as ProgramClient | undefined;
-        if (hostClient) {
-            client = hostClient; // proxy/canonical host wrapper (if present)
-        }
-        if (client instanceof Peerbit === false) {
+        // Some Peerbit/react setups may provide a proxy client with a reference to the
+        // underlying host client. Network stats require access to the real Peerbit instance.
+        let client: unknown = peer;
+        const hostClient = (peer as any)?.hostClient as unknown;
+        if (hostClient) client = hostClient;
+        if (!(client instanceof Peerbit)) {
             throw new Error(
                 "Network stats can not be collected with a proxy client"
             );
         }
 
-        const processRpc = (client as Peerbit).services.pubsub.processRpc.bind(
-            (client as Peerbit).services.pubsub
+        const processRpc = client.services.pubsub.processRpc.bind(
+            client.services.pubsub
         );
 
         const downloadTracker = new BandwidthTracker();
         downloadTracker.start();
 
-        (client as Peerbit).services.pubsub.processRpc = (
+        client.services.pubsub.processRpc = (
             from,
             peerStreams,
             message
@@ -46,7 +45,7 @@ export const useNetworkUsage = () => {
 
         const collectInterval = setInterval(() => {
             let sum = 0;
-            for (const peer of (client as Peerbit).services.pubsub.peers) {
+            for (const peer of client.services.pubsub.peers) {
                 sum += peer[1].usedBandwidth;
             }
             setUp(Math.round(sum * 1e-3) * 8);
@@ -57,7 +56,7 @@ export const useNetworkUsage = () => {
             downloadTracker.stop();
             clearInterval(i2);
             clearInterval(collectInterval);
-            (client as Peerbit).services.pubsub.processRpc = processRpc;
+            client.services.pubsub.processRpc = processRpc;
         };
     }, [peer?.identity.publicKey.hashcode()]);
     return { up, down };

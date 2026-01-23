@@ -11,13 +11,12 @@ import {
 import { useParams } from "react-router";
 import { SearchRequest } from "@peerbit/document";
 import { Post, Room as RoomDB } from "./database.js";
-import { usePeer } from "@peerbit/react";
+import { usePeer, useProgram } from "@peerbit/react";
 import { Names } from "@peerbit/peer-names";
 import { Send } from "@mui/icons-material";
 import { getKeyFromPath } from "./routes";
 import { Ed25519PublicKey, X25519Keypair } from "@peerbit/crypto";
 import PeopleIcon from "@mui/icons-material/People";
-import { useProgram } from "@peerbit/program-react";
 
 const shortName = (name: string) => {
     return (

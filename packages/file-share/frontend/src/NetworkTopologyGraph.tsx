@@ -10,7 +10,6 @@ import {
     DendrogramController,
     EdgeLine,
 } from "chartjs-chart-graph";
-import { ProgramClient } from "@peerbit/program";
 
 // Register controllers and plugins
 ChartJS.register(
@@ -104,11 +103,9 @@ export const NetworkTopologyGraph = () => {
 
     useEffect(() => {
         if (!peer) return;
-        let client = peer;
-        const hostClient = (peer as any)?.hostClient as ProgramClient | undefined;
-        if (hostClient) {
-            client = hostClient;
-        }
+        let client: unknown = peer;
+        const hostClient = (peer as any)?.hostClient as unknown;
+        if (hostClient) client = hostClient;
         if (!(client instanceof Peerbit)) {
             throw new Error(
                 "Network Topology graph can only be used with a non-proxy client"
@@ -129,9 +126,7 @@ export const NetworkTopologyGraph = () => {
             let edges: { source: number; target: number; options: any }[] = [];
             let dashes: ([number, number] | undefined)[] = [];
             getSetIndex("you");
-            const routesFromMe = (
-                client as Peerbit
-            ).services.pubsub.routes.routes.get(
+            const routesFromMe = client.services.pubsub.routes.routes.get(
                 client.identity.publicKey.hashcode()
             );
             if (routesFromMe) {
