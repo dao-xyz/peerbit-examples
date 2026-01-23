@@ -1,48 +1,39 @@
 import React from "react";
 import { usePeer, useProgram } from "@peerbit/react";
-import { Documents } from "@peerbit/document";
 import { useQuery } from "@peerbit/document-react";
-import { TODO_STORE_ID, TodoItem } from "../shared/todo";
-import type { DocumentsProxy } from "@peerbit/document-proxy/client";
+import { Sort } from "@peerbit/indexer-interface";
+import { TODO_STORE_ID, TodoItem } from "../todo/model";
+import { TodoProgram } from "../todo/program";
+import type { TodoProgramProxy } from "../todo/adapter";
 
 export const App = () => {
     const peerCtx = usePeer();
     const [text, setText] = React.useState("");
-    const docsTemplate = React.useMemo(
-        () => new Documents<TodoItem>({ id: TODO_STORE_ID }),
+    const todoTemplate = React.useMemo(() => new TodoProgram({ id: TODO_STORE_ID }), []);
+    const todosQuery = React.useMemo(
+        () => ({
+            query: [],
+            sort: [
+                new Sort({ key: "updatedAt", direction: "desc" }),
+                new Sort({ key: "id", direction: "asc" }),
+            ],
+        }),
         []
     );
 
-    const { program: docs, loading: storeLoading, promise: storePromise } =
-        useProgram<any>(
-            peerCtx.peer,
-            peerCtx.peer ? docsTemplate : undefined,
-            { args: { type: TodoItem } }
-        );
+    const {
+        program: todo,
+        status: todoStatus,
+        error: todoError,
+    } = useProgram<any>(peerCtx.peer, todoTemplate);
 
-    const docsProxy = docs as unknown as DocumentsProxy<TodoItem> | undefined;
+    const todoProxy = todo as unknown as TodoProgramProxy | undefined;
+    const docsProxy = todoProxy?.todos;
 
-    const [storeError, setStoreError] = React.useState<string | undefined>(
-        undefined
-    );
-
-    React.useEffect(() => {
-        let cancelled = false;
-        setStoreError(undefined);
-        if (!storePromise) return;
-        storePromise.catch((e) => {
-            if (cancelled) return;
-            setStoreError(e instanceof Error ? e.message : String(e));
-        });
-        return () => {
-            cancelled = true;
-        };
-    }, [storePromise]);
-
-    const { items: todosRaw, isLoading: todosLoading } = useQuery(
+    const { items: todos, isLoading: todosLoading } = useQuery(
         docsProxy,
         {
-            query: { query: [] },
+            query: todosQuery,
             resolve: true,
             local: true,
             remote: false,
@@ -50,12 +41,6 @@ export const App = () => {
             batchSize: 250,
         }
     );
-
-    const todos = React.useMemo(() => {
-        const items = [...(todosRaw as TodoItem[])];
-        items.sort((a, b) => Number(b.updatedAt - a.updatedAt));
-        return items;
-    }, [todosRaw]);
 
     const onAdd = async () => {
         const docs = docsProxy;
@@ -101,28 +86,21 @@ export const App = () => {
     };
 
     const peerId = peerCtx.peer ? peerCtx.peer.peerId.toString() : undefined;
-    const overallError = peerCtx.error?.message ?? storeError;
+    const overallError = peerCtx.error?.message ?? todoError?.message;
     const ready =
         peerCtx.status === "connected" &&
         !!docsProxy &&
-        !storeLoading &&
+        todoStatus === "ready" &&
         !todosLoading;
-    const storeStatus = storeError
-        ? "error"
-        : storeLoading
-          ? "opening"
-          : docsProxy
-            ? "ready"
-            : "idle";
     const todosStatus = !docsProxy ? "idle" : todosLoading ? "loading" : "ready";
 
     return (
         <div className="page">
             <header className="header">
                 <div>
-                    <div className="title">Canonical Todo</div>
+                    <div className="title">SharedWorker Todo</div>
                     <div className="subtitle">
-                        SharedWorker canonical peer + Documents proxy
+                        Canonical peer in SharedWorker + Documents proxy
                     </div>
                 </div>
                 <div className="right">
@@ -140,7 +118,7 @@ export const App = () => {
                     <div className="label">Status</div>
                     <div className="value">
                         peer {peerCtx.loading ? "connecting" : peerCtx.status} ·
-                        store {storeStatus} · todos {todosStatus}
+                        store {todoStatus} · todos {todosStatus}
                         {peerId ? <span className="muted"> · peerId {peerId}</span> : null}
                     </div>
                 </div>

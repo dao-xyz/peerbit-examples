@@ -2,7 +2,7 @@ import { field, variant } from "@dao-xyz/borsh";
 import { sha256Sync } from "@peerbit/crypto";
 
 export const TODO_STORE_ID = sha256Sync(
-    new TextEncoder().encode("peerbit-examples:canonical-todo:v1")
+    new TextEncoder().encode("peerbit-examples:sharedworker-todo:v1")
 );
 
 @variant("todo_item")
