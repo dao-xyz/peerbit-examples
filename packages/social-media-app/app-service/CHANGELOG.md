@@ -1,5 +1,11 @@
 # @giga-app/app-service
 
+## 2.0.1
+
+### Patch Changes
+
+- Bump Peerbit
+
 ## 2.0.0
 
 ### Major Changes

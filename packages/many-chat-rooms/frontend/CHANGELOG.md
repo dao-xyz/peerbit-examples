@@ -1,5 +1,13 @@
 # chat-frontend
 
+## 0.2.3
+
+### Patch Changes
+
+- Updated dependencies
+    - @peerbit/example-many-chat-rooms@2.0.1
+    - @peerbit/peer-names@2.0.1
+
 ## 0.2.2
 
 ### Patch Changes

@@ -1,5 +1,15 @@
 # music-library-frontend
 
+## 0.1.3
+
+### Patch Changes
+
+- Updated dependencies
+    - @peerbit/music-library-utils@2.0.1
+    - @peerbit/media-streaming-web@2.0.1
+    - @peerbit/media-streaming@2.0.1
+    - @giga-app/sdk@2.0.1
+
 ## 0.1.2
 
 ### Patch Changes

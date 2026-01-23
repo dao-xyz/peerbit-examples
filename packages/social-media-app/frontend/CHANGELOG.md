@@ -1,5 +1,19 @@
 # @giga-app/interface-frontend
 
+## 2.0.1
+
+### Patch Changes
+
+- Bump Peerbit
+- Updated dependencies
+    - @peerbit/identity-supabase@0.1.1
+    - @peerbit/peer-names@2.0.1
+    - @giga-app/llm@2.0.1
+    - @giga-app/sdk@2.0.1
+    - @giga-app/app-service@2.0.1
+    - @giga-app/interface@2.0.1
+    - @giga-app/network@2.0.1
+
 ## 2.0.0
 
 ### Major Changes

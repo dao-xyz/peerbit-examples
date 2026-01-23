@@ -1,5 +1,13 @@
 # @peerbit/blog
 
+## 2.0.1
+
+### Patch Changes
+
+- Bump Peerbit
+- Updated dependencies
+    - @peerbit/blog-sdk@2.0.1
+
 ## 2.0.0
 
 ### Major Changes
