@@ -6,6 +6,12 @@ process.addListener("unhandledRejection", (reason, promise) => {
     // process.exit(1);
 });
 
+process.addListener("uncaughtException", (err, origin) => {
+    console.log("Uncaught Exception: ", err, "origin: ", origin);
+    // Application specific logging, throwing an error, or other logic here
+    // process.exit(1);
+});
+
 import { Peerbit } from "peerbit";
 import {
     Canvas,
@@ -36,9 +42,9 @@ const { canvas: root, scope: capsule } = await createRoot(client, {
 
 console.log(
     "Connected to scope: " +
-        capsule.address +
-        " with root canvas " +
-        root.idString
+    capsule.address +
+    " with root canvas " +
+    root.idString
 );
 await root.replies.log.waitForReplicators();
 const iterator = root.replies.index.iterate({

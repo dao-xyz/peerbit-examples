@@ -34,7 +34,7 @@
         "@peerbit/document-react": "^0",
         "@peerbit/identity-supabase": "workspace:*",
         "@peerbit/peer-names": "workspace:*",
-        "@peerbit/program-react": "^0.3.0",
+        "@peerbit/program-react": "^0",
         "@peerbit/react": "^0",
         "@radix-ui/react-radio-group": "^1.3.7",
         "@radix-ui/react-toggle": "^1.0.3",
