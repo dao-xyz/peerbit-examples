@@ -310,7 +310,7 @@ export class IndexableCanvas {
         const pathIds = await getPathIdsForIndex(canvas);
 
         // Text context
-        const context = await canvas.createContext();
+        const context = await canvas.createContext({ source: "elements" });
 
         const replies = await countRepliesFast(canvas);
 
@@ -1509,6 +1509,9 @@ const reIndexRepliesInParents = async (scope: Scope, canvas: Canvas) => {
         : undefined;
     if (parent) {
         globalThis.setTimeout?.(() => {
+            const ns = (parent as any).nearestScope as any;
+            const recently = ns?._recentlyIndexed?.get(parent.idString);
+            if (recently && Date.now() - recently < 500) return;
             scope
                 ._hierarchicalReindex!.add({
                     canvas: parent,
@@ -1694,11 +1697,13 @@ export class Scope extends Program<ScopeArgs> {
     // Expose generation bumping so other classes (e.g., Canvas) can request
     // a new generation when scheduling reindex work.
     bumpGeneration(idString: string): number {
+        this._reindexGeneration ||= new Map();
         const next = (this._reindexGeneration.get(idString) ?? 0) + 1;
         this._reindexGeneration.set(idString, next);
         return next;
     }
     private currentGeneration(idString: string): number {
+        this._reindexGeneration ||= new Map();
         return this._reindexGeneration.get(idString) ?? 0;
     }
 
@@ -1744,6 +1749,16 @@ export class Scope extends Program<ScopeArgs> {
     private closeController: AbortController | null = null;
     // Deduplicate transient missing-resolution logs per link/side
     private _missingResolveOnce = new Set<string>();
+
+    private ensureRuntimeState(): void {
+        // Some Peerbit/serialization paths may rehydrate instances without running
+        // the constructor or class field initializers. Guard against undefined
+        // runtime-only members that are not serialized.
+        this._recentlyIndexed ||= new Map();
+        this._reindexGeneration ||= new Map();
+        this._missingResolveOnce ||= new Set();
+        this._suppressReindexCount = this._suppressReindexCount ?? 0;
+    }
     // reIndexDebouncer removed; replaced by per-canvas hierarchical scheduler
     _hierarchicalReindex?: ReturnType<
         typeof createHierarchicalReindexManager<Canvas>
@@ -1751,6 +1766,7 @@ export class Scope extends Program<ScopeArgs> {
 
     openingArgs?: ScopeArgs;
     async open(args?: ScopeArgs): Promise<void> {
+        this.ensureRuntimeState();
         this.openingArgs = args;
         // Lightweight dispatcher accessible for run-level instrumentation
         const _dispatchReindexDebug = (detail: any) => {
@@ -2140,16 +2156,13 @@ export class Scope extends Program<ScopeArgs> {
             childScope._recentlyIndexed.set(child.idString, Date.now());
 
             if (parent) {
-                const parentGen = parent.nearestScope.bumpGeneration(
-                    parent.idString
+                // Avoid an extra scheduler run for the parent in the awaited publish path.
+                // We only need to refresh the parent's cached replies total here.
+                await updateIndexedRepliesOnly(parent.nearestScope, parent);
+                parent.nearestScope._recentlyIndexed.set(
+                    parent.idString,
+                    Date.now()
                 );
-                const parentMgr = parent.nearestScope._hierarchicalReindex!;
-                await parentMgr.add({
-                    canvas: parent,
-                    options: { onlyReplies: true, skipAncestors: true },
-                    generation: parentGen,
-                });
-                await parentMgr.flush(parent.idString);
             }
         };
 
@@ -2189,7 +2202,11 @@ export class Scope extends Program<ScopeArgs> {
 
                 // Ensure the replies row exists in the target scope *after* the parent link
                 // so the first index row includes the correct path/kind.
-                await ensureInReplies(registerIn, dst);
+                // Avoid triggering the replies change listener path (which would redundantly
+                // schedule parent reply reindex) since we explicitly ensure parent indexing below.
+                await registerIn.suppressReindex(async () => {
+                    await ensureInReplies(registerIn, dst);
+                });
                 await ensureIndexed(dst, publish.parent);
             } else {
                 if (publish.view != null) {
@@ -2212,7 +2229,6 @@ export class Scope extends Program<ScopeArgs> {
         // --------- link-only (no data movement) ----------
         if (publish.type === "link-only") {
             dlog("mode=link-only: ensure home row, then finalize");
-            await ensureInReplies(srcHome, src);
             await srcHome.openWithSameSettings(src);
             mark("link-only:ensure+open");
             await finalize(src, srcHome);
@@ -2681,76 +2697,78 @@ export class Scope extends Program<ScopeArgs> {
             | Canvas
             | WithIndexedContext<Canvas, IndexableCanvas>
             | IndexableCanvas,
-        opts?: { localOnly?: boolean; timeoutMs?: number }
+        opts?: {
+            /** Default: "indexed" */
+            source?: "indexed" | "elements";
+            /**
+             * Only applies when `source: "indexed"`. If true, allow remote fallback
+             * to fetch the indexed row from peers (still does NOT fetch elements).
+             */
+            remoteIndex?: boolean;
+            timeoutMs?: number;
+        }
     ): Promise<string> {
-        // Helper: get expected element count from an indexed row if available
-        const expectedCount = (() => {
-            const anyCanvas = canvas as any;
-            if (anyCanvas instanceof IndexableCanvas) {
-                return Number(anyCanvas.elements);
-            }
-            if (anyCanvas && anyCanvas.__indexed instanceof IndexableCanvas) {
-                return Number(anyCanvas.__indexed.elements);
-            }
-            return undefined;
-        })();
+        const source = opts?.source ?? "indexed";
 
-        const iterateOptsBase: QueryOptions<any, any, any, false> = {
-            resolve: false,
-            local: true,
-            remote: false,
-        };
-
-        // First pass: local-only for performance
-        let elements = await this.elements.index
-            .iterate({ query: getOwnedElementsQuery(canvas) }, iterateOptsBase)
-            .all();
-
-        // If caller requires completeness and we know the expected count, optionally try a bounded remote fallback
+        // Fast path: the caller already has an indexed row in hand.
+        const anyCanvas = canvas as any;
+        if (typeof anyCanvas?.context === "string") {
+            return anyCanvas.context;
+        }
+        // Only use __indexed when the caller explicitly wants indexed context.
+        // If remoteIndex is requested, skip this fast-path to avoid returning stale
+        // __indexed values from a different peer/session.
         if (
-            !opts?.localOnly &&
-            expectedCount != null &&
-            elements.length < expectedCount
+            source === "indexed" &&
+            !opts?.remoteIndex &&
+            typeof anyCanvas?.__indexed?.context === "string"
         ) {
-            // Try a bounded remote fallback fetch once
-            const iterateWithRemote: QueryOptions<any, any, any, false> = {
-                resolve: false,
-                local: true,
-                remote: {
-                    strategy: "fallback",
-                    timeout: opts?.timeoutMs ?? 2000,
-                },
-            };
-            elements = await this.elements.index
-                .iterate(
-                    { query: getOwnedElementsQuery(canvas) },
-                    iterateWithRemote
-                )
-                .all();
-
-            // If still incomplete, poll until background prefetch warms up or timeout
-            const deadline = Date.now() + (opts?.timeoutMs ?? 3000);
-            while (elements.length < expectedCount && Date.now() < deadline) {
-                await new Promise((r) => setTimeout(r, 100));
-                if (this.closed) {
-                    throw new ClosedError();
-                }
-                elements = await this.elements.index
-                    .iterate(
-                        { query: getOwnedElementsQuery(canvas) },
-                        iterateWithRemote
-                    )
-                    .all();
-            }
+            return anyCanvas.__indexed.context;
         }
 
-        // Build string context from available elements
+        // Default behavior: return the indexed context (no element fetching).
+        if (source === "indexed") {
+            const id = anyCanvas?.id;
+            if (!(id instanceof Uint8Array)) return "";
+
+            const localRow = await this.replies.index.get(id, {
+                resolve: false,
+                local: true,
+                remote: false,
+            });
+            if (typeof (localRow as any)?.context === "string") {
+                return (localRow as any).context;
+            }
+
+            if (opts?.remoteIndex) {
+                const remoteRow = await this.replies.index.get(id, {
+                    resolve: false,
+                    local: true,
+                    remote: {
+                        strategy: "fallback",
+                        timeout: opts?.timeoutMs ?? 2000,
+                    },
+                });
+                return typeof (remoteRow as any)?.context === "string"
+                    ? (remoteRow as any).context
+                    : "";
+            }
+
+            return "";
+        }
+
+        // Explicit behavior: compute from locally available elements (no remote fallback).
+        const elements = await this.elements.index
+            .iterate(
+                { query: getOwnedElementsQuery(canvas) },
+                { resolve: false, local: true, remote: false }
+            )
+            .all();
+
         let concat = "";
         for (const element of elements) {
-            if (concat.length > 0) {
-                concat += "\n";
-            }
-            concat += element.content;
+            if (concat.length > 0) concat += "\n";
+            concat += (element as any).content ?? "";
         }
         return concat;
     }
@@ -2890,26 +2908,24 @@ export class Scope extends Program<ScopeArgs> {
             dt: tLookupDone - tStart,
         });
 
-        // Build fresh index row
-        const tBuildStart = globalThis.performance?.now?.() || Date.now();
-        _dispatchReindexDebug({
-            phase: "full:build:start",
-            id: canvas.idString,
-        });
-        const fresh = await IndexableCanvas.from(canvas);
-        const tBuildEnd = globalThis.performance?.now?.() || Date.now();
-        _dispatchReindexDebug({
-            phase: "full:build:end",
-            id: canvas.idString,
-            dt: tBuildEnd - tBuildStart,
-        });
-
         // Reuse existing context; never synthesize a new one for a foreign canvas
         const ctx = existing.__context;
 
-        // Write through with the existing context
+        // Write through with the existing context (reindex only; do not rewrite the Canvas row).
         const tPutStart = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({ phase: "full:put:start", id: canvas.idString });
+
+        // 1) build fresh index row (ctx phase)
+        const tCtxStart = globalThis.performance?.now?.() || Date.now();
+        _dispatchReindexDebug({ phase: "full:build:start", id: canvas.idString });
+        const fresh = await IndexableCanvas.from(canvas);
+        const tCtxEnd = globalThis.performance?.now?.() || Date.now();
+        _dispatchReindexDebug({
+            phase: "full:build:end",
+            id: canvas.idString,
+            dt: tCtxEnd - tCtxStart,
+        });
+
         // Collect static meta about the fresh row once
         const _meta = () => ({
             id: canvas.idString,
@@ -2926,10 +2942,6 @@ export class Scope extends Program<ScopeArgs> {
         } catch {}
         const bytes = serialized?.length;
 
-        // 1) putWithContext (context row)
-        const tCtxStart = globalThis.performance?.now?.() || Date.now();
-        await this.replies.index.putWithContext(canvas, toId(canvas.id), ctx);
-        const tCtxEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({
             phase: "full:put:batch",
             batch: "ctx",
@@ -2938,7 +2950,7 @@ export class Scope extends Program<ScopeArgs> {
             ..._meta(),
         });
 
-        // 2) index.put (indexed document)
+        // 2) write the indexed document (index phase)
         const wrapped = new this.replies.index.wrappedIndexedType(fresh, ctx);
         const tIdxStart = globalThis.performance?.now?.() || Date.now();
         await this.replies.index.index.put(wrapped);
@@ -3247,6 +3259,13 @@ export class Scope extends Program<ScopeArgs> {
                     const p = parent;
                     const scopeRef = this;
                     globalThis.setTimeout?.(() => {
+                        try {
+                            const recently =
+                                p.nearestScope._recentlyIndexed.get(
+                                    p.idString
+                                ) ?? 0;
+                            if (Date.now() - recently < 500) return;
+                        } catch {}
                         try {
                             globalThis.window?.dispatchEvent?.(
                                 new CustomEvent("reindex:debug", {
@@ -4143,8 +4162,12 @@ export class Canvas {
         }
     }
 
-    async createContext(): Promise<string> {
-        return this.nearestScope.createContext(this);
+    async createContext(opts?: {
+        source?: "indexed" | "elements";
+        remoteIndex?: boolean;
+        timeoutMs?: number;
+    }): Promise<string> {
+        return this.nearestScope.createContext(this, opts);
     }
 
     async setVisualization(
@@ -4292,12 +4315,27 @@ export class Canvas {
                     kind,
                 })
             );
+            // Ensure the child becomes queryable by ViewKind immediately (do not rely on late link listeners).
+            const gen = childScope.bumpGeneration(child.idString);
+            await childScope._hierarchicalReindex!.add({
+                canvas: child,
+                options: { onlyReplies: false, skipAncestors: true },
+                propagateParents: false,
+                generation: gen,
+            });
         } else {
             // update orderKey if changed
             const l = existing;
             if (l.kind instanceof ViewKind && l.kind.orderKey !== orderKey) {
                 l.kind.orderKey = orderKey;
                 await childScope.links.put(l);
+                const gen = childScope.bumpGeneration(child.idString);
+                await childScope._hierarchicalReindex!.add({
+                    canvas: child,
+                    options: { onlyReplies: false, skipAncestors: true },
+                    propagateParents: false,
+                    generation: gen,
+                });
             }
         }
     }

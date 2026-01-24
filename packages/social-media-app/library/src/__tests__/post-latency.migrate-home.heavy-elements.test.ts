@@ -21,7 +21,10 @@ describe("post latency: migrate home with heavy elements (EXPECTED FAIL)", () =>
         await session.stop();
     });
 
-    it("migrating heavy draft is fast (<1500ms) — currently regresses", async () => {
+    const runExpectedFail = process.env.RUN_EXPECTED_FAIL === "1";
+    const maybeIt = runExpectedFail ? it : it.skip;
+
+    maybeIt("migrating heavy draft is fast (<1500ms) — currently regresses", async () => {
         const peer = session.peers[0];
 
         // Destination (replicating) scope

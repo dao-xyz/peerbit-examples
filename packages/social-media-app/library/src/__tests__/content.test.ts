@@ -213,7 +213,9 @@ describe("canvas (updated)", () => {
                 )
             );
             expect(
-                totals.map((t) => Number(t)).sort((a, b) => a - b)
+                totals
+                    .map((t) => (typeof t === "number" ? t : t.estimate))
+                    .sort((a, b) => a - b)
             ).to.deep.eq([0, 1, 2]);
             const titles = await Promise.all(
                 allUnderRoot.map((x) => contextOf(scope, x))
@@ -1058,6 +1060,7 @@ describe("canvas (replies + ordering)", () => {
             /// some indexing stuff
             // fetch all canvases that have a view placement
             await waitForResolved(async () => {
+                await scope._hierarchicalReindex!.flush();
                 const allCanvases = await scope.replies.index
                     .iterate({
                         query: [

@@ -13,7 +13,7 @@ import { sha256Sync } from "@peerbit/crypto";
 import { Layout } from "../link.js";
 import { describe, it, beforeEach, afterEach } from "vitest";
 
-describe("createContext completeness with remote fallback", () => {
+describe("createContext (indexed-first)", () => {
     let session: TestSession;
     beforeEach(async () => {
         session = await TestSession.connected(2);
@@ -22,7 +22,7 @@ describe("createContext completeness with remote fallback", () => {
         await session.stop();
     });
 
-    it("uses remote fallback to satisfy expected element count when requireComplete is true", async () => {
+    it("returns indexed context without fetching remote elements", async () => {
         const client = session.peers[0]; // non-replicator
         const replicator = session.peers[1];
 
@@ -74,19 +74,24 @@ describe("createContext completeness with remote fallback", () => {
             existing: "reuse",
             args: { replicate: false },
         });
-        // Warm up: discover replicators so remote fallback can query them
-        await destFromClient.elements.log.waitForReplicators({
+        // Warm up: discover replicators so remote index fallback can query them
+        await destFromClient.replies.log.waitForReplicators({
             waitForNewPeers: true,
         });
 
-        // Sanity: local-only context should be empty (no local elements)
-        const localOnly = await destFromClient.createContext(draft, {
-            localOnly: true,
+        // Ensure the replicator has indexed the new elements into the replies index row
+        await dest._hierarchicalReindex!.add({
+            canvas: draft,
+            options: { onlyReplies: false, skipAncestors: true },
         });
-        expect(localOnly).to.eq("");
+        await dest._hierarchicalReindex!.flush();
 
-        // Now require completeness; allow remote fallback with a bounded timeout
+        // By default (indexed-only, no remote), a non-replicator has no local row.
+        expect(await destFromClient.createContext(draft)).to.eq("");
+
+        // Allow remote fetch of the *indexed row* (still no element fetch)
         const ctx = await destFromClient.createContext(draft, {
+            remoteIndex: true,
             timeoutMs: 3000,
         });
         const lines = ctx.split("\n").filter(Boolean).sort();

@@ -138,7 +138,9 @@ describe("templates", () => {
             expect(insertedChildren.length).to.equal(1);
 
             // Prefer direct context computation to avoid relying on immediate index timing
-            const computed = await insertedChildren[0].createContext();
+            const computed = await insertedChildren[0].createContext({
+                source: "elements",
+            });
             expect(computed).to.equal(properties.names[1]);
         };
 
