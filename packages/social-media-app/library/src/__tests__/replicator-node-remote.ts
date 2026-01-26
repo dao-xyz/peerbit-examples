@@ -1,17 +1,6 @@
 #!/usr/bin/env node
 
-process.addListener("unhandledRejection", (reason, promise) => {
-    console.log("Unhandled Rejection at: ", promise, "reason: ", reason);
-    // Application specific logging, throwing an error, or other logic here
-    // process.exit(1);
-});
-
-process.addListener("uncaughtException", (err, origin) => {
-    console.log("Uncaught Exception: ", err, "origin: ", origin);
-    // Application specific logging, throwing an error, or other logic here
-    // process.exit(1);
-});
-
+import { installProcessErrorFilter } from "../node/process-errors.js";
 import { Peerbit } from "peerbit";
 import {
     Canvas,
@@ -25,6 +14,12 @@ import { StaticMarkdownText } from "../static/text.js";
 import { StaticPartialImage } from "../static/image.js";
 import { Sort, SortDirection } from "@peerbit/document";
 import { createRoot } from "../root.js";
+
+installProcessErrorFilter({
+    mode: process.env.PEERBIT_TRANSIENT_ERRORS === "warn" ? "warn" : "silent",
+    includeStack: process.env.PEERBIT_TRANSIENT_ERRORS_STACK === "1",
+    failOnUnexpected: false,
+});
 console.log(
     Canvas,
     IndexableCanvas,
