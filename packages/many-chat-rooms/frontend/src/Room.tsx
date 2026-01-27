@@ -196,13 +196,13 @@ export const Room = () => {
         }
         room.program.messages
             .put(new Post({ message: text, from: peer.identity.publicKey }), {
-                    encryption: {
-                        // TODO do once for performance
-                        keypair: await X25519Keypair.from(
-                            await (peer as any).services.keychain.exportByKey(
-                                peer.identity.publicKey
-                            )
-                        ),
+                encryption: {
+                    // TODO do once for performance
+                    keypair: await X25519Keypair.from(
+                        await (peer as any).services.keychain.exportByKey(
+                            peer.identity.publicKey
+                        )
+                    ),
 
                     // Set reciever of message parts
                     receiver: {

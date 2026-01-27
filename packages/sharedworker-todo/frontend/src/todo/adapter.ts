@@ -1,4 +1,7 @@
-import { createVariantAdapter, type CanonicalOpenOptions } from "@peerbit/canonical-client";
+import {
+    createVariantAdapter,
+    type CanonicalOpenOptions,
+} from "@peerbit/canonical-client";
 import type { DocumentsProxy } from "@peerbit/document-proxy/client";
 import type { Address, Program } from "@peerbit/program";
 import { TodoItem } from "./model";
@@ -22,7 +25,10 @@ type CanonicalPeer = {
     ) => Promise<any>;
 };
 
-export const todoProgramAdapter = createVariantAdapter<TodoProgram, TodoProgramProxy>({
+export const todoProgramAdapter = createVariantAdapter<
+    TodoProgram,
+    TodoProgramProxy
+>({
     name: "sharedworker-todo",
     variant: "todo_program",
     getKey: (program) => {

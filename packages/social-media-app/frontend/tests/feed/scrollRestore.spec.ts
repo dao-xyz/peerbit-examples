@@ -11,7 +11,7 @@ const SEED_COUNT = 160;
 const TARGET_INDEX = 80;
 const RECOVERY_BUDGET_MS = Number(
     process.env.PW_SCROLL_RECOVERY_BUDGET_MS ||
-    (process.env.CI ? "15000" : "8000")
+        (process.env.CI ? "15000" : "8000")
 );
 const RECOVERY_ASSERT_TIMEOUT_MS = Math.max(RECOVERY_BUDGET_MS * 2, 30_000);
 const MAX_OFFSET_ERROR_PX = 300;
@@ -46,7 +46,7 @@ test.describe("Feed scroll restoration", () => {
         stop = async () => {
             try {
                 await client.stop();
-            } catch { }
+            } catch {}
         };
     });
 
@@ -141,18 +141,21 @@ test.describe("Feed scroll restoration", () => {
         );
 
         if (DEBUG_HISTORY) {
-            const info = await page.evaluate(({ anchorId }) => {
-                const feed = document.querySelector(
-                    '[data-testid="feed"]'
-                ) as HTMLElement | null;
-                const count = feed
-                    ? feed.querySelectorAll("[data-canvas-id]").length
-                    : 0;
-                const exists = feed
-                    ? !!feed.querySelector(`[data-canvas-id="${anchorId}"]`)
-                    : false;
-                return { count, exists };
-            }, { anchorId });
+            const info = await page.evaluate(
+                ({ anchorId }) => {
+                    const feed = document.querySelector(
+                        '[data-testid="feed"]'
+                    ) as HTMLElement | null;
+                    const count = feed
+                        ? feed.querySelectorAll("[data-canvas-id]").length
+                        : 0;
+                    const exists = feed
+                        ? !!feed.querySelector(`[data-canvas-id="${anchorId}"]`)
+                        : false;
+                    return { count, exists };
+                },
+                { anchorId }
+            );
             // eslint-disable-next-line no-console
             console.log("feed:beforeOpen", info);
         }
@@ -171,18 +174,21 @@ test.describe("Feed scroll restoration", () => {
         await attachHistory("afterBack");
 
         if (DEBUG_HISTORY) {
-            const info = await page.evaluate(({ anchorId }) => {
-                const feed = document.querySelector(
-                    '[data-testid="feed"]'
-                ) as HTMLElement | null;
-                const count = feed
-                    ? feed.querySelectorAll("[data-canvas-id]").length
-                    : 0;
-                const exists = feed
-                    ? !!feed.querySelector(`[data-canvas-id="${anchorId}"]`)
-                    : false;
-                return { count, exists };
-            }, { anchorId });
+            const info = await page.evaluate(
+                ({ anchorId }) => {
+                    const feed = document.querySelector(
+                        '[data-testid="feed"]'
+                    ) as HTMLElement | null;
+                    const count = feed
+                        ? feed.querySelectorAll("[data-canvas-id]").length
+                        : 0;
+                    const exists = feed
+                        ? !!feed.querySelector(`[data-canvas-id="${anchorId}"]`)
+                        : false;
+                    return { count, exists };
+                },
+                { anchorId }
+            );
             // eslint-disable-next-line no-console
             console.log("feed:afterBack", info);
         }

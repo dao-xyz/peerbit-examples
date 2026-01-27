@@ -4,7 +4,7 @@ import {
     insertKeypairForUser,
 } from "@peerbit/identity-supabase";
 import { usePeer } from "@peerbit/react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "./useAuth";
 
 const useSavedKey = (userId: string) =>
@@ -16,6 +16,9 @@ export const SupabaseIdentityBinder = () => {
     const auth = useAuth();
     const { peer } = usePeer();
     const [mismatchOpen, setMismatchOpen] = useState(false);
+    const [dismissedForUserId, setDismissedForUserId] = useState<string | null>(
+        null
+    );
     const [mismatchEmail, setMismatchEmail] = useState<string | undefined>(
         undefined
     );
@@ -24,6 +27,12 @@ export const SupabaseIdentityBinder = () => {
     const inflight = useRef<Promise<void> | null>(null);
 
     const peerPublicKeyHash = peer?.identity?.publicKey?.hashcode?.();
+    const isDismissedForSession =
+        dismissedForUserId !== null && dismissedForUserId === auth.user?.id;
+
+    useEffect(() => {
+        setDismissedForUserId(null);
+    }, [auth.user?.id]);
 
     useEffect(() => {
         if (!auth.enabled || !auth.user || !auth.supabase || !peer) {
@@ -141,9 +150,29 @@ export const SupabaseIdentityBinder = () => {
         return `Use saved identity for ${mismatchEmail}?`;
     }, [mismatchEmail]);
 
+    // React Fast Refresh / devtools probes `$$typeof` on objects when diffing props/state.
+    // libp2p exposes `components` as a Proxy that throws on unknown properties, so ensure
+    // this access never throws in dev/test environments.
+    useLayoutEffect(() => {
+        try {
+            const libp2p = (peer as any)?.libp2p;
+            const components = libp2p?.components;
+            if (!components) return;
+            (components as any)["$$typeof"] = 0;
+        } catch {}
+    }, [peer]);
+
+    const portalContainer = useMemo(
+        () => document.getElementById("root") ?? undefined,
+        []
+    );
+
     return (
-        <Dialog.Root open={mismatchOpen} onOpenChange={setMismatchOpen}>
-            <Dialog.Portal>
+        <Dialog.Root
+            open={mismatchOpen && !isDismissedForSession}
+            onOpenChange={setMismatchOpen}
+        >
+            <Dialog.Portal container={portalContainer}>
                 <Dialog.Overlay className="fixed inset-0  backdrop-blur-sm z-50" />
                 <Dialog.Content className="fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 p-6 rounded-lg max-w-sm w-full z-50 outline-0 bg-white dark:bg-neutral-950 border border-neutral-200 dark:border-neutral-800 shadow-all-lg">
                     <Dialog.Title className="text-xl font-semibold">
@@ -157,6 +186,7 @@ export const SupabaseIdentityBinder = () => {
 
                     <div className="mt-5 flex flex-col gap-2">
                         <button
+                            type="button"
                             className="btn btn-secondary w-full"
                             onClick={() => {
                                 if (auth.user?.id) {
@@ -176,8 +206,13 @@ export const SupabaseIdentityBinder = () => {
                             Reload and switch
                         </button>
                         <button
+                            type="button"
                             className="btn w-full"
                             onClick={() => {
+                                if (auth.user?.id) {
+                                    setDismissedForUserId(auth.user.id);
+                                }
+
                                 if (auth.user?.id) {
                                     try {
                                         window.localStorage.setItem(

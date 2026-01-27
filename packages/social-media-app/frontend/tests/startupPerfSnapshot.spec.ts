@@ -3,7 +3,10 @@ import { OFFLINE_BASE, withSearchParams } from "./utils/url";
 
 test.describe("startup perf snapshot", () => {
     test("emits a startup snapshot when ?perf=1", async ({ page }) => {
-        const url = withSearchParams(OFFLINE_BASE, { perf: 1, ephemeral: false });
+        const url = withSearchParams(OFFLINE_BASE, {
+            perf: 1,
+            ephemeral: false,
+        });
         await page.goto(url);
 
         // Wait for a stable "interactive" UI signal
@@ -29,4 +32,3 @@ test.describe("startup perf snapshot", () => {
         ).toBeDefined();
     });
 });
-

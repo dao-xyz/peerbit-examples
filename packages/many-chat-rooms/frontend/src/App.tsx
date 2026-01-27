@@ -35,7 +35,8 @@ export const App = () => {
         <PeerProvider
             config={{
                 runtime: "node",
-                network: import.meta.env.MODE === "development" ? "local" : "remote",
+                network:
+                    import.meta.env.MODE === "development" ? "local" : "remote",
             }}
         >
             <ThemeProvider theme={theme}>

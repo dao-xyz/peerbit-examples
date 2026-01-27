@@ -4,7 +4,9 @@ import { MdLock, MdPublic } from "react-icons/md";
 
 /* ── Privacy toggle component ──────────────────────────────── */
 export const PrivacySwitch = (properties: { className?: string }) => {
-    const [isPrivate, setIsPrivate] = useState<boolean>(true); // ← default to private
+    // Default to public: the draft/publish pipeline already promotes to the public scope,
+    // and e2e assumes the toggle starts in "Public".
+    const [isPrivate, setIsPrivate] = useState<boolean>(false);
 
     return (
         <label

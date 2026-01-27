@@ -118,9 +118,9 @@ test.describe("Feed back navigation avoids refetch", () => {
         });
 
         // Sanity: the same post card is present after back.
-        await expect(feed.locator(`[data-canvas-id="${anchorId}"]`)).toBeVisible(
-            { timeout: RECOVERY_BUDGET_MS }
-        );
+        await expect(
+            feed.locator(`[data-canvas-id="${anchorId}"]`)
+        ).toBeVisible({ timeout: RECOVERY_BUDGET_MS });
 
         // Guard against a visible "empty skeleton" render after back navigation.
         const postPreviewRenders = await page.evaluate(

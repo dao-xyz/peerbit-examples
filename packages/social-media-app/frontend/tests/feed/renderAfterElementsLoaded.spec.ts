@@ -249,17 +249,17 @@ async function waitForImageReady(page: any, id: string, alt: string) {
                         img.getBoundingClientRect().height > 0
                     ) {
                         try {
-                            (window as any).__E2E_RENDER_GUARD__?.timeline?.push(
-                                {
-                                    t: now(),
-                                    phase: "image:ready",
-                                    id,
-                                    alt,
-                                    src: img.currentSrc || img.src,
-                                    w: img.naturalWidth,
-                                    h: img.naturalHeight,
-                                }
-                            );
+                            (
+                                window as any
+                            ).__E2E_RENDER_GUARD__?.timeline?.push({
+                                t: now(),
+                                phase: "image:ready",
+                                id,
+                                alt,
+                                src: img.currentSrc || img.src,
+                                w: img.naturalWidth,
+                                h: img.naturalHeight,
+                            });
                         } catch {}
                         return now();
                     }
@@ -285,7 +285,9 @@ test.describe("Feed render gating: don't render post shells before elements load
 
     let stop: (() => Promise<void>) | undefined;
     let bootstrap: string[] | undefined;
-    let client: Awaited<ReturnType<typeof startReplicator>>["client"] | undefined;
+    let client:
+        | Awaited<ReturnType<typeof startReplicator>>["client"]
+        | undefined;
     let scope: Awaited<ReturnType<typeof startReplicator>>["scope"] | undefined;
 
     test.beforeAll(async () => {
@@ -353,10 +355,14 @@ test.describe("Feed render gating: don't render post shells before elements load
         const feed = page.getByTestId("feed");
 
         // Confirm the feed is connected by waiting for the baseline post to appear.
-        await expect(feed.locator(`[data-canvas-id="${baselineId}"]`).first()).toBeVisible({
+        await expect(
+            feed.locator(`[data-canvas-id="${baselineId}"]`).first()
+        ).toBeVisible({
             timeout: 180_000,
         });
-        await expect(feed.getByText(baselineMessage, { exact: true })).toBeVisible({
+        await expect(
+            feed.getByText(baselineMessage, { exact: true })
+        ).toBeVisible({
             timeout: 180_000,
         });
 
@@ -382,7 +388,11 @@ test.describe("Feed render gating: don't render post shells before elements load
 
         await expect(card).toBeVisible({ timeout: 180_000 });
 
-        const readyAt = await waitForContentReady(page, postId, insertedMessage);
+        const readyAt = await waitForContentReady(
+            page,
+            postId,
+            insertedMessage
+        );
         expect(readyAt).not.toBeNull();
         if (readyAt == null) return;
 
@@ -454,9 +464,9 @@ test.describe("Feed render gating: don't render post shells before elements load
             );
         }
 
-        await expect(card.getByText(insertedMessage, { exact: true })).toBeVisible(
-            { timeout: 30_000 }
-        );
+        await expect(
+            card.getByText(insertedMessage, { exact: true })
+        ).toBeVisible({ timeout: 30_000 });
 
         // Reload and assert we don't regress into "empty shell then content" on re-hydration.
         await page.reload();
@@ -584,10 +594,14 @@ test.describe("Feed render gating: don't render post shells before elements load
         });
         const feed = page.getByTestId("feed");
 
-        await expect(feed.locator(`[data-canvas-id="${baselineId}"]`).first()).toBeVisible({
+        await expect(
+            feed.locator(`[data-canvas-id="${baselineId}"]`).first()
+        ).toBeVisible({
             timeout: 180_000,
         });
-        await expect(feed.getByText(baselineMessage, { exact: true })).toBeVisible({
+        await expect(
+            feed.getByText(baselineMessage, { exact: true })
+        ).toBeVisible({
             timeout: 180_000,
         });
 
@@ -684,9 +698,9 @@ test.describe("Feed render gating: don't render post shells before elements load
             );
         }
 
-        await expect(card.getByRole("img", { name: imageAlt }).first()).toBeVisible(
-            { timeout: 30_000 }
-        );
+        await expect(
+            card.getByRole("img", { name: imageAlt }).first()
+        ).toBeVisible({ timeout: 30_000 });
 
         // Reload and assert we don't regress into "empty shell then image" on re-hydration.
         await page.reload();

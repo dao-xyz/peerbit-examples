@@ -44,7 +44,7 @@ const { scope: capsule, canvas: root } = await createRoot(client, {
 
 console.log(
     "Connected to scope: " +
-    capsule.address +
-    " with root canvas " +
-    root.idString
+        capsule.address +
+        " with root canvas " +
+        root.idString
 );

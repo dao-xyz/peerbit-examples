@@ -31,11 +31,7 @@ export const useNetworkUsage = () => {
         const downloadTracker = new BandwidthTracker();
         downloadTracker.start();
 
-        client.services.pubsub.processRpc = (
-            from,
-            peerStreams,
-            message
-        ) => {
+        client.services.pubsub.processRpc = (from, peerStreams, message) => {
             downloadTracker.add(message.length);
             return processRpc(from, peerStreams, message);
         };

@@ -9,7 +9,10 @@ import type { TodoProgramProxy } from "../todo/adapter";
 export const App = () => {
     const peerCtx = usePeer();
     const [text, setText] = React.useState("");
-    const todoTemplate = React.useMemo(() => new TodoProgram({ id: TODO_STORE_ID }), []);
+    const todoTemplate = React.useMemo(
+        () => new TodoProgram({ id: TODO_STORE_ID }),
+        []
+    );
     const todosQuery = React.useMemo(
         () => ({
             query: [],
@@ -30,17 +33,14 @@ export const App = () => {
     const todoProxy = todo as unknown as TodoProgramProxy | undefined;
     const docsProxy = todoProxy?.todos;
 
-    const { items: todos, isLoading: todosLoading } = useQuery(
-        docsProxy,
-        {
-            query: todosQuery,
-            resolve: true,
-            local: true,
-            remote: false,
-            updates: { merge: true },
-            batchSize: 250,
-        }
-    );
+    const { items: todos, isLoading: todosLoading } = useQuery(docsProxy, {
+        query: todosQuery,
+        resolve: true,
+        local: true,
+        remote: false,
+        updates: { merge: true },
+        batchSize: 250,
+    });
 
     const onAdd = async () => {
         const docs = docsProxy;
@@ -92,7 +92,11 @@ export const App = () => {
         !!docsProxy &&
         todoStatus === "ready" &&
         !todosLoading;
-    const todosStatus = !docsProxy ? "idle" : todosLoading ? "loading" : "ready";
+    const todosStatus = !docsProxy
+        ? "idle"
+        : todosLoading
+          ? "loading"
+          : "ready";
 
     return (
         <div className="page">
@@ -106,7 +110,9 @@ export const App = () => {
                 <div className="right">
                     <button
                         className="btn"
-                        onClick={() => window.open(window.location.href, "_blank")}
+                        onClick={() =>
+                            window.open(window.location.href, "_blank")
+                        }
                     >
                         Open new tab
                     </button>
@@ -119,10 +125,14 @@ export const App = () => {
                     <div className="value">
                         peer {peerCtx.loading ? "connecting" : peerCtx.status} ·
                         store {todoStatus} · todos {todosStatus}
-                        {peerId ? <span className="muted"> · peerId {peerId}</span> : null}
+                        {peerId ? (
+                            <span className="muted"> · peerId {peerId}</span>
+                        ) : null}
                     </div>
                 </div>
-                {overallError ? <div className="error">{overallError}</div> : null}
+                {overallError ? (
+                    <div className="error">{overallError}</div>
+                ) : null}
             </section>
 
             <section className="card">
@@ -140,7 +150,11 @@ export const App = () => {
                         onChange={(e) => setText(e.target.value)}
                         disabled={!ready}
                     />
-                    <button className="btn primary" type="submit" disabled={!ready}>
+                    <button
+                        className="btn primary"
+                        type="submit"
+                        disabled={!ready}
+                    >
                         Add
                     </button>
                 </form>
@@ -157,11 +171,16 @@ export const App = () => {
                                         checked={todo.completed}
                                         onChange={() => void onToggle(todo)}
                                     />
-                                    <span className={todo.completed ? "done" : ""}>
+                                    <span
+                                        className={todo.completed ? "done" : ""}
+                                    >
                                         {todo.text}
                                     </span>
                                 </label>
-                                <button className="btn danger" onClick={() => void onRemove(todo)}>
+                                <button
+                                    className="btn danger"
+                                    onClick={() => void onRemove(todo)}
+                                >
                                     Delete
                                 </button>
                             </div>
@@ -174,7 +193,11 @@ export const App = () => {
                         {todos.filter((t) => !t.completed).length} active ·{" "}
                         {todos.filter((t) => t.completed).length} completed
                     </div>
-                    <button className="btn" onClick={() => void onClearCompleted()} disabled={!ready}>
+                    <button
+                        className="btn"
+                        onClick={() => void onClearCompleted()}
+                        disabled={!ready}
+                    >
                         Clear completed
                     </button>
                 </div>

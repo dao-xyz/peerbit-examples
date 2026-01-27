@@ -6,7 +6,10 @@ import { todoProgramAdapter } from "./todo/adapter";
 import { App } from "./ui/App";
 import "./ui/styles.css";
 
-const workerUrl = new URL("./worker/sharedworkerTodo.worker.ts", import.meta.url);
+const workerUrl = new URL(
+    "./worker/sharedworkerTodo.worker.ts",
+    import.meta.url
+);
 
 createRoot(document.getElementById("root")!).render(
     <React.StrictMode>
@@ -21,7 +24,10 @@ createRoot(document.getElementById("root")!).render(
                         type: "module",
                     },
                 },
-                open: { adapters: [todoProgramAdapter, documentAdapter], mode: "canonical" },
+                open: {
+                    adapters: [todoProgramAdapter, documentAdapter],
+                    mode: "canonical",
+                },
             }}
         >
             <App />

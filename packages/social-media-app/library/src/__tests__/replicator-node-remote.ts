@@ -37,9 +37,9 @@ const { canvas: root, scope: capsule } = await createRoot(client, {
 
 console.log(
     "Connected to scope: " +
-    capsule.address +
-    " with root canvas " +
-    root.idString
+        capsule.address +
+        " with root canvas " +
+        root.idString
 );
 await root.replies.log.waitForReplicators();
 const iterator = root.replies.index.iterate({

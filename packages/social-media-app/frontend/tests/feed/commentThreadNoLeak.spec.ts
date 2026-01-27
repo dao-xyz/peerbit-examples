@@ -107,10 +107,9 @@ test.describe("Comment thread does not leak root feed", () => {
         await expect
             .poll(
                 async () => ({
-                    hasEmptyState:
-                        ((await thread.textContent()) || "").includes(
-                            "Nothing to see here"
-                        ),
+                    hasEmptyState: (
+                        (await thread.textContent()) || ""
+                    ).includes("Nothing to see here"),
                     leaksRootPost:
                         (await thread
                             .getByText(postB, { exact: true })

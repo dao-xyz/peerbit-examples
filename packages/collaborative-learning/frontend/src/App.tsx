@@ -34,7 +34,8 @@ export const App = () => {
             config={{
                 runtime: "node",
                 inMemory: true,
-                network: import.meta.env.MODE === "development" ? "local" : "remote",
+                network:
+                    import.meta.env.MODE === "development" ? "local" : "remote",
             }}
         >
             <ThemeProvider theme={theme}>

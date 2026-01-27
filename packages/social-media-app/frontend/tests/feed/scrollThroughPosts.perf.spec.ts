@@ -9,12 +9,15 @@ import {
 const BASE_HTTP = process.env.BASE_URL || "http://localhost:5190";
 const SEED_COUNT = Number(process.env.PW_SCROLL_PERF_SEED_COUNT || "10");
 const SCROLL_TIMEOUT_MS = Number(
-    process.env.PW_SCROLL_PERF_TIMEOUT_MS || (process.env.CI ? "60000" : "30000")
+    process.env.PW_SCROLL_PERF_TIMEOUT_MS ||
+        (process.env.CI ? "60000" : "30000")
 );
 const SCROLL_STEP_FRACTION = Number(
     process.env.PW_SCROLL_PERF_SCROLL_STEP_FRACTION || "0.9"
 );
-const SCROLL_TICK_MS = Number(process.env.PW_SCROLL_PERF_SCROLL_TICK_MS || "150");
+const SCROLL_TICK_MS = Number(
+    process.env.PW_SCROLL_PERF_SCROLL_TICK_MS || "150"
+);
 
 async function isInViewport(locator: import("@playwright/test").Locator) {
     return locator.evaluate((el) => {
@@ -133,4 +136,3 @@ test.describe("Feed scroll perf (replicator)", () => {
         });
     });
 });
-

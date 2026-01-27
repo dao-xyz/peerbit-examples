@@ -1,5 +1,16 @@
-import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { NavigationType, UNSAFE_LocationContext, useLocation, useNavigationType } from "react-router";
+import React, {
+    useEffect,
+    useLayoutEffect,
+    useMemo,
+    useRef,
+    useState,
+} from "react";
+import {
+    NavigationType,
+    UNSAFE_LocationContext,
+    useLocation,
+    useNavigationType,
+} from "react-router";
 import clsx from "clsx";
 import { inIframe } from "@peerbit/react";
 import { Header } from "./Header";
@@ -149,11 +160,20 @@ export function LayeredContent(props?: { depth?: number }) {
             next = next.filter((e) => e.idx >= minIdx);
             return next;
         });
-    }, [idx, depth, location.key, location.pathname, location.search, location.hash]);
+    }, [
+        idx,
+        depth,
+        location.key,
+        location.pathname,
+        location.search,
+        location.hash,
+    ]);
 
     return (
         <>
-            {entries.map((entry) => (
+            {/* Render newest (active) layer first so DOM queries prefer the visible layer
+                even when older layers are kept around for scroll restoration. */}
+            {[...entries].reverse().map((entry) => (
                 <StackLayer
                     key={entry.idx}
                     entry={entry}

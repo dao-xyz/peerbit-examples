@@ -23,7 +23,11 @@ test.describe("Late results diagnostics (prod bootstrap)", () => {
 
         await page.addInitScript(() => {
             const w: any = window as any;
-            w.__DBG = { ...(w.__DBG || {}), enabled: true, captureEvents: true };
+            w.__DBG = {
+                ...(w.__DBG || {}),
+                enabled: true,
+                captureEvents: true,
+            };
             try {
                 w.__DBG_EVENTS = [];
             } catch {}
@@ -49,10 +53,9 @@ test.describe("Late results diagnostics (prod bootstrap)", () => {
                     '[data-testid="feed"]'
                 ) as HTMLElement | null;
                 const nodes = feed
-                    ? Array.from(feed.querySelectorAll("[data-canvas-id]")).slice(
-                          0,
-                          6
-                      )
+                    ? Array.from(
+                          feed.querySelectorAll("[data-canvas-id]")
+                      ).slice(0, 6)
                     : [];
                 return nodes.map((el) => ({
                     id: el.getAttribute("data-canvas-id"),

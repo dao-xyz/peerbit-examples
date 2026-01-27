@@ -8,7 +8,8 @@ type StartupPerfState = {
 
 type PerfEventRecord = { type: string; detail: unknown; t: number };
 
-const getGlobal = (): any => (typeof window !== "undefined" ? (window as any) : {});
+const getGlobal = (): any =>
+    typeof window !== "undefined" ? (window as any) : {};
 
 const nowMs = () => {
     try {
@@ -132,13 +133,29 @@ const computeDurations = (marks: Record<string, number>) => {
     const d: Record<string, number> = {};
 
     const pairs: Array<[string, string, string]> = [
-        ["auth:keypair:fetch", "auth:keypair:fetch:start", "auth:keypair:fetch:end"],
+        [
+            "auth:keypair:fetch",
+            "auth:keypair:fetch:start",
+            "auth:keypair:fetch:end",
+        ],
         ["peer:create", "peer:init:start", "peer:event:ready"],
         ["peer:waitForConnected", "peer:event:ready", "peer:context:ready"],
-        ["scope:public:open", "scope:@public:open:start", "scope:@public:open:end"],
-        ["scope:private:open", "scope:@private:open:start", "scope:@private:open:end"],
+        [
+            "scope:public:open",
+            "scope:@public:open:start",
+            "scope:@public:open:end",
+        ],
+        [
+            "scope:private:open",
+            "scope:@private:open:start",
+            "scope:@private:open:end",
+        ],
         ["canvas:path:sync", "canvas:path:sync:start", "canvas:path:sync:end"],
-        ["canvas:root:create", "canvas:root:create:start", "canvas:root:create:end"],
+        [
+            "canvas:root:create",
+            "canvas:root:create:start",
+            "canvas:root:create:end",
+        ],
         ["canvas:root:load", "canvas:root:load:start", "canvas:root:load:end"],
         ["canvas:viewRoot", "peer:context:ready", "canvas:viewRoot:ready"],
         ["draft:readyAfterPeer", "peer:context:ready", "draft:event:ready"],
@@ -211,7 +228,12 @@ export const markStorageSnapshot = async (label: string) => {
         if (!isPerfEnabled()) return;
         const snap = await storageSnapshot();
         startupMark(`storage:${label}`, snap);
-        emitPerfEvent("peer", { kind: "startup", phase: "storage", label, snap });
+        emitPerfEvent("peer", {
+            kind: "startup",
+            phase: "storage",
+            label,
+            snap,
+        });
     } catch {
         // no-op
     }
