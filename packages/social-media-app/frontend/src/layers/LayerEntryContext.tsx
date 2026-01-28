@@ -18,4 +18,3 @@ export const LayerEntryProvider: React.FC<{
 };
 
 export const useLayerEntry = () => useContext(LayerEntryContext);
-
