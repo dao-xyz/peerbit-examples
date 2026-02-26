@@ -161,7 +161,8 @@ export const useFeedHooks = (props: {
                     maxWaitTimeoutRef.current = null;
                 }
                 committedIds.current.firstId = list[0]?.reply.idString ?? null;
-                committedIds.current.lastId = list.at(-1)?.reply.idString ?? null;
+                committedIds.current.lastId =
+                    list.at(-1)?.reply.idString ?? null;
                 committedLengthRef.current = list.length;
 
                 hiddenRef.current = { head: 0, tail: 0 };
@@ -481,7 +482,7 @@ export const useFeedHooks = (props: {
         const myId = iteratorId;
         // Trigger the first batch ASAP so we don't flash the empty-state placeholder before results arrive.
         loadMoreWithReason("hydrate")
-            .catch(() => { })
+            .catch(() => {})
             .finally(() => {
                 // Only mark hydrated if we're still on the same iterator.
                 if (hydrationIteratorRef.current === myId) {
@@ -643,7 +644,6 @@ export const useFeedHooks = (props: {
         },
         [indexIsReadyToRender, hidden.head, hidden.tail, processedReplies]
     );
-
 
     const handleLoad = useCallback((canvas: Canvas, index: number) => {
         const id = canvas.idString;

@@ -180,10 +180,13 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
 
             const myKey = peer?.identity?.publicKey?.bytes;
 
-            const createdNs = (item: WithIndexedContext<Canvas, IndexableCanvas>) => {
+            const createdNs = (
+                item: WithIndexedContext<Canvas, IndexableCanvas>
+            ) => {
                 const created = (item as any).__context?.created;
                 if (typeof created === "bigint") return created;
-                if (typeof created === "number") return BigInt(Math.floor(created));
+                if (typeof created === "number")
+                    return BigInt(Math.floor(created));
                 return undefined;
             };
 
@@ -227,7 +230,10 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
                 if (!pinnedIdsRef.current.has(idString)) {
                     pinnedIdsRef.current.add(idString);
                     pinnedSeqCounterRef.current += 1;
-                    pinnedSeqRef.current.set(idString, pinnedSeqCounterRef.current);
+                    pinnedSeqRef.current.set(
+                        idString,
+                        pinnedSeqCounterRef.current
+                    );
                     changed = true;
                 }
             }
@@ -253,7 +259,8 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
             const createdNs = (item: (typeof pinned)[number]) => {
                 const created = (item as any).__context?.created;
                 if (typeof created === "bigint") return created;
-                if (typeof created === "number") return BigInt(Math.floor(created));
+                if (typeof created === "number")
+                    return BigInt(Math.floor(created));
                 return -1n;
             };
             const seq = (id: string) => pinnedSeqRef.current.get(id) ?? 0;
@@ -393,14 +400,14 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
                     typeof created === "bigint"
                         ? Number(created)
                         : typeof created === "number"
-                            ? created
-                            : undefined;
+                          ? created
+                          : undefined;
                 const repliesN =
                     typeof replies === "bigint"
                         ? Number(replies)
                         : typeof replies === "number"
-                            ? replies
-                            : undefined;
+                          ? replies
+                          : undefined;
                 return {
                     id: item.idString,
                     created: createdMs,
@@ -413,7 +420,10 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
                 : [];
             const evtValues = evtItems
                 .map((it: any) => it?.value ?? it?.indexed ?? it)
-                .filter(Boolean) as WithIndexedContext<Canvas, IndexableCanvas>[];
+                .filter(Boolean) as WithIndexedContext<
+                Canvas,
+                IndexableCanvas
+            >[];
 
             emitDebugEvent({
                 source: "stream",
@@ -575,12 +585,12 @@ function useStreamUiState() {
 
     const timeFilter: TimeFilter = TIME_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TIME) as TimeFilterType) ||
-        DEFAULT_TIME_FILTER
+            DEFAULT_TIME_FILTER
     );
 
     const typeFilter: TypeFilter = TYPE_FILTERS.get(
         (searchParams.get(STREAM_QUERY_PARAMS.TYPE) as TypeFilterType) ||
-        DEFAULT_TYPE_FILTER
+            DEFAULT_TYPE_FILTER
     );
 
     const query: string =
@@ -713,8 +723,21 @@ function useStreamUiState() {
         query,
     ]);
 
-    // lazy loading of replies
-    const [batchSize, setBatchSize] = useState(1);
+    // Lazy loading of replies.
+    // Default to the view's pagination limit so feeds hydrate enough items for
+    // stable scrolling (and avoid requiring many rapid loadMore calls).
+    const viewBatchSize = useMemo(() => {
+        const raw = filterModel?.settings?.paginationLimit;
+        const n =
+            typeof raw === "number" && Number.isFinite(raw)
+                ? Math.floor(raw)
+                : 10;
+        return Math.max(1, Math.min(100, n));
+    }, [filterModel?.id]);
+    const [batchSize, setBatchSize] = useState(viewBatchSize);
+    useEffect(() => {
+        setBatchSize(viewBatchSize);
+    }, [viewBatchSize]);
 
     const remote = React.useMemo(
         () => ({
@@ -936,16 +959,16 @@ type Ctx = ReturnType<typeof buildStreamValue> | undefined;
 const makeInitialStreamValue = (): ReturnType<typeof buildStreamValue> =>
     ({
         feedRoot: undefined,
-        pinToView: async () => { },
+        pinToView: async () => {},
         defaultViews: [],
         dynamicViews: [],
         createSettings: async () => undefined as any,
         filterModel: undefined,
-        setView: () => { },
-        loadMore: async () => { },
+        setView: () => {},
+        loadMore: async () => {},
         isLoading: false,
         loading: false,
-        setBatchSize: () => { },
+        setBatchSize: () => {},
         batchSize: 3,
         iteratorId: undefined,
         lastReply: undefined,
@@ -953,12 +976,12 @@ const makeInitialStreamValue = (): ReturnType<typeof buildStreamValue> =>
         processedReplies: [],
         timeFilter: TIME_FILTERS.get(DEFAULT_TIME_FILTER)!,
         typeFilter: TYPE_FILTERS.get(DEFAULT_TYPE_FILTER)!,
-        setTimeFilter: () => { },
-        setTypeFilter: () => { },
-        setQueryParams: () => { },
+        setTimeFilter: () => {},
+        setTypeFilter: () => {},
+        setQueryParams: () => {},
         hasMore: () => false,
         query: "",
-        setQuery: () => { },
+        setQuery: () => {},
     }) as any;
 
 const StreamContext: React.Context<Ctx> =

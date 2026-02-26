@@ -24,23 +24,56 @@ export function setupConsoleCapture(
             typeof p === "string" ? text.includes(p) : p.test(text)
         );
 
+    // Capture unhandled promise rejections in the page context.
+    // Playwright's `pageerror` does not consistently surface `unhandledrejection`,
+    // and Peerbit/libp2p failures can otherwise disappear into the void.
+    page.addInitScript(() => {
+        const w: any = window as any;
+        if (w.__PW_CAPTURE_UNHANDLED_REJECTIONS__) return;
+        w.__PW_CAPTURE_UNHANDLED_REJECTIONS__ = true;
+
+        window.addEventListener(
+            "unhandledrejection",
+            (evt: PromiseRejectionEvent) => {
+                try {
+                    const reason: any = (evt as any).reason;
+                    const message =
+                        (reason && (reason.stack || reason.message)) ||
+                        String(reason);
+                    // eslint-disable-next-line no-console
+                    console.error(`[unhandledrejection] ${message}`);
+                } catch {
+                    // eslint-disable-next-line no-console
+                    console.error(
+                        "[unhandledrejection] (failed to stringify reason)"
+                    );
+                }
+            }
+        );
+    });
+
     page.on("console", (msg) => {
         const text = msg.text();
         const type = msg.type();
 
-        if (opts.printAll) {
+        if (opts.printAll || (type === "error" && !shouldIgnore(text))) {
             testInfo
                 .attach(`console:${type}`, {
                     body: Buffer.from(text, "utf8"),
                     contentType: "text/plain",
                 })
                 .catch(() => {});
-            // Also echo to stdout for quick diagnosis
-            // eslint-disable-next-line no-console
-            console.log(`Page console ${type}: ${text}`);
+            if (opts.printAll) {
+                // Also echo to stdout for quick diagnosis
+                // eslint-disable-next-line no-console
+                console.log(`Page console ${type}: ${text}`);
+            }
         }
 
         if (type === "error" && !shouldIgnore(text)) {
+            // Always surface errors in runner output (even when printAll is off).
+            // eslint-disable-next-line no-console
+            console.error(`Page console error: ${text}`);
             if (opts.failOnError) {
                 throw new Error(`Page console error: ${text}`);
             }

@@ -1,5 +1,6 @@
 import { chromium, type BrowserContext, type TestInfo } from "@playwright/test";
 import inspector from "inspector";
+import fs from "node:fs";
 
 export type PersistentContextOptions = {
     /** Subdirectory name under the test output path. */
@@ -30,6 +31,14 @@ export async function launchPersistentBrowserContext(
     } = options;
 
     const userDataDir = testInfo.outputPath(scope);
+    // Ensure deterministic profiles across re-runs. Playwright may reuse the same
+    // `testInfo.outputPath()` folder between local runs, which can leak localStorage
+    // and IndexedDB state (e.g. Supabase identity switch flags) into new contexts.
+    try {
+        fs.rmSync(userDataDir, { recursive: true, force: true });
+    } catch {
+        /* ignore */
+    }
     const context = await chromium.launchPersistentContext(userDataDir, {
         headless,
         viewport,

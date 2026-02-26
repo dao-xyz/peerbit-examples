@@ -11,6 +11,7 @@ import React, {
 import { Spinner } from "../utils/Spinner";
 import { useAuth } from "./useAuth";
 import { startupMark } from "../debug/perf";
+import { PeerSetupGate } from "./PeerSetupGate";
 
 type Props = {
     network: "local" | "remote" | NetworkOption;
@@ -22,6 +23,8 @@ type Props = {
 
 const identityModeKey = (userId: string) =>
     `giga:supabaseIdentity:${userId}:useSaved`;
+
+const OFFLINE_NETWORK: NetworkOption = { type: "explicit", bootstrap: [] };
 
 export const PeerWithAuth: React.FC<Props> = ({
     network,
@@ -172,6 +175,22 @@ export const PeerWithAuth: React.FC<Props> = ({
         return "boot:error";
     }, [boot]);
 
+    const keypair = boot?.type === "account" ? boot.keypair : undefined;
+    const peerProviderConfig = useMemo(
+        () => ({
+            runtime: "node" as const,
+            // Important: do not auto-dial in the PeerProvider.
+            // We configure stream timeouts + dial in `PeerSetupGate` to avoid flaky
+            // cold-start delivery failures (SeekDelivery / outbound stream creation).
+            network: OFFLINE_NETWORK,
+            waitForConnected,
+            inMemory,
+            singleton,
+            keypair,
+        }),
+        [peerKey, waitForConnected, inMemory, singleton, keypair]
+    );
+
     useLayoutEffect(() => {
         if (!boot || boot.type === "error") return;
         startupMark("peer:init:start", { identity: boot.type });
@@ -214,18 +233,8 @@ export const PeerWithAuth: React.FC<Props> = ({
     }
 
     return (
-        <PeerProvider
-            key={peerKey}
-            config={{
-                runtime: "node",
-                network,
-                waitForConnected,
-                inMemory,
-                singleton,
-                keypair: boot.type === "account" ? boot.keypair : undefined,
-            }}
-        >
-            {children}
+        <PeerProvider key={peerKey} config={peerProviderConfig}>
+            <PeerSetupGate network={network}>{children}</PeerSetupGate>
         </PeerProvider>
     );
 };

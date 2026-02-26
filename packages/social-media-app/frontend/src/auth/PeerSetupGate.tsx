@@ -25,6 +25,22 @@ export const PeerSetupGate: React.FC<Props> = ({ children, network }) => {
         [peer?.identity?.publicKey?.hashcode?.()]
     );
 
+    // `network` is often passed as an object literal from the top-level App.
+    // Derive a stable key so we don't restart dialing loops on unrelated re-renders.
+    const networkKey = (() => {
+        if (typeof network === "string") return network;
+        const t = (network as any).type as string | undefined;
+        if (t === "local" || t === "remote") return t;
+        if ("bootstrap" in (network as any)) {
+            const list = ((network as any).bootstrap as any[]) ?? [];
+            const addrs = Array.isArray(list)
+                ? list.map(String).filter(Boolean)
+                : [];
+            return `explicit:${addrs.join(",")}`;
+        }
+        return "remote";
+    })();
+
     useLayoutEffect(() => {
         if (!peer) {
             setConfigured(false);
@@ -146,7 +162,7 @@ export const PeerSetupGate: React.FC<Props> = ({ children, network }) => {
         return () => {
             cancelled = true;
         };
-    }, [configured, network, peer, peerKey]);
+    }, [configured, networkKey, peer, peerKey]);
 
     if (!peer || !configured || !connected) {
         const title =

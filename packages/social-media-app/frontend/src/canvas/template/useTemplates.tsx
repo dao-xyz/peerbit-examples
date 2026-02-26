@@ -55,11 +55,91 @@ export type UseTemplatesReturn = {
 /* Single instance of the Templates program (address derived from TEMPLATES_ID) */
 const TEMPLATES_DB = new Templates(TEMPLATES_ID);
 
+const isNotStartedError = (e: unknown): boolean => {
+    const anyE = e as any;
+    return (
+        anyE?.name === "NotStartedError" ||
+        String(anyE?.message ?? "")
+            .toLowerCase()
+            .includes("not started")
+    );
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function retryWhileNotStarted<T>(
+    fn: () => Promise<T>,
+    options?: {
+        timeoutMs?: number;
+        initialDelayMs?: number;
+        maxDelayMs?: number;
+    }
+): Promise<T> {
+    const timeoutMs = options?.timeoutMs ?? 15_000;
+    const initialDelayMs = options?.initialDelayMs ?? 50;
+    const maxDelayMs = options?.maxDelayMs ?? 1_000;
+
+    const start = Date.now();
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+        try {
+            return await fn();
+        } catch (e) {
+            if (!isNotStartedError(e)) throw e;
+            if (Date.now() - start > timeoutMs) throw e;
+            const delayMs = Math.min(
+                maxDelayMs,
+                initialDelayMs * Math.pow(2, attempt)
+            );
+            attempt++;
+            await sleep(delayMs);
+        }
+    }
+}
+
+const warmedScopes = new WeakSet<object>();
+async function warmScopeIndexes(scope: any) {
+    if (!scope || scope.closed) return;
+    if (warmedScopes.has(scope)) return;
+
+    const opts = { resolve: false, local: true, remote: false } as const;
+    const zero32 = new Uint8Array(32);
+
+    // Warm the sqlite-backed indices. These can briefly throw NotStartedError
+    // right after a Scope is opened in a fresh persistent profile.
+    const startIndex = async (di: any) => {
+        const start = di?.index?.start;
+        if (typeof start === "function") {
+            await start.call(di.index);
+        }
+    };
+
+    await startIndex(scope.replies.index);
+    await startIndex(scope.links.index);
+    await startIndex(scope.elements.index);
+    await startIndex(scope.visualizations.index);
+
+    // Confirm readiness via a cheap local read.
+    await retryWhileNotStarted(() => scope.replies.index.get(zero32, opts));
+    await retryWhileNotStarted(() => scope.links.index.get(zero32, opts));
+    await retryWhileNotStarted(() => scope.elements.index.get(zero32, opts));
+    await retryWhileNotStarted(() =>
+        scope.visualizations.index.get(zero32, opts)
+    );
+
+    warmedScopes.add(scope);
+}
+
 /* ------------------------------------------------------------------ */
 export function useTemplates(
     options?: UseTemplatesOptions
 ): UseTemplatesReturn {
     const { peer, persisted } = usePeer();
+    const replicate = useMemo(
+        () => (persisted ? { factor: 1 } : false),
+        [persisted]
+    );
     const auto = options?.auto ?? true;
     const [enabled, setEnabled] = useState<boolean>(auto);
 
@@ -76,7 +156,7 @@ export function useTemplates(
         TEMPLATES_DB,
         {
             existing: "reuse",
-            args: { replicate: persisted },
+            args: { replicate },
         }
     );
     const prog = templatesProgram.program as Templates | undefined;
@@ -99,7 +179,7 @@ export function useTemplates(
         templatesScopeInst,
         {
             existing: "reuse",
-            args: { replicate: persisted },
+            args: { replicate },
         }
     );
 
@@ -113,9 +193,14 @@ export function useTemplates(
         if (!templatesScope.program || templatesScope.loading) return; // scope not ready
         if (bootstrapped) return;
 
+        let cancelled = false;
+
         (async () => {
+            // Ensure sqlite-backed indices are ready before we start creating canvases/links.
+            await warmScopeIndexes(templatesScope.program);
             const peerClient = peer as any;
             const ensure = async (tpl: Template) => {
+                if (cancelled) return;
                 if (prog.templates.closed) return;
                 const exists = await prog.templates.index.get(tpl.id, {
                     local: true,
@@ -164,8 +249,15 @@ export function useTemplates(
                 })
             );
 
+            if (cancelled) return;
             setBootstrapped(true);
-        })().catch(console.error);
+        })().catch((e) => {
+            if (!cancelled) console.error(e);
+        });
+
+        return () => {
+            cancelled = true;
+        };
     }, [
         peer?.identity.publicKey.hashcode(),
         prog,
@@ -217,6 +309,18 @@ export function useTemplates(
         if (!tpl) throw new Error("Missing template");
         if (!into) throw new Error("Missing target canvas");
         // Template.prototype.insertInto(parent: Canvas): Promise<Canvas>
+        // In persistent profiles, sqlite indices can briefly be "Not started" during startup.
+        // Warm the relevant scopes before doing a deep insert that touches links/elements.
+        await warmScopeIndexes(into.nearestScope);
+        try {
+            await tpl.prototype.load(
+                into.client ?? (into.nearestScope as any).node
+            );
+            await warmScopeIndexes(tpl.prototype.tryNearestScope?.());
+        } catch {
+            // Best-effort: insertInto will surface the real error if prototype can't be opened.
+        }
+
         return tpl.insertInto(into);
     }, []);
 

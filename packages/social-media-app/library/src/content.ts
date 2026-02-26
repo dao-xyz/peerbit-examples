@@ -625,15 +625,16 @@ async function updateIndexedRepliesOnly(
     scope: Scope,
     canvas: Canvas
 ): Promise<void> {
-    const indexed = await scope.replies.index.get(canvas.id, {
+    const indexed = (await scope.replies.index.get(canvas.id, {
         resolve: false,
         local: true,
         remote: { strategy: "fallback", timeout: 5_000 },
-    });
-    if (!indexed) return; // not in index yet (e.g. parent still building); skip
+    })) as WithContext<IndexableCanvas> | undefined;
+    // Not in index yet (e.g. parent still building); skip
+    if (!indexed) return;
 
     const total = await countRepliesFast(canvas);
-    (indexed as IndexableCanvas).replies = total;
+    indexed.replies = total;
 
     // write through the index (keep __context)
     const wrapped = new scope.replies.index.wrappedIndexedType(
@@ -682,6 +683,19 @@ async function ensureInReplies(scope: Scope, c: Canvas): Promise<boolean> {
     });
     if (!existed) {
         await scope.replies.put(c);
+        // `replies.put()` returns before the async index transform necessarily completes.
+        // Wait briefly for the indexed row to exist so subsequent reindex/sort operations
+        // (e.g. Best ordering by `replies`) can observe it deterministically.
+        try {
+            await scope.replies.index.get(c.id, {
+                resolve: false,
+                local: true,
+                remote: false,
+                waitFor: 5_000,
+            });
+        } catch {
+            // Non-fatal: callers may still recover via later reindexing.
+        }
         return true;
     }
     return false;
@@ -1810,12 +1824,7 @@ export class Scope extends Program<ScopeArgs> {
             replicas: args?.replicas,
             timeUntilRoleMaturity: 6e4,
             keep: "self",
-            replicate:
-                args?.replicate != null
-                    ? args?.replicate
-                        ? { factor: 1 }
-                        : false
-                    : { factor: 1 }, // TODO choose better
+            replicate: args?.replicate ?? { factor: 1 }, // TODO choose better
             canPerform: async (operation) => {
                 /**
                  * Only allow updates if we created it
@@ -1893,12 +1902,7 @@ export class Scope extends Program<ScopeArgs> {
         await this.visualizations.open({
             type: BasicVisualization,
             replicas: args?.replicas,
-            replicate:
-                args?.replicate != null
-                    ? args?.replicate
-                        ? { factor: 1 }
-                        : false
-                    : { factor: 1 }, // TODO choose better
+            replicate: args?.replicate ?? { factor: 1 }, // TODO choose better
             timeUntilRoleMaturity: 6e4,
             keep: "self",
             index: {
@@ -1916,12 +1920,7 @@ export class Scope extends Program<ScopeArgs> {
         await this.links.open({
             type: Link,
             replicas: args?.replicas,
-            replicate:
-                args?.replicate != null
-                    ? args?.replicate
-                        ? { factor: 1 }
-                        : false
-                    : { factor: 1 }, // TODO choose better
+            replicate: args?.replicate ?? { factor: 1 }, // TODO choose better
             timeUntilRoleMaturity: 6e4,
             keep: "self",
             index: {
@@ -1939,12 +1938,7 @@ export class Scope extends Program<ScopeArgs> {
             type: Canvas,
             timeUntilRoleMaturity: 6e4,
             replicas: args?.replicas,
-            replicate:
-                args?.replicate != null
-                    ? args?.replicate
-                        ? { factor: 1 }
-                        : false
-                    : { factor: 1 }, // TODO choose better
+            replicate: args?.replicate ?? { factor: 1 }, // TODO choose better
             canOpen: () => false,
             canPerform: async (_operation) => {
                 /**
@@ -2917,7 +2911,10 @@ export class Scope extends Program<ScopeArgs> {
 
         // 1) build fresh index row (ctx phase)
         const tCtxStart = globalThis.performance?.now?.() || Date.now();
-        _dispatchReindexDebug({ phase: "full:build:start", id: canvas.idString });
+        _dispatchReindexDebug({
+            phase: "full:build:start",
+            id: canvas.idString,
+        });
         const fresh = await IndexableCanvas.from(canvas);
         const tCtxEnd = globalThis.performance?.now?.() || Date.now();
         _dispatchReindexDebug({

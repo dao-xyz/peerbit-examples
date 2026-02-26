@@ -179,7 +179,6 @@ export const App = () => {
         }
     }
 
-    // your original config stays the same, but now reuses that array
     const networkConfig: NetworkOption =
         import.meta.env.MODE === "development"
             ? {

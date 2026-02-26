@@ -23,6 +23,49 @@ const generateId = (...keys: (Uint8Array | string)[]): Uint8Array => {
     return sha256Sync(concat(seed));
 };
 
+const isNotStartedError = (e: unknown): boolean => {
+    const anyE = e as any;
+    return (
+        anyE?.name === "NotStartedError" ||
+        String(anyE?.message ?? "")
+            .toLowerCase()
+            .includes("not started")
+    );
+};
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function retryWhileNotStarted<T>(
+    fn: () => Promise<T>,
+    options?: {
+        timeoutMs?: number;
+        initialDelayMs?: number;
+        maxDelayMs?: number;
+    }
+): Promise<T> {
+    const timeoutMs = options?.timeoutMs ?? 15_000;
+    const initialDelayMs = options?.initialDelayMs ?? 50;
+    const maxDelayMs = options?.maxDelayMs ?? 1_000;
+
+    const start = Date.now();
+    let attempt = 0;
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+        try {
+            return await fn();
+        } catch (e) {
+            if (!isNotStartedError(e)) throw e;
+            if (Date.now() - start > timeoutMs) throw e;
+            const delayMs = Math.min(
+                maxDelayMs,
+                initialDelayMs * Math.pow(2, attempt)
+            );
+            attempt++;
+            await sleep(delayMs);
+        }
+    }
+}
+
 const getContextText = async (c: Canvas): Promise<string> => {
     return c.nearestScope.createContext(c);
 };
@@ -86,10 +129,11 @@ export class Template {
             kind?: LinkKind,
             view?: ChildVisualization
         ): Promise<Canvas> => {
-            // Open source with its own home settings (publish does copies from srcHome→dest)
-            const srcOpen = src.initialized
-                ? src
-                : await dstParent.nearestScope.openWithSameSettings(src);
+            // Always (re-)open the source with its home settings. Template prototypes
+            // are deserialized without bound scopes, and indexers can still be warming up.
+            const srcOpen = await retryWhileNotStarted(() =>
+                dstParent.nearestScope.openWithSameSettings(src)
+            );
 
             // Materialize a fork in the parent scope; preserve edge metadata if provided
             const [, dst] = await parentScope.publish(srcOpen, {
@@ -106,17 +150,25 @@ export class Template {
             });
 
             // Recreate children using their original link metadata
-            const links = await srcOpen.getChildrenLinks(); // { child, kind?, view? }[]
+            const links = await retryWhileNotStarted(() =>
+                srcOpen.getChildrenLinks()
+            ); // { child, kind?, view? }[]
+            const srcScope = srcOpen.nearestScope;
             for (const link of links) {
-                let child = await resolveChild(link, src.nearestScope);
+                let child = await retryWhileNotStarted(() =>
+                    resolveChild(link, srcScope)
+                );
                 if (!child) {
                     throw new Error(
                         "Failed to resolve child during template cloning"
                     );
                 }
-                const loaded =
-                    await src.nearestScope.openWithSameSettings(child);
-                const vizualization = await loaded.getVisualization();
+                const loaded = await retryWhileNotStarted(() =>
+                    srcScope.openWithSameSettings(child)
+                );
+                const vizualization = await retryWhileNotStarted(() =>
+                    loaded.getVisualization()
+                );
                 await clone(loaded, dst, link.kind, vizualization?.view);
             }
 
@@ -145,7 +197,7 @@ export class IndexableTemplate {
     }
 }
 
-type TemplateArgs = { replicate?: boolean };
+type TemplateArgs = { replicate?: boolean | { factor: number } };
 
 @variant("templates")
 export class Templates extends Program<TemplateArgs> {

@@ -1,4 +1,7 @@
 import { Peerbit } from "peerbit";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import {
     Canvas,
     createRoot,
@@ -11,7 +14,14 @@ import { webSockets } from "@libp2p/websockets";
 import { noise } from "@chainsafe/libp2p-noise";
 
 export async function startReplicator() {
+    // Important for e2e determinism: never use the default Peerbit directory, which can
+    // leak state across local test runs and cause "missing message" seek failures.
+    const directory = fs.mkdtempSync(
+        path.join(os.tmpdir(), "giga-e2e-replicator-")
+    );
+
     const client = await Peerbit.create({
+        directory,
         // The node replicator doesn't need sqlite indexes; use the in-memory indexer
         // to drastically speed up bulk seeding in bench specs.
         indexer: createSimpleIndexer,
@@ -26,9 +36,41 @@ export async function startReplicator() {
         },
     });
 
+    // Reduce flakiness: on cold starts the browser peer can take >10s before it starts
+    // acknowledging seek-delivery messages. Bump timeouts so the node relay doesn't
+    // emit unhandled DeliveryErrors during that window.
+    try {
+        const services: any = (client as any).services;
+        const seekTimeoutMs = 60_000;
+        if (typeof services?.pubsub?.seekTimeout === "number") {
+            services.pubsub.seekTimeout = seekTimeoutMs;
+        }
+        if (typeof services?.blocks?.seekTimeout === "number") {
+            services.blocks.seekTimeout = seekTimeoutMs;
+        }
+    } catch {
+        /* ignore */
+    }
+
+    // Ensure temp directories are always cleaned up when the test shuts down.
+    const originalStop = client.stop.bind(client);
+    client.stop = (async (...args: any[]) => {
+        try {
+            await originalStop(...args);
+        } finally {
+            try {
+                fs.rmSync(directory, { recursive: true, force: true });
+            } catch {
+                /* ignore */
+            }
+        }
+    }) as any;
+
     // Open public root scope and set to replicate all
     const scope: Scope = await client.open(createRootScope(), {
-        args: { replicate: { factor: 1 } },
+        // Use adaptive replication (replicate: true) so the node relay works with ephemeral browser
+        // peers and doesn't require a fixed replica-set to acknowledge every delivery.
+        args: { replicate: true },
         existing: "reuse",
     });
 
@@ -46,7 +88,7 @@ export async function seedReplicatorPosts(options: {
     const { client, count, prefix, delayMs } = options;
     const { scope, canvas } = await createRoot(client, {
         scope: options.scope,
-        persisted: true,
+        replicate: true,
     });
 
     const root = await scope.openWithSameSettings(canvas);

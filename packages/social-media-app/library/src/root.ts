@@ -6,6 +6,7 @@ import { concat } from "uint8arrays";
 import { ViewKind } from "./link.js";
 import { orderKeyBetween } from "./order-key.js";
 import { delay } from "@peerbit/time";
+import { type ReplicationOptions } from "@peerbit/shared-log";
 
 const ROOT_ID_SEED = new TextEncoder().encode("giga | place");
 
@@ -56,11 +57,15 @@ export const createRoot = async (
         scope?: Scope;
         persisted?: boolean;
         sections?: string[];
+        /** Replication behavior for the public root scope. Overrides `persisted` if set. */
+        replicate?: ReplicationOptions;
     }
 ): Promise<{ scope: Scope; canvas: Canvas }> => {
+    const replicate: ReplicationOptions =
+        options?.replicate ?? (options?.persisted ? { factor: 1 } : false);
     const rootScope = await peer.open(options?.scope || createRootScope(), {
         existing: "reuse",
-        args: { replicate: options?.persisted ? { factor: 1 } : false },
+        args: { replicate },
     });
 
     // Create (or reuse) the root canvas inside rootScope.

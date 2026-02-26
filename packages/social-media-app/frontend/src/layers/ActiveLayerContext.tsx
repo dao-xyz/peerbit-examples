@@ -14,4 +14,3 @@ export const ActiveLayerProvider: React.FC<{
 };
 
 export const useIsActiveLayer = () => useContext(ActiveLayerContext);
-
