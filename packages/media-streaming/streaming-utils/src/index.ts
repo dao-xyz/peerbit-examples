@@ -160,6 +160,7 @@ export class Chunk {
     }
 }
 
+@variant("media_chunk_indexable")
 export class ChunkIndexable {
     @field({ type: "string" })
     id: string;
@@ -708,6 +709,7 @@ export class Track<
     }
 }
 
+@variant("media_track_indexable")
 class TrackIndexable {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
@@ -2683,6 +2685,7 @@ export class MediaStreamDB extends Program<{}, MediaStreamDBEvents> {
     }
 }
 
+@variant("media_stream_db_indexable")
 class MediaStreamDBIndexable {
     @field({ type: fixedArray("u8", 32) })
     id: Uint8Array;
