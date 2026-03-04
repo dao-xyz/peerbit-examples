@@ -33,13 +33,13 @@
     },
     "devDependencies": {
         "@giga-app/interface": "workspace:*",
-        "@peerbit/test-utils": "^2.3.2",
+        "@peerbit/test-utils": "^3",
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "^12",
+        "@peerbit/document": "^13",
         "parse5": "^7.1.2",
-        "peerbit": "^4",
+        "peerbit": "^5",
         "uuid": "^10.0.0"
     }
 }
