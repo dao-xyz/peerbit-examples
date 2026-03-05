@@ -403,6 +403,9 @@ importers:
       '@peerbit/vite':
         specifier: ^2
         version: 2.0.0(@types/node@22.19.7)(jiti@2.6.1)(lightningcss@1.30.2)(terser@5.46.0)(tsx@4.21.0)(yaml@2.8.2)
+      '@playwright/test':
+        specifier: ^1.58.0
+        version: 1.58.0
       '@tailwindcss/postcss':
         specifier: ^4.0.14
         version: 4.1.18

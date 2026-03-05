@@ -227,7 +227,7 @@ export const Drop = () => {
                 updateListDebounced
             );
             files.program.files.log.events.removeEventListener(
-                "role",
+                "replication:change",
                 replicatorsChangeListener
             );
             files.program.events.removeEventListener("open", onOpen);
@@ -242,11 +242,13 @@ export const Drop = () => {
         // TODO don't reload the whole list, just add the new elements..
         try {
             const list = await files.program.list();
+            const replicators = await files.program.files.log.getReplicators();
             setList(
                 list
                     .filter((x) => !x.parentId)
                     .sort((a, b) => a.name.localeCompare(b.name))
             );
+            setReplicatorCount(replicators.size);
             // Get replication set
             // TODO performance: this is not efficient
             setReplicationSet(
