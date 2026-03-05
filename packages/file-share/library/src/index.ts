@@ -379,7 +379,10 @@ export class Files extends Program<Args> {
             {
                 local: true,
                 remote: {
-                    throwOnMissing: true,
+                    // Allow partial results while the network is still forming. If we
+                    // throw on missing shards here, the UI can appear "empty" until
+                    // *all* shard roots respond, which feels broken during joins/churn.
+                    throwOnMissing: false,
                     replicate: true, // sync here because this, because we might want to access it offline, even though we are not replicators
                 },
             }

@@ -207,6 +207,9 @@ export const Drop = () => {
                 );
             }
             updateListDebounced();
+            setReplicatorCount(
+                (await files.program.files.log.getReplicators()).size
+            );
         };
 
         onOpen();
@@ -227,7 +230,7 @@ export const Drop = () => {
                 updateListDebounced
             );
             files.program.files.log.events.removeEventListener(
-                "role",
+                "replication:change",
                 replicatorsChangeListener
             );
             files.program.events.removeEventListener("open", onOpen);
@@ -257,6 +260,9 @@ export const Drop = () => {
                         )
                     ).map((x) => x.id)
                 )
+            );
+            setReplicatorCount(
+                (await files.program.files.log.getReplicators()).size
             );
             forceUpdate();
         } catch (error) {
@@ -413,7 +419,10 @@ export const Drop = () => {
                                 </h1>
                                 <span className="font-mono text-xs">
                                     Seeders:{" "}
-                                    <span className="!text-green-400">
+                                    <span
+                                        className="!text-green-400"
+                                        data-testid="seeder-count"
+                                    >
                                         {replicatorCount}
                                     </span>
                                 </span>
@@ -434,6 +443,7 @@ export const Drop = () => {
                                         <input
                                             type="file"
                                             id="imgupload"
+                                            data-testid="upload-input"
                                             className="hidden"
                                             onChange={(e) => {
                                                 addFile(e.target?.files);
@@ -715,7 +725,7 @@ export const Drop = () => {
                                 <h1 className="text-xl">
                                     Files ({list.length}):
                                 </h1>
-                                <ul>
+                                <ul data-testid="file-list">
                                     {list.map((x, ix) => {
                                         return (
                                             <li key={ix}>

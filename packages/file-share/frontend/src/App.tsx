@@ -18,7 +18,9 @@ export const App = () => {
                 runtime: "node",
                 network:
                     import.meta.env.MODE === "development" ? "local" : "remote",
-                waitForConnected: true,
+                // Don't block UI on full bootstrap; start dialing in the background.
+                waitForConnected:
+                    import.meta.env.MODE === "development" ? true : "in-flight",
             }}
         >
             <div className="h-screen">
