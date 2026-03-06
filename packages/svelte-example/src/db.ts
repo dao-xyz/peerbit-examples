@@ -7,6 +7,10 @@ import { Peerbit } from "peerbit";
 import { webSockets } from "@libp2p/websockets";
 import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 
+const relayTransport = circuitRelayTransport({}) as unknown as ReturnType<
+    typeof webSockets
+>;
+
 export class SimpleDocument {
     @field({ type: "string" })
     id: string;
@@ -63,7 +67,7 @@ export const createClient = async (localNetwork = false) => {
                 : undefined,
             transports: [
                 webSockets({}),
-                circuitRelayTransport({}),
+                relayTransport,
                 // TMP disable because flaky behaviour with libp2p 1.8.1
                 // re-enable when https://github.com/dao-xyz/peerbit/issues/302 closed
                 /*    webRTC(), */

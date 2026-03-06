@@ -9,6 +9,10 @@ import {
 } from "@peerbit/document-proxy/host";
 import { TodoItem } from "../todo/model";
 
+const relayTransport = circuitRelayTransport({}) as unknown as ReturnType<
+    typeof webSockets
+>;
+
 // Make the document type available to @peerbit/document-proxy.
 registerDocumentType(TodoItem);
 
@@ -21,7 +25,7 @@ installSharedWorkerHost({
                 // A SharedWorker is the single canonical host for all tabs; no inbound listening needed.
                 listen: [],
             },
-            transports: [webSockets({}), circuitRelayTransport({})],
+            transports: [webSockets({}), relayTransport],
         },
     },
 });
