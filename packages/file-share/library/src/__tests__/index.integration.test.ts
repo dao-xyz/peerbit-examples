@@ -1,5 +1,5 @@
 import { Peerbit } from "peerbit";
-import { Files, LargeFile } from "../index.js";
+import { Files, LargeFile, TinyFile } from "../index.js";
 import { equals } from "uint8arrays";
 import crypto from "crypto";
 import { delay, waitForResolved } from "@peerbit/time";
@@ -116,6 +116,45 @@ describe("index", () => {
             await filestore.removeByName("random large file");
             expect(await filestoreReader.getByName("random large file")).to.be
                 .undefined;
+        });
+
+        it("exposes large file metadata before chunk upload finishes", async () => {
+            const filestore = await peer.open(new Files());
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const fileName = "visible-before-finish";
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let uploadCompleted = false;
+
+            (filestore.files as any).put = async (entry: unknown) => {
+                if (entry instanceof TinyFile && entry.parentId != null) {
+                    await delay(25);
+                }
+                return originalPut(entry as never);
+            };
+
+            const addPromise = filestore
+                .add(fileName, largeFile)
+                .finally(() => {
+                    uploadCompleted = true;
+                });
+
+            await waitForResolved(
+                async () => {
+                    expect(uploadCompleted).to.be.false;
+                    const listed = await filestoreReader.list();
+                    expect(listed.some((x) => x.name === fileName)).to.be.true;
+                },
+                { timeout: 30_000, delayInterval: 200 }
+            );
+
+            await addPromise;
         });
 
         it("replicates", async () => {

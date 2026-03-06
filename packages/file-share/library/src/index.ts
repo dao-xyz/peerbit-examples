@@ -58,6 +58,7 @@ export class IndexableFile {
 }
 
 const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
+const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
 
 @variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
@@ -144,27 +145,48 @@ export class LargeFile extends AbstractFile {
         files: Files,
         progress?: (progress: number) => void
     ) {
-        const segmetSize = TINY_FILE_SIZE_LIMIT / 10; // 10% of the small size limit
-        const fileIds: string[] = [];
-        const id = sha256Base64Sync(file);
-        const fileSize = file.byteLength;
+        const { file: largeFile, chunks } = LargeFile.prepare(name, file);
         progress?.(0);
-        const end = Math.ceil(file.byteLength / segmetSize);
+        const end = chunks.length;
         for (let i = 0; i < end; i++) {
+            await files.files.put(chunks[i]);
             progress?.((i + 1) / end);
-            fileIds.push(
-                await files.add(
-                    name + "/" + i,
-                    file.subarray(
-                        i * segmetSize,
-                        Math.min((i + 1) * segmetSize, file.byteLength)
-                    ),
-                    id
-                )
-            );
         }
         progress?.(1);
-        return new LargeFile({ id, name, fileIds: fileIds, size: fileSize });
+        return largeFile;
+    }
+
+    static prepare(name: string, file: Uint8Array) {
+        const id = sha256Base64Sync(file);
+        const fileSize = file.byteLength;
+        const end = Math.ceil(file.byteLength / LARGE_FILE_SEGMENT_SIZE);
+        const chunks: TinyFile[] = [];
+
+        for (let i = 0; i < end; i++) {
+            chunks.push(
+                new TinyFile({
+                    name: name + "/" + i,
+                    file: file.subarray(
+                        i * LARGE_FILE_SEGMENT_SIZE,
+                        Math.min(
+                            (i + 1) * LARGE_FILE_SEGMENT_SIZE,
+                            file.byteLength
+                        )
+                    ),
+                    parentId: id,
+                })
+            );
+        }
+
+        return {
+            file: new LargeFile({
+                id,
+                name,
+                fileIds: chunks.map((chunk) => chunk.id),
+                size: fileSize,
+            }),
+            chunks,
+        };
     }
 
     get parentId() {
@@ -328,19 +350,36 @@ export class Files extends Program<Args> {
         parentId?: string,
         progress?: (progress: number) => void
     ) {
-        let toPut: AbstractFile;
         progress?.(0);
         if (file.byteLength <= TINY_FILE_SIZE_LIMIT) {
-            toPut = new TinyFile({ name, file, parentId });
-        } else {
-            if (parentId) {
-                throw new Error("Unexpected that a LargeFile to have a parent");
-            }
-            toPut = await LargeFile.create(name, file, this, progress);
+            const tinyFile = new TinyFile({ name, file, parentId });
+            await this.files.put(tinyFile);
+            progress?.(1);
+            return tinyFile.id;
         }
-        await this.files.put(toPut);
+
+        if (parentId) {
+            throw new Error("Unexpected that a LargeFile to have a parent");
+        }
+
+        const { file: largeFile, chunks } = LargeFile.prepare(name, file);
+
+        // Put the root metadata first so readers can list the file while chunks
+        // are still arriving.
+        await this.files.put(largeFile);
+        try {
+            const end = chunks.length;
+            for (let i = 0; i < end; i++) {
+                await this.files.put(chunks[i]);
+                progress?.((i + 1) / end);
+            }
+        } catch (error) {
+            await this.files.del(largeFile.id).catch(() => {});
+            throw error;
+        }
+
         progress?.(1);
-        return toPut.id;
+        return largeFile.id;
     }
 
     async removeById(id: string) {
