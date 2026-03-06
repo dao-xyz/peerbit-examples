@@ -10,7 +10,36 @@ export default defineConfig({
     esbuild: {
         keepNames: true,
     },
+    resolve: {
+        dedupe: [
+            "peerbit",
+            "@peerbit/crypto",
+            "@peerbit/document",
+            "@peerbit/document-interface",
+            "@peerbit/shared-log",
+            "@peerbit/indexer-interface",
+            "@peerbit/indexer-sqlite3",
+            "@peerbit/indexer-simple",
+            "@peerbit/indexer-cache",
+            "@peerbit/log",
+            "@peerbit/program",
+            "@peerbit/program-react",
+            "@peerbit/pubsub",
+            "@peerbit/react",
+            "@peerbit/stream",
+            "@peerbit/stream-interface",
+            "@peerbit/trusted-network",
+        ],
+    },
     optimizeDeps: {
+        include: [
+            "peerbit",
+            "@peerbit/crypto",
+            "@peerbit/document",
+            "@peerbit/react",
+            "@peerbit/shared-log",
+            "@peerbit/stream",
+        ],
         esbuildOptions: {
             target: "esnext",
         },

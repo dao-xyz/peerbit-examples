@@ -32,6 +32,7 @@ export const CreateDrop = () => {
                     <span>Create space</span>
                     <input
                         className="p-2"
+                        data-testid="space-name-input"
                         value={name}
                         onChange={(e) => {
                             setName(e.target.value);
@@ -41,6 +42,7 @@ export const CreateDrop = () => {
                     <button
                         disabled={name.length === 0 || loading}
                         className="btn btn-elevated"
+                        data-testid="create-space"
                         onClick={() => {
                             peer.open(
                                 new Files({
@@ -56,6 +58,16 @@ export const CreateDrop = () => {
                                 })
                                 .then((db) => {
                                     navigate(getDropAreaPath(db));
+                                })
+                                .catch((error) => {
+                                    console.error(
+                                        "Failed to create space:",
+                                        (error as any)?.stack ?? error
+                                    );
+                                    alert(
+                                        "Failed to create space: " +
+                                            (error?.message ?? error)
+                                    );
                                 });
                         }}
                     >

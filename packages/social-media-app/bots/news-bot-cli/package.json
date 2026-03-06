@@ -38,10 +38,10 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@giga-app/news-bot": "workspace:*",
         "@giga-app/network": "workspace:*",
+        "@giga-app/news-bot": "workspace:*",
         "@inquirer/input": "^2",
         "@inquirer/select": "^2",
-        "peerbit": "^5"
+        "peerbit": "^5.0.2"
     }
 }
