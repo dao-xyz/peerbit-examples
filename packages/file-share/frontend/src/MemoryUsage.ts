@@ -7,7 +7,11 @@ export const useStorageUsage = (log?: SharedLog<any, any>) => {
             return;
         }
         const onJoin = () => {
-            log.getMemoryUsage().then((m) => setStorage(Math.round(m * 1e-3)));
+            log.getMemoryUsage()
+                .then((m) => setStorage(Math.round(m * 1e-3)))
+                .catch((error) => {
+                    console.warn("Failed to refresh storage usage", error);
+                });
         };
 
         const i2 = setInterval(() => {
