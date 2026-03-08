@@ -132,60 +132,72 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any, any> }) => {
 
     useEffect(() => {
         if (!properties.log) return;
+        let cancelled = false;
 
         const roleChangeListener = async (ev: any) => {
-            const dataSets: {
-                data: number[][];
-                backgroundColor?: any;
-                borderColor?: any;
-            }[] = [{ data: [] }, { data: [] }];
-            const labels: string[] = [];
-            let myIndex = -1;
-            const iterator = await properties.log.replicationIndex
-                .iterate({ sort: [new Sort({ key: "hash" })] })
-                .all();
+            try {
+                const dataSets: {
+                    data: number[][];
+                    backgroundColor?: any;
+                    borderColor?: any;
+                }[] = [{ data: [] }, { data: [] }];
+                const labels: string[] = [];
+                let myIndex = -1;
+                const iterator = await properties.log.replicationIndex
+                    .iterate({ sort: [new Sort({ key: "hash" })] })
+                    .all();
 
-            for (const [i, rect] of iterator.entries()) {
-                const value = rect.value as ReplicationRangeIndexable<"u64">;
-                const isMySegment =
-                    value.hash ===
-                    properties.log.node.identity.publicKey.hashcode();
-                if (isMySegment) {
-                    labels.push("you");
-                    myIndex = i;
-                } else {
-                    labels.push(value.hash.slice(0, 5) + "...");
+                if (cancelled) {
+                    return;
                 }
 
-                if (value.widthNormalized === 1) {
-                    dataSets[0].data[i] = [0, 1];
-                    dataSets[1].data[i] = [0, 0];
-                } else {
-                    dataSets[0].data[i] = [
-                        Number(value.start1) / Number(MAX_U64),
-                        Number(value.end1) / Number(MAX_U64),
-                    ];
-                    dataSets[1].data[i] = [
-                        Number(value.start2) / Number(MAX_U64),
-                        Number(value.end2) / Number(MAX_U64),
-                    ];
-                }
-            }
+                for (const [i, rect] of iterator.entries()) {
+                    const value = rect.value as ReplicationRangeIndexable<"u64">;
+                    const isMySegment =
+                        value.hash ===
+                        properties.log.node.identity.publicKey.hashcode();
+                    if (isMySegment) {
+                        labels.push("you");
+                        myIndex = i;
+                    } else {
+                        labels.push(value.hash.slice(0, 5) + "...");
+                    }
 
-            if (chartRef.current) {
-                chartRef.current.data.labels = labels;
-                chartRef.current.data.datasets = dataSets as any;
-                chartRef.current.data.datasets.forEach((set) => {
-                    set.backgroundColor = (ctx: any) =>
-                        ctx.dataIndex === myIndex
-                            ? colors.green400 + "a0"
-                            : colors.primary400 + "a0";
-                    set.borderColor = (ctx: any) =>
-                        ctx.dataIndex === myIndex
-                            ? colors.green300 + "a0"
-                            : colors.primary300 + "a0";
-                });
-                chartRef.current.update();
+                    if (value.widthNormalized === 1) {
+                        dataSets[0].data[i] = [0, 1];
+                        dataSets[1].data[i] = [0, 0];
+                    } else {
+                        dataSets[0].data[i] = [
+                            Number(value.start1) / Number(MAX_U64),
+                            Number(value.end1) / Number(MAX_U64),
+                        ];
+                        dataSets[1].data[i] = [
+                            Number(value.start2) / Number(MAX_U64),
+                            Number(value.end2) / Number(MAX_U64),
+                        ];
+                    }
+                }
+
+                if (chartRef.current) {
+                    chartRef.current.data.labels = labels;
+                    chartRef.current.data.datasets = dataSets as any;
+                    chartRef.current.data.datasets.forEach((set) => {
+                        set.backgroundColor = (ctx: any) =>
+                            ctx.dataIndex === myIndex
+                                ? colors.green400 + "a0"
+                                : colors.primary400 + "a0";
+                        set.borderColor = (ctx: any) =>
+                            ctx.dataIndex === myIndex
+                                ? colors.green300 + "a0"
+                                : colors.primary300 + "a0";
+                    });
+                    chartRef.current.update();
+                }
+            } catch (error) {
+                if (cancelled) {
+                    return;
+                }
+                console.warn("Failed to refresh replication graph", error);
             }
         };
 
@@ -194,11 +206,13 @@ export const ReplicatorGraph = (properties: { log: SharedLog<any, any> }) => {
             "replication:change",
             roleChangeListener
         );
-        return () =>
+        return () => {
+            cancelled = true;
             properties.log.events.removeEventListener(
                 "replication:change",
                 roleChangeListener
             );
+        };
     }, [properties.log?.address, colors]);
 
     return <canvas ref={canvasRef}></canvas>;

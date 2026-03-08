@@ -13,7 +13,7 @@ const persistErrorMessage = `Not allowed to persist data by ${
         : ""
 }`;
 export const CreateDrop = () => {
-    const { peer, persisted, loading } = usePeer();
+    const { peer, persisted, loading, status } = usePeer();
     const navigate = useNavigate();
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const [name, setName] = useState("");
@@ -40,10 +40,17 @@ export const CreateDrop = () => {
                         placeholder="Type a name"
                     ></input>
                     <button
-                        disabled={name.length === 0 || loading}
+                        disabled={
+                            name.length === 0 ||
+                            loading ||
+                            status !== "connected"
+                        }
                         className="btn btn-elevated"
                         data-testid="create-space"
                         onClick={() => {
+                            if (status !== "connected") {
+                                return;
+                            }
                             peer.open(
                                 new Files({
                                     id: new Uint8Array(32),
@@ -73,6 +80,11 @@ export const CreateDrop = () => {
                     >
                         Create
                     </button>
+                    {status !== "connected" && (
+                        <span className="italic text-sm">
+                            Connecting to network...
+                        </span>
+                    )}
                     {persisted === false && (
                         <span className="!text-red-600 italic max-w-[300px] text-wrap">
                             {persistErrorMessage}

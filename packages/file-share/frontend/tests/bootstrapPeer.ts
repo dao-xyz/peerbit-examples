@@ -28,6 +28,33 @@ export async function startBootstrapPeer() {
         if (typeof services?.blocks?.seekTimeout === "number") {
             services.blocks.seekTimeout = seekTimeoutMs;
         }
+        const bootstrapHash = services?.pubsub?.publicKeyHash;
+        if (bootstrapHash) {
+            try {
+                services?.pubsub?.setTopicRootCandidates?.([bootstrapHash]);
+            } catch {
+                // Ignore optional candidate seeding failures.
+            }
+            try {
+                services?.pubsub?.topicRootControlPlane?.setTopicRootCandidates?.([
+                    bootstrapHash,
+                ]);
+            } catch {
+                // Ignore optional control-plane seeding failures.
+            }
+            try {
+                services?.fanout?.topicRootControlPlane?.setTopicRootCandidates?.([
+                    bootstrapHash,
+                ]);
+            } catch {
+                // Ignore optional fanout-plane seeding failures.
+            }
+            try {
+                await services?.pubsub?.hostShardRootsNow?.();
+            } catch {
+                // Ignore optional host-root failures.
+            }
+        }
     } catch {
         // Ignore optional tuning failures.
     }
