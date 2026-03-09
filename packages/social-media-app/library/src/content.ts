@@ -1369,6 +1369,7 @@ export type ScopeArgs = {
     debug?: boolean;
     replicate?: ReplicationOptions;
     replicas?: { min?: number };
+    messages?: boolean;
     experimentalHierarchicalReindex?: boolean; // feature flag
 };
 
@@ -1994,14 +1995,21 @@ export class Scope extends Program<ScopeArgs> {
         });
         this.debug && console.timeEnd(this.getValueWithContext("openReplies"));
 
-        await this.messages.open({
-            responseType: CanvasMessage,
-            queryType: CanvasMessage,
-            topic: sha256Base64Sync(
-                concat([this.id, new TextEncoder().encode("messages")])
-            ),
-            responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
-        });
+        if (args?.messages !== false) {
+            await this.messages.open({
+                responseType: CanvasMessage,
+                queryType: CanvasMessage,
+                topic: sha256Base64Sync(
+                    concat([this.id, new TextEncoder().encode("messages")])
+                ),
+                responseHandler: async () => {}, // need an empty response handle to make response events to emit TODO fix this?
+            });
+        } else {
+            // `Program.beforeOpen()` has already marked child programs as open. If this
+            // optional RPC is intentionally skipped, force it back to "closed" so the
+            // parent program does not try to enumerate topics from an uninitialized RPC.
+            this.messages.closed = true;
+        }
     }
 
     async getVisualization(canvas: {

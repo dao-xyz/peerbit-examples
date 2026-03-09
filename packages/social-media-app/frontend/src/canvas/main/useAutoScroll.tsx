@@ -101,9 +101,7 @@ export const useAutoScroll = (properties: {
         triggerScroll();
     }, [
         setting?.scrollDirection,
-        properties.enabled,
         properties.scrollOnViewChange,
-        properties.suppressAutoScroll,
     ]);
 
     // Refs for scroll adjustments.

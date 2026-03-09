@@ -29,9 +29,11 @@ export function BlurOnOutsidePointerProvider({
             if (!enabledRef.current) return;
 
             const active = document.activeElement as HTMLElement | null;
+            const target = ev.target as Element | null;
             if (
                 active &&
                 active.matches("input, textarea, [contenteditable]") &&
+                !target?.closest?.('[data-keep-editor-focus="true"]') &&
                 // if the pointer target is *not* the focused element
                 // and *not* a descendant of it (important for datalists, etc.)
                 !active.contains(ev.target as Node)

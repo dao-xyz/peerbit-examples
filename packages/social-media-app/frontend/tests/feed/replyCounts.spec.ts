@@ -83,18 +83,18 @@ async function addComment(page: any, parentId: string, message: string) {
     await expect(page).toHaveURL(/#\/c\//, { timeout: 15000 });
 
     // Wait for detail composer to mount
+    await waitForComposerReady(page, 45000);
     const textArea = page
         .locator('[data-testid="toolbarcreatenew"] textarea')
         .first();
-    await expect(textArea).toBeVisible({ timeout: 20000 });
-    await waitForStableDraft(page);
+    await expect(textArea).toBeVisible({ timeout: 45000 });
+    await waitForStableDraft(page, 5000);
     const privacySwitch = page
         .getByRole("switch", { name: /Private/i })
         .first();
     if ((await privacySwitch.count()) > 0) {
         await expect(privacySwitch).toHaveAttribute("aria-checked", "false");
     }
-    await textArea.click();
     // Retry typing in case draft rotation clears the value
     let filled = false;
     for (let attempt = 0; attempt < 4; attempt++) {

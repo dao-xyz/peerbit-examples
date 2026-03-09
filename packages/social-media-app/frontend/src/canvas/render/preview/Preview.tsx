@@ -66,6 +66,8 @@ type ChatMessageVariantProps = BaseCanvasPreviewProps & {
 
 export type CanvasPreviewProps = StandardVariantProps | ChatMessageVariantProps;
 
+const previewRectsCache = new Map<string, Element<ElementContent>[]>();
+
 function getRectsForVariant<V extends VariantType>(
     separatedRects: {
         text: Element<StaticContent<StaticMarkdownText>>[];
@@ -557,11 +559,13 @@ const PostPreview = ({
     onAllElementsLoaded?: () => void;
 }) => {
     const { text, other: media } = rects;
-    const expected = (media?.length || 0) + (text ? 1 : 0);
+    const visibleText =
+        text && text.content.content.text.trim().length > 0 ? text : undefined;
+    const expected = (media?.length || 0) + (visibleText ? 1 : 0);
     const loadedIds = useRef<Set<string>>(new Set());
     useEffect(() => {
         loadedIds.current.clear();
-    }, [media, text]);
+    }, [media, visibleText]);
     const handleLoad = (el: Element<ElementContent>) => {
         if (!el?.idString) return;
         loadedIds.current.add(el.idString);
@@ -569,7 +573,7 @@ const PostPreview = ({
             onAllElementsLoaded?.();
         }
     };
-    if (media.length === 0 && !text) return null;
+    if (media.length === 0 && !visibleText) return null;
     /* ─────────────── layout ─────────────── */
     return (
         <div
@@ -589,13 +593,13 @@ const PostPreview = ({
                 </div>
             )}
 
-            {text && (
+            {visibleText && (
                 <div className="px-2">
                     <PreviewFrame
-                        element={text}
+                        element={visibleText}
                         noPadding
                         onClick={onClick}
-                        onLoad={() => handleLoad(text)}
+                        onLoad={() => handleLoad(visibleText)}
                         className={classNameContent}
                         canOpenFullscreen
                     />
@@ -1000,22 +1004,51 @@ export const CanvasPreview = ({
     whenEmpty,
     classNameContent, // TODO is this property really needed?
 }: CanvasPreviewProps) => {
-    const { rects, pendingRects, separateAndSortRects, canvas } = useCanvas();
+    const { rects, pendingRects, separateAndSortRects, canvas, isLoading } =
+        useCanvas();
+
+    const liveOwnRects = useMemo(() => {
+        const cid = canvas?.id;
+        const combined = [...rects, ...pendingRects];
+        if (!cid) return [...rects];
+        return combined.filter((e) => equals(e.canvasId, cid));
+    }, [canvas?.idString, rects, pendingRects]);
+
+    const fallbackOwnRectsRef = useRef<Element<ElementContent>[]>([]);
+
+    useEffect(() => {
+        fallbackOwnRectsRef.current = [];
+    }, [canvas?.idString]);
+
+    useEffect(() => {
+        if (liveOwnRects.length > 0) {
+            fallbackOwnRectsRef.current = liveOwnRects;
+            if (canvas?.idString) {
+                previewRectsCache.set(canvas.idString, liveOwnRects);
+            }
+        }
+    }, [canvas?.idString, canvas?.__indexed?.elements, isLoading, liveOwnRects]);
+
+    const cachedOwnRects = useMemo(() => {
+        if (!canvas?.idString) return [];
+        return previewRectsCache.get(canvas.idString) ?? [];
+    }, [canvas?.idString]);
+
+    const ownRects =
+        liveOwnRects.length > 0
+            ? liveOwnRects
+            : fallbackOwnRectsRef.current.length > 0
+              ? fallbackOwnRectsRef.current
+              : cachedOwnRects;
 
     // Prefer actual element presence over potentially stale index metadata.
     // Some publishes can momentarily report elements=0 in the index row even
     // after elements are persisted; rely on rect queries for visibility.
-    const hasLocalRects =
-        (rects?.length ?? 0) + (pendingRects?.length ?? 0) > 0;
+    const hasLocalRects = ownRects.length > 0;
 
     const variantRects = useMemo(() => {
-        // Defensive: only render elements that belong to THIS canvas id
-        const cid = canvas?.id;
-        const own = cid
-            ? [...rects, ...pendingRects].filter((e) => equals(e.canvasId, cid))
-            : [...rects];
-        return getRectsForVariant(separateAndSortRects(own), variant);
-    }, [canvas?.idString, rects, pendingRects, variant]);
+        return getRectsForVariant(separateAndSortRects(ownRects), variant);
+    }, [canvas?.idString, ownRects, separateAndSortRects, variant]);
 
     // Debug: log what text we are about to render for this canvas
     useEffect(() => {
@@ -1044,14 +1077,14 @@ export const CanvasPreview = ({
                 name: "render",
                 canvasId: cid,
                 texts,
-                rects: rects.length,
+                rects: ownRects.length,
                 pending: pendingRects.length,
                 variant,
             });
         } catch (e) {
             // safe to ignore debug issues
         }
-    }, [canvas?.idString, rects.length, pendingRects.length, variant]);
+    }, [canvas?.idString, ownRects, pendingRects.length, variant]);
 
     const isEmpty = useMemo(() => {
         return (
@@ -1062,14 +1095,26 @@ export const CanvasPreview = ({
         );
     }, [variantRects]);
 
-    // If the canvas has no elements, consider it "loaded" immediately so feed can reveal.
+    // Only reveal truly empty canvases once their element query has settled.
+    // Otherwise a replies row that momentarily reports `elements=0` can flash a
+    // header shell before the real rects arrive.
     useEffect(() => {
-        // Reset the sentinel on canvas/variant change
-        // and only report once per empty state
-        if (canvas?.__indexed?.elements === 0n) {
+        if (
+            !whenEmpty &&
+            !isLoading &&
+            !hasLocalRects &&
+            canvas?.__indexed?.elements === 0n
+        ) {
             onLoad?.();
         }
-    }, [canvas?.idString]);
+    }, [
+        canvas?.idString,
+        canvas?.__indexed?.elements,
+        hasLocalRects,
+        isLoading,
+        onLoad,
+        whenEmpty,
+    ]);
 
     // Bubble up when all elements loaded
     const [allLoaded, setAllLoaded] = useState(false);
@@ -1083,6 +1128,15 @@ export const CanvasPreview = ({
     useEffect(() => {
         setAllLoaded(false);
     }, [canvas?.idString, variant]);
+
+    // Route-layer reactivation can transiently clear rect queries while the feed
+    // card shell stays mounted. If we keep a stale `allLoaded=true`, Reply can
+    // re-fire `onLoad` before the preview body has actually rehydrated.
+    useEffect(() => {
+        if (!hasLocalRects || isEmpty) {
+            setAllLoaded(false);
+        }
+    }, [hasLocalRects, isEmpty]);
 
     const onAllElementsLoaded = useCallback(() => {
         setAllLoaded(true);

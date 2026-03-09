@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect, useState } from "react";
 import { ProfileButton } from "../../profile/ProfileButton";
 import { Canvas, IndexableCanvas } from "@giga-app/interface";
 import RelativeTimestamp from "./RelativeTimestamp";
@@ -8,6 +8,17 @@ import { CanvasSettingsButton } from "./CanvasSettingsButton";
 import { TinyPath } from "../path/RelativePath";
 import { useRelativePath } from "./useRelativePath";
 import { IoEnterOutline } from "react-icons/io5";
+
+const LIVE_REPLY_REFRESH_MS = 2_000;
+
+const hasRemoteBootstrapTargets = () => {
+    if (typeof window === "undefined") return false;
+    const bootstraps = (window as any).__DBG_BOOTSTRAP;
+    if (Array.isArray(bootstraps)) {
+        return bootstraps.length > 0;
+    }
+    return true;
+};
 
 export const Header = ({
     canvas,
@@ -59,6 +70,75 @@ export const Header = ({
 
     // load the path
 
+    const indexedReplies = Number(
+        (canvas as WithIndexedContext<Canvas, IndexableCanvas> | undefined)
+            ?.__indexed?.replies ?? 0
+    );
+    const replyCountRefreshEnabled = variant === "large" && !detailed && !!canvas;
+    const [refreshedIndexedReplies, setRefreshedIndexedReplies] =
+        useState(indexedReplies);
+
+    useEffect(() => {
+        setRefreshedIndexedReplies(indexedReplies);
+    }, [canvas?.idString, indexedReplies]);
+
+    useEffect(() => {
+        if (!replyCountRefreshEnabled || !canvas) return;
+
+        let cancelled = false;
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        const allowRemote = hasRemoteBootstrapTargets();
+
+        const refresh = async () => {
+            try {
+                const [localRow, remoteRow] = await Promise.all([
+                    canvas.nearestScope.replies.index.get(canvas.id, {
+                        resolve: false,
+                        local: true,
+                        remote: false,
+                    }),
+                    allowRemote
+                        ? canvas.nearestScope.replies.index.get(canvas.id, {
+                              resolve: false,
+                              local: false,
+                              remote: {
+                                  timeout: LIVE_REPLY_REFRESH_MS,
+                              },
+                          })
+                        : Promise.resolve(undefined),
+                ]);
+                if (cancelled) return;
+                const next = Math.max(
+                    Number((localRow as any)?.replies ?? 0),
+                    Number((remoteRow as any)?.replies ?? 0)
+                );
+                if (Number.isFinite(next)) {
+                    setRefreshedIndexedReplies(next);
+                }
+            } catch {
+                // Best-effort refresh only; leave the last known indexed value in place.
+            } finally {
+                if (!cancelled) {
+                    timer = setTimeout(refresh, LIVE_REPLY_REFRESH_MS);
+                }
+            }
+        };
+
+        void refresh();
+
+        return () => {
+            cancelled = true;
+            if (timer) clearTimeout(timer);
+        };
+    }, [canvas?.idString, replyCountRefreshEnabled]);
+
+    // Observer peers are allowed to query/subscribe without replicating full subtrees.
+    // Poll the parent indexed row directly so visible badges can reflect the latest
+    // local metadata, and add remote fallback when peers are available.
+    const replyCount = replyCountRefreshEnabled
+        ? Math.max(indexedReplies, refreshedIndexedReplies)
+        : indexedReplies;
+
     const controls = (
         <div className="ml-auto flex flex-row ">
             {variant === "large" && !detailed && (
@@ -72,21 +152,9 @@ export const Header = ({
                         onClick={open}
                     >
                         <FaRegComment size={16} />
-                        {(canvas as WithIndexedContext<Canvas, IndexableCanvas>)
-                            .__indexed?.replies ? (
-                            <span className="text-xs">
-                                {Number(
-                                    (
-                                        canvas as WithIndexedContext<
-                                            Canvas,
-                                            IndexableCanvas
-                                        >
-                                    ).__indexed.replies
-                                )}
-                            </span>
-                        ) : (
-                            <></>
-                        )}
+                        {replyCount > 0 ? (
+                            <span className="text-xs">{replyCount}</span>
+                        ) : null}
                     </button>
 
                     {/* Show a "go to post" buttom */}

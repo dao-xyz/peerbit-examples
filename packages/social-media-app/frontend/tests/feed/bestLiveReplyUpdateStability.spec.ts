@@ -113,7 +113,7 @@ test.describe("Best feed stability on live reply updates", () => {
         const url = withSearchParams(
             `${BASE_HTTP}#/?${hashParams.toString()}`,
             {
-                ephemeral: true,
+                ephemeral: false,
                 bootstrap: (bootstrap || []).join(","),
             }
         );
@@ -159,18 +159,10 @@ test.describe("Best feed stability on live reply updates", () => {
         const commentMsg = `${prefix}-comment-${Date.now()}`;
         await addCommentToOldest(commentMsg);
 
-        // Open the older post so the app loads the new comment canvas (some peers don't replicate deep replies in the feed view).
-        await olderCard.getByTestId("open-comments").first().click();
-        await expect(page).toHaveURL(/#\/c\//, { timeout: 30_000 });
-        await expect(page.getByText(commentMsg, { exact: true })).toBeVisible({
-            timeout: 180_000,
-        });
-
-        // Back to feed; order should remain stable even after reply count updates.
-        await page.getByTestId("nav-back").click();
-        await expect(feed).toBeVisible({ timeout: 60_000 });
-
-        // Wait until the older post's reply count updates in the feed UI.
+        // This spec is about Best-feed stability, not thread hydration. Observer-like
+        // peers are allowed to avoid mirroring the full child canvas until the thread
+        // is explicitly queried. The signal we actually care about here is the parent
+        // reply-count metadata changing on the live Best feed.
         await expect
             .poll(async () => await commentCountForId(page, olderId), {
                 timeout: 180_000,

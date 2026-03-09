@@ -18,6 +18,7 @@ import { debugLog, emitDebugEvent } from "../../debug/debug";
 import { useIsActiveLayer } from "../../layers/ActiveLayerContext";
 
 const DEFAULT_REVEAL_TIMEOUT = 3e3; // 3s
+const DEFAULT_INITIAL_REVEAL_MAX_WAIT = 15e3; // initial remote hydration can legitimately lag well beyond the debounce window
 
 interface HiddenState {
     head: number; // hidden items at start
@@ -33,6 +34,10 @@ export const useFeedHooks = (props: {
 }) => {
     const dev = useDeveloperConfig();
     const revealTimeout = dev.revealTimeoutMs ?? DEFAULT_REVEAL_TIMEOUT;
+    const initialRevealMaxWait = Math.max(
+        revealTimeout * 5,
+        DEFAULT_INITIAL_REVEAL_MAX_WAIT
+    );
     const {
         loadMore: _loadMore,
         loading: isLoadingView,
@@ -50,6 +55,7 @@ export const useFeedHooks = (props: {
     const { replyTo, typedOnce } = useAutoReply();
     const sentinelRef = useRef<HTMLDivElement>(null);
     const contentRef = useRef<HTMLDivElement>(null);
+    const isActiveLayer = useIsActiveLayer();
 
     const hiddenRef = useRef<HiddenState>({ head: 0, tail: 0 });
     const [hidden, setHidden] = useState<HiddenState>({ head: 0, tail: 0 });
@@ -103,10 +109,42 @@ export const useFeedHooks = (props: {
         return loadMore(n);
     };
 
+    const replyLooksReady = useCallback((id: string) => {
+        const root = contentRef.current;
+        if (!root) return false;
+
+        const selector = `[data-canvas-id-string="${CSS.escape(id)}"]`;
+        const node = root.querySelector(selector) as HTMLElement | null;
+        if (!node) return false;
+
+        const preview =
+            (node.querySelector(
+                '[data-feed-preview="true"]'
+            ) as HTMLElement | null) ?? node;
+
+        const images = Array.from(
+            preview.querySelectorAll("img")
+        ) as HTMLImageElement[];
+        if (
+            images.some((img) => {
+                return (
+                    img.complete &&
+                    img.naturalWidth > 0 &&
+                    img.naturalHeight > 0
+                );
+            })
+        ) {
+            return true;
+        }
+
+        return (preview.textContent || "").trim().length > 0;
+    }, []);
+
     /* ------------------------------------------------------------------ */
     /* Detect new items at either end                                     */
     /* ------------------------------------------------------------------ */
     useLayoutEffect(() => {
+        if (!isActiveLayer) return;
         const list = processedReplies;
         if (!list || list.length === 0) return;
 
@@ -202,7 +240,7 @@ export const useFeedHooks = (props: {
                 clearTimeout(maxWaitTimeoutRef.current);
                 maxWaitTimeoutRef.current = null;
             }
-            const maxWaitMs = Math.max(revealTimeout * 2, revealTimeout);
+            const maxWaitMs = initialRevealMaxWait;
             maxWaitTimeoutRef.current = setTimeout(() => {
                 if (loadTimeoutRef.current) {
                     clearTimeout(loadTimeoutRef.current);
@@ -313,6 +351,11 @@ export const useFeedHooks = (props: {
         for (const id of loadedIdsRef.current) {
             hiddenToLoadRef.current.delete(id);
         }
+        for (const id of Array.from(hiddenToLoadRef.current)) {
+            if (!replyLooksReady(id)) continue;
+            hiddenToLoadRef.current.delete(id);
+            loadedIdsRef.current.add(id);
+        }
 
         // reveal function, (show pending messages)
         const reveal = (reason?: string) => {
@@ -385,7 +428,7 @@ export const useFeedHooks = (props: {
         }, revealTimeout);
 
         if (!maxWaitTimeoutRef.current) {
-            const maxWaitMs = Math.max(revealTimeout * 2, revealTimeout);
+            const maxWaitMs = initialRevealMaxWait;
             maxWaitTimeoutRef.current = setTimeout(() => {
                 if (loadTimeoutRef.current) {
                     clearTimeout(loadTimeoutRef.current);
@@ -401,7 +444,12 @@ export const useFeedHooks = (props: {
                 revealRef.current?.("maxWait");
             }, maxWaitMs);
         }
-    }, [processedReplies, revealTimeout]);
+    }, [
+        initialRevealMaxWait,
+        isActiveLayer,
+        processedReplies,
+        revealTimeout,
+    ]);
 
     // Ensure any pending reveal timeout is cleared on unmount.
     useEffect(() => {
@@ -416,18 +464,6 @@ export const useFeedHooks = (props: {
             }
         };
     }, []);
-
-    useEffect(() => {
-        if (
-            !firstBatchHandled.current &&
-            committedLengthRef.current > 0 &&
-            hidden.head === 0 &&
-            hidden.tail === 0
-        ) {
-            firstBatchHandled.current = true;
-            pendingScrollAdjust.current = null;
-        }
-    }, [hidden.head, hidden.tail]);
 
     const resetLazyState = () => {
         if (loadTimeoutRef.current) {
@@ -451,6 +487,50 @@ export const useFeedHooks = (props: {
         firstBatchHandled.current = false;
     };
 
+    const effectiveHidden = useMemo<HiddenState>(() => {
+        if (!processedReplies || processedReplies.length === 0) {
+            return { head: 0, tail: 0 };
+        }
+
+        const oldFirst = committedIds.current.firstId;
+        const oldLast = committedIds.current.lastId;
+
+        // Hide the first non-empty batch until individual replies report ready.
+        if (!oldFirst || !oldLast) {
+            return { head: processedReplies.length, tail: 0 };
+        }
+
+        const firstIdx = processedReplies.findIndex(
+            (r) => r.reply.idString === oldFirst
+        );
+        const lastIdx = processedReplies.findIndex(
+            (r) => r.reply.idString === oldLast
+        );
+
+        // If anchors disappeared (for example, dynamic ranking changed), avoid
+        // synthesizing a hide window and let the committed order reset.
+        if (firstIdx === -1 || lastIdx === -1 || firstIdx > lastIdx) {
+            return { head: 0, tail: 0 };
+        }
+
+        return {
+            head: firstIdx,
+            tail: processedReplies.length - 1 - lastIdx,
+        };
+    }, [processedReplies, hidden.head, hidden.tail]);
+
+    useEffect(() => {
+        if (
+            !firstBatchHandled.current &&
+            committedLengthRef.current > 0 &&
+            effectiveHidden.head === 0 &&
+            effectiveHidden.tail === 0
+        ) {
+            firstBatchHandled.current = true;
+            pendingScrollAdjust.current = null;
+        }
+    }, [effectiveHidden.head, effectiveHidden.tail]);
+
     const visualization = useVisualizationContext().visualization;
 
     const prevView = useRef(visualization?.view);
@@ -468,7 +548,8 @@ export const useFeedHooks = (props: {
         }
     }, [visualization?.view, feedRoot]);
 
-    const isLoadingAnything = isLoadingView || hidden.head + hidden.tail > 0;
+    const isLoadingAnything =
+        isLoadingView || effectiveHidden.head + effectiveHidden.tail > 0;
     const [initialHydrated, setInitialHydrated] = useState(false);
     const hydrationIteratorRef = useRef<string | undefined>(undefined);
 
@@ -493,7 +574,6 @@ export const useFeedHooks = (props: {
     }, [iteratorId]);
 
     const scrollUpForMore = visualization?.view === ChildVisualization.CHAT;
-    const isActiveLayer = useIsActiveLayer();
 
     useEffect(() => {
         if (!isActiveLayer) return;
@@ -565,7 +645,7 @@ export const useFeedHooks = (props: {
     useLayoutEffect(() => {
         if (!scrollUpForMore) return;
         if (!pendingScrollAdjust.current) return;
-        if (hidden.head > 0) return;
+        if (effectiveHidden.head > 0) return;
         if (!props.viewRef) return;
 
         const isWindow = props.viewRef === document.body;
@@ -589,7 +669,7 @@ export const useFeedHooks = (props: {
             }
         }
         pendingScrollAdjust.current = null;
-    }, [hidden.head, scrollUpForMore, props.viewRef]);
+    }, [effectiveHidden.head, scrollUpForMore, props.viewRef]);
 
     useEffect(() => {
         if (!contentRef.current || !props.viewRef) return;
@@ -597,7 +677,7 @@ export const useFeedHooks = (props: {
             if (
                 scrollUpForMore &&
                 pendingScrollAdjust.current &&
-                hidden.head > 0
+                effectiveHidden.head > 0
             ) {
                 pendingScrollAdjust.current.prevScrollHeight =
                     props.viewRef.scrollHeight;
@@ -606,7 +686,12 @@ export const useFeedHooks = (props: {
         viewObserver.observe(contentRef.current);
         viewObserver.observe(props.viewRef);
         return () => viewObserver.disconnect();
-    }, [contentRef.current, props.viewRef, scrollUpForMore, hidden.head]);
+    }, [
+        contentRef.current,
+        props.viewRef,
+        scrollUpForMore,
+        effectiveHidden.head,
+    ]);
 
     const sentinelIndexPadding = Math.floor(batchSize / 2);
     const sentinelIndex = scrollUpForMore
@@ -628,9 +713,9 @@ export const useFeedHooks = (props: {
 
     const indexIsReadyToRender = useCallback(
         (i: number) =>
-            i >= hiddenRef.current.head &&
-            i < (processedReplies?.length || 0) - hiddenRef.current.tail,
-        [processedReplies?.length]
+            i >= effectiveHidden.head &&
+            i < (processedReplies?.length || 0) - effectiveHidden.tail,
+        [effectiveHidden.head, effectiveHidden.tail, processedReplies?.length]
     );
 
     const isReplyVisible = useCallback(
@@ -642,7 +727,12 @@ export const useFeedHooks = (props: {
             // dbg and see if we can be ready even if head is 0
             return isReady;
         },
-        [indexIsReadyToRender, hidden.head, hidden.tail, processedReplies]
+        [
+            indexIsReadyToRender,
+            effectiveHidden.head,
+            effectiveHidden.tail,
+            processedReplies,
+        ]
     );
 
     const handleLoad = useCallback((canvas: Canvas, index: number) => {
@@ -673,7 +763,12 @@ export const useFeedHooks = (props: {
     const visibleReplies = useMemo(() => {
         if (!processedReplies) return [];
         return processedReplies.filter((_, i) => indexIsReadyToRender(i));
-    }, [processedReplies, indexIsReadyToRender, hidden.head, hidden.tail]);
+    }, [
+        processedReplies,
+        indexIsReadyToRender,
+        effectiveHidden.head,
+        effectiveHidden.tail,
+    ]);
 
     const { isAtBottom, scrollToBottom } = useAutoScroll({
         replies: visibleReplies,
@@ -738,7 +833,7 @@ export const useFeedHooks = (props: {
         sentinelIndex,
         replyContentRefs,
         indexIsReadyToRender,
-        hidden,
+        hidden: effectiveHidden,
         setHidden,
         isReplyVisible,
         showNewMessagesToast,

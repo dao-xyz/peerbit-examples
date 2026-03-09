@@ -20,6 +20,7 @@ import { WithIndexedContext } from "@peerbit/document";
 import { getCanvasIdFromPart, getScopeAddrsFromSearch } from "../routes";
 import { useLocation, useMatch } from "react-router";
 import { publishStartupPerfSnapshot, startupMark } from "../debug/perf";
+import { toBase64URL } from "@peerbit/crypto";
 
 export interface ICanvasContext {
     scope?: Scope; // kept for compatibility
@@ -41,6 +42,15 @@ const initialCtx: ICanvasContext = {
 
 const Ctx = createContext<ICanvasContext>(initialCtx);
 const useCanvases = () => useContext(Ctx);
+
+const routeCanvasCache = new Map<string, Canvas>();
+
+export const rememberRouteCanvas = (canvas: Canvas) => {
+    routeCanvasCache.set(toBase64URL(canvas.id), canvas);
+};
+
+const getRememberedRouteCanvas = (idParam?: string) =>
+    idParam ? routeCanvasCache.get(idParam) : undefined;
 
 const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const publicScope = PublicScope.useScope();
@@ -66,6 +76,7 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
     const [standalone, setStandalone] = useState<
         WithIndexedContext<Canvas, IndexableCanvas>[] | undefined
     >();
+    const [routeScopes, setRouteScopes] = useState<Scope[]>([]);
 
     // avoid race-y path updates
     const reqToken = useRef(0);
@@ -77,10 +88,74 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
         [location.search]
     );
 
-    const availableScopes = useMemo(
-        () => [publicScope, privateScope].filter(Boolean) as Scope[],
-        [publicScope?.address, privateScope?.address]
-    );
+    useEffect(() => {
+        let cancelled = false;
+
+        if (!peer || scopeAddrsFromUrl.length === 0) {
+            setRouteScopes([]);
+            return;
+        }
+
+        const localScopeAddrs = new Set(
+            [publicScope?.address, privateScope?.address].filter(Boolean)
+        );
+        const extraAddrs = scopeAddrsFromUrl.filter(
+            (addr) => !localScopeAddrs.has(addr)
+        );
+
+        if (extraAddrs.length === 0) {
+            setRouteScopes([]);
+            return;
+        }
+
+        (async () => {
+            const args = publicScope?.openingArgs ?? privateScope?.openingArgs;
+            const scopes = await Promise.all(
+                extraAddrs.map(async (addr) => {
+                    try {
+                        return await peer.open<Scope>(addr, {
+                            existing: "reuse",
+                            args,
+                        });
+                    } catch (error) {
+                        console.warn("Failed to open route scope", addr, error);
+                        return undefined;
+                    }
+                })
+            );
+            if (!cancelled) {
+                setRouteScopes(scopes.filter(Boolean) as Scope[]);
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        peer,
+        publicScope?.address,
+        publicScope?.openingArgs,
+        privateScope?.address,
+        privateScope?.openingArgs,
+        scopeAddrsFromUrl,
+    ]);
+
+    const availableScopes = useMemo(() => {
+        const scopes = [
+            publicScope,
+            privateScope,
+            ...routeScopes,
+        ].filter(Boolean) as Scope[];
+        const byAddress = new Map<string, Scope>();
+        for (const scope of scopes) {
+            byAddress.set(scope.address, scope);
+        }
+        return [...byAddress.values()];
+    }, [
+        publicScope?.address,
+        privateScope?.address,
+        routeScopes,
+    ]);
 
     const candidateScopes = useMemo(() => {
         if (!scopeAddrsFromUrl.length) return availableScopes;
@@ -164,13 +239,18 @@ const CanvasProvider = ({ children }: { children: JSX.Element }) => {
             const canvases = !idBytes
                 ? [root]
                 : await (async () => {
-                      const current = await loadCanvasFromScopes(
-                          idBytes,
-                          candidateScopes,
-                          {
-                              local: true,
-                          }
-                      );
+                      const preloaded = getRememberedRouteCanvas(idParam);
+                      const current = preloaded
+                          ? await root.nearestScope.openWithSameSettings(
+                                preloaded
+                            )
+                          : await loadCanvasFromScopes(
+                                idBytes,
+                                candidateScopes,
+                                {
+                                    local: true,
+                                }
+                            );
                       if (!current) return [root];
                       // `loadPath({ includeSelf: true })` requires the canvas to already be indexed.
                       // Right after publish, the document may exist while its indexed row is still

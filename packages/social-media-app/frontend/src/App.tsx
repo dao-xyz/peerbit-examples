@@ -35,9 +35,28 @@ import {
     startupMark,
 } from "./debug/perf";
 import { LayeredContent } from "./LayeredContent";
+import { RelayScopeProbe } from "./debug/RelayScopeProbe";
+import { RelayScopeRegistryProbe } from "./debug/RelayScopeRegistryProbe";
 enable("peerbit:react:usePeer:*");
 
-export const Content = () => {
+const getMergedSearchParams = () => {
+    const merged = new URLSearchParams(window.location.search);
+    const hash = window.location.hash || "";
+    const qIndex = hash.indexOf("?");
+    if (qIndex !== -1) {
+        const hashQuery = hash.substring(qIndex + 1);
+        const clean = hashQuery.replace(/^\/?/, "");
+        const hashParams = new URLSearchParams(clean);
+        hashParams.forEach((v, k) => {
+            if (!merged.has(k)) {
+                merged.set(k, v);
+            }
+        });
+    }
+    return merged;
+};
+
+export const Content = (props: { scopeProbeMode?: string | null }) => {
     const { error: peerError, peer, persisted, status, loading } = usePeer();
     const { showError } = useErrorDialog();
 
@@ -97,6 +116,17 @@ export const Content = () => {
         } catch {}
     }, [peer?.identity?.publicKey?.hashcode?.(), persisted]);
 
+    if (props.scopeProbeMode) {
+        if (props.scopeProbeMode.startsWith("registry-")) {
+            return (
+                <RelayScopeRegistryProbe
+                    mode={props.scopeProbeMode.replace(/^registry-/, "")}
+                />
+            );
+        }
+        return <RelayScopeProbe mode={props.scopeProbeMode} />;
+    }
+
     return (
         <StreamSettingsProvider>
             <DraftManagerProvider debug>
@@ -116,23 +146,7 @@ export const App = () => {
     // Initialize debug console once per app load
     setupPrettyConsole();
     // Parse query params from both traditional search (?foo=bar) and hash segment (/#/path?foo=bar)
-    const params = (() => {
-        const merged = new URLSearchParams(window.location.search);
-        const hash = window.location.hash || ""; // e.g. #/path?bootstrap=offline&v=feed
-        const qIndex = hash.indexOf("?");
-        if (qIndex !== -1) {
-            const hashQuery = hash.substring(qIndex + 1); // after the ? to end (before potential # but hash won't contain another # normally)
-            // Remove potential fragment-only routing prefixes like #/ or #//
-            const clean = hashQuery.replace(/^\/?/, "");
-            const hashParams = new URLSearchParams(clean);
-            hashParams.forEach((v, k) => {
-                if (!merged.has(k)) {
-                    merged.set(k, v);
-                }
-            });
-        }
-        return merged;
-    })();
+    const params = getMergedSearchParams();
     const flagTrue = (val: string | null) =>
         val == null || val === "" ? undefined : val === "true" || val === "1";
     // Single canonical flag for non-persistent mode
@@ -153,6 +167,7 @@ export const App = () => {
         return true;
     })();
     const bootstrapParam = params.get("bootstrap");
+    const scopeProbeMode = params.get("scopeprobe");
     // Support an "offline" mode (or empty ?bootstrap=) for tests/e2e to avoid dialing any relays
     // If bootstrap is explicitly provided (even if empty or 'offline'), we pass an explicit network option
     const offline =
@@ -218,29 +233,42 @@ export const App = () => {
                                     inMemory={inMemory}
                                     singleton
                                 >
-                                    <IdentityNoticeProvider>
-                                        <SupabaseIdentityBinder />
-                                        <IdentitiesProvider>
-                                            <AppProvider>
-                                                <HeaderVisibilityProvider>
-                                                    <BlurOnOutsidePointerProvider>
-                                                        <ScopeRegistryProvider>
-                                                            <ReplyProgressProvider>
-                                                                <ProfileProvider>
-                                                                    <AIReplyProvider>
-                                                                        <HostRegistryProvider>
-                                                                            <Content />
-                                                                            {/* <DebugOverlay /> */}
-                                                                        </HostRegistryProvider>
-                                                                    </AIReplyProvider>
-                                                                </ProfileProvider>
-                                                            </ReplyProgressProvider>
-                                                        </ScopeRegistryProvider>
-                                                    </BlurOnOutsidePointerProvider>
-                                                </HeaderVisibilityProvider>
-                                            </AppProvider>
-                                        </IdentitiesProvider>
-                                    </IdentityNoticeProvider>
+                                    {scopeProbeMode &&
+                                    scopeProbeMode.startsWith("registry-") ? (
+                                        <ScopeRegistryProvider>
+                                            <Content
+                                                scopeProbeMode={scopeProbeMode}
+                                            />
+                                        </ScopeRegistryProvider>
+                                    ) : scopeProbeMode ? (
+                                        <Content
+                                            scopeProbeMode={scopeProbeMode}
+                                        />
+                                    ) : (
+                                        <IdentityNoticeProvider>
+                                            <SupabaseIdentityBinder />
+                                            <IdentitiesProvider>
+                                                <AppProvider>
+                                                    <HeaderVisibilityProvider>
+                                                        <BlurOnOutsidePointerProvider>
+                                                            <ScopeRegistryProvider>
+                                                                <ReplyProgressProvider>
+                                                                    <ProfileProvider>
+                                                                        <AIReplyProvider>
+                                                                            <HostRegistryProvider>
+                                                                                <Content />
+                                                                                {/* <DebugOverlay /> */}
+                                                                            </HostRegistryProvider>
+                                                                        </AIReplyProvider>
+                                                                    </ProfileProvider>
+                                                                </ReplyProgressProvider>
+                                                            </ScopeRegistryProvider>
+                                                        </BlurOnOutsidePointerProvider>
+                                                    </HeaderVisibilityProvider>
+                                                </AppProvider>
+                                            </IdentitiesProvider>
+                                        </IdentityNoticeProvider>
+                                    )}
                                 </PeerWithAuth>
                             </AuthProvider>
                         </DeveloperConfigProvider>

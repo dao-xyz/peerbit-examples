@@ -43,7 +43,7 @@ export const CanvasAndReplies = () => {
     const [collapsed, setCollapsed] = useState(false);
 
     const { loading, feedRoot, lastReply } = useStream();
-    const { viewRoot } = useCanvases();
+    const { path: canvases, viewRoot } = useCanvases();
 
     const lastScrollTopRef = useRef(-1);
     const lastHeightTopRef = useRef(-1);
@@ -257,6 +257,8 @@ export const CanvasAndReplies = () => {
 
     const isChat = visualization?.view === ChildVisualization.CHAT;
 
+    const showDetailedView = canvases.length > 1;
+
     return (
         <>
             {/* OUTER provider: edit the viewRoot itself */}
@@ -294,8 +296,7 @@ export const CanvasAndReplies = () => {
                         >
                             <div className="z-5 flex-shrink-0">
                                 <div className="max-w-[876px] mx-auto w-full bg-neutral-50 dark:bg-neutral-900 shadow-md">
-                                    {!viewRoot ||
-                                    viewRoot?.__indexed.path.length === 0 ? (
+                                    {!viewRoot || !showDetailedView ? (
                                         <></>
                                     ) : (
                                         <DetailedView />

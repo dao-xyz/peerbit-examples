@@ -34,8 +34,19 @@ type AIReplyMProviderProps = {
 
 export const AIReplyProvider = ({ children }: AIReplyMProviderProps) => {
     const { peer } = usePeer();
+    const [enabled, setEnabled] = React.useState(false);
+
+    useEffect(() => {
+        setEnabled(false);
+        if (!peer) return;
+        const timer = setTimeout(() => {
+            setEnabled(true);
+        }, 3000);
+        return () => clearTimeout(timer);
+    }, [peer?.identity?.publicKey?.hashcode?.()]);
+
     // Use the Peerbit hook to open the program.
-    const { program } = useProgram(peer, new CanvasAIReply(), {
+    const { program } = useProgram(enabled && peer ? peer : undefined, enabled ? new CanvasAIReply() : undefined, {
         existing: "reuse",
     });
 

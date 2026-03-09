@@ -54,9 +54,33 @@ export async function startReplicator() {
 
     // Ensure temp directories are always cleaned up when the test shuts down.
     const originalStop = client.stop.bind(client);
+    const isBenignStopError = (error: any): boolean => {
+        const name = error?.name ?? error?.constructor?.name;
+        const message = String(error?.message ?? "").toLowerCase();
+        if (
+            name === "AbortError" ||
+            message === "aborterror" ||
+            message.includes("operation was aborted") ||
+            message.includes("fanout channel closed")
+        ) {
+            return true;
+        }
+        if (
+            typeof AggregateError !== "undefined" &&
+            error instanceof AggregateError &&
+            Array.isArray((error as any).errors)
+        ) {
+            return (error as any).errors.every(isBenignStopError);
+        }
+        return false;
+    };
     client.stop = (async (...args: any[]) => {
         try {
             await originalStop(...args);
+        } catch (error: any) {
+            if (!isBenignStopError(error)) {
+                throw error;
+            }
         } finally {
             try {
                 fs.rmSync(directory, { recursive: true, force: true });
@@ -75,6 +99,26 @@ export async function startReplicator() {
     });
 
     const addrs = client.getMultiaddrs();
+    try {
+        const bootstrapAddrs = addrs.map((addr) => addr.toString());
+        const services: any = (client as any).services;
+        services?.fanout?.setBootstraps?.(bootstrapAddrs);
+        services?.pubsub?.fanout?.setBootstraps?.(bootstrapAddrs);
+
+        const selfHash = services?.pubsub?.publicKeyHash;
+        if (selfHash) {
+            services?.pubsub?.setTopicRootCandidates?.([selfHash]);
+            services?.fanout?.topicRootControlPlane?.setTopicRootCandidates?.([
+                selfHash,
+            ]);
+            services?.pubsub?.topicRootControlPlane?.setTopicRootCandidates?.([
+                selfHash,
+            ]);
+            await services?.pubsub?.hostShardRootsNow?.();
+        }
+    } catch {
+        // Best-effort bootstrap-root configuration for relay e2e only.
+    }
     return { client, addrs, scope };
 }
 

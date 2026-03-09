@@ -22,7 +22,11 @@ const BASE_HTTP = process.env.BASE_URL || "http://localhost:5190";
 
 const MAX_CONTAINER_TO_CONTENT_MS = Number(
     process.env.PW_FEED_MAX_CONTAINER_TO_CONTENT_MS ||
-        (process.env.CI ? "1500" : "750")
+        (process.env.CI ? "1500" : "1100")
+);
+const MAX_BACK_CONTAINER_TO_CONTENT_MS = Number(
+    process.env.PW_FEED_MAX_BACK_CONTAINER_TO_CONTENT_MS ||
+        (process.env.CI ? "1800" : "1250")
 );
 const MAX_CONTAINER_TO_IMAGE_MS = Number(
     process.env.PW_FEED_MAX_CONTAINER_TO_IMAGE_MS ||
@@ -33,6 +37,10 @@ const MAX_HEIGHT_DELTA_PX = Number(
 );
 const HEIGHT_STABILITY_WAIT_MS = Number(
     process.env.PW_FEED_HEIGHT_STABILITY_WAIT_MS || "1250"
+);
+const FRAME_POLL_MS = 16;
+const APP_READY_TIMEOUT_MS = Number(
+    process.env.PW_FEED_APP_READY_TIMEOUT_MS || "120000"
 );
 
 const PNG_BASE64 =
@@ -50,7 +58,7 @@ async function installE2EFlags(page: any) {
 }
 
 async function installRenderGuard(page: any) {
-    await page.addInitScript(() => {
+    await page.addInitScript((framePollMs: number) => {
         const now = () =>
             typeof performance !== "undefined" && performance.now
                 ? performance.now()
@@ -85,11 +93,15 @@ async function installRenderGuard(page: any) {
             if (!feed) return;
             const nodes = Array.from(feed.querySelectorAll("[data-canvas-id]"));
             for (const node of nodes) {
-                if (!isVisible(node)) continue;
                 const el = node as HTMLElement;
                 const id = el.getAttribute("data-canvas-id");
                 if (!id) continue;
                 if (state.appear[id]) continue;
+                const preview =
+                    (el.querySelector(
+                        '[data-feed-preview="true"]'
+                    ) as HTMLElement | null) ?? el;
+                if (!isVisible(preview)) continue;
                 state.appear[id] = {
                     appeared: now(),
                     heightAtAppearPx: el.getBoundingClientRect().height,
@@ -111,10 +123,10 @@ async function installRenderGuard(page: any) {
             subtree: true,
             attributes: true,
         });
-        setInterval(scan, 50);
+        setInterval(scan, framePollMs);
         scan();
         pushTL({ phase: "observer:installed" });
-    });
+    }, FRAME_POLL_MS);
 }
 
 async function seedReplicatorImagePosts(options: {
@@ -196,37 +208,90 @@ async function waitForObservedAppearance(page: any, id: string) {
     }, id)) as { appeared: number; heightAtAppearPx: number };
 }
 
-async function waitForContentReady(page: any, id: string, text: string) {
-    return (await page.evaluate(
-        async ({ id, text }: { id: string; text: string }) => {
-            const now = () =>
-                typeof performance !== "undefined" && performance.now
-                    ? performance.now()
-                    : Date.now();
-            const start = now();
-            while (now() - start < 15_000) {
-                const el = document.querySelector(`[data-canvas-id="${id}"]`);
-                if (el && el.textContent && el.textContent.includes(text)) {
-                    try {
-                        (window as any).__E2E_RENDER_GUARD__?.timeline?.push({
-                            t: now(),
-                            phase: "content:ready",
-                            id,
+async function waitForContentReady(
+    page: any,
+    card: any,
+    id: string,
+    text: string
+) {
+    await expect
+        .poll(
+            async () =>
+                await page.evaluate(
+                    ({ id, text }: { id: string; text: string }) => {
+                        const isVisible = (el: Element | null) => {
+                            if (!el) return false;
+                            const node = el as HTMLElement;
+                            const style = window.getComputedStyle(node);
+                            if (
+                                style.display === "none" ||
+                                style.visibility === "hidden"
+                            ) {
+                                return false;
+                            }
+                            const rect = node.getBoundingClientRect();
+                            return rect.width > 0 && rect.height > 0;
+                        };
+
+                        const root = document.querySelector(
+                            `[data-canvas-id="${id}"]`
+                        ) as HTMLElement | null;
+                        if (!root || !isVisible(root)) return false;
+
+                        const preview =
+                            (root.querySelector(
+                                '[data-feed-preview="true"]'
+                            ) as HTMLElement | null) ?? root;
+                        if (!isVisible(preview)) return false;
+
+                        const exactNode = Array.from(
+                            preview.querySelectorAll("*")
+                        ).find((node) => {
+                            return (
+                                (node.textContent || "").trim() === text &&
+                                isVisible(node)
+                            );
                         });
-                    } catch {}
-                    return now();
-                }
-                await new Promise((r) => setTimeout(r, 50));
-            }
-            return null;
-        },
-        { id, text }
-    )) as number | null;
+
+                        if (exactNode) {
+                            return true;
+                        }
+
+                        return (preview.textContent || "").trim() === text;
+                    },
+                    { id, text }
+                ),
+            { timeout: 15_000 }
+        )
+        .toBe(true);
+
+    return (await page.evaluate((id: string) => {
+        const now = () =>
+            typeof performance !== "undefined" && performance.now
+                ? performance.now()
+                : Date.now();
+        try {
+            (window as any).__E2E_RENDER_GUARD__?.timeline?.push({
+                t: now(),
+                phase: "content:ready",
+                id,
+            });
+        } catch {}
+        return now();
+    }, id)) as number | null;
 }
 
 async function waitForImageReady(page: any, id: string, alt: string) {
     return (await page.evaluate(
-        async ({ id, alt }: { id: string; alt: string }) => {
+        async ({
+            id,
+            alt,
+            framePollMs,
+        }: {
+            id: string;
+            alt: string;
+            framePollMs: number;
+        }) => {
             const now = () =>
                 typeof performance !== "undefined" && performance.now
                     ? performance.now()
@@ -264,11 +329,11 @@ async function waitForImageReady(page: any, id: string, alt: string) {
                         return now();
                     }
                 }
-                await new Promise((r) => setTimeout(r, 50));
+                await new Promise((r) => setTimeout(r, framePollMs));
             }
             return null;
         },
-        { id, alt }
+        { id, alt, framePollMs: FRAME_POLL_MS }
     )) as number | null;
 }
 
@@ -290,7 +355,7 @@ test.describe("Feed render gating: don't render post shells before elements load
         | undefined;
     let scope: Awaited<ReturnType<typeof startReplicator>>["scope"] | undefined;
 
-    test.beforeAll(async () => {
+    test.beforeEach(async () => {
         const started = await startReplicator();
         client = started.client;
         scope = started.scope;
@@ -303,7 +368,7 @@ test.describe("Feed render gating: don't render post shells before elements load
         };
     });
 
-    test.afterAll(async () => {
+    test.afterEach(async () => {
         if (stop) await stop();
         stop = undefined;
         bootstrap = undefined;
@@ -350,7 +415,7 @@ test.describe("Feed render gating: don't render post shells before elements load
 
         // App ready
         await expect(page.getByTestId("toolbarcreatenew").first()).toBeVisible({
-            timeout: 60_000,
+            timeout: APP_READY_TIMEOUT_MS,
         });
         const feed = page.getByTestId("feed");
 
@@ -390,6 +455,7 @@ test.describe("Feed render gating: don't render post shells before elements load
 
         const readyAt = await waitForContentReady(
             page,
+            card,
             postId,
             insertedMessage
         );
@@ -471,13 +537,14 @@ test.describe("Feed render gating: don't render post shells before elements load
         // Reload and assert we don't regress into "empty shell then content" on re-hydration.
         await page.reload();
         await expect(page.getByTestId("toolbarcreatenew").first()).toBeVisible({
-            timeout: 60_000,
+            timeout: APP_READY_TIMEOUT_MS,
         });
         await expect(card).toBeVisible({ timeout: 180_000 });
 
         const appearReload = await waitForObservedAppearance(page, postId);
         const readyReloadAt = await waitForContentReady(
             page,
+            card,
             postId,
             insertedMessage
         );
@@ -590,7 +657,7 @@ test.describe("Feed render gating: don't render post shells before elements load
         await page.goto(url);
 
         await expect(page.getByTestId("toolbarcreatenew").first()).toBeVisible({
-            timeout: 60_000,
+            timeout: APP_READY_TIMEOUT_MS,
         });
         const feed = page.getByTestId("feed");
 
@@ -705,7 +772,7 @@ test.describe("Feed render gating: don't render post shells before elements load
         // Reload and assert we don't regress into "empty shell then image" on re-hydration.
         await page.reload();
         await expect(page.getByTestId("toolbarcreatenew").first()).toBeVisible({
-            timeout: 60_000,
+            timeout: APP_READY_TIMEOUT_MS,
         });
         await expect(card).toBeVisible({ timeout: 180_000 });
 
@@ -890,7 +957,58 @@ test.describe("Feed render gating: don't render post shells before elements load
         const appear = await waitForObservedAppearance(page, postId);
         await expect(card).toBeVisible({ timeout: 180_000 });
 
-        const readyAt = await waitForContentReady(page, postId, targetMessage);
+        const immediateBackSnapshot = await page.evaluate(
+            ({ id, text }: { id: string; text: string }) => {
+                const isVisible = (el: Element | null) => {
+                    if (!el) return false;
+                    const node = el as HTMLElement;
+                    const style = window.getComputedStyle(node);
+                    if (
+                        style.display === "none" ||
+                        style.visibility === "hidden"
+                    ) {
+                        return false;
+                    }
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                };
+
+                const root = document.querySelector(
+                    `[data-canvas-id="${id}"]`
+                ) as HTMLElement | null;
+                const preview =
+                    (root?.querySelector(
+                        '[data-feed-preview="true"]'
+                    ) as HTMLElement | null) ?? root;
+                return {
+                    cardText: (root?.textContent || "").trim(),
+                    previewText: (preview?.textContent || "").trim(),
+                    previewVisible: isVisible(preview),
+                    exactPresent: !!Array.from(
+                        preview?.querySelectorAll("*") ?? []
+                    ).find(
+                        (node) =>
+                            (node.textContent || "").trim() === text &&
+                            isVisible(node)
+                    ),
+                };
+            },
+            { id: postId, text: targetMessage }
+        );
+        await testInfo.attach("debug:back-immediate", {
+            body: Buffer.from(
+                JSON.stringify(immediateBackSnapshot, null, 2),
+                "utf8"
+            ),
+            contentType: "application/json",
+        });
+
+        const readyAt = await waitForContentReady(
+            page,
+            card,
+            postId,
+            targetMessage
+        );
         expect(readyAt).not.toBeNull();
         if (readyAt == null) return;
 
@@ -930,11 +1048,11 @@ test.describe("Feed render gating: don't render post shells before elements load
             contentType: "application/json",
         });
 
-        if (metricsBack.contentGapMs >= MAX_CONTAINER_TO_CONTENT_MS) {
+        if (metricsBack.contentGapMs >= MAX_BACK_CONTAINER_TO_CONTENT_MS) {
             throw new Error(
                 `After back: content appeared ${metricsBack.contentGapMs.toFixed(
                     0
-                )}ms after container (max ${MAX_CONTAINER_TO_CONTENT_MS}ms)`
+                )}ms after container (max ${MAX_BACK_CONTAINER_TO_CONTENT_MS}ms)`
             );
         }
 

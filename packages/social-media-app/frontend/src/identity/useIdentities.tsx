@@ -28,7 +28,9 @@ export const IdentitiesProvider = ({ children }: { children: JSX.Element }) => {
     const identities = useProgram(peer, new Identities({ baseUrl }), {
         existing: "reuse",
         args: {
-            replicate: persisted,
+            // Device/identity views can observe and query without joining the
+            // replication set during startup.
+            replicate: false,
             deviceName: generateDefaultDeviceName(),
         },
     });

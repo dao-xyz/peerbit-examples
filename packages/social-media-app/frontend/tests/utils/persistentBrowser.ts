@@ -66,3 +66,27 @@ export async function launchPersistentBrowserContext(
 
     return context;
 }
+
+const isIgnorablePersistentCloseError = (error: unknown) => {
+    const message = String((error as any)?.message ?? error ?? "");
+    return (
+        message.includes("ENOENT") &&
+        (message.includes(".playwright-artifacts") ||
+            message.includes(".trace") ||
+            message.includes("recording") ||
+            message.includes("video"))
+    );
+};
+
+export async function closePersistentBrowserContext(
+    context: BrowserContext
+): Promise<void> {
+    try {
+        await context.close();
+    } catch (error) {
+        if (isIgnorablePersistentCloseError(error)) {
+            return;
+        }
+        throw error;
+    }
+}

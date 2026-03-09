@@ -105,6 +105,16 @@ export const PeerSetupGate: React.FC<Props> = ({ children, network }) => {
         const tryOnce = async (): Promise<boolean> => {
             if (cancelled) return false;
 
+            const applyFanoutBootstraps = (addrs: string[]) => {
+                try {
+                    const services: any = (peer as any).services;
+                    services?.fanout?.setBootstraps?.(addrs);
+                    services?.pubsub?.fanout?.setBootstraps?.(addrs);
+                } catch {
+                    // ignore
+                }
+            };
+
             if (target.kind === "local") {
                 try {
                     const peerId = await (
@@ -112,6 +122,11 @@ export const PeerSetupGate: React.FC<Props> = ({ children, network }) => {
                     ).text();
                     const localAddress =
                         "/ip4/127.0.0.1/tcp/8002/ws/p2p/" + peerId;
+                    applyFanoutBootstraps([localAddress]);
+                    if (typeof peer.bootstrap === "function") {
+                        await peer.bootstrap([localAddress]);
+                        return true;
+                    }
                     return await peer.dial(localAddress);
                 } catch {
                     return false;
@@ -128,6 +143,16 @@ export const PeerSetupGate: React.FC<Props> = ({ children, network }) => {
             }
 
             // explicit bootstraps
+            try {
+                applyFanoutBootstraps(target.addrs);
+                if (typeof peer.bootstrap === "function") {
+                    await peer.bootstrap(target.addrs);
+                    return true;
+                }
+            } catch {
+                // fall back to raw dial below
+            }
+
             for (const addr of target.addrs) {
                 if (cancelled) return false;
                 try {

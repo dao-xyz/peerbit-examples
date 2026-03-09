@@ -28,6 +28,19 @@ async function waitForComposerReady(page: Page, timeout = 30000) {
     );
 }
 
+async function waitForStableDraft(page: Page, timeout = 3000) {
+    const start = Date.now();
+    let lastId: string | null = null;
+    while (Date.now() - start < timeout) {
+        const info = await page.evaluate(() => (window as any).__DRAFT_READY);
+        const draftId = info?.draftId || null;
+        if (draftId && draftId === lastId) return draftId;
+        lastId = draftId;
+        await page.waitForTimeout(150);
+    }
+    return lastId;
+}
+
 async function openFeedView(
     page: Page,
     url: string,
@@ -37,6 +50,7 @@ async function openFeedView(
     await page.goto(url);
     await expectPersistent(page);
     await waitForComposerReady(page);
+    await waitForStableDraft(page);
     await page
         .getByRole("button", { name: viewLabel, exact: true })
         .first()
@@ -127,63 +141,49 @@ async function publishPost(page: Page, message: string) {
 }
 
 async function addCommentToPost(page: Page, postId: string, comment: string) {
-    // Jump directly to the post detail view (chat) to comment
-    await page.evaluate((id) => {
-        const url = new URL(window.location.href);
-        url.hash = `#/c/${encodeURIComponent(id)}?view=chat&v=feed`;
-        window.location.assign(url.toString());
-    }, postId);
+    const card = page.locator(`[data-canvas-id="${postId}"]`).first();
+    await expect(card).toBeVisible({ timeout: 30000 });
+    await card.getByTestId("open-comments").first().click();
     await expect(page).toHaveURL(/#\/c\//, { timeout: 15000 });
     await waitForComposerReady(page);
-    const baseEvents =
-        (await page.evaluate(() => (window as any).__DBG_EVENTS?.length)) || 0;
+    await waitForStableDraft(page);
 
-    const replyToolbar = page.getByTestId("toolbarcreatenew").last();
-    try {
-        await replyToolbar.getByTestId("composer-textarea").first().click({
-            timeout: 1500,
-        });
-    } catch {}
-    const privacySwitch = replyToolbar.getByRole("switch", {
-        name: /Private/i,
-    });
-    try {
-        if ((await privacySwitch.count()) > 0) {
-            const checked =
-                (await privacySwitch.getAttribute("aria-checked")) === "true";
-            if (checked) await privacySwitch.click();
-        }
-    } catch {}
-    const commentBox = replyToolbar.locator("textarea").first();
+    const commentBox = page
+        .locator('[data-testid="toolbarcreatenew"] textarea')
+        .first();
     await expect(commentBox).toBeVisible({ timeout: 20000 });
-
+    const privacySwitch = page
+        .getByRole("switch", { name: /Private/i })
+        .first();
+    if ((await privacySwitch.count()) > 0) {
+        await expect(privacySwitch).toHaveAttribute("aria-checked", "false");
+    }
     await commentBox.click({ timeout: 2000 });
-    await commentBox.fill(comment);
-    const sendBtn = replyToolbar.getByTestId("send-button");
-    await expect(sendBtn).toBeVisible({ timeout: 20000 });
+    let filled = false;
+    for (let attempt = 0; attempt < 4; attempt++) {
+        await commentBox.fill("");
+        await commentBox.type(comment, { delay: 30 });
+        await page.waitForTimeout(200);
+        if ((await commentBox.inputValue()) === comment) {
+            filled = true;
+            break;
+        }
+    }
+    expect(filled).toBe(true);
+    const sendBtn = page.getByTestId("send-button").first();
     await expect
         .poll(
-            async () => {
-                await page.waitForTimeout(250);
-                if (!(await sendBtn.isEnabled())) {
-                    await commentBox.type(" .");
-                }
-                return await sendBtn.isEnabled();
-            },
-            { timeout: 30000, intervals: [200, 400, 800, 1200] }
+            async () => await sendBtn.isEnabled(),
+            { timeout: 20000 }
         )
         .toBe(true);
-
+    const baseEvents = (await getReplyPublishedEvents(page))?.length ?? 0;
     await sendBtn.click();
     await expect
         .poll(
-            async () => {
-                const evts =
-                    (await page.evaluate(
-                        () => (window as any).__DBG_EVENTS?.length
-                    )) || 0;
-                return evts > baseEvents;
-            },
+            async () =>
+                ((await getReplyPublishedEvents(page))?.length ?? 0) >
+                baseEvents,
             { timeout: 30000 }
         )
         .toBe(true);

@@ -484,6 +484,17 @@ export const MarkdownContent = ({
     }, [editable, content?.text]);
 
     const displayText = isEditing ? text : content.text;
+    const usePlainTextPreview = useMemo(() => {
+        if (isEditing || !previewLines) {
+            return false;
+        }
+
+        // Keep the fast path narrow: only bypass Markdown parsing for simple
+        // one-line previews with no obvious markdown/image syntax.
+        return !/[`*_#[\]()>~-]|^\s*[-+*]\s|^\s*\d+\.\s|!\[|<[^>]+>/m.test(
+            displayText
+        );
+    }, [displayText, isEditing, previewLines]);
 
     const urlTransform = useCallback((url: string, key: string, node: any) => {
         // react-markdown sanitizes unknown protocols to `""`; keep our internal image URLs intact.
@@ -575,66 +586,77 @@ export const MarkdownContent = ({
                             : ""
                     }`}
                 >
-                    <Markdown
-                        disallowedElements={
-                            previewLines
-                                ? ["h1", "h2", "h3", "h4", "h5", "h6", "hr"]
-                                : []
-                        }
-                        unwrapDisallowed
-                        remarkPlugins={[remarkGfm]}
-                        urlTransform={urlTransform}
-                        components={{
-                            a: ({ node, ...props }) => (
-                                <a
-                                    {...props}
-                                    className=" wrap-anywhere underline "
-                                />
-                            ),
-                            img: ({ node, ...props }) => (
-                                <GigaMarkdownImage
-                                    src={props.src}
-                                    alt={props.alt}
-                                    title={props.title}
-                                    imagesByRef={gigaImagesByRef}
-                                />
-                            ),
+                    {usePlainTextPreview ? (
+                        <p className="break-all whitespace-pre-wrap">
+                            {displayText}
+                        </p>
+                    ) : (
+                        <Markdown
+                            disallowedElements={
+                                previewLines
+                                    ? ["h1", "h2", "h3", "h4", "h5", "h6", "hr"]
+                                    : []
+                            }
+                            unwrapDisallowed
+                            remarkPlugins={[remarkGfm]}
+                            urlTransform={urlTransform}
+                            components={{
+                                a: ({ node, ...props }) => (
+                                    <a
+                                        {...props}
+                                        className=" wrap-anywhere underline "
+                                    />
+                                ),
+                                img: ({ node, ...props }) => (
+                                    <GigaMarkdownImage
+                                        src={props.src}
+                                        alt={props.alt}
+                                        title={props.title}
+                                        imagesByRef={gigaImagesByRef}
+                                    />
+                                ),
 
-                            // the first h1, h2, h3, or h4 should be rendered without top margin
-                            /*  h1: ({ node, className, children, ...props }) => {
-                                 return <h1
-                                     className={`mt-0 mb-2 ${className}`}
-                                     {...props}
-                                 >
-                                     {children}
-                                 </h1>
-                             }, */
+                                // the first h1, h2, h3, or h4 should be rendered without top margin
+                                /*  h1: ({ node, className, children, ...props }) => {
+                                     return <h1
+                                         className={`mt-0 mb-2 ${className}`}
+                                         {...props}
+                                     >
+                                         {children}
+                                     </h1>
+                                 }, */
 
-                            code: ({ node, className, children, ...props }) => {
-                                // break if previewLines is set
-                                if (previewLines) {
+                                code: ({
+                                    node,
+                                    className,
+                                    children,
+                                    ...props
+                                }) => {
+                                    // break if previewLines is set
+                                    if (previewLines) {
+                                        return (
+                                            <code
+                                                className={`break-all whitespace-pre-wrap ${className}`}
+                                                {...props}
+                                            >
+                                                {children}
+                                            </code>
+                                        );
+                                    }
                                     return (
                                         <code
-                                            className={`break-all whitespace-pre-wrap ${className}`}
+                                            className={`whitespace-pre-wrap ${className}`}
                                             {...props}
                                         >
                                             {children}
                                         </code>
                                     );
-                                }
-                                return (
-                                    <code
-                                        className={`whitespace-pre-wrap ${className}`}
-                                        {...props}
-                                    >
-                                        {children}
-                                    </code>
-                                );
-                            },
-                        }}
-                    >
-                        {displayText}
-                    </Markdown>
+                                },
+                            }}
+                        >
+                            {displayText}
+                        </Markdown>
+                    )}
                 </div>
             )}
         </div>

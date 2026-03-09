@@ -71,7 +71,7 @@ export const getCanvasIdFromPart = (
 ): Uint8Array | undefined => {
     if (!path) return undefined;
     try {
-        return fromBase64URL(path);
+        return fromBase64URL(decodeURIComponent(path));
     } catch (error) {
         console.error("Invalid canvas ID in path:", path, error);
         return undefined;

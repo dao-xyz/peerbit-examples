@@ -9,7 +9,7 @@ import {
     ReplyKind,
     Scope,
 } from "@giga-app/interface";
-import { PrivateScope, PublicScope } from "../../useScope";
+import { PrivateScope } from "../../useScope";
 import { WithIndexedContext } from "@peerbit/document";
 import { randomBytes } from "@peerbit/crypto";
 import debounce from "lodash/debounce";
@@ -84,7 +84,6 @@ export const DraftManagerProvider: React.FC<{
 }> = ({ children, debug = false }) => {
     const { peer } = usePeer();
     const privateScope = PrivateScope.useScope();
-    const publicScope = PublicScope.useScope();
 
     // Centralized debug options from DebugConfigProvider with backwards compatibility
     const debugOpts = useDebugConfig();
@@ -872,7 +871,6 @@ export const DraftManagerProvider: React.FC<{
     }, [
         peer?.identity.publicKey.hashcode(),
         privateScope?.address,
-        publicScope?.address,
         debug,
         debugOpts.enabled,
         debugOpts.captureEvents,
@@ -880,9 +878,11 @@ export const DraftManagerProvider: React.FC<{
         debugOpts.perfEnabled,
     ]);
 
+    const privateScopeReady = !!privateScope?.address;
+
     return (
         <DraftManagerCtx.Provider value={api}>
-            {children}
+            {privateScopeReady ? children : null}
         </DraftManagerCtx.Provider>
     );
 };

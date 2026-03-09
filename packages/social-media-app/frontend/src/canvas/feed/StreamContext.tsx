@@ -13,12 +13,14 @@ import {
     Canvas as CanvasDB,
     Canvas,
     IndexableCanvas,
+    getChildrenLinksQuery,
     getTimeQuery,
     getCanvasWithContentQuery,
     getCanvasWithContentTypesQuery,
     ChildVisualization,
     getReplyKindQuery,
     ReplyKind,
+    resolveChild,
 } from "@giga-app/interface";
 import { useCanvases } from "../useCanvas";
 import type {
@@ -144,6 +146,7 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
     // Stabilize ordering for "best"/ranked feeds to prevent large reorders on async reply-count updates.
     const stableOrderRef = useRef<string[]>([]);
     const stableOrderSetRef = useRef<Set<string>>(new Set());
+    const stableOrderingLockedRef = useRef(false);
     const lastPinResetKeyRef = useRef<string | null>(null);
 
     // Session-local pinning of newly created posts (per slot)
@@ -164,6 +167,7 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
 
         stableOrderRef.current = [];
         stableOrderSetRef.current = new Set();
+        stableOrderingLockedRef.current = false;
         pinnedIdsRef.current.clear();
         pinnedSeqRef.current.clear();
         publishedSeqByCanvasIdRef.current.clear();
@@ -332,7 +336,10 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
             const applyStableOrdering = (
                 items: WithIndexedContext<Canvas, IndexableCanvas>[]
             ) => {
-                if (!config?.stableOrdering) {
+                if (
+                    !config?.stableOrdering ||
+                    !stableOrderingLockedRef.current
+                ) {
                     stableOrderRef.current = items.map((x) => x.idString);
                     stableOrderSetRef.current = new Set(stableOrderRef.current);
                     return items;
@@ -511,6 +518,19 @@ const StreamQuerySlot = React.memo(function StreamQuerySlot({
     }, [items, registerPins]);
 
     useEffect(() => {
+        if (!config?.stableOrdering) return;
+        return subscribeDebugEvents((evt) => {
+            if (evt?.source !== "feed") return;
+            if (evt?.name !== "itemInteraction") return;
+            stableOrderingLockedRef.current = true;
+            stableOrderRef.current = latestItemsRef.current.map(
+                (item) => item.idString
+            );
+            stableOrderSetRef.current = new Set(stableOrderRef.current);
+        });
+    }, [config?.stableOrdering, config?.pinResetKey]);
+
+    useEffect(() => {
         if (!config?.pinningEnabled) return;
         return subscribeDebugEvents((evt) => {
             if (evt?.source !== "DraftManager") return;
@@ -687,7 +707,9 @@ function useStreamUiState() {
 
     // unified replies query
     const feedRootIdString = feedRoot?.idString;
-    const feedRootPathDepth = feedRoot?.__indexed?.pathDepth;
+    const feedRootPathDepth = feedRoot
+        ? Math.max(feedRoot.__indexed?.pathDepth ?? 0, canvases.length - 1, 0)
+        : undefined;
     const canvasQuery = useMemo(() => {
         if (!feedRoot || !filterModel || !filterModel?.query) return undefined;
         const queryObject = filterModel.query(feedRoot);
@@ -1106,6 +1128,78 @@ export const StreamProvider: React.FC<{ children: ReactNode }> = ({
     ));
 
     const activeState = statesRef.current.get(activeKey);
+
+    useEffect(() => {
+        const isCanvasRoute = !!getCanvasIdFromPath(location.pathname || "");
+        const feedRoot = ui.feedRoot;
+        if (!isCanvasRoute || !feedRoot) return;
+        if (activeState?.isLoading) return;
+        if ((activeState?.items?.length ?? 0) > 0) return;
+
+        let cancelled = false;
+
+        (async () => {
+            for (let attempt = 0; attempt < 10; attempt++) {
+                if (cancelled) return;
+                try {
+                    const links = await feedRoot.nearestScope.links.index
+                        .iterate(
+                            {
+                                query: [getChildrenLinksQuery(feedRoot.id)],
+                            },
+                            {
+                                resolve: true,
+                                local: true,
+                                remote: {
+                                    strategy: "fallback",
+                                    timeout: 10_000,
+                                },
+                            }
+                        )
+                        .all();
+
+                    const children = (
+                        await Promise.all(
+                            links.map((link: any) =>
+                                resolveChild(link, feedRoot.nearestScope, {
+                                    local: true,
+                                    remote: true,
+                                    waitFor: 10_000,
+                                })
+                            )
+                        )
+                    ).filter(Boolean) as WithIndexedContext<
+                        Canvas,
+                        IndexableCanvas
+                    >[];
+
+                    if (children.length > 0) {
+                        await Promise.all(
+                            children.map(async (child) => {
+                                try {
+                                    await feedRoot.nearestScope.replies.put(child);
+                                } catch {}
+                            })
+                        );
+                        return;
+                    }
+                } catch {}
+
+                await new Promise((resolve) => setTimeout(resolve, 1000));
+            }
+        })();
+
+        return () => {
+            cancelled = true;
+        };
+    }, [
+        activeState?.id,
+        activeState?.isLoading,
+        activeState?.items?.length,
+        location.pathname,
+        ui.feedRoot?.idString,
+    ]);
+
     const value = buildStreamValue(ui, activeState);
     return (
         <StreamContext.Provider value={value}>

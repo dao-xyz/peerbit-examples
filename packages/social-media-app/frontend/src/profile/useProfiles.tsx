@@ -28,7 +28,9 @@ export const ProfileProvider = ({ children }: { children: JSX.Element }) => {
 
     // Open the registry
     const profilesProgram = useProgram(peer, new Profiles(), {
-        args: { replicate: !!persisted },
+        // Profile lookup is observer-style at startup; querying/subscribing does
+        // not require this browser to take replication responsibility.
+        args: { replicate: false },
         existing: "reuse",
     });
 

@@ -4,6 +4,7 @@ import { Reply } from "./Reply";
 import { ScrollSettings } from "../main/useAutoScroll";
 import { IoIosArrowDown } from "react-icons/io";
 import { Spinner } from "../../utils/Spinner";
+import { emitDebugEvent } from "../../debug/debug";
 
 import { useFeedHooks } from "./useFeedHooks";
 import { useStream } from "./StreamContext";
@@ -86,6 +87,13 @@ export const Feed = (
                             {processedReplies.map((item, i) => (
                                 <Fragment key={item.id}>
                                     <Reply
+                                        onPointerDownCapture={() => {
+                                            emitDebugEvent({
+                                                source: "feed",
+                                                name: "itemInteraction",
+                                                id: item.reply.idString,
+                                            });
+                                        }}
                                         onLoad={() => handleLoad(item.reply, i)}
                                         hideHeader={
                                             !visualization.showAuthorInfo
