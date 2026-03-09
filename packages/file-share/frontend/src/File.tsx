@@ -104,6 +104,7 @@ export const File = (properties: {
                 </div>
             )}
             <button
+                data-testid="download-file"
                 disabled={progress != null}
                 onClick={() => {
                     setFailedDownload(false);
@@ -137,6 +138,7 @@ export const File = (properties: {
             </button>
             {properties.isHost && (
                 <button
+                    data-testid="delete-file"
                     onClick={() => {
                         properties.delete();
                     }}

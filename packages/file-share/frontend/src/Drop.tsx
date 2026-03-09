@@ -1,7 +1,7 @@
 import { usePeer, useProgram } from "@peerbit/react";
 import { useNavigate, useParams } from "react-router";
 import { useEffect, useReducer, useState } from "react";
-import { Files, AbstractFile } from "@peerbit/please-lib";
+import { Files, AbstractFile, LargeFile } from "@peerbit/please-lib";
 import * as Toggle from "@radix-ui/react-toggle";
 import { MdArrowBack, MdUploadFile, MdClose, MdSettings } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
@@ -277,10 +277,14 @@ export const Drop = () => {
         progress: (progress: number | null) => void
     ) => {
         console.log("FETCH FILE START");
+        const timeout =
+            file instanceof LargeFile
+                ? Math.max(60_000, Math.ceil(file.size / 1e6) * 1_000)
+                : 10_000;
         const bytes = await file
             .getFile(files.program, {
                 as: "chunks",
-                timeout: 10 * 1000,
+                timeout,
                 progress,
             })
             .catch((e) => {
@@ -467,6 +471,7 @@ export const Drop = () => {
                                 {!isHost && goBack()}
                             </div>
                             <Toggle.Root
+                                data-testid="seed-toggle"
                                 onPressedChange={(e) => {
                                     setRole(e ? "replicator" : "observer");
                                 }}
@@ -707,6 +712,7 @@ export const Drop = () => {
                         <br />
                         {uploadProgress != null && (
                             <Progress.Root
+                                data-testid="upload-progress"
                                 className="progress-root w-full h-3"
                                 value={uploadProgress}
                             >

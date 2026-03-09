@@ -16,6 +16,9 @@ import { TrustedNetwork } from "@peerbit/trusted-network";
 import PQueue from "p-queue";
 import { ReplicationOptions } from "@peerbit/shared-log";
 
+const sleep = (ms: number) =>
+    new Promise((resolve) => setTimeout(resolve, ms));
+
 export abstract class AbstractFile {
     abstract id: string;
     abstract name: string;
@@ -194,21 +197,86 @@ export class LargeFile extends AbstractFile {
         return undefined;
     }
 
-    async fetchChunks(files: Files) {
-        const expectedIds = new Set(this.fileIds);
-        const allFiles = await files.files.index.search(
-            new SearchRequest({
-                query: [
-                    new Or(
-                        [...expectedIds].map(
-                            (x) => new StringMatch({ key: "id", value: x })
-                        )
-                    ),
-                ],
-                fetch: 0xffffffff,
-            })
+    async fetchChunks(
+        files: Files,
+        properties?: {
+            timeout?: number;
+        }
+    ) {
+        const expectedIds = [...new Set(this.fileIds)];
+        const expectedSet = new Set(expectedIds);
+        const chunks = new Map<string, AbstractFile>();
+        const totalTimeout = properties?.timeout ?? 30_000;
+        const deadline = Date.now() + totalTimeout;
+        const queryTimeout = Math.min(totalTimeout, 5_000);
+        const searchOptions = {
+            local: true,
+            remote: {
+                timeout: queryTimeout,
+                throwOnMissing: false,
+                // Observer downloads still need chunk metadata/documents, even
+                // when the peer is not a replicator.
+                replicate: true,
+            },
+        };
+        const recordChunks = (results: AbstractFile[]) => {
+            for (const chunk of results) {
+                if (
+                    chunk instanceof TinyFile &&
+                    expectedSet.has(chunk.id) &&
+                    !chunks.has(chunk.id)
+                ) {
+                    chunks.set(chunk.id, chunk);
+                }
+            }
+        };
+
+        recordChunks(
+            await files.files.index.search(
+                new SearchRequest({
+                    query: new StringMatch({ key: "parentId", value: this.id }),
+                    fetch: 0xffffffff,
+                }),
+                searchOptions
+            )
         );
-        return allFiles;
+
+        while (chunks.size < expectedSet.size && Date.now() < deadline) {
+            const missingIds = expectedIds.filter((id) => !chunks.has(id));
+            if (missingIds.length === 0) {
+                break;
+            }
+
+            let before = chunks.size;
+            for (let i = 0; i < missingIds.length; i += 32) {
+                const batch = missingIds.slice(i, i + 32);
+                recordChunks(
+                    await files.files.index.search(
+                        new SearchRequest({
+                            query: [
+                                new Or(
+                                    batch.map(
+                                        (id) =>
+                                            new StringMatch({
+                                                key: "id",
+                                                value: id,
+                                            })
+                                    )
+                                ),
+                            ],
+                            fetch: batch.length,
+                        }),
+                        searchOptions
+                    )
+                );
+            }
+
+            if (chunks.size === before && chunks.size < expectedSet.size) {
+                await sleep(250);
+            }
+        }
+
+        return [...chunks.values()];
     }
     async delete(files: Files) {
         await Promise.all(
@@ -231,7 +299,9 @@ export class LargeFile extends AbstractFile {
 
         properties?.progress?.(0);
 
-        const allChunks = await this.fetchChunks(files);
+        const allChunks = await this.fetchChunks(files, {
+            timeout: properties?.timeout,
+        });
 
         const fetchQueue = new PQueue({ concurrency: 10 });
         let fetchError: Error | undefined = undefined;
