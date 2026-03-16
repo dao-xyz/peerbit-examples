@@ -30,7 +30,7 @@
         "watch": "nodemon"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.6",
+        "@peerbit/test-utils": "^3.0.12",
         "@types/express": "^4",
         "nodemon": "^3",
         "typescript": "^5.6.3"
@@ -39,6 +39,6 @@
         "@peerbit/blog-sdk": "workspace:*",
         "body-parser": "^1",
         "express": "^4",
-        "peerbit": "^5.0.6"
+        "peerbit": "^5.1.0"
     }
 }
