@@ -38,10 +38,10 @@
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
         "@peerbit/crypto": "^3.0.1",
-        "@peerbit/document": "^13.0.13",
+        "@peerbit/document": "^13.0.14",
         "@peerbit/program": "^6.0.8",
-        "@peerbit/shared-log": "^13.0.13",
-        "@peerbit/trusted-network": "^6.0.13",
+        "@peerbit/shared-log": "^13.0.14",
+        "@peerbit/trusted-network": "^6.0.14",
         "p-queue": "^8.1.0",
         "peerbit": "^5.1.0",
         "uint8arrays": "^5.1.0",

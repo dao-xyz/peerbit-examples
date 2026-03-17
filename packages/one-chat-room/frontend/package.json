@@ -17,7 +17,7 @@
         "@emotion/styled": "^11.11.0",
         "@mui/icons-material": "^7.0.2",
         "@mui/material": "^5.15.7",
-        "@peerbit/document": "^13.0.13",
+        "@peerbit/document": "^13.0.14",
         "@peerbit/peer-names": "workspace:*",
         "@peerbit/program-react": "^0.4.11",
         "@peerbit/react": "^1.1.0",

@@ -15,7 +15,7 @@
     },
     "dependencies": {
         "@peerbit/react": "^1.1.0",
-        "@peerbit/string": "^5.1.36",
+        "@peerbit/string": "^5.1.37",
         "fast-diff": "^1.3.0",
         "peerbit": "^5.1.0",
         "react": "^19.2.0",
