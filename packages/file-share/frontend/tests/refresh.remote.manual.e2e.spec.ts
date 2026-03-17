@@ -1,24 +1,17 @@
 import { test } from "@playwright/test";
-import { createSpace, getSeederCount, rootUrl, waitForFileListed } from "./helpers";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import {
+    createSyntheticFileOnDisk,
+    createSpace,
+    getSeederCount,
+    rootUrl,
+    waitForFileListed,
+} from "./helpers";
+import { rm } from "node:fs/promises";
 
 const PROD_ONLY = process.env.PW_PROD_SMOKE === "1";
 const FILE_MB = Number(process.env.PW_FILE_MB || "100");
 const MONITOR_MS = Number(process.env.PW_MONITOR_MS || "60000");
 const POLL_MS = Number(process.env.PW_POLL_MS || "5000");
-
-async function createSyntheticFileOnDisk(sizeMb: number) {
-    const dir = await mkdtemp(path.join(tmpdir(), "peerbit-file-share-"));
-    const filePath = path.join(dir, `prod-${sizeMb}mb.bin`);
-    await writeFile(filePath, Buffer.alloc(sizeMb * 1024 * 1024, 7));
-    return {
-        dir,
-        filePath,
-        fileName: path.basename(filePath),
-    };
-}
 
 async function getVisibleFileRow(page, fileName: string): Promise<string | null> {
     const row = page.locator("li", { hasText: fileName }).first();
@@ -54,7 +47,10 @@ test.describe("manual prod refresh smoke", () => {
             throw new Error("Missing baseURL");
         }
 
-        const file = await createSyntheticFileOnDisk(FILE_MB);
+        const file = await createSyntheticFileOnDisk(
+            `prod-${FILE_MB}mb.bin`,
+            FILE_MB
+        );
         const writerContext = await browser.newContext({ acceptDownloads: true });
         const readerOneContext = await browser.newContext({
             acceptDownloads: true,

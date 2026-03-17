@@ -1,9 +1,16 @@
 import { Peerbit } from "peerbit";
-import { Files, LargeFile, TinyFile } from "../index.js";
-import { equals } from "uint8arrays";
+import {
+    Files,
+    IndexableFile,
+    LargeFile,
+    type ReReadableChunkSource,
+    TinyFile,
+} from "../index.js";
+import { concat, equals } from "uint8arrays";
 import crypto from "crypto";
 import { delay, waitForResolved } from "@peerbit/time";
 import { expect, describe, it, beforeEach, afterEach } from "vitest";
+import { deserialize, serialize } from "@dao-xyz/borsh";
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
 
@@ -116,6 +123,92 @@ describe("index", () => {
             await filestore.removeByName("random large file");
             expect(await filestoreReader.getByName("random large file")).to.be
                 .undefined;
+        });
+
+        it("streams rereadable sources in bounded chunks", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const readChunkSizes: number[] = [];
+            let readPasses = 0;
+
+            const source: ReReadableChunkSource = {
+                size: BigInt(largeFile.byteLength),
+                async *readChunks(chunkSize: number) {
+                    readPasses++;
+                    readChunkSizes.push(chunkSize);
+                    for (
+                        let offset = 0;
+                        offset < largeFile.byteLength;
+                        offset += chunkSize
+                    ) {
+                        yield largeFile.subarray(
+                            offset,
+                            Math.min(offset + chunkSize, largeFile.byteLength)
+                        );
+                    }
+                },
+            };
+
+            await filestore.addSource("streamed source", source);
+
+            expect(readPasses).to.eq(2);
+            expect(readChunkSizes).to.deep.eq([5e5, 5e5]);
+
+            const file = await filestore.getByName("streamed source");
+            expect(equals(file!.bytes, largeFile)).to.be.true;
+        });
+
+        it("streams downloaded files chunk by chunk", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            await filestore.add("streamed download", largeFile);
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.resolveByName(
+                "streamed download",
+                { replicate: true }
+            );
+            const streamedChunks: Uint8Array[] = [];
+
+            expect(file).to.be.instanceOf(LargeFile);
+
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("stores file sizes as u64", () => {
+            const size = 5_000_000_000n;
+            const largeFile = new LargeFile({
+                id: "large",
+                name: "large-file",
+                fileIds: ["a", "b"],
+                size,
+            });
+            const indexable = new IndexableFile(largeFile);
+
+            const decodedFile = deserialize(
+                serialize(largeFile),
+                LargeFile
+            );
+            const decodedIndexable = deserialize(
+                serialize(indexable),
+                IndexableFile
+            );
+
+            expect(decodedFile.size).to.eq(size);
+            expect(decodedIndexable.size).to.eq(size);
         });
 
         it("exposes large file metadata before chunk upload finishes", async () => {

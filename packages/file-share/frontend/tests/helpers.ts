@@ -1,7 +1,28 @@
+import fs from "node:fs";
 import { expect, type Page } from "@playwright/test";
-import { mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+
+const uploadTempDirectories = new Set<string>();
+let uploadTempCleanupRegistered = false;
+
+const registerUploadTempDirectory = (directory: string) => {
+    uploadTempDirectories.add(directory);
+    if (uploadTempCleanupRegistered) {
+        return;
+    }
+    uploadTempCleanupRegistered = true;
+    process.on("exit", () => {
+        for (const dir of uploadTempDirectories) {
+            try {
+                fs.rmSync(dir, { recursive: true, force: true });
+            } catch {
+                // ignore best-effort cleanup failures
+            }
+        }
+    });
+};
 
 export function rootUrl(baseURL: string): string {
     return `${baseURL.replace(/\/$/, "")}/#/`;
@@ -12,6 +33,25 @@ export function withBootstrap(baseURL: string, addrs: string[]): string {
     url.searchParams.set("bootstrap", addrs.join(","));
     url.hash = "/";
     return url.toString();
+}
+
+export async function createSyntheticFileOnDisk(
+    fileName: string,
+    sizeMb: number
+) {
+    const dir = await mkdtemp(path.join(tmpdir(), "peerbit-file-share-"));
+    const filePath = path.join(dir, fileName);
+    const file = await open(filePath, "w");
+    try {
+        await file.truncate(sizeMb * 1024 * 1024);
+    } finally {
+        await file.close();
+    }
+    return {
+        dir,
+        filePath,
+        fileName,
+    };
 }
 
 export async function createSpace(
@@ -81,14 +121,9 @@ export async function uploadSyntheticFile(
         return;
     }
 
-    const dir = await mkdtemp(path.join(tmpdir(), "peerbit-upload-"));
-    const filePath = path.join(dir, fileName);
-    await writeFile(filePath, Buffer.alloc(bytes, 7));
-    try {
-        await page.locator("#imgupload").setInputFiles(filePath);
-    } finally {
-        await rm(dir, { recursive: true, force: true }).catch(() => {});
-    }
+    const tempFile = await createSyntheticFileOnDisk(fileName, sizeMb);
+    registerUploadTempDirectory(tempFile.dir);
+    await page.locator("#imgupload").setInputFiles(tempFile.filePath);
 }
 
 export async function waitForFileListed(
@@ -181,4 +216,68 @@ export async function expectDownloadedFile(
         downloadPath,
         size: details.size,
     };
+}
+
+export async function installMockSaveFilePicker(page: Page) {
+    await page.addInitScript(() => {
+        const savedFiles: Array<{ name: string; size: number }> = [];
+        Object.defineProperty(window, "__peerbitStreamingDownloadThresholdBytes", {
+            value: 1,
+            configurable: true,
+            enumerable: false,
+            writable: true,
+        });
+        Object.defineProperty(window, "__mockSavedFiles", {
+            value: savedFiles,
+            configurable: true,
+            enumerable: false,
+            writable: false,
+        });
+        Object.defineProperty(window, "showSaveFilePicker", {
+            configurable: true,
+            enumerable: false,
+            writable: true,
+            value: async (options?: { suggestedName?: string }) => {
+                let written = 0;
+                return {
+                    createWritable: async () => ({
+                        write: async (data: Uint8Array) => {
+                            written += data.byteLength ?? 0;
+                        },
+                        close: async () => {
+                            savedFiles.push({
+                                name: options?.suggestedName ?? "download.bin",
+                                size: written,
+                            });
+                        },
+                        abort: async () => {},
+                    }),
+                };
+            },
+        });
+    });
+}
+
+export async function expectSavedViaPicker(
+    page: Page,
+    fileName: string,
+    expectedSizeMb: number,
+    timeout = 8 * 60 * 1000
+) {
+    const expectedBytes = expectedSizeMb * 1024 * 1024;
+    await expect
+        .poll(
+            async () =>
+                page.evaluate((expectedName) => {
+                    const savedFiles =
+                        ((window as unknown as { __mockSavedFiles?: Array<{ name: string; size: number }> })
+                            .__mockSavedFiles ?? []);
+                    return savedFiles.find((file) => file.name === expectedName) ?? null;
+                }, fileName),
+            {
+                timeout,
+                message: `Expected streamed save for ${fileName}`,
+            }
+        )
+        .toEqual({ name: fileName, size: expectedBytes });
 }

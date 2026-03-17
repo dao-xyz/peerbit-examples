@@ -4,6 +4,10 @@ import { useEffect, useReducer, useState } from "react";
 import { FaSeedling } from "react-icons/fa";
 import { MdDeleteForever, MdDownload } from "react-icons/md";
 import { DocumentsChange } from "@peerbit/document";
+
+const formatFileSize = (size: bigint) =>
+    `${Math.round(Number(size) / 1000)} kb`;
+
 export const File = (properties: {
     files: Files;
     isHost: boolean;
@@ -71,7 +75,7 @@ export const File = (properties: {
             <span className="max-w-xs">{properties.file.name}</span>
             <div className="ml-auto  flex flex-col leading-3">
                 <span className="font-mono text-sm">
-                    {Math.round(properties.file.size / 1000) + " kb"}
+                    {formatFileSize(properties.file.size)}
                 </span>
 
                 {properties.file instanceof LargeFile && (
