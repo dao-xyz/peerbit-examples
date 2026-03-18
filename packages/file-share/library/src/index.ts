@@ -124,6 +124,7 @@ const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
 const LARGE_FILE_TARGET_CHUNK_COUNT = 1024;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT - 256 * 1024;
+const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
 
 const roundUpTo = (value: number, multiple: number) =>
@@ -339,7 +340,8 @@ export class LargeFile extends AbstractFile {
             timeout?: number;
         }
     ): Promise<TinyFile> {
-        const totalTimeout = properties?.timeout ?? 30_000;
+        const totalTimeout =
+            properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
         const deadline = Date.now() + totalTimeout;
         const attemptTimeout = Math.min(totalTimeout, 5_000);
         const chunkId = getChunkId(this.id, index);
