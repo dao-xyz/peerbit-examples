@@ -65,4 +65,5 @@ Then go back to the [./cli](./cli) folder and now you can do:
 
 ```node  ./cli/lib/esm/bin.js``` instead of ```please``` to invoke the cli. 
 
-You can run through a local relay by passing a relay address using the `--relay` argument.
+You can dial a local peer by passing its address with `--peer`.
+The older `--bootstrap` and `--relay` flags are still accepted as aliases, but the CLI now dials the peer directly and lets Peerbit discover shard roots automatically.

@@ -9,7 +9,7 @@ import {
     uploadSyntheticFile,
     waitForFileListed,
     waitForUploadComplete,
-    withBootstrap,
+    withPeer,
 } from "./helpers";
 
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "100");
@@ -37,7 +37,7 @@ test.describe("file-share streamed download via local bootstrap", () => {
 
         try {
             await installMockSaveFilePicker(reader);
-            const entryUrl = withBootstrap(rootUrl(baseURL), bootstrap.addrs);
+            const entryUrl = withPeer(rootUrl(baseURL), bootstrap.addrs);
             const shareUrl = await createSpace(
                 writer,
                 entryUrl,

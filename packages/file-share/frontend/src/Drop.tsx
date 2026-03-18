@@ -54,6 +54,9 @@ const getStreamingDownloadThresholdBytes = () => {
     return STREAMING_DOWNLOAD_THRESHOLD_BYTES;
 };
 
+const getFileSizeBigInt = (file: AbstractFile) =>
+    typeof file.size === "bigint" ? file.size : BigInt(file.size);
+
 export const useDebouncedEffect = (effect, deps, delay) => {
     useEffect(() => {
         const handler = setTimeout(() => effect(), delay);
@@ -319,7 +322,7 @@ export const Drop = () => {
 
             if (
                 saveFilePicker &&
-                file.size >= getStreamingDownloadThresholdBytes()
+                getFileSizeBigInt(file) >= getStreamingDownloadThresholdBytes()
             ) {
                 const handle = await saveFilePicker({
                     suggestedName: file.name,

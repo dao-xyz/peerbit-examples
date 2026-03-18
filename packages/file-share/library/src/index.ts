@@ -5,43 +5,32 @@ import {
     SearchRequest,
     StringMatch,
     StringMatchMethod,
-    Or,
     IsNull,
 } from "@peerbit/document";
 import {
-    createSHA256,
     PublicSignKey,
     sha256Base64Sync,
     randomBytes,
-    sha256Sync,
     toBase64,
+    toBase64URL,
 } from "@peerbit/crypto";
 import { concat } from "uint8arrays";
+import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
 import { ReplicationOptions } from "@peerbit/shared-log";
+import { SHA256 } from "@stablelib/sha256";
 
 const sleep = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
 
-const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 5 MB
-const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
-const LARGE_FILE_DOWNLOAD_BATCH_SIZE = 32;
-const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
-const PROGRESS_SCALE = 10_000n;
+const isRetryableChunkLookupError = (error: unknown) =>
+    error instanceof Error &&
+    (error.name === "AbortError" ||
+        error.message.includes("fanout channel closed"));
 
-const toProgress = (processed: bigint, total: bigint): number => {
-    if (total <= 0n) {
-        return 1;
-    }
-    return Number((processed * PROGRESS_SCALE) / total) / Number(PROGRESS_SCALE);
-};
-
-const ensureSourceSize = (actual: bigint, expected: bigint) => {
-    if (actual !== expected) {
-        throw new Error(
-            `Source size changed during upload. Expected ${expected} bytes, got ${actual}`
-        );
-    }
+type FileReadOptions = {
+    timeout?: number;
+    progress?: (progress: number) => any;
 };
 
 export interface ReReadableChunkSource {
@@ -49,59 +38,11 @@ export interface ReReadableChunkSource {
     readChunks(chunkSize: number): AsyncIterable<Uint8Array>;
 }
 
-export type FileReadOptions = {
-    timeout?: number;
-    progress?: (progress: number) => any;
-};
-
-export interface ChunkWritable {
+interface ChunkWritable {
     write(chunk: Uint8Array): Promise<void> | void;
     close?(): Promise<void> | void;
     abort?(reason?: unknown): Promise<void> | void;
 }
-
-export const chunkSourceFromBytes = (
-    bytes: Uint8Array
-): ReReadableChunkSource => ({
-    size: BigInt(bytes.byteLength),
-    async *readChunks(chunkSize: number) {
-        for (let offset = 0; offset < bytes.byteLength; offset += chunkSize) {
-            yield bytes.subarray(
-                offset,
-                Math.min(offset + chunkSize, bytes.byteLength)
-            );
-        }
-    },
-});
-
-export const chunkSourceFromBlob = (blob: Blob): ReReadableChunkSource => ({
-    size: BigInt(blob.size),
-    async *readChunks(chunkSize: number) {
-        for (let offset = 0; offset < blob.size; offset += chunkSize) {
-            const chunk = blob.slice(
-                offset,
-                Math.min(offset + chunkSize, blob.size)
-            );
-            yield new Uint8Array(await chunk.arrayBuffer());
-        }
-    },
-});
-
-const readAllFromSource = async (
-    source: ReReadableChunkSource,
-    chunkSize: number
-): Promise<Uint8Array> => {
-    const chunks: Uint8Array[] = [];
-    let processed = 0n;
-
-    for await (const chunk of source.readChunks(chunkSize)) {
-        chunks.push(chunk);
-        processed += BigInt(chunk.byteLength);
-    }
-
-    ensureSourceSize(processed, source.size);
-    return chunks.length === 0 ? new Uint8Array(0) : concat(chunks);
-};
 
 export abstract class AbstractFile {
     abstract id: string;
@@ -120,9 +61,7 @@ export abstract class AbstractFile {
         files: Files,
         properties?: {
             as: OutputType;
-            timeout?: number;
-            progress?: (progress: number) => any;
-        }
+        } & FileReadOptions
     ): Promise<Output> {
         const chunks: Uint8Array[] = [];
         for await (const chunk of this.streamFile(files, properties)) {
@@ -148,7 +87,7 @@ export abstract class AbstractFile {
                 try {
                     await writable.abort(error);
                 } catch {
-                    // ignore abort cleanup failures
+                    // Ignore writable cleanup failures.
                 }
             }
             throw error;
@@ -180,6 +119,58 @@ export class IndexableFile {
     }
 }
 
+const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
+const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
+const LARGE_FILE_TARGET_CHUNK_COUNT = 1024;
+const CHUNK_SIZE_GRANULARITY = 64 * 1024;
+const MAX_LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT - 256 * 1024;
+const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
+
+const roundUpTo = (value: number, multiple: number) =>
+    Math.ceil(value / multiple) * multiple;
+const getLargeFileSegmentSize = (size: number | bigint) =>
+    Math.min(
+        MAX_LARGE_FILE_SEGMENT_SIZE,
+        roundUpTo(
+            Math.max(
+                LARGE_FILE_SEGMENT_SIZE,
+                Math.ceil(Number(size) / LARGE_FILE_TARGET_CHUNK_COUNT)
+            ),
+            CHUNK_SIZE_GRANULARITY
+        )
+    );
+const getChunkStart = (index: number, chunkSize = LARGE_FILE_SEGMENT_SIZE) =>
+    index * chunkSize;
+const getChunkEnd = (
+    index: number,
+    size: number | bigint,
+    chunkSize = LARGE_FILE_SEGMENT_SIZE
+) => Math.min((index + 1) * chunkSize, Number(size));
+const getChunkCount = (
+    size: number | bigint,
+    chunkSize = LARGE_FILE_SEGMENT_SIZE
+) => Math.ceil(Number(size) / chunkSize);
+const getChunkId = (parentId: string, index: number) => `${parentId}:${index}`;
+const createUploadId = () => toBase64URL(randomBytes(16));
+const isBlobLike = (value: Uint8Array | Blob): value is Blob =>
+    typeof Blob !== "undefined" && value instanceof Blob;
+const readBlobChunk = async (blob: Blob, index: number, chunkSize: number) =>
+    new Uint8Array(
+        await blob
+            .slice(
+                getChunkStart(index, chunkSize),
+                getChunkEnd(index, blob.size, chunkSize)
+            )
+            .arrayBuffer()
+    );
+const ensureSourceSize = (actual: bigint, expected: bigint) => {
+    if (actual !== expected) {
+        throw new Error(
+            `Source size changed during upload. Expected ${expected} bytes, got ${actual}`
+        );
+    }
+};
+
 @variant(0) // for versioning purposes
 export class TinyFile extends AbstractFile {
     @field({ type: "string" })
@@ -191,8 +182,14 @@ export class TinyFile extends AbstractFile {
     @field({ type: Uint8Array })
     file: Uint8Array; // 10 mb imit
 
+    @field({ type: "string" })
+    hash: string;
+
     @field({ type: option("string") })
     parentId?: string;
+
+    @field({ type: option("u32") })
+    index?: number;
 
     get size() {
         return BigInt(this.file.byteLength);
@@ -202,20 +199,28 @@ export class TinyFile extends AbstractFile {
         id?: string;
         name: string;
         file: Uint8Array;
+        hash?: string;
         parentId?: string;
+        index?: number;
     }) {
         super();
-        this.id = properties.id || sha256Base64Sync(properties.file);
+        this.parentId = properties.parentId;
+        this.index = properties.index;
+        this.id =
+            properties.id ||
+            (properties.parentId != null && properties.index != null
+                ? `${properties.parentId}:${properties.index}`
+                : sha256Base64Sync(properties.file));
         this.name = properties.name;
         this.file = properties.file;
-        this.parentId = properties.parentId;
+        this.hash = properties.hash || sha256Base64Sync(properties.file);
     }
 
     async *streamFile(
         _files: Files,
         properties?: FileReadOptions
     ): AsyncIterable<Uint8Array> {
-        if (sha256Base64Sync(this.file) !== this.id) {
+        if (sha256Base64Sync(this.file) !== this.hash) {
             throw new Error("Hash does not match the file content");
         }
         properties?.progress?.(1);
@@ -230,118 +235,38 @@ export class TinyFile extends AbstractFile {
 @variant(1) // for versioning purposes
 export class LargeFile extends AbstractFile {
     @field({ type: "string" })
-    id: string; // hash
+    id: string;
 
     @field({ type: "string" })
     name: string;
 
-    @field({ type: vec("string") })
-    fileIds: string[];
-
     @field({ type: "u64" })
     size: bigint;
 
+    @field({ type: "u32" })
+    chunkCount: number;
+
+    @field({ type: "bool" })
+    ready: boolean;
+
+    @field({ type: option("string") })
+    finalHash?: string;
+
     constructor(properties: {
-        id: string;
+        id?: string;
         name: string;
-        fileIds: string[];
         size: bigint;
+        chunkCount: number;
+        ready?: boolean;
+        finalHash?: string;
     }) {
         super();
-        this.id = properties.id;
+        this.id = properties.id || createUploadId();
         this.name = properties.name;
-        this.fileIds = properties.fileIds;
         this.size = properties.size;
-    }
-
-    static async create(
-        name: string,
-        file: Uint8Array,
-        files: Files,
-        progress?: (progress: number) => void
-    ) {
-        const source = chunkSourceFromBytes(file);
-        const { file: largeFile, chunkIds } = await LargeFile.prepareSource(
-            name,
-            source,
-            progress,
-        );
-        let index = 0;
-        for await (const chunk of source.readChunks(LARGE_FILE_SEGMENT_SIZE)) {
-            await files.files.put(
-                new TinyFile({
-                    id: chunkIds[index],
-                    name: name + "/" + index,
-                    file: chunk,
-                    parentId: largeFile.id,
-                }),
-            );
-            index++;
-        }
-        return largeFile;
-    }
-
-    static prepare(name: string, file: Uint8Array) {
-        const id = sha256Base64Sync(file);
-        const fileSize = BigInt(file.byteLength);
-        const end = Math.ceil(file.byteLength / LARGE_FILE_SEGMENT_SIZE);
-        const chunks: TinyFile[] = [];
-
-        for (let i = 0; i < end; i++) {
-            chunks.push(
-                new TinyFile({
-                    name: name + "/" + i,
-                    file: file.subarray(
-                        i * LARGE_FILE_SEGMENT_SIZE,
-                        Math.min(
-                            (i + 1) * LARGE_FILE_SEGMENT_SIZE,
-                            file.byteLength
-                        )
-                    ),
-                    parentId: id,
-                })
-            );
-        }
-
-        return {
-            file: new LargeFile({
-                id,
-                name,
-                fileIds: chunks.map((chunk) => chunk.id),
-                size: fileSize,
-            }),
-            chunks,
-        };
-    }
-
-    static async prepareSource(
-        name: string,
-        source: ReReadableChunkSource,
-        progress?: (progress: number) => void
-    ) {
-        const fileHasher = createSHA256();
-        const fileIds: string[] = [];
-        let processed = 0n;
-
-        for await (const chunk of source.readChunks(LARGE_FILE_SEGMENT_SIZE)) {
-            fileHasher.update(chunk);
-            fileIds.push(sha256Base64Sync(chunk));
-            processed += BigInt(chunk.byteLength);
-            progress?.(toProgress(processed, source.size));
-        }
-
-        ensureSourceSize(processed, source.size);
-        progress?.(1);
-
-        return {
-            file: new LargeFile({
-                id: toBase64(fileHasher.digest()),
-                name,
-                fileIds,
-                size: processed,
-            }),
-            chunkIds: fileIds,
-        };
+        this.chunkCount = properties.chunkCount;
+        this.ready = properties.ready ?? false;
+        this.finalHash = properties.finalHash;
     }
 
     get parentId() {
@@ -355,9 +280,7 @@ export class LargeFile extends AbstractFile {
             timeout?: number;
         }
     ) {
-        const expectedIds = [...new Set(this.fileIds)];
-        const expectedSet = new Set(expectedIds);
-        const chunks = new Map<string, AbstractFile>();
+        const chunks = new Map<number, TinyFile>();
         const totalTimeout = properties?.timeout ?? 30_000;
         const deadline = Date.now() + totalTimeout;
         const queryTimeout = Math.min(totalTimeout, 5_000);
@@ -366,73 +289,102 @@ export class LargeFile extends AbstractFile {
             remote: {
                 timeout: queryTimeout,
                 throwOnMissing: false,
-                // Observer downloads still need chunk metadata/documents, even
-                // when the peer is not a replicator.
-                replicate: true,
+                // Chunk queries return the full TinyFile document including its
+                // bytes. Observer reads can stream that result directly, while
+                // actual replicators should still persist downloaded chunks.
+                replicate: files.persistChunkReads,
             },
         };
         const recordChunks = (results: AbstractFile[]) => {
             for (const chunk of results) {
                 if (
                     chunk instanceof TinyFile &&
-                    expectedSet.has(chunk.id) &&
-                    !chunks.has(chunk.id)
+                    chunk.parentId === this.id &&
+                    chunk.index != null &&
+                    !chunks.has(chunk.index)
                 ) {
-                    chunks.set(chunk.id, chunk);
+                    chunks.set(chunk.index, chunk);
                 }
             }
         };
 
-        recordChunks(
-            await files.files.index.search(
-                new SearchRequest({
-                    query: new StringMatch({ key: "parentId", value: this.id }),
-                    fetch: 0xffffffff,
-                }),
-                searchOptions
-            )
-        );
-
-        while (chunks.size < expectedSet.size && Date.now() < deadline) {
-            const missingIds = expectedIds.filter((id) => !chunks.has(id));
-            if (missingIds.length === 0) {
-                break;
-            }
-
+        while (chunks.size < this.chunkCount && Date.now() < deadline) {
             const before = chunks.size;
-            for (let i = 0; i < missingIds.length; i += 32) {
-                const batch = missingIds.slice(i, i + 32);
-                recordChunks(
-                    await files.files.index.search(
-                        new SearchRequest({
-                            query: [
-                                new Or(
-                                    batch.map(
-                                        (id) =>
-                                            new StringMatch({
-                                                key: "id",
-                                                value: id,
-                                            })
-                                    )
-                                ),
-                            ],
-                            fetch: batch.length,
-                        }),
-                        searchOptions
-                    )
-                );
-            }
+            recordChunks(
+                await files.files.index.search(
+                    new SearchRequest({
+                        query: new StringMatch({ key: "parentId", value: this.id }),
+                        fetch: 0xffffffff,
+                    }),
+                    searchOptions
+                )
+            );
 
-            if (chunks.size === before && chunks.size < expectedSet.size) {
+            if (chunks.size === before && chunks.size < this.chunkCount) {
                 await sleep(250);
             }
         }
 
-        return [...chunks.values()];
+        return [...chunks.values()].sort((a, b) => (a.index || 0) - (b.index || 0));
     }
     async delete(files: Files) {
-        await Promise.all(
-            (await this.fetchChunks(files)).map((x) => x.delete(files))
+        await Promise.all((await this.fetchChunks(files)).map((x) => files.files.del(x.id)));
+    }
+
+    private async resolveChunk(
+        files: Files,
+        index: number,
+        knownChunks: Map<number, TinyFile>,
+        properties?: {
+            timeout?: number;
+        }
+    ): Promise<TinyFile> {
+        const totalTimeout = properties?.timeout ?? 30_000;
+        const deadline = Date.now() + totalTimeout;
+        const attemptTimeout = Math.min(totalTimeout, 5_000);
+        const chunkId = getChunkId(this.id, index);
+
+        while (Date.now() < deadline) {
+            const cached = knownChunks.get(index);
+            if (cached) {
+                return cached;
+            }
+
+            try {
+                const chunk = await files.files.index.get(chunkId, {
+                    local: true,
+                    waitFor: attemptTimeout,
+                    remote: {
+                        timeout: attemptTimeout,
+                        wait: {
+                            timeout: attemptTimeout,
+                            behavior: "keep-open",
+                        },
+                        throwOnMissing: false,
+                        retryMissingResponses: true,
+                        replicate: files.persistChunkReads,
+                    },
+                });
+
+                if (
+                    chunk instanceof TinyFile &&
+                    chunk.parentId === this.id &&
+                    chunk.index === index
+                ) {
+                    knownChunks.set(index, chunk);
+                    return chunk;
+                }
+            } catch (error) {
+                if (!isRetryableChunkLookupError(error)) {
+                    throw error;
+                }
+            }
+
+            await sleep(250);
+        }
+
+        throw new Error(
+            `Failed to resolve chunk ${index + 1}/${this.chunkCount} for file ${this.id}`
         );
     }
 
@@ -440,131 +392,34 @@ export class LargeFile extends AbstractFile {
         files: Files,
         properties?: FileReadOptions
     ): AsyncIterable<Uint8Array> {
+        if (!this.ready) {
+            throw new Error("File is still uploading");
+        }
+
         properties?.progress?.(0);
-        const totalTimeout = properties?.timeout ?? 30_000;
-        const deadline = Date.now() + totalTimeout;
-        const remainingOccurrences = new Map<string, number>();
-        const cachedChunks = new Map<string, Uint8Array>();
-        const prefetchedChunks = new Map<string, Uint8Array>();
-        let processed = 0n;
 
-        for (const fileId of this.fileIds) {
-            remainingOccurrences.set(
-                fileId,
-                (remainingOccurrences.get(fileId) ?? 0) + 1
+        let processed = 0;
+        const hasher = this.finalHash ? new SHA256() : undefined;
+        const knownChunks = new Map<number, TinyFile>();
+        for (let index = 0; index < this.chunkCount; index++) {
+            const chunkFile = await this.resolveChunk(files, index, knownChunks, {
+                timeout: properties?.timeout,
+            });
+            const chunk = await chunkFile.getFile(files, {
+                as: "joined",
+                timeout: properties?.timeout,
+            });
+            hasher?.update(chunk);
+            processed += chunk.byteLength;
+            properties?.progress?.(
+                processed / Math.max(Number(this.size), 1)
             );
-        }
-
-        const prefetchChunks = async (startIndex: number) => {
-            const batchIds: string[] = [];
-            const seen = new Set<string>();
-            for (
-                let cursor = startIndex;
-                cursor < this.fileIds.length &&
-                batchIds.length < LARGE_FILE_DOWNLOAD_BATCH_SIZE;
-                cursor++
-            ) {
-                const fileId = this.fileIds[cursor];
-                if (
-                    prefetchedChunks.has(fileId) ||
-                    cachedChunks.has(fileId) ||
-                    seen.has(fileId)
-                ) {
-                    continue;
-                }
-                seen.add(fileId);
-                batchIds.push(fileId);
-            }
-
-            const missingIds = new Set(batchIds);
-            while (missingIds.size > 0) {
-                const remainingTime = deadline - Date.now();
-                if (remainingTime <= 0) {
-                    break;
-                }
-
-                const results = await files.files.index.search(
-                    new SearchRequest({
-                        query: [
-                            new Or(
-                                [...missingIds].map(
-                                    (id) =>
-                                        new StringMatch({
-                                            key: "id",
-                                            value: id,
-                                        })
-                                )
-                            ),
-                        ],
-                        fetch: missingIds.size,
-                    }),
-                    {
-                        local: true,
-                        remote: {
-                            timeout: Math.min(remainingTime, 5_000),
-                            throwOnMissing: false,
-                            replicate: true,
-                        },
-                    }
-                );
-
-                let progress = false;
-                for (const entry of results) {
-                    if (
-                        entry instanceof TinyFile &&
-                        missingIds.has(entry.id) &&
-                        !prefetchedChunks.has(entry.id)
-                    ) {
-                        prefetchedChunks.set(entry.id, entry.file);
-                        missingIds.delete(entry.id);
-                        progress = true;
-                    }
-                }
-
-                if (!progress && missingIds.size > 0) {
-                    await sleep(250);
-                }
-            }
-
-            if (missingIds.size > 0) {
-                throw new Error(
-                    `Failed to retrieve chunk with id: ${[...missingIds][0]}`
-                );
-            }
-        };
-
-        for (let index = 0; index < this.fileIds.length; index++) {
-            const fileId = this.fileIds[index];
-            let chunk = cachedChunks.get(fileId) ?? prefetchedChunks.get(fileId);
-            if (!chunk) {
-                await prefetchChunks(index);
-                chunk = cachedChunks.get(fileId) ?? prefetchedChunks.get(fileId);
-            }
-
-            if (!chunk) {
-                throw new Error(`Failed to retrieve chunk with id: ${fileId}`);
-            }
-
-            prefetchedChunks.delete(fileId);
-
-            if ((remainingOccurrences.get(fileId) ?? 0) > 1) {
-                cachedChunks.set(fileId, chunk);
-            }
-
-            processed += BigInt(chunk.byteLength);
-            properties?.progress?.(toProgress(processed, this.size));
             yield chunk;
-
-            const remaining = (remainingOccurrences.get(fileId) ?? 0) - 1;
-            if (remaining <= 0) {
-                remainingOccurrences.delete(fileId);
-                cachedChunks.delete(fileId);
-            } else {
-                remainingOccurrences.set(fileId, remaining);
-            }
         }
 
-        ensureSourceSize(processed, this.size);
+        if (hasher && toBase64(hasher.digest()) !== this.finalHash) {
+            throw new Error("File hash does not match the expected content");
+        }
     }
 }
 
@@ -583,6 +438,8 @@ export class Files extends Program<Args> {
 
     @field({ type: Documents })
     files: Documents<AbstractFile, IndexableFile>;
+
+    persistChunkReads: boolean;
 
     constructor(
         properties: {
@@ -606,17 +463,39 @@ export class Files extends Program<Args> {
                 ])
             ),
         });
+        this.persistChunkReads = true;
     }
 
     async add(
         name: string,
-        file: Uint8Array,
+        file: Uint8Array | Blob,
         parentId?: string,
         progress?: (progress: number) => void
     ) {
-        return this.addSource(
+        if (isBlobLike(file)) {
+            return this.addBlob(name, file, parentId, progress);
+        }
+
+        progress?.(0);
+        if (BigInt(file.byteLength) <= TINY_FILE_SIZE_LIMIT_BIGINT) {
+            const tinyFile = new TinyFile({ name, file, parentId });
+            await this.files.put(tinyFile);
+            progress?.(1);
+            return tinyFile.id;
+        }
+
+        const chunkSize = getLargeFileSegmentSize(file.byteLength);
+        return this.addChunkedFile(
             name,
-            chunkSourceFromBytes(file),
+            BigInt(file.byteLength),
+            (index) =>
+                Promise.resolve(
+                    file.subarray(
+                        getChunkStart(index, chunkSize),
+                        getChunkEnd(index, file.byteLength, chunkSize)
+                    )
+                ),
+            chunkSize,
             parentId,
             progress
         );
@@ -628,9 +507,24 @@ export class Files extends Program<Args> {
         parentId?: string,
         progress?: (progress: number) => void
     ) {
-        return this.addSource(
+        progress?.(0);
+        if (BigInt(file.size) <= TINY_FILE_SIZE_LIMIT_BIGINT) {
+            const tinyFile = new TinyFile({
+                name,
+                file: new Uint8Array(await file.arrayBuffer()),
+                parentId,
+            });
+            await this.files.put(tinyFile);
+            progress?.(1);
+            return tinyFile.id;
+        }
+
+        const chunkSize = getLargeFileSegmentSize(file.size);
+        return this.addChunkedFile(
             name,
-            chunkSourceFromBlob(file),
+            BigInt(file.size),
+            (index) => readBlobChunk(file, index, chunkSize),
+            chunkSize,
             parentId,
             progress
         );
@@ -644,8 +538,18 @@ export class Files extends Program<Args> {
     ) {
         progress?.(0);
         if (source.size <= TINY_FILE_SIZE_LIMIT_BIGINT) {
-            const bytes = await readAllFromSource(source, TINY_FILE_SIZE_LIMIT);
-            const tinyFile = new TinyFile({ name, file: bytes, parentId });
+            const chunks: Uint8Array[] = [];
+            let processed = 0n;
+            for await (const chunk of source.readChunks(TINY_FILE_SIZE_LIMIT)) {
+                chunks.push(chunk);
+                processed += BigInt(chunk.byteLength);
+            }
+            ensureSourceSize(processed, source.size);
+            const tinyFile = new TinyFile({
+                name,
+                file: chunks.length === 0 ? new Uint8Array(0) : concat(chunks),
+                parentId,
+            });
             await this.files.put(tinyFile);
             progress?.(1);
             return tinyFile.id;
@@ -655,46 +559,129 @@ export class Files extends Program<Args> {
             throw new Error("Unexpected that a LargeFile to have a parent");
         }
 
-        const { file: largeFile, chunkIds } = await LargeFile.prepareSource(
+        const size = source.size;
+        const chunkSize = getLargeFileSegmentSize(size);
+        const uploadId = createUploadId();
+        const manifest = new LargeFile({
+            id: uploadId,
             name,
-            source,
-            (scanProgress) => {
-                progress?.(scanProgress * 0.5);
-            }
-        );
+            size,
+            chunkCount: getChunkCount(size, chunkSize),
+            ready: false,
+        });
 
-        // Put the root metadata first so readers can list the file while chunks
-        // are still arriving.
-        await this.files.put(largeFile);
+        await this.files.put(manifest);
+        const hasher = new SHA256();
         try {
-            let processed = 0n;
-            let index = 0;
-            for await (const chunk of source.readChunks(LARGE_FILE_SEGMENT_SIZE)) {
+            let uploadedBytes = 0n;
+            let chunkCount = 0;
+            for await (const chunkBytes of source.readChunks(chunkSize)) {
+                hasher.update(chunkBytes);
                 await this.files.put(
                     new TinyFile({
-                        id: chunkIds[index],
-                        name: name + "/" + index,
-                        file: chunk,
-                        parentId: largeFile.id,
+                        name: name + "/" + chunkCount,
+                        file: chunkBytes,
+                        parentId: uploadId,
+                        index: chunkCount,
                     })
                 );
-                processed += BigInt(chunk.byteLength);
-                index++;
-                progress?.(0.5 + toProgress(processed, source.size) * 0.5);
+                uploadedBytes += BigInt(chunkBytes.byteLength);
+                chunkCount++;
+                progress?.(Number(uploadedBytes) / Math.max(Number(size), 1));
             }
-            ensureSourceSize(processed, source.size);
-            if (index !== chunkIds.length) {
-                throw new Error(
-                    `Chunk count changed during upload. Expected ${chunkIds.length} chunks, got ${index}`
-                );
-            }
+            ensureSourceSize(uploadedBytes, source.size);
+            await this.files.put(
+                new LargeFile({
+                    id: uploadId,
+                    name,
+                    size,
+                    chunkCount,
+                    ready: true,
+                    finalHash: toBase64(hasher.digest()),
+                })
+            );
         } catch (error) {
-            await this.files.del(largeFile.id).catch(() => {});
+            await this.cleanupChunkedUpload(uploadId).catch(() => {});
+            await this.files.del(uploadId).catch(() => {});
             throw error;
         }
 
         progress?.(1);
-        return largeFile.id;
+        return uploadId;
+    }
+
+    private async cleanupChunkedUpload(uploadId: string) {
+        const chunks = await this.files.index.search(
+            new SearchRequest({
+                query: new StringMatch({
+                    key: "parentId",
+                    value: uploadId,
+                }),
+                fetch: 0xffffffff,
+            }),
+            { local: true }
+        );
+        await Promise.all(chunks.map((chunk) => this.files.del(chunk.id)));
+    }
+
+    private async addChunkedFile(
+        name: string,
+        size: bigint,
+        getChunk: (index: number) => Promise<Uint8Array>,
+        chunkSize: number,
+        parentId?: string,
+        progress?: (progress: number) => void
+    ) {
+        if (parentId) {
+            throw new Error("Unexpected that a LargeFile to have a parent");
+        }
+
+        const uploadId = createUploadId();
+        const chunkCount = getChunkCount(size, chunkSize);
+        const manifest = new LargeFile({
+            id: uploadId,
+            name,
+            size,
+            chunkCount,
+            ready: false,
+        });
+
+        await this.files.put(manifest);
+        const hasher = new SHA256();
+        try {
+            let uploadedBytes = 0;
+            for (let i = 0; i < chunkCount; i++) {
+                const chunkBytes = await getChunk(i);
+                hasher.update(chunkBytes);
+                await this.files.put(
+                    new TinyFile({
+                        name: name + "/" + i,
+                        file: chunkBytes,
+                        parentId: uploadId,
+                        index: i,
+                    })
+                );
+                uploadedBytes += chunkBytes.byteLength;
+                progress?.(uploadedBytes / Math.max(Number(size), 1));
+            }
+            await this.files.put(
+                new LargeFile({
+                    id: uploadId,
+                    name,
+                    size,
+                    chunkCount,
+                    ready: true,
+                    finalHash: toBase64(hasher.digest()),
+                })
+            );
+        } catch (error) {
+            await this.cleanupChunkedUpload(uploadId).catch(() => {});
+            await this.files.del(uploadId).catch(() => {});
+            throw error;
+        }
+
+        progress?.(1);
+        return uploadId;
     }
 
     async removeById(id: string) {
@@ -761,28 +748,22 @@ export class Files extends Program<Args> {
             replicate?: boolean;
         }
     ): Promise<AbstractFile | undefined> {
-        const results = await this.files.index.search(
-            new SearchRequest({
-                query: [
-                    new StringMatch({
-                        key: "id",
-                        value: id,
-                        caseInsensitive: false,
-                        method: StringMatchMethod.exact,
-                    }),
-                ],
-                fetch: 1,
-            }),
-            {
-                local: true,
-                remote: {
-                    timeout: properties?.timeout ?? 10 * 1000,
-                    throwOnMissing: false,
-                    replicate: properties?.replicate,
-                },
-            }
-        );
-        return results[0];
+        return this.files.index.get(id, {
+            local: true,
+            waitFor: properties?.timeout,
+            remote: {
+                timeout: properties?.timeout ?? 10 * 1000,
+                wait: properties?.timeout
+                    ? {
+                          timeout: properties.timeout,
+                          behavior: "keep-open",
+                      }
+                    : undefined,
+                throwOnMissing: false,
+                retryMissingResponses: true,
+                replicate: properties?.replicate,
+            },
+        });
     }
 
     async resolveByName(
@@ -828,19 +809,29 @@ export class Files extends Program<Args> {
         id: string,
         properties?: { as: OutputType }
     ): Promise<{ id: string; name: string; bytes: Output } | undefined> {
-        const result = await this.resolveById(id);
-        if (!result) {
-            return undefined;
+        const results = await this.files.index.search(
+            new SearchRequest({
+                query: [new StringMatch({ key: "id", value: id })],
+                fetch: 0xffffffff,
+            }),
+            {
+                local: true,
+                remote: {
+                    timeout: 10 * 1000,
+                },
+            }
+        );
+
+        for (const result of results) {
+            const file = await result.getFile(this, properties);
+            if (file) {
+                return {
+                    id: result.id,
+                    name: result.name,
+                    bytes: file as Output,
+                };
+            }
         }
-        const file = await result.getFile(this, properties);
-        if (!file) {
-            return undefined;
-        }
-        return {
-            id: result.id,
-            name: result.name,
-            bytes: file as Output,
-        };
     }
 
     /**
@@ -855,23 +846,34 @@ export class Files extends Program<Args> {
         name: string,
         properties?: { as: OutputType }
     ): Promise<{ id: string; name: string; bytes: Output } | undefined> {
-        const result = await this.resolveByName(name);
-        if (!result) {
-            return undefined;
+        const results = await this.files.index.search(
+            new SearchRequest({
+                query: [new StringMatch({ key: "name", value: name })],
+                fetch: 0xffffffff,
+            }),
+            {
+                local: true,
+                remote: {
+                    timeout: 10 * 1000,
+                },
+            }
+        );
+
+        for (const result of results) {
+            const file = await result.getFile(this, properties);
+            if (file) {
+                return {
+                    id: result.id,
+                    name: result.name,
+                    bytes: file as Output,
+                };
+            }
         }
-        const file = await result.getFile(this, properties);
-        if (!file) {
-            return undefined;
-        }
-        return {
-            id: result.id,
-            name: result.name,
-            bytes: file as Output,
-        };
     }
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
+        this.persistChunkReads = args?.replicate !== false;
         await this.trustGraph?.open({
             replicate: args?.replicate,
         });

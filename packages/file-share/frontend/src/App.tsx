@@ -13,29 +13,28 @@ const loggefr = logger({ module: "shared-log" })
 loggefr.level = 'trace'
 loggefr.trace("hello") */
 
-const getBootstrapAddresses = (): string[] | undefined => {
+const getPeerAddresses = (): string[] | undefined => {
     const params = new URLSearchParams(window.location.search);
     const hashQueryIndex = window.location.hash.indexOf("?");
-    if (hashQueryIndex !== -1) {
-        const hashParams = new URLSearchParams(
-            window.location.hash.slice(hashQueryIndex + 1)
-        );
-        if (!params.has("bootstrap") && hashParams.has("bootstrap")) {
-            params.set("bootstrap", hashParams.get("bootstrap") || "");
-        }
-    }
+    const hashParams =
+        hashQueryIndex !== -1
+            ? new URLSearchParams(window.location.hash.slice(hashQueryIndex + 1))
+            : undefined;
 
-    const bootstrap = params.get("bootstrap");
-    if (bootstrap == null) {
+    const peer = params.get("peer") ??
+        hashParams?.get("peer") ??
+        params.get("bootstrap") ??
+        hashParams?.get("bootstrap");
+    if (peer == null) {
         return undefined;
     }
 
-    const normalized = bootstrap.trim().toLowerCase();
+    const normalized = peer.trim().toLowerCase();
     if (normalized === "" || normalized === "offline") {
         return [];
     }
 
-    return bootstrap
+    return peer
         .split(",")
         .map((value) => value.trim())
         .filter(Boolean);
@@ -43,32 +42,32 @@ const getBootstrapAddresses = (): string[] | undefined => {
 
 document.documentElement.classList.add("dark");
 
-const BootstrapOverride = ({
-    bootstrap,
+const PeerOverride = ({
+    peers,
     onReady,
     onError,
 }: {
-    bootstrap?: string[];
+    peers?: string[];
     onReady: () => void;
     onError: (error: unknown) => void;
 }) => {
     const { peer } = usePeer();
 
     useEffect(() => {
-        if (!peer || bootstrap == null || bootstrap.length === 0) {
+        if (!peer || peers == null || peers.length === 0) {
             onReady();
             return;
         }
 
         let cancelled = false;
-        peer.bootstrap?.(bootstrap)
+        Promise.all(peers.map((address) => peer.dial(address)))
             .then(() => {
                 if (!cancelled) {
                     onReady();
                 }
             })
             .catch((error) => {
-                console.error("Failed to bootstrap:", error);
+                console.error("Failed to connect to peer:", error);
                 if (!cancelled) {
                     onError(error);
                 }
@@ -76,20 +75,20 @@ const BootstrapOverride = ({
         return () => {
             cancelled = true;
         };
-    }, [peer, bootstrap?.join(","), onError, onReady]);
+    }, [peer, peers?.join(","), onError, onReady]);
 
     return null;
 };
 
 export const App = () => {
-    const bootstrap = getBootstrapAddresses();
-    const [bootstrapState, setBootstrapState] = useState<
+    const peers = getPeerAddresses();
+    const [connectionState, setConnectionState] = useState<
         "pending" | "ready" | "failed"
     >(
-        bootstrap !== undefined && bootstrap.length > 0 ? "pending" : "ready"
+        peers !== undefined && peers.length > 0 ? "pending" : "ready"
     );
     const network =
-        bootstrap !== undefined
+        peers !== undefined
             ? { bootstrap: [] }
             : import.meta.env.MODE === "development"
               ? "local"
@@ -101,25 +100,25 @@ export const App = () => {
                 runtime: "node",
                 network,
                 waitForConnected:
-                    bootstrap !== undefined ||
+                    peers !== undefined ||
                     import.meta.env.MODE === "development"
                         ? true
                         : "in-flight",
             }}
         >
             <div className="h-screen">
-                <BootstrapOverride
-                    bootstrap={bootstrap}
-                    onReady={() => setBootstrapState("ready")}
-                    onError={() => setBootstrapState("failed")}
+                <PeerOverride
+                    peers={peers}
+                    onReady={() => setConnectionState("ready")}
+                    onError={() => setConnectionState("failed")}
                 />
-                {bootstrapState === "ready" ? (
+                {connectionState === "ready" ? (
                     <HashRouter basename="/">
                         <BaseRoutes />
                     </HashRouter>
-                ) : bootstrapState === "failed" ? (
+                ) : connectionState === "failed" ? (
                     <div className="w-screen h-screen bg-neutral-200 dark:bg-black flex justify-center items-center transition-all">
-                        <span>Failed to bootstrap</span>
+                        <span>Failed to connect to peer</span>
                     </div>
                 ) : (
                     <div className="w-screen h-screen bg-neutral-200 dark:bg-black flex justify-center items-center transition-all">

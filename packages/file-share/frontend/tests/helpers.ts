@@ -35,6 +35,13 @@ export function withBootstrap(baseURL: string, addrs: string[]): string {
     return url.toString();
 }
 
+export function withPeer(baseURL: string, addrs: string[]): string {
+    const url = new URL(baseURL.replace(/#.*$/, ""));
+    url.searchParams.set("peer", addrs.join(","));
+    url.hash = "/";
+    return url.toString();
+}
+
 export async function createSyntheticFileOnDisk(
     fileName: string,
     sizeMb: number

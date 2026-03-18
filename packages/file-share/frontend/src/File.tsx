@@ -5,7 +5,7 @@ import { FaSeedling } from "react-icons/fa";
 import { MdDeleteForever, MdDownload } from "react-icons/md";
 import { DocumentsChange } from "@peerbit/document";
 
-const formatFileSize = (size: bigint) =>
+const formatFileSize = (size: number | bigint) =>
     `${Math.round(Number(size) / 1000)} kb`;
 
 export const File = (properties: {
@@ -19,6 +19,10 @@ export const File = (properties: {
     const [progress, setProgess] = useState<number | null>(null);
     const [failedDownload, setFailedDownload] = useState<boolean>(false);
     const [replicatedChunksRatio, setReplicatedChunksRatio] = useState(0);
+    const largeFile =
+        properties.file instanceof LargeFile ? properties.file : undefined;
+    const chunkCount = largeFile?.chunkCount ?? 0;
+    const downloadDisabled = progress != null || !!(largeFile && !largeFile.ready);
 
     useEffect(() => {
         if (!properties.files) {
@@ -29,17 +33,13 @@ export const File = (properties: {
             properties.files
                 .countLocalChunks(properties.file as LargeFile)
                 .then((count) => {
-                    properties.file instanceof LargeFile &&
+                    largeFile &&
                         setReplicatedChunksRatio(
-                            Math.round(
-                                (count * 100) /
-                                    (properties.file as LargeFile).fileIds
-                                        .length
-                            )
+                            Math.round((count * 100) / Math.max(chunkCount, 1))
                         );
                 });
         let changeListener =
-            properties.file instanceof LargeFile
+            largeFile
                 ? (
                       e: CustomEvent<
                           DocumentsChange<AbstractFile, IndexableFile>
@@ -78,9 +78,10 @@ export const File = (properties: {
                     {formatFileSize(properties.file.size)}
                 </span>
 
-                {properties.file instanceof LargeFile && (
+                {largeFile && (
                     <span className="font-mono text-xs">
-                        {properties.file.fileIds.length} chunks
+                        {chunkCount} chunks
+                        {!largeFile.ready && " (uploading)"}
                     </span>
                 )}
             </div>
@@ -109,7 +110,7 @@ export const File = (properties: {
             )}
             <button
                 data-testid="download-file"
-                disabled={progress != null}
+                disabled={downloadDisabled}
                 onClick={() => {
                     setFailedDownload(false);
                     properties
@@ -132,7 +133,9 @@ export const File = (properties: {
                 }}
                 className={`flex flex-row border border-1 items-center p-2 btn btn-elevated`}
             >
-                {progress != null ? (
+                {largeFile && !largeFile.ready ? (
+                    <span className={`text-xs font-mono`}>pending</span>
+                ) : progress != null ? (
                     <span className={`text-xs font-mono`}>
                         {Math.round(progress * 100)}%
                     </span>

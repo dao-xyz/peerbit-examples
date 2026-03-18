@@ -25,10 +25,31 @@ const coerceAddresses = (addrs: string | string[]) => {
     return (Array.isArray(addrs) ? addrs : [addrs]).map((x) => multiaddr(x));
 };
 
+const connectToNetwork = async (
+    peerbit: Peerbit,
+    peer?: string | string[]
+) => {
+    if (peer) {
+        await peerbit.dial(coerceAddresses(peer));
+        return;
+    }
+    await peerbit.bootstrap();
+};
+
 const FILE_LOOKUP_TIMEOUT_MS = 2 * 60 * 1000;
 const FILE_LOOKUP_ATTEMPT_TIMEOUT_MS = 2 * 1000;
 const FILE_LOOKUP_POLL_INTERVAL_MS = 1 * 1000;
 const DEFAULT_DIRECTORY_NAME = "peerbit-file-share";
+const CLI_REPLICATION_ARGS = {
+    replicate: {
+        limits: {
+            cpu: {
+                max: 1,
+                monitor: undefined,
+            },
+        },
+    },
+} as const;
 
 const getDirectoryArg = (args: string[]) => {
     for (let i = 0; i < args.length; i++) {
@@ -44,6 +65,25 @@ const getDirectoryArg = (args: string[]) => {
         }
     }
     return undefined;
+};
+
+const stripDirectoryArgs = (args: string[]) => {
+    const nextArgs: string[] = [];
+    for (let i = 0; i < args.length; i++) {
+        const arg = args[i];
+        if (arg === "--directory" || arg === "--dir") {
+            i++;
+            continue;
+        }
+        if (
+            arg.startsWith("--directory=") ||
+            arg.startsWith("--dir=")
+        ) {
+            continue;
+        }
+        nextArgs.push(arg);
+    }
+    return nextArgs;
 };
 
 const resolveDirectory = (directoryArg?: string) => {
@@ -63,6 +103,53 @@ const resolveDirectory = (directoryArg?: string) => {
     return directoryArg;
 };
 
+const waitForTermination = async (stop: () => Promise<void>) => {
+    await new Promise<void>((resolve, reject) => {
+        let settled = false;
+        const keepAlive = setInterval(() => {}, 1 << 30);
+        const finish = async () => {
+            if (settled) {
+                return;
+            }
+            settled = true;
+            clearInterval(keepAlive);
+            try {
+                await stop();
+                resolve();
+            } catch (error) {
+                reject(error);
+            }
+        };
+
+        process.once("SIGINT", finish);
+        process.once("SIGTERM", finish);
+    });
+};
+
+const stopPeerbitForCli = async (
+    peerbit: Peerbit,
+    options?: { timeoutMs?: number }
+) => {
+    const timeoutMs = options?.timeoutMs ?? 10_000;
+    const timer = setTimeout(() => {
+        console.warn(
+            chalk.yellow(
+                `Peer shutdown exceeded ${Math.round(
+                    timeoutMs / 1000
+                )} seconds, forcing CLI exit.`
+            )
+        );
+        process.exit(process.exitCode ?? 0);
+    }, timeoutMs);
+    timer.unref?.();
+
+    try {
+        await peerbit.stop();
+    } finally {
+        clearTimeout(timer);
+    }
+};
+
 // A random ID, but unique for this app
 const ID = new Uint8Array([
     30, 221, 227, 76, 164, 10, 61, 8, 21, 176, 122, 5, 79, 110, 115, 255, 233,
@@ -76,17 +163,32 @@ const cli = async (args?: string[]) => {
     }
 
     const directory = resolveDirectory(getDirectoryArg(args));
+    const parsedArgs = stripDirectoryArgs(args);
     console.log(
         "Starting file-share CLI" +
             (directory ? ` in directory ${directory}` : "")
     );
 
     const peerbit = await Peerbit.create({ directory });
-    const files = await peerbit.open(new Files({ id: ID }));
+    let files: Files | undefined;
+    const openFiles = async (
+        programArgs:
+            | typeof CLI_REPLICATION_ARGS
+            | {
+                  replicate: false;
+              } = CLI_REPLICATION_ARGS
+    ) => {
+        if (!files) {
+            files = await peerbit.open(new Files({ id: ID }), {
+                args: programArgs,
+            });
+        }
+        return files;
+    };
 
     // TODO fix types
     return yargs
-        .default(args)
+        .default(parsedArgs)
         .option("directory", {
             alias: "dir",
             type: "string",
@@ -102,24 +204,21 @@ const cli = async (args?: string[]) => {
                     describe: "Where to save it",
                     defaultDescription: "Current directory",
                 });
-                yargs.option("relay", {
+                yargs.option("peer", {
+                    alias: ["bootstrap", "relay"],
                     type: "string",
-                    describe: "Relay address",
-                    defaultDescription: "?",
+                    describe:
+                        "Peer address to dial. Shard roots are discovered automatically after connecting. --bootstrap and --relay remain accepted as aliases.",
+                    defaultDescription: "Peerbit bootstrap addresses",
                     default: undefined,
                 });
                 return yargs;
             },
 
             handler: async (args) => {
-                if (args.relay) {
-                    await Promise.all(
-                        coerceAddresses(args.relay).map((x) => peerbit.dial(x))
-                    );
-                } else {
-                    await peerbit.bootstrap();
-                }
+                await connectToNetwork(peerbit, args.peer);
 
+                const files = await openFiles();
                 const source = await createPathSource(args.path);
                 const id = await files.addSource(path.basename(args.path), source);
                 console.log(
@@ -127,6 +226,9 @@ const cli = async (args?: string[]) => {
                         id
                     )}\n\nFile can now be fetched with:\n\nplease get ${id}\n\nThis process will keep seeding until you stop it.`
                 );
+                await waitForTermination(async () => {
+                    await stopPeerbitForCli(peerbit);
+                });
             },
         })
         .command<any>({
@@ -149,41 +251,23 @@ const cli = async (args?: string[]) => {
                     type: "boolean",
                     default: false,
                 });
-                yargs.option("relay", {
+                yargs.option("peer", {
+                    alias: ["bootstrap", "relay"],
                     type: "string",
-                    describe: "Relay address",
+                    describe:
+                        "Peer address to dial. Shard roots are discovered automatically after connecting. --bootstrap and --relay remain accepted as aliases.",
                     defaultDescription:
-                        "Bootstrap addresses for testing purposes",
+                        "Peerbit bootstrap addresses",
                     default: undefined,
                 });
                 return yargs;
             },
 
             handler: async (args) => {
-                if (args.relay) {
-                    await Promise.all(
-                        coerceAddresses(args.relay).map((x) => peerbit.dial(x))
-                    );
-                } else {
-                    await peerbit.bootstrap();
-                }
+                await connectToNetwork(peerbit, args.peer);
 
+                const files = await openFiles({ replicate: false });
                 console.log("Fetching file with id: " + args.id);
-
-                const selfHash = peerbit.identity.publicKey.hashcode();
-                await waitFor(
-                    async () =>
-                        [...(await files.getReady())].some(
-                            ([hash]) => hash !== selfHash
-                        ),
-                    {
-                        timeout: FILE_LOOKUP_TIMEOUT_MS,
-                        delayInterval: FILE_LOOKUP_POLL_INTERVAL_MS,
-                        timeoutMessage:
-                            "waiting for a remote peer to join the file network",
-                    }
-                );
-
                 let file;
                 try {
                     file = await waitFor(
@@ -196,7 +280,7 @@ const cli = async (args?: string[]) => {
                             timeout: FILE_LOOKUP_TIMEOUT_MS,
                             delayInterval: FILE_LOOKUP_POLL_INTERVAL_MS,
                             timeoutMessage:
-                                "waiting for file metadata to replicate",
+                                "waiting for the requested file to become discoverable",
                         }
                     );
                 } catch (error) {
@@ -212,7 +296,7 @@ const cli = async (args?: string[]) => {
                         chalk.red(
                             `ERROR: File not found after waiting ${Math.round(
                                 FILE_LOOKUP_TIMEOUT_MS / 1000
-                            )} seconds!`
+                            )} seconds! Ensure the seeder is still running and that both peers are connected to the same network. If you pass --peer, the CLI now uses Peerbit.dial(...) and discovers shard roots automatically.`
                         )
                     );
                 } else {
@@ -237,12 +321,13 @@ const cli = async (args?: string[]) => {
                         );
                     }
                 }
-                await peerbit.stop();
+                await stopPeerbitForCli(peerbit);
             },
         })
         .help()
         .strict()
-        .demandCommand().argv;
+        .demandCommand()
+        .parseAsync();
 };
 
-cli();
+await cli();
