@@ -1,5 +1,6 @@
 import { test } from "@playwright/test";
 import {
+    createSyntheticFileOnDisk,
     createSpace,
     getSeederCount,
     rootUrl,
@@ -7,24 +8,11 @@ import {
     withBootstrap,
 } from "./helpers";
 import { startBootstrapPeer } from "./bootstrapPeer";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import { rm } from "node:fs/promises";
 
 const FILE_MB = Number(process.env.PW_FILE_MB || "100");
 const MONITOR_MS = Number(process.env.PW_MONITOR_MS || "60000");
 const POLL_MS = Number(process.env.PW_POLL_MS || "5000");
-
-async function createSyntheticFileOnDisk(sizeMb: number) {
-    const dir = await mkdtemp(path.join(tmpdir(), "peerbit-file-share-"));
-    const filePath = path.join(dir, `local-${sizeMb}mb.bin`);
-    await writeFile(filePath, Buffer.alloc(sizeMb * 1024 * 1024, 7));
-    return {
-        dir,
-        filePath,
-        fileName: path.basename(filePath),
-    };
-}
 
 async function getVisibleFileRow(page, fileName: string): Promise<string | null> {
     const row = page.locator("li", { hasText: fileName }).first();
@@ -59,7 +47,10 @@ test.describe("manual local refresh smoke", () => {
         }
 
         const bootstrap = await startBootstrapPeer();
-        const file = await createSyntheticFileOnDisk(FILE_MB);
+        const file = await createSyntheticFileOnDisk(
+            `local-${FILE_MB}mb.bin`,
+            FILE_MB
+        );
         const writerContext = await browser.newContext({ acceptDownloads: true });
         const readerOneContext = await browser.newContext({
             acceptDownloads: true,

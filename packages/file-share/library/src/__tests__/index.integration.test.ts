@@ -1,8 +1,10 @@
 import { Peerbit } from "peerbit";
-import { Files, LargeFile, TinyFile } from "../index.js";
-import { equals } from "uint8arrays";
+import { Files, IndexableFile, LargeFile, TinyFile } from "../index.js";
+import { concat, equals } from "uint8arrays";
 import crypto from "crypto";
 import { delay, waitForResolved } from "@peerbit/time";
+import { sha256Base64Sync } from "@peerbit/crypto";
+import { deserialize, serialize } from "@dao-xyz/borsh";
 import { expect, describe, it, beforeEach, afterEach } from "vitest";
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -67,17 +69,15 @@ describe("index", () => {
     });
 
     describe("large file", () => {
-        it("will deduplicate chunks", async () => {
+        it("stores upload-scoped chunks for repeated large-file segments", async () => {
             // Peer 1 is subscribing to a replication topic (to start helping the network)
             const filestore = await peer.open(new Files());
 
             const largeFile = new Uint8Array(5 * 1e7 + 1); // 50 mb + 1 byte to make this not perfect splittable
             await filestore.add("large file", largeFile);
 
-            // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
-            // +2 SmallFiles, because all chunks expect the last one will be exactly the same
-            //(the last chunk will be different because it is smaller, but will also just contain 0)
-            expect(await filestore.files.index.getSize()).to.eq(3);
+            // 96 upload-scoped chunks + 1 root manifest.
+            expect(await filestore.files.index.getSize()).to.eq(97);
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
                 args: { replicate: false },
@@ -97,9 +97,8 @@ describe("index", () => {
             const largeFile = crypto.randomBytes(5 * 1e7) as Uint8Array; // 50 mb
             await filestore.add("random large file", largeFile);
 
-            // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
-            // +56 SmallFiles
-            expect(await filestore.files.index.getSize()).to.eq(101); // depends on the chunk size used
+            // 96 upload-scoped chunks + 1 root manifest.
+            expect(await filestore.files.index.getSize()).to.eq(97); // depends on the chunk size used
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
                 args: { replicate: false },
@@ -116,6 +115,212 @@ describe("index", () => {
             await filestore.removeByName("random large file");
             expect(await filestoreReader.getByName("random large file")).to.be
                 .undefined;
+        });
+
+        it("streams blob uploads without changing the root hash", async () => {
+            const filestore = await peer.open(new Files());
+
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const expectedId = sha256Base64Sync(largeFile);
+            const addProgress: number[] = [];
+
+            const addedId = await filestore.add(
+                "streamed large blob",
+                new Blob([largeFile]),
+                undefined,
+                (progress) => {
+                    addProgress.push(progress);
+                }
+            );
+
+            const added = await filestore.files.index.get(addedId);
+            expect(added).to.be.instanceOf(LargeFile);
+            expect((added as LargeFile).finalHash).to.eq(expectedId);
+            expect(addProgress.some((x) => x > 0 && x < 1)).to.be.true;
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.getByName("streamed large blob");
+            expect(equals(file!.bytes, largeFile)).to.be.true;
+        });
+
+        it("streams downloaded files chunk by chunk", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add("streamed download", largeFile);
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            const streamedChunks: Uint8Array[] = [];
+
+            expect(file).to.be.instanceOf(LargeFile);
+
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("streams large downloads without parentId chunk searches", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "streamed download without parentId search",
+                largeFile
+            );
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            let parentIdSearches = 0;
+
+            (filestoreReader.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const isBulkChunkLookup = queries.some(
+                    (query: any) =>
+                        query?.key === "parentId" && query?.value === fileId
+                );
+
+                if (isBulkChunkLookup) {
+                    parentIdSearches++;
+                    throw new Error("parentId chunk search should not be used");
+                }
+
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(parentIdSearches).to.eq(0);
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("retries transient chunk lookup aborts", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "streamed download with transient abort",
+                largeFile
+            );
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const transientChunkId = `${fileId}:1`;
+            let abortedOnce = false;
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id === transientChunkId && !abortedOnce) {
+                    abortedOnce = true;
+                    const error = new Error("fanout channel closed");
+                    error.name = "AbortError";
+                    throw error;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(abortedOnce).to.be.true;
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("stores file sizes as u64", () => {
+            const size = 5_000_000_000n;
+            const largeFile = new LargeFile({
+                id: "large",
+                name: "large-file",
+                size,
+                chunkCount: 2,
+                ready: true,
+            });
+            const indexable = new IndexableFile(largeFile);
+
+            const decodedFile = deserialize(serialize(largeFile), LargeFile);
+            const decodedIndexable = deserialize(
+                serialize(indexable),
+                IndexableFile
+            );
+
+            expect(decodedFile.size).to.eq(size);
+            expect(decodedIndexable.size).to.eq(size);
+        });
+
+        it("scales chunk sizes for multi-gigabyte sources", async () => {
+            const filestore = await peer.open(new Files());
+            let requestedChunkSize = 0;
+            let error: any;
+
+            try {
+                await filestore.addSource("huge-file", {
+                    size: 5_000_000_000n,
+                    async *readChunks(chunkSize: number) {
+                        requestedChunkSize = chunkSize;
+                        throw new Error("stop-after-measuring");
+                    },
+                });
+            } catch (caught) {
+                error = caught;
+            }
+
+            expect(error?.message).to.eq("stop-after-measuring");
+            expect(requestedChunkSize).to.be.greaterThan(500_000);
+            expect(requestedChunkSize).to.be.greaterThan(4_000_000);
         });
 
         it("exposes large file metadata before chunk upload finishes", async () => {
@@ -168,13 +373,12 @@ describe("index", () => {
             const largeFile = crypto.randomBytes(5 * 1e7) as Uint8Array; // 50 mb
             await filestore.add("random large file", largeFile);
 
-            // +1 for the LargeFile that contains meta info about the chunks (SmallFiles)
-            // +56 SmallFiles
-            expect(await filestore.files.index.getSize()).to.eq(101); // depends on the chunk size used
+            // 96 upload-scoped chunks + 1 root manifest.
+            expect(await filestore.files.index.getSize()).to.eq(97); // depends on the chunk size used
 
             await waitForResolved(async () =>
                 expect(await filestoreReplicator2.files.index.getSize()).to.eq(
-                    101
+                    97
                 )
             );
         });

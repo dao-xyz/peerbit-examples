@@ -24,6 +24,39 @@ const getRoleFromLocalStorage = (files: Files) => {
     return localStorage.getItem(files.address + "-role"); // Save role in localstorage for next time
 };
 
+const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000n;
+
+type BrowserFileWriter = {
+    write(data: Uint8Array): Promise<void>;
+    close(): Promise<void>;
+    abort?(reason?: unknown): Promise<void>;
+};
+
+type SaveFilePickerWindow = Window & {
+    showSaveFilePicker?: (options?: {
+        suggestedName?: string;
+    }) => Promise<{
+        createWritable(): Promise<BrowserFileWriter>;
+    }>;
+    __peerbitStreamingDownloadThresholdBytes?: number;
+};
+
+const isUserCancelledDownload = (error: unknown) =>
+    error instanceof DOMException &&
+    (error.name === "AbortError" || error.name === "NotAllowedError");
+
+const getStreamingDownloadThresholdBytes = () => {
+    const override = (window as SaveFilePickerWindow)
+        .__peerbitStreamingDownloadThresholdBytes;
+    if (typeof override === "number" && Number.isFinite(override)) {
+        return BigInt(Math.max(0, Math.floor(override)));
+    }
+    return STREAMING_DOWNLOAD_THRESHOLD_BYTES;
+};
+
+const getFileSizeBigInt = (file: AbstractFile) =>
+    typeof file.size === "bigint" ? file.size : BigInt(file.size);
+
 export const useDebouncedEffect = (effect, deps, delay) => {
     useEffect(() => {
         const handler = setTimeout(() => effect(), delay);
@@ -276,32 +309,59 @@ export const Drop = () => {
         file: AbstractFile,
         progress: (progress: number | null) => void
     ) => {
-        console.log("FETCH FILE START");
         const timeout =
             file instanceof LargeFile
-                ? Math.max(60_000, Math.ceil(file.size / 1e6) * 1_000)
+                ? Math.max(
+                      60_000,
+                      Math.ceil(Number(file.size) / 1e6) * 1_000
+                  )
                 : 10_000;
-        const bytes = await file
-            .getFile(files.program, {
+        try {
+            const saveFilePicker = (window as SaveFilePickerWindow)
+                .showSaveFilePicker;
+
+            if (
+                saveFilePicker &&
+                getFileSizeBigInt(file) >= getStreamingDownloadThresholdBytes()
+            ) {
+                const handle = await saveFilePicker({
+                    suggestedName: file.name,
+                }).catch((error) => {
+                    if (isUserCancelledDownload(error)) {
+                        return undefined;
+                    }
+                    throw error;
+                });
+                if (handle) {
+                    const writable = await handle.createWritable();
+                    await file.writeFile(files.program, writable, {
+                        timeout,
+                        progress: (value) => {
+                            progress(value);
+                        },
+                    });
+                    return;
+                }
+                return;
+            }
+
+            const bytes = await file.getFile(files.program, {
                 as: "chunks",
                 timeout,
                 progress,
-            })
-            .catch((e) => {
-                console.error(e);
-                throw e;
-            })
-            .finally(() => {
-                progress(null);
             });
-        console.log("FETCH FILE DONE");
-        var blob = new Blob(bytes as BlobPart[]);
-        console.log("DOWNLOAD FILE");
-        var link = document.createElement("a");
-        link.href = window.URL.createObjectURL(blob);
-        var fileName = file.name;
-        link.download = fileName;
-        link.click();
+            const blob = new Blob(bytes as BlobPart[]);
+            const link = document.createElement("a");
+            const url = window.URL.createObjectURL(blob);
+            link.href = url;
+            link.download = file.name;
+            link.click();
+            setTimeout(() => {
+                window.URL.revokeObjectURL(url);
+            }, 60_000);
+        } finally {
+            progress(null);
+        }
     };
 
     function dropHandler(ev) {
@@ -344,37 +404,27 @@ export const Drop = () => {
 
             // there will just by one file here in practice
             for (const file of filesToAdd) {
-                var reader = new FileReader();
-                reader.readAsArrayBuffer(file);
-                reader.onload = function () {
-                    var arrayBuffer = reader.result;
-                    var bytes = new Uint8Array(arrayBuffer as ArrayBuffer);
-                    promises.push(
-                        files.program.add(
-                            file.name,
-                            bytes,
-                            undefined,
-                            (progress) => {
-                                setUploadProgress(
-                                    Math.min(progress, uploadProgress || 1)
-                                );
-                            }
-                        )
-                    );
-                    if (promises.length === filesToAdd.length) {
-                        Promise.all(promises)
-                            .then(() => {
-                                if (endProgress) {
-                                    setUploadProgress(null);
-                                }
-                                updateList();
-                                resolve();
-                            })
-                            .catch((e) => {
-                                reject(e);
-                            });
-                    }
-                };
+                promises.push(
+                    files.program.addBlob(file.name, file, undefined, (progress) => {
+                        setUploadProgress((current) =>
+                            current == null ? progress : Math.max(progress, current)
+                        );
+                    })
+                );
+            }
+
+            if (promises.length === filesToAdd.length) {
+                Promise.all(promises)
+                    .then(() => {
+                        if (endProgress) {
+                            setUploadProgress(null);
+                        }
+                        updateList();
+                        resolve();
+                    })
+                    .catch((e) => {
+                        reject(e);
+                    });
             }
         });
     };
