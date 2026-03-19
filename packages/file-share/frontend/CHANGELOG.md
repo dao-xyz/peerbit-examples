@@ -1,5 +1,12 @@
 # file-share
 
+## 0.0.5
+
+### Patch Changes
+
+- Updated dependencies [af6fcb4]
+    - @peerbit/please-lib@2.0.2
+
 ## 0.0.4
 
 ### Patch Changes
