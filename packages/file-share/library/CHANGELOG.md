@@ -1,5 +1,11 @@
 # @peerbit/please-lib
 
+## 2.0.2
+
+### Patch Changes
+
+- af6fcb4: Prefer direct peer dialing for file sharing, improve large streamed transfer reliability, and update file-share examples for the released Peerbit 5.2.0 graph.
+
 ## 2.0.1
 
 ### Patch Changes
