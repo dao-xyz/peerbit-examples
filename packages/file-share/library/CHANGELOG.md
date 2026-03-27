@@ -1,5 +1,11 @@
 # @peerbit/please-lib
 
+## 2.0.4
+
+### Patch Changes
+
+- Refresh file-share packages to the latest Peerbit release line and stabilize the monorepo install layout used by the CLI and frontend.
+
 ## 2.0.3
 
 ### Patch Changes
