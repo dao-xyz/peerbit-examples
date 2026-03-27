@@ -1,5 +1,11 @@
 # @peerbit/please-lib
 
+## 2.0.5
+
+### Patch Changes
+
+- d1ca154: Wait for the full chunk set before streaming large files in observer downloads, so CLI reads do not fail after a file becomes discoverable but before all chunks are fetchable.
+
 ## 2.0.4
 
 ### Patch Changes
