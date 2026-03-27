@@ -794,7 +794,10 @@ export class SuggestedReplyResponse extends AIResponse {
  *  - (node, text, parent: Canvas|CanvasReference)
  *  - (text, parent: Canvas)  // legacy path
  */
-export async function insertTextIntoCanvas(text: string, target: Canvas) {
+export async function insertTextIntoCanvas(
+    text: string,
+    target: Canvas
+): Promise<unknown> {
     const scope = target.nearestScope; // safe after resolve
     return scope.elements.put(
         new Element({
