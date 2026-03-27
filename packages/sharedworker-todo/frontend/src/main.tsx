@@ -1,6 +1,7 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import { PeerProvider } from "@peerbit/react";
+import type { CanonicalOpenAdapter } from "@peerbit/canonical-client";
 import { documentAdapter } from "@peerbit/document-proxy/auto";
 import { todoProgramAdapter } from "./todo/adapter";
 import { App } from "./ui/App";
@@ -25,7 +26,10 @@ createRoot(document.getElementById("root")!).render(
                     },
                 },
                 open: {
-                    adapters: [todoProgramAdapter, documentAdapter],
+                    adapters: [
+                        todoProgramAdapter,
+                        documentAdapter,
+                    ] as CanonicalOpenAdapter[],
                     mode: "canonical",
                 },
             }}

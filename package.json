@@ -60,12 +60,12 @@
     "pnpm": {
         "overrides": {
             "@peerbit/crypto": "3.1.0",
-            "@peerbit/document": "13.0.17",
-            "@peerbit/program": "6.0.11",
-            "@peerbit/shared-log": "13.0.17",
+            "@peerbit/document": "13.0.19",
+            "@peerbit/program": "6.0.13",
+            "@peerbit/shared-log": "13.0.19",
             "@peerbit/stream-interface": "6.0.6",
             "@peerbit/trusted-network": "6.0.17",
-            "peerbit": "5.2.0",
+            "peerbit": "5.2.2",
             "libsodium": "0.7.15",
             "libsodium-wrappers": "0.7.15"
         }

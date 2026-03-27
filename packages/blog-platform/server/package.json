@@ -39,6 +39,6 @@
         "@peerbit/blog-sdk": "workspace:*",
         "body-parser": "^1",
         "express": "^4",
-        "peerbit": "^5.1.0"
+        "peerbit": "^5.2.2"
     }
 }
