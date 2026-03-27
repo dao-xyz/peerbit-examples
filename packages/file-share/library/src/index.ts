@@ -402,11 +402,29 @@ export class LargeFile extends AbstractFile {
 
         let processed = 0;
         const hasher = this.finalHash ? new SHA256() : undefined;
-        const knownChunks = new Map<number, TinyFile>();
+        const knownChunks = files.persistChunkReads
+            ? new Map<number, TinyFile>()
+            : new Map(
+                  (
+                      await this.fetchChunks(files, {
+                          timeout:
+                              properties?.timeout ??
+                              LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS,
+                      })
+                  ).map((chunk) => [chunk.index || 0, chunk])
+              );
+
         for (let index = 0; index < this.chunkCount; index++) {
-            const chunkFile = await this.resolveChunk(files, index, knownChunks, {
-                timeout: properties?.timeout,
-            });
+            const chunkFile = files.persistChunkReads
+                ? await this.resolveChunk(files, index, knownChunks, {
+                      timeout: properties?.timeout,
+                  })
+                : knownChunks.get(index);
+            if (!chunkFile) {
+                throw new Error(
+                    `Failed to resolve chunk ${index + 1}/${this.chunkCount} for file ${this.id}`
+                );
+            }
             const chunk = await chunkFile.getFile(files, {
                 as: "joined",
                 timeout: properties?.timeout,
