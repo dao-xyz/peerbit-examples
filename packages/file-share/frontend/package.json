@@ -1,6 +1,6 @@
 {
     "name": "file-share",
-    "version": "0.0.6",
+    "version": "0.0.7",
     "private": true,
     "homepage": "https://dao-xyz.github.io/peerbit-examples",
     "type": "module",
