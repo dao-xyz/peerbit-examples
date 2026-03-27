@@ -1,5 +1,11 @@
 # @peerbit/please-lib
 
+## 2.0.3
+
+### Patch Changes
+
+- Release the file-share CLI packages with the latest Peerbit dependency line.
+
 ## 2.0.2
 
 ### Patch Changes
