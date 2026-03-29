@@ -5,6 +5,8 @@ import { startBootstrapPeer } from "./bootstrapPeer";
 import {
     createSyntheticFileOnDisk,
     expectDownloadedFile,
+    expectSavedViaPicker,
+    installMockSaveFilePicker,
     rootUrl,
     waitForFileListed,
     waitForUploadComplete,
@@ -21,6 +23,7 @@ const UPLOAD_TIMEOUT_MS = Number(
 const DOWNLOAD_TIMEOUT_MS = Number(
     process.env.PW_DOWNLOAD_TIMEOUT_MS || "1800000"
 );
+const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000;
 
 if (!["local", "prod"].includes(SCENARIO)) {
     throw new Error(`Unsupported PW_BENCH_SCENARIO='${SCENARIO}'`);
@@ -124,8 +127,14 @@ test.describe("file-share transfer benchmark", () => {
             fileName,
             FILE_SIZE_MB
         );
+        const usesStreamingDownload =
+            preparedFile != null &&
+            FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
 
         try {
+            if (usesStreamingDownload) {
+                await installMockSaveFilePicker(reader);
+            }
             logStage("create-space");
             const entryUrl =
                 usesLocalBootstrap && bootstrap
@@ -173,12 +182,21 @@ test.describe("file-share transfer benchmark", () => {
 
             logStage("download");
             const downloadStartedAt = Date.now();
-            const downloaded = await expectDownloadedFile(
-                reader,
-                fileName,
-                FILE_SIZE_MB,
-                DOWNLOAD_TIMEOUT_MS
-            );
+            const downloaded = usesStreamingDownload
+                ? await expectSavedViaPicker(
+                      reader,
+                      fileName,
+                      FILE_SIZE_MB,
+                      DOWNLOAD_TIMEOUT_MS
+                  ).then(() => ({
+                      size: preparedFile ? FILE_SIZE_MB * 1024 * 1024 : 0,
+                  }))
+                : await expectDownloadedFile(
+                      reader,
+                      fileName,
+                      FILE_SIZE_MB,
+                      DOWNLOAD_TIMEOUT_MS
+                  );
             const downloadFinishedAt = Date.now();
 
             const result = {
@@ -188,6 +206,9 @@ test.describe("file-share transfer benchmark", () => {
                 shareUrl: shareUrl.toString(),
                 fileName,
                 fileSizeMb: FILE_SIZE_MB,
+                downloadMode: usesStreamingDownload
+                    ? "save-picker-stream"
+                    : "browser-download",
                 sizeBytes: downloaded.size,
                 uploadDurationMs: uploadFinishedAt - uploadStartedAt,
                 discoveryLagMs: readerVisibleAt - uploadFinishedAt,

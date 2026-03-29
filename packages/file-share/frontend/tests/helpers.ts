@@ -177,22 +177,7 @@ export async function expectDownloadedFile(
     expectedSizeMb: number,
     timeout = 8 * 60 * 1000
 ) {
-    const row = page.locator("li", { hasText: fileName }).first();
-    await expect(row).toBeVisible({ timeout: 60_000 });
-    const byTestId = row.getByTestId("download-file");
-    const button =
-        (await byTestId.count()) > 0 ? byTestId : row.locator("button").first();
-
-    const ignoreTimeout = <T>(promise: Promise<T>) =>
-        promise.catch((error: any) => {
-            if (
-                error?.name === "TimeoutError" ||
-                /Timeout .* exceeded/i.test(String(error?.message || ""))
-            ) {
-                return new Promise<T>(() => {});
-            }
-            throw error;
-        });
+    const { button } = await getDownloadButton(page, fileName);
 
     const downloadPromise = page.waitForEvent("download", { timeout });
     const dialogFailure = ignoreTimeout(
@@ -228,6 +213,26 @@ export async function expectDownloadedFile(
         size: details.size,
     };
 }
+
+const ignoreTimeout = <T>(promise: Promise<T>) =>
+    promise.catch((error: any) => {
+        if (
+            error?.name === "TimeoutError" ||
+            /Timeout .* exceeded/i.test(String(error?.message || ""))
+        ) {
+            return new Promise<T>(() => {});
+        }
+        throw error;
+    });
+
+const getDownloadButton = async (page: Page, fileName: string) => {
+    const row = page.locator("li", { hasText: fileName }).first();
+    await expect(row).toBeVisible({ timeout: 60_000 });
+    const byTestId = row.getByTestId("download-file");
+    const button =
+        (await byTestId.count()) > 0 ? byTestId : row.locator("button").first();
+    return { row, button };
+};
 
 export async function installMockSaveFilePicker(page: Page) {
     await page.addInitScript(() => {
@@ -276,14 +281,31 @@ export async function expectSavedViaPicker(
     timeout = 8 * 60 * 1000
 ) {
     const expectedBytes = expectedSizeMb * 1024 * 1024;
-    await expect
+    const { button } = await getDownloadButton(page, fileName);
+    const dialogFailure = ignoreTimeout(
+        page.waitForEvent("dialog", { timeout }).then(async (dialog) => {
+            const message = dialog.message();
+            await dialog.dismiss().catch(() => {});
+            throw new Error(`Download failed dialog: ${message}`);
+        })
+    );
+    const pageErrorFailure = ignoreTimeout(
+        page.waitForEvent("pageerror", { timeout }).then((error) => {
+            throw error;
+        })
+    );
+    const streamedSave = expect
         .poll(
             async () =>
                 page.evaluate((expectedName) => {
                     const savedFiles =
-                        ((window as unknown as { __mockSavedFiles?: Array<{ name: string; size: number }> })
-                            .__mockSavedFiles ?? []);
-                    return savedFiles.find((file) => file.name === expectedName) ?? null;
+                        ((window as unknown as {
+                            __mockSavedFiles?: Array<{ name: string; size: number }>;
+                        }).__mockSavedFiles ?? []);
+                    return (
+                        savedFiles.find((file) => file.name === expectedName) ??
+                        null
+                    );
                 }, fileName),
             {
                 timeout,
@@ -291,4 +313,7 @@ export async function expectSavedViaPicker(
             }
         )
         .toEqual({ name: fileName, size: expectedBytes });
+
+    await button.click();
+    await Promise.race([streamedSave, dialogFailure, pageErrorFailure]);
 }
