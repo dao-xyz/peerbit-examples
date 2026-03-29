@@ -24,10 +24,10 @@
     "dependencies": {
         "@iframe-resizer/child": "^5",
         "@iframe-resizer/parent": "^5",
-        "@peerbit/react": "^1.1.6",
+        "@peerbit/react": "^1.1.7",
         "@types/react": "^19.1.8",
         "@types/react-dom": "^19.1.6",
-        "peerbit": "^5.2.3",
+        "peerbit": "^5.2.4",
         "react": "^19.2.0",
         "react-dom": "^19.1.0",
         "react-router": "^7.9.3",

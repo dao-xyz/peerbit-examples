@@ -41,12 +41,12 @@
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
         "@peerbit/crypto": "^3.1.0",
-        "@peerbit/document": "13.0.20",
-        "@peerbit/program": "6.0.14",
-        "@peerbit/shared-log": "13.0.20",
+        "@peerbit/document": "13.0.21",
+        "@peerbit/program": "6.0.15",
+        "@peerbit/shared-log": "13.0.21",
         "@peerbit/trusted-network": "^6.0.20",
         "@stablelib/sha256": "^2.0.1",
-        "peerbit": "^5.2.3",
+        "peerbit": "^5.2.4",
         "uint8arrays": "^5.1.0",
         "uuid": "^10.0.0"
     }
