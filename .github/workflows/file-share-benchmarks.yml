@@ -1,0 +1,198 @@
+name: File Share Benchmarks
+
+on:
+    workflow_dispatch:
+        inputs:
+            scenario:
+                description: Benchmark scenario
+                required: true
+                type: choice
+                default: local
+                options:
+                    - local
+                    - prod
+            file_mb:
+                description: File size in MiB
+                required: true
+                type: number
+                default: 1024
+            runs:
+                description: Number of benchmark runs
+                required: true
+                type: number
+                default: 1
+            min_upload_mbps:
+                description: Fail if median upload throughput is below this value (0 disables)
+                required: true
+                type: number
+                default: 0
+            min_download_mbps:
+                description: Fail if median download throughput is below this value (0 disables)
+                required: true
+                type: number
+                default: 0
+
+permissions:
+    contents: read
+
+jobs:
+    benchmark:
+        runs-on: ubuntu-22.04
+        timeout-minutes: 180
+        concurrency:
+            group: file-share-bench-${{ github.ref_name }}-${{ inputs.scenario }}-${{ inputs.file_mb }}
+            cancel-in-progress: false
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Install Playwright Chromium
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Run benchmark
+              env:
+                  PW_BENCH: "1"
+                  PW_BENCH_SCENARIO: ${{ inputs.scenario }}
+                  PW_FILE_MB: ${{ inputs.file_mb }}
+                  PW_BASE_URL: ${{ inputs.scenario == 'prod' && 'https://files.dao.xyz' || '' }}
+              working-directory: packages/file-share/frontend
+              run: |
+                  mkdir -p "$GITHUB_WORKSPACE/bench-results"
+                  for i in $(seq 1 "${{ inputs.runs }}"); do
+                    echo "Starting file-share benchmark run $i/${{ inputs.runs }}"
+                    export PW_RESULT_FILE="$GITHUB_WORKSPACE/bench-results/run-$i.json"
+                    npx playwright test -c playwright.config.ts tests/transfer.bench.e2e.spec.ts --project chromium
+                  done
+
+            - name: Summarize results
+              env:
+                  BENCH_SCENARIO: ${{ inputs.scenario }}
+                  BENCH_FILE_MB: ${{ inputs.file_mb }}
+                  BENCH_RUNS: ${{ inputs.runs }}
+                  BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
+                  BENCH_MIN_DOWNLOAD_MBPS: ${{ inputs.min_download_mbps }}
+              run: |
+                  node <<'NODE'
+                  const fs = require("node:fs");
+                  const path = require("node:path");
+
+                  const resultsDir = path.join(process.cwd(), "bench-results");
+                  const files = fs.readdirSync(resultsDir)
+                    .filter((name) => name.startsWith("run-") && name.endsWith(".json"))
+                    .sort();
+                  const results = files.map((name) =>
+                    JSON.parse(fs.readFileSync(path.join(resultsDir, name), "utf8"))
+                  );
+
+                  if (results.length === 0) {
+                    throw new Error("No benchmark results were produced");
+                  }
+
+                  const failed = results.filter((result) => result.status !== "passed");
+                  if (failed.length > 0) {
+                    throw new Error(
+                      `One or more benchmark runs failed: ${failed
+                        .map((result) => result.failure?.message || "unknown failure")
+                        .join("; ")}`
+                    );
+                  }
+
+                  const median = (values) => {
+                    const sorted = [...values].sort((a, b) => a - b);
+                    const mid = Math.floor(sorted.length / 2);
+                    return sorted.length % 2 === 0
+                      ? (sorted[mid - 1] + sorted[mid]) / 2
+                      : sorted[mid];
+                  };
+
+                  const average = (values) =>
+                    values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
+
+                  const uploadMbps = results.map((result) => Number(result.uploadMbps));
+                  const downloadMbps = results.map((result) => Number(result.downloadMbps));
+                  const uploadSeconds = results.map((result) => Number(result.uploadDurationMs) / 1000);
+                  const downloadSeconds = results.map((result) => Number(result.downloadDurationMs) / 1000);
+                  const discoverySeconds = results.map((result) => Number(result.discoveryLagMs) / 1000);
+
+                  const summary = {
+                    scenario: process.env.BENCH_SCENARIO,
+                    fileSizeMb: Number(process.env.BENCH_FILE_MB),
+                    runs: Number(process.env.BENCH_RUNS),
+                    medianUploadMbps: median(uploadMbps),
+                    medianDownloadMbps: median(downloadMbps),
+                    medianUploadSeconds: median(uploadSeconds),
+                    medianDownloadSeconds: median(downloadSeconds),
+                    medianDiscoverySeconds: median(discoverySeconds),
+                    averageUploadMbps: average(uploadMbps),
+                    averageDownloadMbps: average(downloadMbps),
+                    rawResults: results,
+                  };
+
+                  fs.writeFileSync(
+                    path.join(resultsDir, "summary.json"),
+                    JSON.stringify(summary, null, 2) + "\n"
+                  );
+
+                  const lines = [
+                    "# File-share benchmark",
+                    "",
+                    `- Scenario: \`${summary.scenario}\``,
+                    `- File size: \`${summary.fileSizeMb} MiB\``,
+                    `- Runs: \`${summary.runs}\``,
+                    `- Median upload: \`${summary.medianUploadSeconds.toFixed(2)}s\` at \`${summary.medianUploadMbps.toFixed(2)} Mbps\``,
+                    `- Median discovery lag: \`${summary.medianDiscoverySeconds.toFixed(2)}s\``,
+                    `- Median download: \`${summary.medianDownloadSeconds.toFixed(2)}s\` at \`${summary.medianDownloadMbps.toFixed(2)} Mbps\``,
+                    "",
+                    "## Raw runs",
+                    "",
+                  ];
+
+                  results.forEach((result, index) => {
+                    lines.push(
+                      `- Run ${index + 1}: upload=${(Number(result.uploadDurationMs) / 1000).toFixed(2)}s (${Number(result.uploadMbps).toFixed(2)} Mbps), discovery=${(Number(result.discoveryLagMs) / 1000).toFixed(2)}s, download=${(Number(result.downloadDurationMs) / 1000).toFixed(2)}s (${Number(result.downloadMbps).toFixed(2)} Mbps)`
+                    );
+                  });
+
+                  if (process.env.GITHUB_STEP_SUMMARY) {
+                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+                  } else {
+                    console.log(lines.join("\n"));
+                  }
+
+                  const minUpload = Number(process.env.BENCH_MIN_UPLOAD_MBPS || "0");
+                  const minDownload = Number(process.env.BENCH_MIN_DOWNLOAD_MBPS || "0");
+
+                  if (minUpload > 0 && summary.medianUploadMbps < minUpload) {
+                    throw new Error(
+                      `Median upload throughput ${summary.medianUploadMbps.toFixed(2)} Mbps is below threshold ${minUpload} Mbps`
+                    );
+                  }
+                  if (minDownload > 0 && summary.medianDownloadMbps < minDownload) {
+                    throw new Error(
+                      `Median download throughput ${summary.medianDownloadMbps.toFixed(2)} Mbps is below threshold ${minDownload} Mbps`
+                    );
+                  }
+                  NODE
+
+            - name: Upload artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: file-share-benchmark-${{ github.run_id }}
+                  path: bench-results
