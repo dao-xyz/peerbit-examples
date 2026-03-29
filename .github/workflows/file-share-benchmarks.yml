@@ -15,7 +15,7 @@ on:
                 description: File size in MiB
                 required: true
                 type: number
-                default: 1024
+                default: 512
             runs:
                 description: Number of benchmark runs
                 required: true
