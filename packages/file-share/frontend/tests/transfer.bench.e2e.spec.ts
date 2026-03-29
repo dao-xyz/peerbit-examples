@@ -1,13 +1,11 @@
-import { test } from "@playwright/test";
+import { test, type Page } from "@playwright/test";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { startBootstrapPeer } from "./bootstrapPeer";
 import {
-    createSpace,
     createSyntheticFileOnDisk,
     expectDownloadedFile,
     rootUrl,
-    setSeedMode,
     waitForFileListed,
     waitForUploadComplete,
     withBootstrap,
@@ -45,6 +43,45 @@ const logStage = (stage: string, details: Record<string, unknown> = {}) => {
             ...details,
         })}`
     );
+};
+
+const waitForCreateSpaceHook = async (page: Page) => {
+    await page.waitForFunction(
+        () => Boolean((window as any).__peerbitFileShareCreateSpace),
+        undefined,
+        { timeout: 180_000 }
+    );
+};
+
+const createSpaceFromHook = async (page: Page, name: string) => {
+    return await page.evaluate(async (spaceName) => {
+        const createSpace = (window as any).__peerbitFileShareCreateSpace;
+        if (!createSpace) {
+            throw new Error("Missing __peerbitFileShareCreateSpace");
+        }
+        return await createSpace(spaceName);
+    }, name);
+};
+
+const waitForTestHooks = async (page: Page) => {
+    await page.waitForFunction(
+        () => Boolean((window as any).__peerbitFileShareTestHooks?.setReplicationRole),
+        undefined,
+        { timeout: 180_000 }
+    );
+};
+
+const applyReplicationRole = async (
+    page: Page,
+    role: unknown
+) => {
+    await page.evaluate(async (roleOptions) => {
+        const hooks = (window as any).__peerbitFileShareTestHooks;
+        if (!hooks?.setReplicationRole) {
+            throw new Error("Missing __peerbitFileShareTestHooks.setReplicationRole");
+        }
+        await hooks.setReplicationRole(roleOptions);
+    }, role);
 };
 
 const toMiBPerSecond = (bytes: number, durationMs: number) =>
@@ -94,15 +131,26 @@ test.describe("file-share transfer benchmark", () => {
                 usesLocalBootstrap && bootstrap
                     ? withBootstrap(rootUrl(baseURL), bootstrap.addrs)
                     : rootUrl(baseURL);
-            const shareUrl = await createSpace(
+            await writer.goto(entryUrl, { waitUntil: "domcontentloaded" });
+            await waitForCreateSpaceHook(writer);
+            const address = await createSpaceFromHook(
                 writer,
-                entryUrl,
                 `file-share-transfer-bench-${Date.now()}`
             );
+            const shareUrl = new URL(entryUrl);
+            shareUrl.hash = `/s/${address}`;
 
-            logStage("open-reader", { shareUrl });
-            await reader.goto(shareUrl, { waitUntil: "domcontentloaded" });
-            await setSeedMode(reader, false);
+            logStage("open-reader", { shareUrl: shareUrl.toString() });
+            logStage("open-writer-page");
+            await writer.goto(shareUrl.toString(), { waitUntil: "domcontentloaded" });
+            logStage("writer-page-ready");
+            await reader.goto(shareUrl.toString(), { waitUntil: "domcontentloaded" });
+            logStage("reader-page-ready");
+            logStage("wait-for-test-hooks");
+            await Promise.all([waitForTestHooks(writer), waitForTestHooks(reader)]);
+            logStage("apply-reader-role");
+            await applyReplicationRole(reader, false);
+            logStage("reader-seed-disabled");
 
             logStage("wait-for-input");
             await writer.locator("#imgupload").waitFor({
@@ -113,7 +161,9 @@ test.describe("file-share transfer benchmark", () => {
             logStage("upload");
             const uploadStartedAt = Date.now();
             await writer.locator("#imgupload").setInputFiles(preparedFile.filePath);
+            logStage("wait-for-writer-listing");
             await waitForFileListed(writer, fileName, UPLOAD_TIMEOUT_MS);
+            logStage("wait-for-upload-complete");
             await waitForUploadComplete(writer, UPLOAD_TIMEOUT_MS);
             const uploadFinishedAt = Date.now();
 
@@ -135,7 +185,7 @@ test.describe("file-share transfer benchmark", () => {
                 status: "passed",
                 scenario: SCENARIO,
                 baseURL,
-                shareUrl,
+                shareUrl: shareUrl.toString(),
                 fileName,
                 fileSizeMb: FILE_SIZE_MB,
                 sizeBytes: downloaded.size,

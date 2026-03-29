@@ -1,0 +1,44 @@
+diff --git a/node_modules/@peerbit/pubsub/dist/src/fanout-tree.js b/node_modules/@peerbit/pubsub/dist/src/fanout-tree.js
+index 1b8f01f70..c05ffb3ff 100644
+--- a/node_modules/@peerbit/pubsub/dist/src/fanout-tree.js
++++ b/node_modules/@peerbit/pubsub/dist/src/fanout-tree.js
+@@ -2322,7 +2322,7 @@ export class FanoutTree extends DirectStream {
+             mode: new AnyWhere(),
+             priority: CONTROL_PRIORITY,
+         });
+-        await this.publishMessageMaybe(this.publicKey, message, [stream]);
++        await this.publishMessage(this.publicKey, message, [stream]).catch(dontThrowIfDeliveryError);
+     }
+     async _sendControlMany(to, bytes) {
+         if (to.length === 0)
+@@ -2337,7 +2337,7 @@ export class FanoutTree extends DirectStream {
+             mode: new AnyWhere(),
+             priority: CONTROL_PRIORITY,
+         });
+-        await this.publishMessageMaybe(this.publicKey, message, streams);
++        await this.publishMessage(this.publicKey, message, streams).catch(dontThrowIfDeliveryError);
+     }
+     refillUploadTokens(ch, now = Date.now()) {
+         if (ch.uploadLimitBps <= 0)
+diff --git a/node_modules/@peerbit/pubsub/dist/src/index.js b/node_modules/@peerbit/pubsub/dist/src/index.js
+index 0d9fe1f43..1cb887de3 100644
+--- a/node_modules/@peerbit/pubsub/dist/src/index.js
++++ b/node_modules/@peerbit/pubsub/dist/src/index.js
+@@ -2,7 +2,7 @@ import {} from "@libp2p/interface";
+ import { PublicSignKey, getPublicKeyFromPeerId } from "@peerbit/crypto";
+ import { logger as loggerFn } from "@peerbit/logger";
+ import { DataEvent, GetSubscribers, PeerUnavailable, PubSubData, PubSubMessage, PublishEvent, Subscribe, SubscriptionData, SubscriptionEvent, TopicRootCandidates, TopicRootQuery, TopicRootQueryResponse, UnsubcriptionEvent, Unsubscribe, } from "@peerbit/pubsub-interface";
+-import { DirectStream, } from "@peerbit/stream";
++import { DirectStream, dontThrowIfDeliveryError, } from "@peerbit/stream";
+ import { AcknowledgeAnyWhere, AcknowledgeDelivery, AnyWhere, DataMessage, DeliveryError, MessageHeader, NotStartedError, SilentDelivery, deliveryModeHasReceiver, getMsgId, } from "@peerbit/stream-interface";
+ import { AbortError, TimeoutError, delay } from "@peerbit/time";
+ import { Uint8ArrayList } from "uint8arraylist";
+@@ -434,7 +434,7 @@ export class TopicControlPlane extends DirectStream {
+             priority: 1,
+             skipRecipientValidation: true,
+         });
+-        await this.publishMessageMaybe(this.publicKey, embedded, streams);
++        await this.publishMessage(this.publicKey, embedded, streams).catch(dontThrowIfDeliveryError);
+     }
+     mergeAutoTopicRootCandidatesFromPeer(candidates) {
+         if (!this.autoTopicRootCandidates)

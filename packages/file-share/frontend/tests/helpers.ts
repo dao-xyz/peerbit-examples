@@ -67,8 +67,12 @@ export async function createSpace(
     name: string
 ): Promise<string> {
     await page.goto(url, { waitUntil: "domcontentloaded" });
-    await page.getByPlaceholder("Type a name").fill(name);
-    await page.getByRole("button", { name: "Create" }).click();
+    const nameInput = page.getByTestId("space-name-input");
+    const createButton = page.getByTestId("create-space");
+    await expect(nameInput).toBeVisible({ timeout: 60_000 });
+    await nameInput.fill(name);
+    await expect(createButton).toBeEnabled({ timeout: 180_000 });
+    await createButton.click();
     await expect(page).toHaveURL(/#\/s\//, { timeout: 180_000 });
     await page
         .getByText("Copy the URL to share all files")
