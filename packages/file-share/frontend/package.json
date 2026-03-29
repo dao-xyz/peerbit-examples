@@ -22,7 +22,7 @@
         "@peerbit/please-lib": "workspace:*",
         "@peerbit/react": "^1.1.6",
         "@peerbit/shared-log": "13.0.20",
-        "@peerbit/stream": "^5.0.6",
+        "@peerbit/stream": "^5.0.8",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",
         "@radix-ui/react-slider": "^1.1.2",
