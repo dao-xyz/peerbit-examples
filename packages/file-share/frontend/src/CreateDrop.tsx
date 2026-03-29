@@ -17,11 +17,44 @@ export const CreateDrop = () => {
     const navigate = useNavigate();
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const [name, setName] = useState("");
+
+    const createSpace = async (spaceName: string) => {
+        if (!peer) {
+            throw new Error("Peer is not ready");
+        }
+        const db = await peer.open(
+            new Files({
+                id: new Uint8Array(32),
+                name: spaceName,
+                rootKey: peer.identity.publicKey,
+            }),
+            { existing: "reuse" }
+        );
+        forceUpdate();
+        navigate(getDropAreaPath(db));
+        return db.address;
+    };
+
     useEffect(() => {
         if (!peer?.identity.publicKey) {
             return;
         }
     }, [peer?.identity?.publicKey.hashcode()]);
+
+    useEffect(() => {
+        const testWindow = window as Window & {
+            __peerbitFileShareCreateSpace?: (name: string) => Promise<string>;
+        };
+        if (!peer || loading) {
+            delete testWindow.__peerbitFileShareCreateSpace;
+            return;
+        }
+        testWindow.__peerbitFileShareCreateSpace = async (spaceName: string) =>
+            createSpace(spaceName);
+        return () => {
+            delete testWindow.__peerbitFileShareCreateSpace;
+        };
+    }, [loading, navigate, peer]);
 
     return (
         <div className="w-screen h-screen bg-neutral-200 dark:bg-black flex justify-center items-center transition-all">
@@ -40,31 +73,13 @@ export const CreateDrop = () => {
                         placeholder="Type a name"
                     ></input>
                     <button
-                        disabled={
-                            name.length === 0 ||
-                            loading ||
-                            status !== "connected"
-                        }
+                        disabled={name.length === 0 || loading || !peer}
                         className="btn btn-elevated"
                         data-testid="create-space"
                         onClick={() => {
-                            if (status !== "connected") {
-                                return;
-                            }
-                            peer.open(
-                                new Files({
-                                    id: new Uint8Array(32),
-                                    name,
-                                    rootKey: peer.identity.publicKey,
-                                }),
-                                { existing: "reuse" }
-                            )
+                            createSpace(name)
                                 .then((f) => {
-                                    forceUpdate();
                                     return f;
-                                })
-                                .then((db) => {
-                                    navigate(getDropAreaPath(db));
                                 })
                                 .catch((error) => {
                                     console.error(

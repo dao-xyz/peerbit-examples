@@ -135,6 +135,57 @@ export const Drop = () => {
         }
     };
 
+    useEffect(() => {
+        const testWindow = window as Window & {
+            __peerbitFileShareTestHooks?: {
+                setReplicationRole: (
+                    roleOptions: ReplicationOptions
+                ) => Promise<void>;
+                getDiagnostics: () => Promise<Record<string, unknown>>;
+            };
+        };
+        if (!files.program || files.program.closed) {
+            delete testWindow.__peerbitFileShareTestHooks;
+            return;
+        }
+        testWindow.__peerbitFileShareTestHooks = {
+            setReplicationRole: async (roleOptions) => {
+                saveRoleLocalStorage(files.program, JSON.stringify(roleOptions));
+                setRole(roleOptions ? "replicator" : "observer");
+                await updateRole(roleOptions);
+            },
+            getDiagnostics: async () => {
+                const replicators = await files.program.files.log
+                    .getReplicators()
+                    .catch(() => undefined);
+                return {
+                    programAddress: files.program?.address ?? null,
+                    programClosed: files.program?.closed ?? null,
+                    peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
+                    replicatorCount:
+                        replicators && typeof replicators.size === "number"
+                            ? replicators.size
+                            : null,
+                    listCount: list.length,
+                    replicationSetSize: replicationSet.size,
+                    isHost: isHost ?? null,
+                    left,
+                };
+            },
+        };
+        return () => {
+            delete testWindow.__peerbitFileShareTestHooks;
+        };
+    }, [
+        files.program?.address,
+        files.program?.closed,
+        isHost,
+        left,
+        list.length,
+        peer?.identity?.publicKey,
+        replicationSet.size,
+    ]);
+
     useDebouncedEffect(
         () => {
             const limitSizeMB = Number(limitStorageString);
