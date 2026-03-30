@@ -59,22 +59,22 @@
     },
     "pnpm": {
         "overrides": {
-            "@peerbit/canonical-client": "1.1.17",
-            "@peerbit/canonical-host": "1.0.23",
+            "@peerbit/canonical-client": "1.1.19",
+            "@peerbit/canonical-host": "1.0.25",
             "@peerbit/crypto": "3.1.0",
-            "@peerbit/document": "13.0.21",
-            "@peerbit/program": "6.0.15",
-            "@peerbit/shared-log": "13.0.21",
-            "@peerbit/stream-interface": "6.0.6",
-            "@peerbit/trusted-network": "6.0.20",
-            "peerbit": "5.2.4",
+            "@peerbit/document": "13.0.22",
+            "@peerbit/program": "6.0.16",
+            "@peerbit/shared-log": "13.0.22",
+            "@peerbit/stream-interface": "6.0.7",
+            "@peerbit/trusted-network": "6.0.22",
+            "peerbit": "5.2.5",
             "libsodium": "0.7.15",
             "libsodium-wrappers": "0.7.15"
         }
     },
     "devDependencies": {
         "@changesets/cli": "^2.29.7",
-        "@peerbit/stream-interface": "6.0.6",
+        "@peerbit/stream-interface": "6.0.7",
         "@testing-library/dom": "10.4.1",
         "@testing-library/react": "16.3.0",
         "@types/chai": "^4.3.18",
