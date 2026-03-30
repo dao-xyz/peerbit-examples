@@ -43,48 +43,53 @@ jobs:
                   node --input-type=commonjs <<'NODE'
                   const fs = require("node:fs");
 
-                  const token = process.env.GITHUB_TOKEN;
-                  const repo = process.env.GITHUB_REPOSITORY;
-                  const title = "File Share Benchmark Coordination";
+                  (async () => {
+                    const token = process.env.GITHUB_TOKEN;
+                    const repo = process.env.GITHUB_REPOSITORY;
+                    const title = "File Share Benchmark Coordination";
 
-                  const request = async (url, init = {}) => {
-                    const response = await fetch(url, {
-                      ...init,
-                      headers: {
-                        Accept: "application/vnd.github+json",
-                        Authorization: `Bearer ${token}`,
-                        "X-GitHub-Api-Version": "2022-11-28",
-                        ...(init.headers || {}),
-                      },
-                    });
-                    if (!response.ok) {
-                      throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
-                    }
-                    return await response.json();
-                  };
-
-                  const search = await request(
-                    `https://api.github.com/search/issues?q=${encodeURIComponent(`repo:${repo} is:issue "${title}" in:title`)}`
-                  );
-                  const existing = search.items.find((item) => item.title === title);
-                  let issueNumber = existing?.number;
-
-                  if (!issueNumber) {
-                    const created = await request(
-                      `https://api.github.com/repos/${repo}/issues`,
-                      {
-                        method: "POST",
-                        body: JSON.stringify({
-                          title,
-                          body:
-                            "This issue is used by the on-demand two-runner file-share benchmark workflow as a coordination channel. Each benchmark run posts run-id scoped comments here.",
-                        }),
+                    const request = async (url, init = {}) => {
+                      const response = await fetch(url, {
+                        ...init,
+                        headers: {
+                          Accept: "application/vnd.github+json",
+                          Authorization: `Bearer ${token}`,
+                          "X-GitHub-Api-Version": "2022-11-28",
+                          ...(init.headers || {}),
+                        },
+                      });
+                      if (!response.ok) {
+                        throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
                       }
-                    );
-                    issueNumber = created.number;
-                  }
+                      return await response.json();
+                    };
 
-                  fs.appendFileSync(process.env.GITHUB_OUTPUT, `issue_number=${issueNumber}\n`);
+                    const search = await request(
+                      `https://api.github.com/search/issues?q=${encodeURIComponent(`repo:${repo} is:issue "${title}" in:title`)}`
+                    );
+                    const existing = search.items.find((item) => item.title === title);
+                    let issueNumber = existing?.number;
+
+                    if (!issueNumber) {
+                      const created = await request(
+                        `https://api.github.com/repos/${repo}/issues`,
+                        {
+                          method: "POST",
+                          body: JSON.stringify({
+                            title,
+                            body:
+                              "This issue is used by the on-demand two-runner file-share benchmark workflow as a coordination channel. Each benchmark run posts run-id scoped comments here.",
+                          }),
+                        }
+                      );
+                      issueNumber = created.number;
+                    }
+
+                    fs.appendFileSync(process.env.GITHUB_OUTPUT, `issue_number=${issueNumber}\n`);
+                  })().catch((error) => {
+                    console.error(error);
+                    process.exit(1);
+                  });
                   NODE
 
     writer:
