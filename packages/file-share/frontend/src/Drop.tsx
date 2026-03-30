@@ -127,6 +127,8 @@ export const Drop = () => {
             return;
         }
 
+        files.program.persistChunkReads = roleOptions !== false;
+
         // console.log("X", files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]?.max)
         saveRoleLocalStorage(files.program, JSON.stringify(roleOptions)); // Save role in localstorage for next time
         await files.program.files.log.replicate(false);
@@ -161,6 +163,7 @@ export const Drop = () => {
                 return {
                     programAddress: files.program?.address ?? null,
                     programClosed: files.program?.closed ?? null,
+                    persistChunkReads: files.program?.persistChunkReads ?? null,
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
                     replicatorCount:
                         replicators && typeof replicators.size === "number"
