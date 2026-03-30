@@ -13,6 +13,22 @@ const waitForTestHooks = async (page: Page) => {
     );
 };
 
+const seedReplicationRole = async (
+    page: Page,
+    address: string,
+    role: unknown
+) => {
+    await page.addInitScript(
+        ({ shareAddress, roleOptions }) => {
+            window.localStorage.setItem(
+                `${shareAddress}-role`,
+                JSON.stringify(roleOptions)
+            );
+        },
+        { shareAddress: address, roleOptions: role }
+    );
+};
+
 const setReplicationRole = async (page: Page, role: unknown) => {
     await page.evaluate(async (roleOptions) => {
         const hooks = (window as any).__peerbitFileShareTestHooks;
@@ -34,7 +50,7 @@ const getDiagnostics = async (page: Page) => {
 };
 
 test.describe("file-share observer role", () => {
-    test("observer mode disables persistent chunk reads", async ({
+    test("observer mode disables persistent chunk reads on first open", async ({
         browser,
         baseURL,
     }) => {
@@ -57,10 +73,13 @@ test.describe("file-share observer role", () => {
                 `observer-role-space-${Date.now()}`
             );
 
+            const shareAddress = new URL(shareUrl).hash.replace(/^#\/s\//, "");
+            if (!shareAddress) {
+                throw new Error(`Failed to derive share address from ${shareUrl}`);
+            }
+            await seedReplicationRole(reader, shareAddress, false);
             await reader.goto(shareUrl, { waitUntil: "domcontentloaded" });
             await waitForTestHooks(reader);
-
-            await setReplicationRole(reader, false);
 
             await expect
                 .poll(async () => {
@@ -68,6 +87,16 @@ test.describe("file-share observer role", () => {
                     return diagnostics.persistChunkReads;
                 })
                 .toBe(false);
+
+            await setReplicationRole(reader, {
+                limits: { cpu: { max: 1 } },
+            });
+            await expect
+                .poll(async () => {
+                    const diagnostics = await getDiagnostics(reader);
+                    return diagnostics.persistChunkReads;
+                })
+                .toBe(true);
         } finally {
             await writerContext.close().catch(() => {});
             await readerContext.close().catch(() => {});
