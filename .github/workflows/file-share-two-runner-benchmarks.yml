@@ -1,0 +1,274 @@
+name: File Share Two-Runner Benchmarks
+
+on:
+    workflow_dispatch:
+        inputs:
+            file_mb:
+                description: File size in MiB
+                required: true
+                type: number
+                default: 512
+            base_url:
+                description: Target file-share deployment
+                required: true
+                type: string
+                default: https://files.dao.xyz
+            min_upload_mbps:
+                description: Fail if upload throughput is below this value (0 disables)
+                required: true
+                type: number
+                default: 0
+            min_download_mbps:
+                description: Fail if download throughput is below this value (0 disables)
+                required: true
+                type: number
+                default: 0
+
+permissions:
+    contents: read
+    issues: write
+
+jobs:
+    coordinator:
+        runs-on: ubuntu-22.04
+        outputs:
+            issue_number: ${{ steps.issue.outputs.issue_number }}
+        steps:
+            - name: Ensure coordination issue
+              id: issue
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+                  GITHUB_REPOSITORY: ${{ github.repository }}
+              run: |
+                  node <<'NODE'
+                  const fs = require("node:fs");
+
+                  const token = process.env.GITHUB_TOKEN;
+                  const repo = process.env.GITHUB_REPOSITORY;
+                  const title = "File Share Benchmark Coordination";
+
+                  const request = async (url, init = {}) => {
+                    const response = await fetch(url, {
+                      ...init,
+                      headers: {
+                        Accept: "application/vnd.github+json",
+                        Authorization: `Bearer ${token}`,
+                        "X-GitHub-Api-Version": "2022-11-28",
+                        ...(init.headers || {}),
+                      },
+                    });
+                    if (!response.ok) {
+                      throw new Error(`GitHub API ${response.status}: ${await response.text()}`);
+                    }
+                    return await response.json();
+                  };
+
+                  const search = await request(
+                    `https://api.github.com/search/issues?q=${encodeURIComponent(`repo:${repo} is:issue "${title}" in:title`)}`
+                  );
+                  const existing = search.items.find((item) => item.title === title);
+                  let issueNumber = existing?.number;
+
+                  if (!issueNumber) {
+                    const created = await request(
+                      `https://api.github.com/repos/${repo}/issues`,
+                      {
+                        method: "POST",
+                        body: JSON.stringify({
+                          title,
+                          body:
+                            "This issue is used by the on-demand two-runner file-share benchmark workflow as a coordination channel. Each benchmark run posts run-id scoped comments here.",
+                        }),
+                      }
+                    );
+                    issueNumber = created.number;
+                  }
+
+                  fs.appendFileSync(process.env.GITHUB_OUTPUT, `issue_number=${issueNumber}\n`);
+                  NODE
+
+    writer:
+        runs-on: ubuntu-22.04
+        needs: coordinator
+        timeout-minutes: 90
+        concurrency:
+            group: file-share-two-runner-writer-${{ github.ref_name }}-${{ inputs.file_mb }}
+            cancel-in-progress: false
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Install Playwright Chromium
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Run writer benchmark
+              working-directory: packages/file-share/frontend
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+                  GITHUB_REPOSITORY: ${{ github.repository }}
+                  COORDINATION_ISSUE: ${{ needs.coordinator.outputs.issue_number }}
+                  PW_BASE_URL: ${{ inputs.base_url }}
+                  PW_FILE_MB: ${{ inputs.file_mb }}
+                  PW_RESULT_FILE: ${{ github.workspace }}/bench-results/writer.json
+              run: |
+                  mkdir -p "$GITHUB_WORKSPACE/bench-results"
+                  node tests/two-runner.bench.mjs writer
+
+            - name: Upload writer artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: file-share-two-runner-writer-${{ github.run_id }}
+                  path: bench-results
+
+    reader:
+        runs-on: ubuntu-22.04
+        needs: coordinator
+        timeout-minutes: 90
+        concurrency:
+            group: file-share-two-runner-reader-${{ github.ref_name }}-${{ inputs.file_mb }}
+            cancel-in-progress: false
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Install Playwright Chromium
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Run reader benchmark
+              working-directory: packages/file-share/frontend
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+                  GITHUB_REPOSITORY: ${{ github.repository }}
+                  COORDINATION_ISSUE: ${{ needs.coordinator.outputs.issue_number }}
+                  PW_BASE_URL: ${{ inputs.base_url }}
+                  PW_FILE_MB: ${{ inputs.file_mb }}
+                  PW_RESULT_FILE: ${{ github.workspace }}/bench-results/reader.json
+              run: |
+                  mkdir -p "$GITHUB_WORKSPACE/bench-results"
+                  node tests/two-runner.bench.mjs reader
+
+            - name: Upload reader artifacts
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: file-share-two-runner-reader-${{ github.run_id }}
+                  path: bench-results
+
+    summarize:
+        runs-on: ubuntu-22.04
+        needs:
+            - coordinator
+            - writer
+            - reader
+        if: always()
+        steps:
+            - name: Download writer artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: file-share-two-runner-writer-${{ github.run_id }}
+                  path: writer-results
+
+            - name: Download reader artifacts
+              uses: actions/download-artifact@v4
+              with:
+                  name: file-share-two-runner-reader-${{ github.run_id }}
+                  path: reader-results
+
+            - name: Summarize results
+              env:
+                  BENCH_FILE_MB: ${{ inputs.file_mb }}
+                  BENCH_BASE_URL: ${{ inputs.base_url }}
+                  BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
+                  BENCH_MIN_DOWNLOAD_MBPS: ${{ inputs.min_download_mbps }}
+              run: |
+                  node <<'NODE'
+                  const fs = require("node:fs");
+                  const path = require("node:path");
+
+                  const load = (dir, file) =>
+                    JSON.parse(fs.readFileSync(path.join(dir, file), "utf8"));
+
+                  const writer = load("writer-results", "writer.json");
+                  const reader = load("reader-results", "reader.json");
+
+                  const lines = [
+                    "# File-share two-runner benchmark",
+                    "",
+                    `- Base URL: \`${process.env.BENCH_BASE_URL}\``,
+                    `- File size: \`${process.env.BENCH_FILE_MB} MiB\``,
+                    `- Writer status: \`${writer.status}\``,
+                    `- Reader status: \`${reader.status}\``,
+                  ];
+
+                  if (writer.status === "passed") {
+                    lines.push(
+                      `- Upload: \`${(Number(writer.uploadDurationMs) / 1000).toFixed(2)}s\` at \`${Number(writer.uploadMbps).toFixed(2)} Mbps\``
+                    );
+                  } else {
+                    lines.push(`- Writer failure: \`${writer.failure?.message || "unknown"}\``);
+                  }
+
+                  if (reader.status === "passed") {
+                    lines.push(
+                      `- Reader listing wait: \`${(Number(reader.listingWaitMs) / 1000).toFixed(2)}s\``,
+                      `- Download: \`${(Number(reader.downloadDurationMs) / 1000).toFixed(2)}s\` at \`${Number(reader.downloadMbps).toFixed(2)} Mbps\``
+                    );
+                  } else {
+                    lines.push(`- Reader failure: \`${reader.failure?.message || "unknown"}\``);
+                  }
+
+                  if (process.env.GITHUB_STEP_SUMMARY) {
+                    fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, lines.join("\n") + "\n");
+                  } else {
+                    console.log(lines.join("\n"));
+                  }
+
+                  if (writer.status !== "passed" || reader.status !== "passed") {
+                    throw new Error("Two-runner benchmark did not complete successfully");
+                  }
+
+                  const minUpload = Number(process.env.BENCH_MIN_UPLOAD_MBPS || "0");
+                  const minDownload = Number(process.env.BENCH_MIN_DOWNLOAD_MBPS || "0");
+
+                  if (minUpload > 0 && Number(writer.uploadMbps) < minUpload) {
+                    throw new Error(
+                      `Upload throughput ${Number(writer.uploadMbps).toFixed(2)} Mbps is below threshold ${minUpload} Mbps`
+                    );
+                  }
+                  if (minDownload > 0 && Number(reader.downloadMbps) < minDownload) {
+                    throw new Error(
+                      `Download throughput ${Number(reader.downloadMbps).toFixed(2)} Mbps is below threshold ${minDownload} Mbps`
+                    );
+                  }
+                  NODE
