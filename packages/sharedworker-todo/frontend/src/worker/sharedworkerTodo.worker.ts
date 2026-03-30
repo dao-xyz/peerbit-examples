@@ -3,15 +3,24 @@
 import { circuitRelayTransport } from "@libp2p/circuit-relay-v2";
 import { webSockets } from "@libp2p/websockets";
 import { installSharedWorkerHost } from "@peerbit/canonical-host/shared-worker";
+import type { CreateInstanceOptions } from "peerbit";
 import {
     documentModule,
     registerDocumentType,
 } from "@peerbit/document-proxy/host";
 import { TodoItem } from "../todo/model";
 
-const relayTransport = circuitRelayTransport({}) as unknown as ReturnType<
-    typeof webSockets
->;
+type SharedWorkerTransport = NonNullable<
+    Extract<
+        NonNullable<
+            Extract<CreateInstanceOptions, { libp2p?: unknown }>["libp2p"]
+        >,
+        { transports?: unknown[] }
+    >["transports"]
+>[number];
+
+const wsTransport = webSockets({}) as unknown as SharedWorkerTransport;
+const relayTransport = circuitRelayTransport({}) as unknown as SharedWorkerTransport;
 
 // Make the document type available to @peerbit/document-proxy.
 registerDocumentType(TodoItem);
@@ -25,7 +34,7 @@ installSharedWorkerHost({
                 // A SharedWorker is the single canonical host for all tabs; no inbound listening needed.
                 listen: [],
             },
-            transports: [webSockets({}), relayTransport],
+            transports: [wsTransport, relayTransport],
         },
     },
 });

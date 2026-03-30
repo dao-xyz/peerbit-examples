@@ -36,9 +36,9 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "13.0.21",
-        "@peerbit/trusted-network": "^6.0.20",
-        "peerbit": "^5.2.4",
+        "@peerbit/document": "13.0.22",
+        "@peerbit/trusted-network": "^6.0.22",
+        "peerbit": "^5.2.5",
         "uuid": "^10.0.0"
     }
 }
