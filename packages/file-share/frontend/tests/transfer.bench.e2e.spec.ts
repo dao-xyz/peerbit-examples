@@ -66,25 +66,20 @@ const createSpaceFromHook = async (page: Page, name: string) => {
     }, name);
 };
 
-const waitForTestHooks = async (page: Page) => {
-    await page.waitForFunction(
-        () => Boolean((window as any).__peerbitFileShareTestHooks?.setReplicationRole),
-        undefined,
-        { timeout: 180_000 }
-    );
-};
-
-const applyReplicationRole = async (
+const seedReplicationRole = async (
     page: Page,
+    address: string,
     role: unknown
 ) => {
-    await page.evaluate(async (roleOptions) => {
-        const hooks = (window as any).__peerbitFileShareTestHooks;
-        if (!hooks?.setReplicationRole) {
-            throw new Error("Missing __peerbitFileShareTestHooks.setReplicationRole");
-        }
-        await hooks.setReplicationRole(roleOptions);
-    }, role);
+    await page.addInitScript(
+        ({ shareAddress, roleOptions }) => {
+            window.localStorage.setItem(
+                `${shareAddress}-role`,
+                JSON.stringify(roleOptions)
+            );
+        },
+        { shareAddress: address, roleOptions: role }
+    );
 };
 
 const toMiBPerSecond = (bytes: number, durationMs: number) =>
@@ -148,6 +143,8 @@ test.describe("file-share transfer benchmark", () => {
             );
             const shareUrl = new URL(entryUrl);
             shareUrl.hash = `/s/${address}`;
+            logStage("seed-reader-role");
+            await seedReplicationRole(reader, address, false);
 
             logStage("open-reader", { shareUrl: shareUrl.toString() });
             logStage("open-writer-page");
@@ -155,11 +152,6 @@ test.describe("file-share transfer benchmark", () => {
             logStage("writer-page-ready");
             await reader.goto(shareUrl.toString(), { waitUntil: "domcontentloaded" });
             logStage("reader-page-ready");
-            logStage("wait-for-test-hooks");
-            await Promise.all([waitForTestHooks(writer), waitForTestHooks(reader)]);
-            logStage("apply-reader-role");
-            await applyReplicationRole(reader, false);
-            logStage("reader-seed-disabled");
 
             logStage("wait-for-input");
             await writer.locator("#imgupload").waitFor({
