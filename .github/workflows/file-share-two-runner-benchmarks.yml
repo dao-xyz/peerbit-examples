@@ -40,7 +40,7 @@ jobs:
                   GITHUB_TOKEN: ${{ github.token }}
                   GITHUB_REPOSITORY: ${{ github.repository }}
               run: |
-                  node <<'NODE'
+                  node --input-type=commonjs <<'NODE'
                   const fs = require("node:fs");
 
                   const token = process.env.GITHUB_TOKEN;
@@ -212,7 +212,7 @@ jobs:
                   BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
                   BENCH_MIN_DOWNLOAD_MBPS: ${{ inputs.min_download_mbps }}
               run: |
-                  node <<'NODE'
+                  node --input-type=commonjs <<'NODE'
                   const fs = require("node:fs");
                   const path = require("node:path");
 
