@@ -391,23 +391,54 @@ export class LargeFile extends AbstractFile {
         );
     }
 
+    private async waitUntilReady(
+        files: Files,
+        properties?: FileReadOptions
+    ): Promise<LargeFile> {
+        if (this.ready) {
+            return this;
+        }
+
+        const totalTimeout =
+            properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
+        const deadline = Date.now() + totalTimeout;
+        const attemptTimeout = Math.min(totalTimeout, 5_000);
+
+        while (Date.now() < deadline) {
+            const latest = await files.resolveById(this.id, {
+                timeout: attemptTimeout,
+                replicate: true,
+            });
+
+            if (latest instanceof LargeFile && latest.ready) {
+                return latest;
+            }
+
+            await sleep(250);
+        }
+
+        throw new Error(
+            `File ${this.id} is still uploading after waiting ${Math.round(
+                totalTimeout / 1000
+            )} seconds`
+        );
+    }
+
     async *streamFile(
         files: Files,
         properties?: FileReadOptions
     ): AsyncIterable<Uint8Array> {
-        if (!this.ready) {
-            throw new Error("File is still uploading");
-        }
+        const resolvedFile = await this.waitUntilReady(files, properties);
 
         properties?.progress?.(0);
 
         let processed = 0;
-        const hasher = this.finalHash ? new SHA256() : undefined;
+        const hasher = resolvedFile.finalHash ? new SHA256() : undefined;
         const knownChunks = files.persistChunkReads
             ? new Map<number, TinyFile>()
             : new Map(
                   (
-                      await this.fetchChunks(files, {
+                      await resolvedFile.fetchChunks(files, {
                           timeout:
                               properties?.timeout ??
                               LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS,
@@ -431,16 +462,22 @@ export class LargeFile extends AbstractFile {
             for (
                 let index = 0;
                 index <
-                Math.min(this.chunkCount, LARGE_FILE_PERSISTED_READ_AHEAD);
+                Math.min(
+                    resolvedFile.chunkCount,
+                    LARGE_FILE_PERSISTED_READ_AHEAD
+                );
                 index++
             ) {
                 void resolveChunkWithReadAhead(index);
             }
         }
 
-        for (let index = 0; index < this.chunkCount; index++) {
+        for (let index = 0; index < resolvedFile.chunkCount; index++) {
             const nextIndex = index + LARGE_FILE_PERSISTED_READ_AHEAD;
-            if (files.persistChunkReads && nextIndex < this.chunkCount) {
+            if (
+                files.persistChunkReads &&
+                nextIndex < resolvedFile.chunkCount
+            ) {
                 void resolveChunkWithReadAhead(nextIndex);
             }
             const chunkFile = files.persistChunkReads
@@ -449,7 +486,7 @@ export class LargeFile extends AbstractFile {
             inFlightChunks.delete(index);
             if (!chunkFile) {
                 throw new Error(
-                    `Failed to resolve chunk ${index + 1}/${this.chunkCount} for file ${this.id}`
+                    `Failed to resolve chunk ${index + 1}/${resolvedFile.chunkCount} for file ${resolvedFile.id}`
                 );
             }
             const chunk = await chunkFile.getFile(files, {
@@ -459,12 +496,15 @@ export class LargeFile extends AbstractFile {
             hasher?.update(chunk);
             processed += chunk.byteLength;
             properties?.progress?.(
-                processed / Math.max(Number(this.size), 1)
+                processed / Math.max(Number(resolvedFile.size), 1)
             );
             yield chunk;
         }
 
-        if (hasher && toBase64(hasher.digest()) !== this.finalHash) {
+        if (
+            hasher &&
+            toBase64(hasher.digest()) !== resolvedFile.finalHash
+        ) {
             throw new Error("File hash does not match the expected content");
         }
     }

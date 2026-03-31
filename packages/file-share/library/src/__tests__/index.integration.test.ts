@@ -464,6 +464,64 @@ describe("index", () => {
             await addPromise;
         });
 
+        it("waits for ready manifests before reading early-discovered large files", async () => {
+            const filestore = await peer.open(new Files());
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const fileName = "read-after-ready";
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let uploadCompleted = false;
+            let uploadId: string | undefined;
+
+            (filestore.files as any).put = async (entry: unknown) => {
+                if (entry instanceof LargeFile && !entry.ready) {
+                    uploadId = entry.id;
+                }
+                if (entry instanceof TinyFile && entry.parentId != null) {
+                    await delay(250);
+                }
+                return originalPut(entry as never);
+            };
+
+            const addPromise = filestore
+                .add(fileName, largeFile)
+                .finally(() => {
+                    uploadCompleted = true;
+                });
+
+            let discoveredFile: LargeFile | undefined;
+            await waitForResolved(
+                async () => {
+                    expect(uploadId).to.be.ok;
+                    const match = await filestoreReader.resolveById(uploadId!, {
+                        replicate: true,
+                        timeout: 1_000,
+                    });
+                    expect(match).to.be.instanceOf(LargeFile);
+                    expect((match as LargeFile).ready).to.be.false;
+                    discoveredFile = match as LargeFile;
+                },
+                { timeout: 30_000, delayInterval: 200 }
+            );
+
+            const streamedChunks: Uint8Array[] = [];
+            await discoveredFile!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            await addPromise;
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
         it("replicates", async () => {
             const filestore = await peer.open(new Files());
 
