@@ -125,6 +125,7 @@ const LARGE_FILE_TARGET_CHUNK_COUNT = 1024;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT - 256 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
+const LARGE_FILE_PERSISTED_READ_AHEAD = 16;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
 
 const roundUpTo = (value: number, multiple: number) =>
@@ -413,13 +414,39 @@ export class LargeFile extends AbstractFile {
                       })
                   ).map((chunk) => [chunk.index || 0, chunk])
               );
+        const inFlightChunks = new Map<number, Promise<TinyFile>>();
+        const resolveChunkWithReadAhead = (index: number) => {
+            const cached = inFlightChunks.get(index);
+            if (cached) {
+                return cached;
+            }
+            const pending = this.resolveChunk(files, index, knownChunks, {
+                timeout: properties?.timeout,
+            });
+            inFlightChunks.set(index, pending);
+            return pending;
+        };
+
+        if (files.persistChunkReads) {
+            for (
+                let index = 0;
+                index <
+                Math.min(this.chunkCount, LARGE_FILE_PERSISTED_READ_AHEAD);
+                index++
+            ) {
+                void resolveChunkWithReadAhead(index);
+            }
+        }
 
         for (let index = 0; index < this.chunkCount; index++) {
+            const nextIndex = index + LARGE_FILE_PERSISTED_READ_AHEAD;
+            if (files.persistChunkReads && nextIndex < this.chunkCount) {
+                void resolveChunkWithReadAhead(nextIndex);
+            }
             const chunkFile = files.persistChunkReads
-                ? await this.resolveChunk(files, index, knownChunks, {
-                      timeout: properties?.timeout,
-                  })
+                ? await resolveChunkWithReadAhead(index)
                 : knownChunks.get(index);
+            inFlightChunks.delete(index);
             if (!chunkFile) {
                 throw new Error(
                     `Failed to resolve chunk ${index + 1}/${this.chunkCount} for file ${this.id}`
