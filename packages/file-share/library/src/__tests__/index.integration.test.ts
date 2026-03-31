@@ -176,11 +176,11 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("streams large downloads without parentId chunk searches when chunk reads are persisted", async () => {
+        it("pipelines persisted chunk reads without using parentId searches", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
-                "streamed download without parentId search",
+                "streamed download with persisted read-ahead",
                 largeFile
             );
 
@@ -194,7 +194,12 @@ describe("index", () => {
 
             const originalSearch =
                 filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
             let parentIdSearches = 0;
+            let directChunkGets = 0;
+            let inflightChunkGets = 0;
+            let maxInflightChunkGets = 0;
 
             (filestoreReader.files.index as any).search = async (
                 request: { query: unknown | unknown[] },
@@ -216,6 +221,23 @@ describe("index", () => {
                 return originalSearch(request as never, options as never);
             };
 
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id.startsWith(`${fileId}:`)) {
+                    directChunkGets++;
+                    inflightChunkGets++;
+                    maxInflightChunkGets = Math.max(
+                        maxInflightChunkGets,
+                        inflightChunkGets
+                    );
+                    await delay(25);
+                    inflightChunkGets--;
+                }
+                return originalGet(id as never, options as never);
+            };
+
             const streamedChunks: Uint8Array[] = [];
 
             await file!.writeFile(filestoreReader, {
@@ -225,6 +247,8 @@ describe("index", () => {
             });
 
             expect(parentIdSearches).to.eq(0);
+            expect(directChunkGets).to.be.greaterThan(1);
+            expect(maxInflightChunkGets).to.be.greaterThan(1);
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
