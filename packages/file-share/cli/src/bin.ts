@@ -11,6 +11,7 @@ import path from "path";
 import os from "os";
 import { multiaddr } from "@multiformats/multiaddr";
 import { createPathSource, createPathWriter } from "./io.js";
+import { formatShareUrl, parseShareReference } from "./share-ref.js";
 
 function ensureDirectoryExistence(filePath) {
     const dirname = path.dirname(filePath);
@@ -50,6 +51,11 @@ const CLI_REPLICATION_ARGS = {
         },
     },
 } as const;
+type CliProgramArgs =
+    | typeof CLI_REPLICATION_ARGS
+    | {
+          replicate: false;
+      };
 
 const formatDuration = (ms: number) => {
     if (ms < 1_000) {
@@ -176,6 +182,14 @@ const ID = new Uint8Array([
     253, 92, 76, 146, 158, 46, 212, 14, 162, 30, 94, 1, 134, 99, 174,
 ]);
 
+const resolveSpaceAddress = (reference?: string) => {
+    const parsed = parseShareReference(reference);
+    if (!parsed) {
+        return undefined;
+    }
+    return parsed;
+};
+
 const cli = async (args?: string[]) => {
     if (!args) {
         const { hideBin } = await import("yargs/helpers");
@@ -190,20 +204,35 @@ const cli = async (args?: string[]) => {
     );
 
     const peerbit = await Peerbit.create({ directory });
-    let files: Files | undefined;
-    const openFiles = async (
-        programArgs:
-            | typeof CLI_REPLICATION_ARGS
-            | {
-                  replicate: false;
-              } = CLI_REPLICATION_ARGS
+    const openLegacyFiles = async (
+        programArgs: CliProgramArgs = CLI_REPLICATION_ARGS
+    ) =>
+        peerbit.open(new Files({ id: ID }), {
+            args: programArgs,
+        });
+    const openShareFiles = async (
+        programArgs: CliProgramArgs = CLI_REPLICATION_ARGS,
+        properties?: {
+            share?: string;
+            shareName?: string;
+        }
     ) => {
-        if (!files) {
-            files = await peerbit.open(new Files({ id: ID }), {
+        if (properties?.share) {
+            return peerbit.open<Files>(properties.share, {
                 args: programArgs,
             });
         }
-        return files;
+
+        return peerbit.open(
+            new Files({
+                name: properties?.shareName,
+                rootKey: peerbit.identity.publicKey,
+            }),
+            {
+                existing: "reuse",
+                args: programArgs,
+            }
+        );
     };
 
     // TODO fix types
@@ -232,19 +261,64 @@ const cli = async (args?: string[]) => {
                     defaultDescription: "Peerbit bootstrap addresses",
                     default: undefined,
                 });
+                yargs.option("space", {
+                    alias: ["share", "address"],
+                    type: "string",
+                    describe:
+                        "Existing share address or share URL. If omitted, a new share is created.",
+                });
+                yargs.option("share-url-base", {
+                    type: "string",
+                    describe:
+                        "Base URL used when printing the share link for newly created spaces.",
+                    default: "https://files.dao.xyz",
+                });
+                yargs.option("legacy-global", {
+                    type: "boolean",
+                    describe:
+                        "Use the old global file-share space instead of creating or opening a real share address.",
+                    default: false,
+                });
+                yargs.option("space-name", {
+                    type: "string",
+                    describe:
+                        "Optional name for a newly created share. Defaults to the uploaded file name.",
+                });
                 return yargs;
             },
 
             handler: async (args) => {
                 await connectToNetwork(peerbit, args.peer);
 
-                const files = await openFiles();
+                const shareAddress = resolveSpaceAddress(args.space);
+                if (args.legacyGlobal && shareAddress) {
+                    throw new Error(
+                        "--legacy-global cannot be combined with --space"
+                    );
+                }
+                const files = args.legacyGlobal
+                    ? await openLegacyFiles()
+                    : await openShareFiles(CLI_REPLICATION_ARGS, {
+                          share: shareAddress,
+                          shareName:
+                              args.spaceName || path.basename(args.path),
+                      });
                 const source = await createPathSource(args.path);
                 const id = await files.addSource(path.basename(args.path), source);
+                const fetchCommand = args.legacyGlobal
+                    ? `please get ${id} --legacy-global`
+                    : `please get ${id} --space ${files.address}`;
+                const shareOutput = args.legacyGlobal
+                    ? ""
+                    : `Share: ${chalk.green(
+                          files.address
+                      )}\nShare URL: ${chalk.green(
+                          formatShareUrl(files.address, args.shareUrlBase)
+                      )}\n`;
                 console.log(
-                    `Id: ${chalk.green(
+                    `${shareOutput}Id: ${chalk.green(
                         id
-                    )}\n\nFile can now be fetched with:\n\nplease get ${id}\n\nThis process will keep seeding until you stop it.`
+                    )}\n\nFile can now be fetched with:\n\n${fetchCommand}\n\nThis process will keep seeding until you stop it.`
                 );
                 await waitForTermination(async () => {
                     await stopPeerbitForCli(peerbit);
@@ -286,17 +360,56 @@ const cli = async (args?: string[]) => {
                         "Open the file-share as a replicator before fetching, so chunk reads are persisted locally like the browser app's default mode.",
                     default: false,
                 });
+                yargs.option("space", {
+                    alias: ["share", "address"],
+                    type: "string",
+                    describe:
+                        "Share address or share URL created by the browser app or `please put`.",
+                });
+                yargs.option("legacy-global", {
+                    type: "boolean",
+                    describe:
+                        "Use the old global file-share space. Without this flag, `please get` prefers explicit per-share reads via --space.",
+                    default: false,
+                });
                 return yargs;
             },
 
             handler: async (args) => {
                 await connectToNetwork(peerbit, args.peer);
 
-                const files = await openFiles(
-                    args.replicate ? CLI_REPLICATION_ARGS : { replicate: false }
-                );
+                const shareAddress = resolveSpaceAddress(args.space);
+                if (args.legacyGlobal && shareAddress) {
+                    throw new Error(
+                        "--legacy-global cannot be combined with --space"
+                    );
+                }
+
+                const files = shareAddress
+                    ? await openShareFiles(
+                          args.replicate
+                              ? CLI_REPLICATION_ARGS
+                              : { replicate: false },
+                          {
+                              share: shareAddress,
+                          }
+                      )
+                    : await openLegacyFiles(
+                          args.replicate
+                              ? CLI_REPLICATION_ARGS
+                              : { replicate: false }
+                      );
+                if (!shareAddress && !args.legacyGlobal) {
+                    console.warn(
+                        chalk.yellow(
+                            "No --space provided, falling back to the legacy global file-share. This path does not match the browser app's per-share model."
+                        )
+                    );
+                }
                 console.log(
-                    `Fetching file with id: ${args.id} (${args.replicate ? "replicator" : "observer"} mode)`
+                    `Fetching file with id: ${args.id} (${args.replicate ? "replicator" : "observer"} mode${
+                        shareAddress ? `, share ${shareAddress}` : ", legacy global space"
+                    })`
                 );
                 let file;
                 const lookupStartedAt = Date.now();
