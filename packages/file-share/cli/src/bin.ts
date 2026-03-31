@@ -51,6 +51,26 @@ const CLI_REPLICATION_ARGS = {
     },
 } as const;
 
+const formatDuration = (ms: number) => {
+    if (ms < 1_000) {
+        return `${ms}ms`;
+    }
+    if (ms < 60_000) {
+        return `${(ms / 1_000).toFixed(2)}s`;
+    }
+    const minutes = Math.floor(ms / 60_000);
+    const seconds = ((ms % 60_000) / 1_000).toFixed(1);
+    return `${minutes}m${seconds}s`;
+};
+
+const formatMbps = (bytes: bigint, ms: number) => {
+    if (ms <= 0) {
+        return "n/a";
+    }
+    const megabits = (Number(bytes) * 8) / 1_000_000;
+    return `${(megabits / (ms / 1_000)).toFixed(2)} Mbps`;
+};
+
 const getDirectoryArg = (args: string[]) => {
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -260,15 +280,26 @@ const cli = async (args?: string[]) => {
                         "Peerbit bootstrap addresses",
                     default: undefined,
                 });
+                yargs.option("replicate", {
+                    type: "boolean",
+                    describe:
+                        "Open the file-share as a replicator before fetching, so chunk reads are persisted locally like the browser app's default mode.",
+                    default: false,
+                });
                 return yargs;
             },
 
             handler: async (args) => {
                 await connectToNetwork(peerbit, args.peer);
 
-                const files = await openFiles({ replicate: false });
-                console.log("Fetching file with id: " + args.id);
+                const files = await openFiles(
+                    args.replicate ? CLI_REPLICATION_ARGS : { replicate: false }
+                );
+                console.log(
+                    `Fetching file with id: ${args.id} (${args.replicate ? "replicator" : "observer"} mode)`
+                );
                 let file;
+                const lookupStartedAt = Date.now();
                 try {
                     file = await waitFor(
                         () =>
@@ -290,6 +321,7 @@ const cli = async (args?: string[]) => {
                         throw error;
                     }
                 }
+                const lookupFinishedAt = Date.now();
 
                 if (!file) {
                     console.log(
@@ -312,12 +344,27 @@ const cli = async (args?: string[]) => {
                         );
                     } else {
                         ensureDirectoryExistence(outPath);
+                        const downloadStartedAt = Date.now();
                         const writer = await createPathWriter(outPath);
                         await file.writeFile(files, writer);
+                        const downloadFinishedAt = Date.now();
+                        const sizeBytes = file.size;
+                        const lookupMs = lookupFinishedAt - lookupStartedAt;
+                        const downloadMs = downloadFinishedAt - downloadStartedAt;
+                        const totalMs = downloadFinishedAt - lookupStartedAt;
                         console.log(
                             chalk.greenBright(
                                 "File successfully saved at path: " + outPath
                             )
+                        );
+                        console.log(
+                            [
+                                `Lookup: ${formatDuration(lookupMs)}`,
+                                `Download: ${formatDuration(downloadMs)}`,
+                                `Total: ${formatDuration(totalMs)}`,
+                                `Size: ${sizeBytes} bytes`,
+                                `Throughput: ${formatMbps(sizeBytes, downloadMs)}`,
+                            ].join("\n")
                         );
                     }
                 }
