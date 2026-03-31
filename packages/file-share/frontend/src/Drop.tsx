@@ -24,6 +24,15 @@ const getRoleFromLocalStorage = (files: Files) => {
     return localStorage.getItem(files.address + "-role"); // Save role in localstorage for next time
 };
 
+const DEFAULT_REPLICATION_ROLE: ReplicationOptions = {
+    limits: { cpu: { max: 1, monitor: undefined } },
+};
+
+const parseStoredRole = (
+    serializedRole: string | null
+): ReplicationOptions | undefined =>
+    serializedRole == null ? undefined : JSON.parse(serializedRole);
+
 const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000n;
 
 type BrowserFileWriter = {
@@ -98,16 +107,20 @@ export const Drop = () => {
     const [currentRole, setCurrentRole] = useState<ReplicationOptions>(false);
     const [replicatorCount, setReplicatorCount] = useState(0);
     const [left, setLeft] = useState(false);
+    const shareAddress = params.address && decodeURIComponent(params.address);
+    const storedRole = parseStoredRole(
+        typeof window === "undefined" || !shareAddress
+            ? null
+            : window.localStorage.getItem(`${shareAddress}-role`)
+    );
 
     const files = useProgram<Files>(
         peer,
-        params.address && decodeURIComponent(params.address),
+        shareAddress,
         {
             existing: "reuse",
             args: {
-                replicate: {
-                    limits: { cpu: { max: 1, monitor: undefined } },
-                },
+                replicate: storedRole ?? DEFAULT_REPLICATION_ROLE,
             },
         }
     );
@@ -117,7 +130,9 @@ export const Drop = () => {
     const [limitStorageString, setLimitStorageString] = useState<string>("0");
     const [limitStorage, setLimitStorage] = useState<boolean>(false);
 
-    const [role, setRole] = useState<"replicator" | "observer">("replicator");
+    const [role, setRole] = useState<"replicator" | "observer">(
+        storedRole === false ? "observer" : "replicator"
+    );
     const [limitCPU, setLimitCPU] = useState<number | undefined>(1);
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
@@ -259,11 +274,11 @@ export const Drop = () => {
             const serializedRoleFromStorage = getRoleFromLocalStorage(
                 files.program
             );
-            const roleFromLocalstore: ReplicationOptions | undefined =
+            const hasStoredRole = serializedRoleFromStorage != null;
+            const roleFromLocalstore = parseStoredRole(
                 serializedRoleFromStorage
-                    ? JSON.parse(serializedRoleFromStorage)
-                    : undefined;
-            if (isTrusted && roleFromLocalstore) {
+            );
+            if (isTrusted && hasStoredRole) {
                 // by default open as replicator
                 setLimitCPU(
                     files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]
@@ -285,15 +300,11 @@ export const Drop = () => {
                 }
                 await updateRole(
                     role === "replicator"
-                        ? {
-                              limits: {
-                                  cpu: { max: 1, monitor: undefined },
-                              },
-                          }
+                        ? DEFAULT_REPLICATION_ROLE
                         : false
                 );
             }
-            updateListDebounced();
+            void updateList();
             setReplicatorCount(
                 (await files.program.files.log.getReplicators()).size
             );
@@ -337,21 +348,23 @@ export const Drop = () => {
                     .filter((x) => !x.parentId)
                     .sort((a, b) => a.name.localeCompare(b.name))
             );
-            // Get replication set
-            // TODO performance: this is not efficient
-            setReplicationSet(
-                new Set(
-                    (
-                        await files.program.files.index.search(
-                            new SearchRequest({})
-                        )
-                    ).map((x) => x.id)
-                )
-            );
-            setReplicatorCount(
-                (await files.program.files.log.getReplicators()).size
-            );
             forceUpdate();
+            void (async () => {
+                try {
+                    const [allFiles, replicators] = await Promise.all([
+                        files.program.files.index.search(new SearchRequest({})),
+                        files.program.files.log.getReplicators(),
+                    ]);
+                    setReplicationSet(new Set(allFiles.map((x) => x.id)));
+                    setReplicatorCount(replicators.size);
+                    forceUpdate();
+                } catch (error) {
+                    console.warn(
+                        "Failed to refresh replication metadata: " +
+                            error?.message
+                    );
+                }
+            })();
         } catch (error) {
             console.warn(
                 "Failed to resolve complete file list: " + error?.message
