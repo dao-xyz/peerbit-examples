@@ -59,15 +59,15 @@
     },
     "pnpm": {
         "overrides": {
-            "@peerbit/canonical-client": "1.1.19",
-            "@peerbit/canonical-host": "1.0.25",
+            "@peerbit/canonical-client": "1.1.20",
+            "@peerbit/canonical-host": "1.0.26",
             "@peerbit/crypto": "3.1.0",
-            "@peerbit/document": "13.0.22",
-            "@peerbit/program": "6.0.16",
-            "@peerbit/shared-log": "13.0.22",
+            "@peerbit/document": "13.0.23",
+            "@peerbit/program": "6.0.17",
+            "@peerbit/shared-log": "13.0.23",
             "@peerbit/stream-interface": "6.0.7",
-            "@peerbit/trusted-network": "6.0.22",
-            "peerbit": "5.2.5",
+            "@peerbit/trusted-network": "6.0.23",
+            "peerbit": "5.2.6",
             "libsodium": "0.7.15",
             "libsodium-wrappers": "0.7.15"
         }
