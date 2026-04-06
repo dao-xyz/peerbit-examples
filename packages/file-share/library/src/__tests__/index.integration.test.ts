@@ -335,6 +335,167 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
+        it("falls back to chunk-id lookups when observer chunk searches miss available chunks", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "observer download falls back to chunk-id lookups",
+                largeFile
+            );
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            let parentIdSearchCalls = 0;
+            let directChunkGets = 0;
+
+            (filestoreReader.files.index as any).search = async (
+                request: unknown,
+                options: unknown
+            ) => {
+                const results = await originalSearch(
+                    request as never,
+                    options as never
+                );
+                const chunkResults = results.filter(
+                    (result: unknown) =>
+                        result instanceof TinyFile && result.parentId === fileId
+                );
+                if (chunkResults.length === 0) {
+                    return results;
+                }
+
+                parentIdSearchCalls++;
+                return results.filter(
+                    (result: unknown) =>
+                        !(
+                            result instanceof TinyFile &&
+                            result.parentId === fileId &&
+                            result.index === 1
+                        )
+                );
+            };
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id.startsWith(`${fileId}:`)) {
+                    directChunkGets++;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(parentIdSearchCalls).to.be.greaterThan(0);
+            expect(directChunkGets).to.be.greaterThan(0);
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("avoids keep-open remote waits for observer chunk downloads", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "observer chunk reads stay stateless",
+                largeFile
+            );
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            let observedChunkGets = 0;
+            let sawKeepOpenWait = false;
+            let sawSelfInHints = false;
+            const selfHash = peer2.identity.publicKey.hashcode();
+
+            (filestoreReader.files.index as any).search = async (
+                request: unknown,
+                options: unknown
+            ) => {
+                const results = await originalSearch(
+                    request as never,
+                    options as never
+                );
+                const chunkResults = results.filter(
+                    (result: unknown) =>
+                        result instanceof TinyFile && result.parentId === fileId
+                );
+                if (chunkResults.length === 0) {
+                    return results;
+                }
+
+                return results.filter(
+                    (result: unknown) =>
+                        !(
+                            result instanceof TinyFile &&
+                            result.parentId === fileId &&
+                            result.index === 1
+                        )
+                );
+            };
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: {
+                    remote?: {
+                        wait?: {
+                            timeout: number;
+                            behavior: string;
+                        };
+                    };
+                }
+            ) => {
+                if (id.startsWith(`${fileId}:`)) {
+                    observedChunkGets++;
+                    sawKeepOpenWait ||= options?.remote?.wait?.behavior === "keep-open";
+                    sawSelfInHints ||= options?.remote?.from?.includes(selfHash) === true;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(observedChunkGets).to.be.greaterThan(0);
+            expect(sawKeepOpenWait).to.be.false;
+            expect(sawSelfInHints).to.be.false;
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
         it("retries transient chunk lookup aborts", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;

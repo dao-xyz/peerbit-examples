@@ -132,6 +132,8 @@ test.describe("file-share transfer benchmark", () => {
             fileName,
             FILE_SIZE_MB
         );
+        let writerDiagnostics: Record<string, unknown> | undefined;
+        let readerDiagnostics: Record<string, unknown> | undefined;
         const usesStreamingDownload =
             preparedFile != null &&
             FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
@@ -177,12 +179,12 @@ test.describe("file-share transfer benchmark", () => {
             logStage("wait-for-upload-complete");
             await waitForUploadComplete(writer, UPLOAD_TIMEOUT_MS);
             const uploadFinishedAt = Date.now();
-            const writerDiagnostics = await getDiagnostics(writer);
+            writerDiagnostics = await getDiagnostics(writer);
 
             logStage("wait-for-reader-listing");
             await waitForFileListed(reader, fileName, UPLOAD_TIMEOUT_MS);
             const readerVisibleAt = Date.now();
-            const readerDiagnostics = await getDiagnostics(reader);
+            readerDiagnostics = await getDiagnostics(reader);
 
             logStage("download");
             const downloadStartedAt = Date.now();
@@ -242,6 +244,12 @@ test.describe("file-share transfer benchmark", () => {
             await persistResult(result);
             console.log(`FILE_SHARE_TRANSFER_BENCH ${JSON.stringify(result)}`);
         } catch (error: any) {
+            const failureWriterDiagnostics =
+                writerDiagnostics ??
+                (await getDiagnostics(writer).catch(() => undefined));
+            const failureReaderDiagnostics =
+                (await getDiagnostics(reader).catch(() => undefined)) ??
+                readerDiagnostics;
             const result = {
                 status: "failed",
                 scenario: SCENARIO,
@@ -255,6 +263,8 @@ test.describe("file-share transfer benchmark", () => {
                     stack:
                         typeof error?.stack === "string" ? error.stack : undefined,
                 },
+                writerDiagnostics: failureWriterDiagnostics,
+                readerDiagnostics: failureReaderDiagnostics,
             };
             await persistResult(result);
             console.error(`FILE_SHARE_TRANSFER_BENCH ${JSON.stringify(result)}`);
