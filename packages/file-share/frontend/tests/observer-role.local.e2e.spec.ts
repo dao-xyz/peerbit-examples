@@ -88,6 +88,11 @@ test.describe("file-share observer role", () => {
                 })
                 .toBe(false);
 
+            const initialDiagnostics = await getDiagnostics(reader);
+            expect(initialDiagnostics.timings?.updateRoleCount).toBe(0);
+            expect(initialDiagnostics.timings?.firstListStartedAt).not.toBeNull();
+            expect(initialDiagnostics.timings?.firstListFinishedAt).not.toBeNull();
+
             await setReplicationRole(reader, {
                 limits: { cpu: { max: 1 } },
             });
@@ -97,6 +102,9 @@ test.describe("file-share observer role", () => {
                     return diagnostics.persistChunkReads;
                 })
                 .toBe(true);
+
+            const updatedDiagnostics = await getDiagnostics(reader);
+            expect(updatedDiagnostics.timings?.updateRoleCount).toBeGreaterThan(0);
         } finally {
             await writerContext.close().catch(() => {});
             await readerContext.close().catch(() => {});
