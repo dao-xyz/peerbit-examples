@@ -45,6 +45,10 @@ type ListingDiagnostics = {
     mountedAt: number;
     shareAddress: string | null;
     initialRole: "replicator" | "replicator-default" | "observer";
+    firstPeerReadyAt: number | null;
+    firstProgramHookReadyAt: number | null;
+    programHookStatus: string | null;
+    programHookLoading: boolean;
     onOpenStartedAt: number | null;
     trustCheckStartedAt: number | null;
     trustCheckFinishedAt: number | null;
@@ -97,6 +101,10 @@ const createListingDiagnostics = (
             : storedRole
               ? "replicator"
               : "replicator-default",
+    firstPeerReadyAt: null,
+    firstProgramHookReadyAt: null,
+    programHookStatus: null,
+    programHookLoading: false,
     onOpenStartedAt: null,
     trustCheckStartedAt: null,
     trustCheckFinishedAt: null,
@@ -140,7 +148,7 @@ function callEvenInterval(func, delay) {
 export const Drop = () => {
     const navigate = useNavigate();
 
-    const { peer } = usePeer();
+    const { peer, loading: peerLoading, status: peerStatus } = usePeer();
 
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const params = useParams();
@@ -180,6 +188,20 @@ export const Drop = () => {
             },
         }
     );
+
+    useEffect(() => {
+        if (peer && diagnosticsRef.current.firstPeerReadyAt == null) {
+            diagnosticsRef.current.firstPeerReadyAt = Date.now();
+        }
+    }, [peer]);
+
+    useEffect(() => {
+        diagnosticsRef.current.programHookStatus = files.status;
+        diagnosticsRef.current.programHookLoading = files.loading;
+        if (files.program && diagnosticsRef.current.firstProgramHookReadyAt == null) {
+            diagnosticsRef.current.firstProgramHookReadyAt = Date.now();
+        }
+    }, [files.loading, files.program, files.status]);
 
     const { memory } = useStorageUsage(files.program?.files.log);
     const { up, down } = useNetworkUsage();
@@ -237,18 +259,43 @@ export const Drop = () => {
                 const replicators = await files.program.files.log
                     .getReplicators()
                     .catch(() => undefined);
+                const listedFiles = await Promise.all(
+                    list.map(async (file) => ({
+                        id: file.id,
+                        name: file.name,
+                        type: file instanceof LargeFile ? "large" : "tiny",
+                        size: file.size.toString(),
+                        ready:
+                            file instanceof LargeFile ? file.ready : undefined,
+                        chunkCount:
+                            file instanceof LargeFile
+                                ? file.chunkCount
+                                : undefined,
+                        localChunkCount:
+                            file instanceof LargeFile
+                                ? await files.program
+                                      ?.countLocalChunks(file)
+                                      .catch(() => null)
+                                : undefined,
+                    }))
+                );
                 return {
                     programAddress: files.program?.address ?? null,
                     programClosed: files.program?.closed ?? null,
                     persistChunkReads: files.program?.persistChunkReads ?? null,
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
+                    peerStatus,
+                    peerLoading,
                     programOpenDiagnostics:
                         files.program?.openDiagnostics ?? null,
+                    lastReadDiagnostics:
+                        files.program?.lastReadDiagnostics ?? null,
                     replicatorCount:
                         replicators && typeof replicators.size === "number"
                             ? replicators.size
                             : null,
                     listCount: list.length,
+                    listedFiles,
                     replicationSetSize: replicationSet.size,
                     isHost: isHost ?? null,
                     left,
