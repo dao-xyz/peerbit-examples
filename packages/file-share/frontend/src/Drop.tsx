@@ -1,6 +1,6 @@
 import { usePeer, useProgram } from "@peerbit/react";
 import { useNavigate, useParams } from "react-router";
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useReducer, useRef, useState } from "react";
 import { Files, AbstractFile, LargeFile } from "@peerbit/please-lib";
 import * as Toggle from "@radix-ui/react-toggle";
 import { MdArrowBack, MdUploadFile, MdClose, MdSettings } from "react-icons/md";
@@ -41,6 +41,25 @@ type BrowserFileWriter = {
     abort?(reason?: unknown): Promise<void>;
 };
 
+type ListingDiagnostics = {
+    mountedAt: number;
+    shareAddress: string | null;
+    initialRole: "replicator" | "replicator-default" | "observer";
+    onOpenStartedAt: number | null;
+    trustCheckStartedAt: number | null;
+    trustCheckFinishedAt: number | null;
+    firstListSource: string | null;
+    firstListStartedAt: number | null;
+    firstListFinishedAt: number | null;
+    firstListDurationMs: number | null;
+    firstMetadataRefreshFinishedAt: number | null;
+    updateRoleCount: number;
+    lastUpdateRoleStartedAt: number | null;
+    lastUpdateRoleFinishedAt: number | null;
+    lastAppliedRole: "replicator" | "observer" | null;
+    listCallCount: number;
+};
+
 type SaveFilePickerWindow = Window & {
     showSaveFilePicker?: (options?: {
         suggestedName?: string;
@@ -65,6 +84,33 @@ const getStreamingDownloadThresholdBytes = () => {
 
 const getFileSizeBigInt = (file: AbstractFile) =>
     typeof file.size === "bigint" ? file.size : BigInt(file.size);
+
+const createListingDiagnostics = (
+    shareAddress: string | undefined,
+    storedRole: ReplicationOptions | undefined
+): ListingDiagnostics => ({
+    mountedAt: Date.now(),
+    shareAddress: shareAddress ?? null,
+    initialRole:
+        storedRole === false
+            ? "observer"
+            : storedRole
+              ? "replicator"
+              : "replicator-default",
+    onOpenStartedAt: null,
+    trustCheckStartedAt: null,
+    trustCheckFinishedAt: null,
+    firstListSource: null,
+    firstListStartedAt: null,
+    firstListFinishedAt: null,
+    firstListDurationMs: null,
+    firstMetadataRefreshFinishedAt: null,
+    updateRoleCount: 0,
+    lastUpdateRoleStartedAt: null,
+    lastUpdateRoleFinishedAt: null,
+    lastAppliedRole: null,
+    listCallCount: 0,
+});
 
 export const useDebouncedEffect = (effect, deps, delay) => {
     useEffect(() => {
@@ -113,6 +159,16 @@ export const Drop = () => {
             ? null
             : window.localStorage.getItem(`${shareAddress}-role`)
     );
+    const diagnosticsRef = useRef<ListingDiagnostics>(
+        createListingDiagnostics(shareAddress, storedRole)
+    );
+
+    useEffect(() => {
+        diagnosticsRef.current = createListingDiagnostics(shareAddress, storedRole);
+        // Reset diagnostics only when we enter a different share. Role changes
+        // inside the same share are part of the same session we want to measure.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [shareAddress]);
 
     const files = useProgram<Files>(
         peer,
@@ -142,6 +198,11 @@ export const Drop = () => {
             return;
         }
 
+        diagnosticsRef.current.updateRoleCount += 1;
+        diagnosticsRef.current.lastAppliedRole =
+            roleOptions === false ? "observer" : "replicator";
+        diagnosticsRef.current.lastUpdateRoleStartedAt = Date.now();
+
         files.program.persistChunkReads = roleOptions !== false;
 
         // console.log("X", files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]?.max)
@@ -150,6 +211,7 @@ export const Drop = () => {
         if (roleOptions !== false) {
             await files.program.files.log.replicate(roleOptions);
         }
+        diagnosticsRef.current.lastUpdateRoleFinishedAt = Date.now();
     };
 
     useEffect(() => {
@@ -180,6 +242,8 @@ export const Drop = () => {
                     programClosed: files.program?.closed ?? null,
                     persistChunkReads: files.program?.persistChunkReads ?? null,
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
+                    programOpenDiagnostics:
+                        files.program?.openDiagnostics ?? null,
                     replicatorCount:
                         replicators && typeof replicators.size === "number"
                             ? replicators.size
@@ -188,6 +252,7 @@ export const Drop = () => {
                     replicationSetSize: replicationSet.size,
                     isHost: isHost ?? null,
                     left,
+                    timings: diagnosticsRef.current,
                 };
             },
         };
@@ -261,16 +326,8 @@ export const Drop = () => {
         );
 
         let onOpen = async () => {
-            const isTrusted =
-                !files.program.trustGraph ||
-                (await files.program.trustGraph.isTrusted(
-                    peer.identity.publicKey
-                ));
-            setIsHost(isTrusted);
+            diagnosticsRef.current.onOpenStartedAt = Date.now();
 
-            files.program = files.program;
-
-            // Second condition is for when we last time did use this files address, and if we where replicator at that time, be a replicator this time again
             const serializedRoleFromStorage = getRoleFromLocalStorage(
                 files.program
             );
@@ -278,8 +335,28 @@ export const Drop = () => {
             const roleFromLocalstore = parseStoredRole(
                 serializedRoleFromStorage
             );
+            const desiredRole =
+                hasStoredRole
+                    ? roleFromLocalstore
+                    : role === "replicator"
+                      ? DEFAULT_REPLICATION_ROLE
+                      : false;
+
+            files.program.persistChunkReads = desiredRole !== false;
+            setRole(desiredRole === false ? "observer" : "replicator");
+            void updateList("initial-open");
+
+            diagnosticsRef.current.trustCheckStartedAt = Date.now();
+            const isTrusted =
+                !files.program.trustGraph ||
+                (await files.program.trustGraph.isTrusted(
+                    peer.identity.publicKey
+                ));
+            diagnosticsRef.current.trustCheckFinishedAt = Date.now();
+            setIsHost(isTrusted);
+
+            files.program = files.program;
             if (isTrusted && hasStoredRole) {
-                // by default open as replicator
                 setLimitCPU(
                     files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]
                         ?.max
@@ -292,22 +369,10 @@ export const Drop = () => {
                         ? String(limitStorageLoaded)
                         : "0"
                 ); // TODO export types
-                setRole(roleFromLocalstore ? "replicator" : "observer");
-                await updateRole(roleFromLocalstore);
-            } else {
-                if (isTrusted) {
-                    // I am the owner
-                }
-                await updateRole(
-                    role === "replicator"
-                        ? DEFAULT_REPLICATION_ROLE
-                        : false
-                );
             }
-            void updateList();
-            setReplicatorCount(
-                (await files.program.files.log.getReplicators()).size
-            );
+
+            const replicators = await files.program.files.log.getReplicators();
+            setReplicatorCount(replicators.size);
         };
 
         onOpen();
@@ -335,14 +400,29 @@ export const Drop = () => {
         };
     }, [files.program?.address, files.program?.closed]);
 
-    const updateList = async () => {
+    const updateList = async (sourceOrEvent: string | Event = "refresh") => {
         if (files.program.files.log.closed) {
             return;
         }
 
+        const source =
+            typeof sourceOrEvent === "string" ? sourceOrEvent : "event";
+
         // TODO don't reload the whole list, just add the new elements..
         try {
+            diagnosticsRef.current.listCallCount += 1;
+            const startedAt = Date.now();
+            if (diagnosticsRef.current.firstListStartedAt == null) {
+                diagnosticsRef.current.firstListStartedAt = startedAt;
+                diagnosticsRef.current.firstListSource = source;
+            }
             const list = await files.program.list();
+            const finishedAt = Date.now();
+            if (diagnosticsRef.current.firstListFinishedAt == null) {
+                diagnosticsRef.current.firstListFinishedAt = finishedAt;
+                diagnosticsRef.current.firstListDurationMs =
+                    finishedAt - startedAt;
+            }
             setList(
                 list
                     .filter((x) => !x.parentId)
@@ -357,6 +437,13 @@ export const Drop = () => {
                     ]);
                     setReplicationSet(new Set(allFiles.map((x) => x.id)));
                     setReplicatorCount(replicators.size);
+                    if (
+                        diagnosticsRef.current.firstMetadataRefreshFinishedAt ==
+                        null
+                    ) {
+                        diagnosticsRef.current.firstMetadataRefreshFinishedAt =
+                            Date.now();
+                    }
                     forceUpdate();
                 } catch (error) {
                     console.warn(

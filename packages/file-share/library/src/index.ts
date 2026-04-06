@@ -512,6 +512,15 @@ export class LargeFile extends AbstractFile {
 
 type Args = { replicate: ReplicationOptions };
 
+type OpenDiagnostics = {
+    startedAt: number;
+    trustGraphOpenStartedAt: number | null;
+    trustGraphOpenFinishedAt: number | null;
+    filesOpenStartedAt: number | null;
+    filesOpenFinishedAt: number | null;
+    finishedAt: number | null;
+};
+
 @variant("files")
 export class Files extends Program<Args> {
     @field({ type: Uint8Array })
@@ -527,6 +536,7 @@ export class Files extends Program<Args> {
     files: Documents<AbstractFile, IndexableFile>;
 
     persistChunkReads: boolean;
+    openDiagnostics?: OpenDiagnostics;
 
     constructor(
         properties: {
@@ -960,11 +970,22 @@ export class Files extends Program<Args> {
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
+        this.openDiagnostics = {
+            startedAt: Date.now(),
+            trustGraphOpenStartedAt: null,
+            trustGraphOpenFinishedAt: null,
+            filesOpenStartedAt: null,
+            filesOpenFinishedAt: null,
+            finishedAt: null,
+        };
         this.persistChunkReads = args?.replicate !== false;
+        this.openDiagnostics.trustGraphOpenStartedAt = Date.now();
         await this.trustGraph?.open({
             replicate: args?.replicate,
         });
+        this.openDiagnostics.trustGraphOpenFinishedAt = Date.now();
 
+        this.openDiagnostics.filesOpenStartedAt = Date.now();
         await this.files.open({
             type: AbstractFile,
             // TODO add ACL
@@ -985,5 +1006,7 @@ export class Files extends Program<Args> {
                 type: IndexableFile,
             },
         });
+        this.openDiagnostics.filesOpenFinishedAt = Date.now();
+        this.openDiagnostics.finishedAt = Date.now();
     }
 }

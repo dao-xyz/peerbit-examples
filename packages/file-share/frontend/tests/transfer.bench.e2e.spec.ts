@@ -66,6 +66,16 @@ const createSpaceFromHook = async (page: Page, name: string) => {
     }, name);
 };
 
+const getDiagnostics = async (page: Page) => {
+    return await page.evaluate(async () => {
+        const hooks = (window as any).__peerbitFileShareTestHooks;
+        if (!hooks?.getDiagnostics) {
+            throw new Error("Missing __peerbitFileShareTestHooks.getDiagnostics");
+        }
+        return await hooks.getDiagnostics();
+    });
+};
+
 const seedReplicationRole = async (
     page: Page,
     address: string,
@@ -167,10 +177,12 @@ test.describe("file-share transfer benchmark", () => {
             logStage("wait-for-upload-complete");
             await waitForUploadComplete(writer, UPLOAD_TIMEOUT_MS);
             const uploadFinishedAt = Date.now();
+            const writerDiagnostics = await getDiagnostics(writer);
 
             logStage("wait-for-reader-listing");
             await waitForFileListed(reader, fileName, UPLOAD_TIMEOUT_MS);
             const readerVisibleAt = Date.now();
+            const readerDiagnostics = await getDiagnostics(reader);
 
             logStage("download");
             const downloadStartedAt = Date.now();
@@ -205,6 +217,8 @@ test.describe("file-share transfer benchmark", () => {
                 uploadDurationMs: uploadFinishedAt - uploadStartedAt,
                 discoveryLagMs: readerVisibleAt - uploadFinishedAt,
                 downloadDurationMs: downloadFinishedAt - downloadStartedAt,
+                writerDiagnostics,
+                readerDiagnostics,
                 uploadMiBps: toMiBPerSecond(
                     downloaded.size,
                     uploadFinishedAt - uploadStartedAt
