@@ -14,9 +14,9 @@
         "@libp2p/circuit-relay-v2": "^4.1.0",
         "@libp2p/websockets": "^10.1.0",
         "@peerbit/canonical-host": "^1.0.26",
-        "@peerbit/document": "13.0.23",
-        "@peerbit/document-proxy": "^2.0.23",
-        "@peerbit/document-react": "^1.0.23",
+        "@peerbit/document": "13.0.24",
+        "@peerbit/document-proxy": "^2.0.24",
+        "@peerbit/document-react": "^1.0.24",
         "@peerbit/react": "^1.1.9",
         "react": "^19.2.0",
         "react-dom": "^19.1.0"

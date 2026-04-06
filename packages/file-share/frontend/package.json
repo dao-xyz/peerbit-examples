@@ -18,7 +18,7 @@
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
         "@peerbit/crypto": "^3.1.0",
-        "@peerbit/document": "13.0.23",
+        "@peerbit/document": "13.0.24",
         "@peerbit/please-lib": "workspace:*",
         "@peerbit/react": "^1.1.9",
         "@peerbit/shared-log": "13.0.23",

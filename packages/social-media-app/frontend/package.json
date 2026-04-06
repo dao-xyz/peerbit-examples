@@ -31,7 +31,7 @@
         "@giga-app/network": "workspace:*",
         "@giga-app/sdk": "workspace:*",
         "@headlessui/react": "^2.2.0",
-        "@peerbit/document-react": "^1.0.23",
+        "@peerbit/document-react": "^1.0.24",
         "@peerbit/identity-supabase": "workspace:*",
         "@peerbit/peer-names": "workspace:*",
         "@peerbit/program-react": "^0.4.20",
