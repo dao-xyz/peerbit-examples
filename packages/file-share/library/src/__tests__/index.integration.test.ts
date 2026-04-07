@@ -176,6 +176,31 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
+        it("records diagnostics for chunked uploads", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add("diagnostic large file", largeFile);
+
+            expect(fileId).to.be.a("string");
+            expect(filestore.lastUploadDiagnostics).to.deep.include({
+                uploadId: fileId,
+                fileName: "diagnostic large file",
+                sizeBytes: largeFile.byteLength,
+            });
+            expect(filestore.lastUploadDiagnostics?.chunkCount).to.be.greaterThan(1);
+            expect(filestore.lastUploadDiagnostics?.chunkPutCount).to.eq(
+                filestore.lastUploadDiagnostics?.chunkCount
+            );
+            expect(filestore.lastUploadDiagnostics?.manifestFinishedAt).to.not.eq(
+                null
+            );
+            expect(
+                filestore.lastUploadDiagnostics?.readyManifestFinishedAt
+            ).to.not.eq(null);
+            expect(filestore.lastUploadDiagnostics?.finishedAt).to.not.eq(null);
+            expect(filestore.lastUploadDiagnostics?.failureMessage).to.eq(null);
+        });
+
         it("pipelines persisted chunk reads without using parentId searches", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
