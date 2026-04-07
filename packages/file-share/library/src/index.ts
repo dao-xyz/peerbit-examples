@@ -582,6 +582,32 @@ type OpenDiagnostics = {
     finishedAt: number | null;
 };
 
+type UploadDiagnostics = {
+    uploadId: string;
+    fileName: string;
+    sizeBytes: number;
+    chunkSize: number;
+    chunkCount: number;
+    startedAt: number;
+    manifestStartedAt: number | null;
+    manifestFinishedAt: number | null;
+    firstChunkStartedAt: number | null;
+    firstChunkFinishedAt: number | null;
+    lastChunkFinishedAt: number | null;
+    chunkPutCount: number;
+    chunkReadTotalMs: number;
+    chunkReadMaxMs: number;
+    chunkPutTotalMs: number;
+    chunkPutMaxMs: number;
+    slowestChunkIndex: number | null;
+    slowestChunkPutMs: number | null;
+    readyManifestStartedAt: number | null;
+    readyManifestFinishedAt: number | null;
+    finishedAt: number | null;
+    failureAt: number | null;
+    failureMessage: string | null;
+};
+
 @variant("files")
 export class Files extends Program<Args> {
     @field({ type: Uint8Array })
@@ -599,6 +625,7 @@ export class Files extends Program<Args> {
     persistChunkReads: boolean;
     openDiagnostics?: OpenDiagnostics;
     lastReadDiagnostics?: Record<string, any>;
+    lastUploadDiagnostics?: UploadDiagnostics;
 
     constructor(
         properties: {
@@ -797,6 +824,32 @@ export class Files extends Program<Args> {
 
         const uploadId = createUploadId();
         const chunkCount = getChunkCount(size, chunkSize);
+        const diagnostics: UploadDiagnostics = {
+            uploadId,
+            fileName: name,
+            sizeBytes: Number(size),
+            chunkSize,
+            chunkCount,
+            startedAt: Date.now(),
+            manifestStartedAt: null,
+            manifestFinishedAt: null,
+            firstChunkStartedAt: null,
+            firstChunkFinishedAt: null,
+            lastChunkFinishedAt: null,
+            chunkPutCount: 0,
+            chunkReadTotalMs: 0,
+            chunkReadMaxMs: 0,
+            chunkPutTotalMs: 0,
+            chunkPutMaxMs: 0,
+            slowestChunkIndex: null,
+            slowestChunkPutMs: null,
+            readyManifestStartedAt: null,
+            readyManifestFinishedAt: null,
+            finishedAt: null,
+            failureAt: null,
+            failureMessage: null,
+        };
+        this.lastUploadDiagnostics = diagnostics;
         const manifest = new LargeFile({
             id: uploadId,
             name,
@@ -805,13 +858,24 @@ export class Files extends Program<Args> {
             ready: false,
         });
 
+        diagnostics.manifestStartedAt = Date.now();
         await this.files.put(manifest);
+        diagnostics.manifestFinishedAt = Date.now();
         const hasher = new SHA256();
         try {
             let uploadedBytes = 0;
             for (let i = 0; i < chunkCount; i++) {
+                const readStartedAt = Date.now();
                 const chunkBytes = await getChunk(i);
+                const readFinishedAt = Date.now();
+                diagnostics.chunkReadTotalMs += readFinishedAt - readStartedAt;
+                diagnostics.chunkReadMaxMs = Math.max(
+                    diagnostics.chunkReadMaxMs,
+                    readFinishedAt - readStartedAt
+                );
                 hasher.update(chunkBytes);
+                const putStartedAt = Date.now();
+                diagnostics.firstChunkStartedAt ??= putStartedAt;
                 await this.files.put(
                     new TinyFile({
                         name: name + "/" + i,
@@ -820,9 +884,27 @@ export class Files extends Program<Args> {
                         index: i,
                     })
                 );
+                const putFinishedAt = Date.now();
+                const putDurationMs = putFinishedAt - putStartedAt;
+                diagnostics.firstChunkFinishedAt ??= putFinishedAt;
+                diagnostics.lastChunkFinishedAt = putFinishedAt;
+                diagnostics.chunkPutCount += 1;
+                diagnostics.chunkPutTotalMs += putDurationMs;
+                diagnostics.chunkPutMaxMs = Math.max(
+                    diagnostics.chunkPutMaxMs,
+                    putDurationMs
+                );
+                if (
+                    diagnostics.slowestChunkPutMs == null ||
+                    putDurationMs > diagnostics.slowestChunkPutMs
+                ) {
+                    diagnostics.slowestChunkPutMs = putDurationMs;
+                    diagnostics.slowestChunkIndex = i;
+                }
                 uploadedBytes += chunkBytes.byteLength;
                 progress?.(uploadedBytes / Math.max(Number(size), 1));
             }
+            diagnostics.readyManifestStartedAt = Date.now();
             await this.files.put(
                 new LargeFile({
                     id: uploadId,
@@ -833,12 +915,17 @@ export class Files extends Program<Args> {
                     finalHash: toBase64(hasher.digest()),
                 })
             );
+            diagnostics.readyManifestFinishedAt = Date.now();
         } catch (error) {
+            diagnostics.failureAt = Date.now();
+            diagnostics.failureMessage =
+                error instanceof Error ? error.message : String(error);
             await this.cleanupChunkedUpload(uploadId).catch(() => {});
             await this.files.del(uploadId).catch(() => {});
             throw error;
         }
 
+        diagnostics.finishedAt = Date.now();
         progress?.(1);
         return uploadId;
     }

@@ -288,6 +288,8 @@ export const Drop = () => {
                     peerLoading,
                     programOpenDiagnostics:
                         files.program?.openDiagnostics ?? null,
+                    lastUploadDiagnostics:
+                        files.program?.lastUploadDiagnostics ?? null,
                     lastReadDiagnostics:
                         files.program?.lastReadDiagnostics ?? null,
                     replicatorCount:

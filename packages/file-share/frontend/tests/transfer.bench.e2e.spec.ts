@@ -134,6 +134,8 @@ test.describe("file-share transfer benchmark", () => {
         );
         let writerDiagnostics: Record<string, unknown> | undefined;
         let readerDiagnostics: Record<string, unknown> | undefined;
+        let writerDiagnosticsAfterDownload: Record<string, unknown> | undefined;
+        let readerDiagnosticsAfterDownload: Record<string, unknown> | undefined;
         const usesStreamingDownload =
             preparedFile != null &&
             FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
@@ -204,6 +206,12 @@ test.describe("file-share transfer benchmark", () => {
                       DOWNLOAD_TIMEOUT_MS
                   );
             const downloadFinishedAt = Date.now();
+            writerDiagnosticsAfterDownload =
+                (await getDiagnostics(writer).catch(() => undefined)) ??
+                writerDiagnostics;
+            readerDiagnosticsAfterDownload =
+                (await getDiagnostics(reader).catch(() => undefined)) ??
+                readerDiagnostics;
 
             const result = {
                 status: "passed",
@@ -221,6 +229,8 @@ test.describe("file-share transfer benchmark", () => {
                 downloadDurationMs: downloadFinishedAt - downloadStartedAt,
                 writerDiagnostics,
                 readerDiagnostics,
+                writerDiagnosticsAfterDownload,
+                readerDiagnosticsAfterDownload,
                 uploadMiBps: toMiBPerSecond(
                     downloaded.size,
                     uploadFinishedAt - uploadStartedAt
