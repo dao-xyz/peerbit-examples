@@ -87,6 +87,17 @@ const seedReplicationRole = async (page, address, roleOptions) => {
     );
 };
 
+const enableOpenProfiler = async (page) => {
+    await page.addInitScript(() => {
+        Object.defineProperty(window, "__peerbitFileShareEnableOpenProfiler", {
+            value: true,
+            configurable: true,
+            enumerable: false,
+            writable: true,
+        });
+    });
+};
+
 const waitForFileListed = async (page, fileName, timeout = 180_000) => {
     await page.locator("li", { hasText: fileName }).first().waitFor({ timeout });
 };
@@ -377,6 +388,7 @@ const runWriter = async (coordinator) => {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
+    await enableOpenProfiler(page);
     const fileName = `file-share-two-runner-${Date.now()}.bin`;
     const preparedFile = await createSyntheticFileOnDisk(fileName, FILE_SIZE_MB);
 
@@ -477,6 +489,7 @@ const runReader = async (coordinator) => {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
+    await enableOpenProfiler(page);
     const usesStreamingDownload =
         FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
 

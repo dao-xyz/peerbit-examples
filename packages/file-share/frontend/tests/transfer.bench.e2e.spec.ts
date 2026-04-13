@@ -92,6 +92,17 @@ const seedReplicationRole = async (
     );
 };
 
+const enableOpenProfiler = async (page: Page) => {
+    await page.addInitScript(() => {
+        Object.defineProperty(window, "__peerbitFileShareEnableOpenProfiler", {
+            value: true,
+            configurable: true,
+            enumerable: false,
+            writable: true,
+        });
+    });
+};
+
 const toMiBPerSecond = (bytes: number, durationMs: number) =>
     durationMs > 0 ? bytes / (1024 * 1024) / (durationMs / 1000) : null;
 
@@ -149,6 +160,8 @@ test.describe("file-share transfer benchmark", () => {
                 usesLocalBootstrap && bootstrap
                     ? withBootstrap(rootUrl(baseURL), bootstrap.addrs)
                     : rootUrl(baseURL);
+            await enableOpenProfiler(writer);
+            await enableOpenProfiler(reader);
             await writer.goto(entryUrl, { waitUntil: "domcontentloaded" });
             await waitForCreateSpaceHook(writer);
             const address = await createSpaceFromHook(
