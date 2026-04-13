@@ -1149,7 +1149,7 @@ export class Files extends Program<Args> {
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
-        this.openDiagnostics = {
+        const openDiagnostics: OpenDiagnostics = {
             startedAt: Date.now(),
             trustGraphOpenStartedAt: null,
             trustGraphOpenFinishedAt: null,
@@ -1157,15 +1157,19 @@ export class Files extends Program<Args> {
             filesOpenFinishedAt: null,
             finishedAt: null,
         };
+        this.openDiagnostics = openDiagnostics;
         this.persistChunkReads = args?.replicate !== false;
-        this.openDiagnostics.trustGraphOpenStartedAt = Date.now();
-        await this.trustGraph?.open({
-            replicate: args?.replicate,
+        openDiagnostics.trustGraphOpenStartedAt = Date.now();
+        const trustGraphOpenPromise =
+            this.trustGraph?.open({
+                replicate: args?.replicate,
+            }) ?? Promise.resolve();
+        void trustGraphOpenPromise.finally(() => {
+            openDiagnostics.trustGraphOpenFinishedAt = Date.now();
         });
-        this.openDiagnostics.trustGraphOpenFinishedAt = Date.now();
 
-        this.openDiagnostics.filesOpenStartedAt = Date.now();
-        await this.files.open({
+        openDiagnostics.filesOpenStartedAt = Date.now();
+        const filesOpenPromise = this.files.open({
             type: AbstractFile,
             // TODO add ACL
             replicate: args?.replicate,
@@ -1174,6 +1178,7 @@ export class Files extends Program<Args> {
                 if (!this.trustGraph) {
                     return true;
                 }
+                await trustGraphOpenPromise;
                 for (const key of await operation.entry.getPublicKeys()) {
                     if (await this.trustGraph.isTrusted(key)) {
                         return true;
@@ -1185,7 +1190,11 @@ export class Files extends Program<Args> {
                 type: IndexableFile,
             },
         });
-        this.openDiagnostics.filesOpenFinishedAt = Date.now();
-        this.openDiagnostics.finishedAt = Date.now();
+        void filesOpenPromise.finally(() => {
+            openDiagnostics.filesOpenFinishedAt = Date.now();
+        });
+
+        await Promise.all([trustGraphOpenPromise, filesOpenPromise]);
+        openDiagnostics.finishedAt = Date.now();
     }
 }
