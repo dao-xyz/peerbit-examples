@@ -1,5 +1,5 @@
 import { field, variant, vec, option } from "@dao-xyz/borsh";
-import { Program } from "@peerbit/program";
+import { Program, ProgramHandler } from "@peerbit/program";
 import {
     Documents,
     SearchRequest,
@@ -17,11 +17,135 @@ import {
 import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
-import { ReplicationOptions } from "@peerbit/shared-log";
+import { ReplicationOptions, SharedLog } from "@peerbit/shared-log";
 import { SHA256 } from "@stablelib/sha256";
 
 const sleep = (ms: number) =>
     new Promise((resolve) => setTimeout(resolve, ms));
+
+type RuntimeOpenProfileSample = {
+    label: string;
+    target: string;
+    startedAt: number;
+    finishedAt: number;
+    durationMs: number;
+};
+
+type RuntimeOpenProfilerState = {
+    patched: boolean;
+    samples: RuntimeOpenProfileSample[];
+};
+
+const isRuntimeOpenProfilerEnabled = () => {
+    const scope = globalThis as typeof globalThis & {
+        __peerbitFileShareEnableOpenProfiler?: boolean;
+    };
+    return scope.__peerbitFileShareEnableOpenProfiler === true;
+};
+
+const getRuntimeOpenProfilerState = (): RuntimeOpenProfilerState => {
+    const scope = globalThis as typeof globalThis & {
+        __peerbitFileShareRuntimeOpenProfiler?: RuntimeOpenProfilerState;
+    };
+    scope.__peerbitFileShareRuntimeOpenProfiler ??= {
+        patched: false,
+        samples: [],
+    };
+    return scope.__peerbitFileShareRuntimeOpenProfiler;
+};
+
+const recordRuntimeOpenProfileSample = (
+    label: string,
+    target: string,
+    startedAt: number
+) => {
+    if (!isRuntimeOpenProfilerEnabled()) {
+        return;
+    }
+    const finishedAt = Date.now();
+    getRuntimeOpenProfilerState().samples.push({
+        label,
+        target,
+        startedAt,
+        finishedAt,
+        durationMs: finishedAt - startedAt,
+    });
+};
+
+const wrapAsyncMethod = (
+    ctor:
+        | {
+              name?: string;
+              prototype?: object;
+          }
+        | undefined,
+    method: string,
+    getLabel: (instance: any, args: any[]) => string
+) => {
+    const prototype = ctor?.prototype as Record<string, unknown> | undefined;
+    if (!prototype || typeof prototype[method] !== "function") {
+        return;
+    }
+    const original = prototype[method] as ((...args: any[]) => Promise<any>) & {
+        __peerbitOpenProfilePatched?: boolean;
+    };
+    if (original.__peerbitOpenProfilePatched) {
+        return;
+    }
+    const wrapped = async function (this: any, ...args: any[]) {
+        const startedAt = Date.now();
+        try {
+            return await original.apply(this, args);
+        } finally {
+            recordRuntimeOpenProfileSample(
+                getLabel(this, args),
+                this?.constructor?.name ?? ctor?.name ?? "unknown",
+                startedAt
+            );
+        }
+    };
+    wrapped.__peerbitOpenProfilePatched = true;
+    prototype[method] = wrapped;
+};
+
+const describeOpenTarget = (target: unknown) => {
+    if (typeof target === "string") {
+        return "address";
+    }
+    return (target as { constructor?: { name?: string } })?.constructor?.name ?? "unknown";
+};
+
+const installRuntimeOpenProfiler = () => {
+    if (!isRuntimeOpenProfilerEnabled()) {
+        return;
+    }
+    const state = getRuntimeOpenProfilerState();
+    if (state.patched) {
+        return;
+    }
+    state.patched = true;
+
+    wrapAsyncMethod(ProgramHandler, "open", (_instance, args) => {
+        return `ProgramHandler.open(${describeOpenTarget(args[0])})`;
+    });
+    wrapAsyncMethod(Program, "beforeOpen", (instance) => {
+        return `Program.beforeOpen(${instance?.constructor?.name ?? "unknown"})`;
+    });
+    wrapAsyncMethod(Program, "afterOpen", (instance) => {
+        return `Program.afterOpen(${instance?.constructor?.name ?? "unknown"})`;
+    });
+    wrapAsyncMethod(Documents, "open", (instance) => {
+        return `Documents.open(${instance?.constructor?.name ?? "unknown"})`;
+    });
+    wrapAsyncMethod(SharedLog, "open", (instance) => {
+        return `SharedLog.open(${instance?.constructor?.name ?? "unknown"})`;
+    });
+    wrapAsyncMethod(TrustedNetwork, "open", (instance) => {
+        return `TrustedNetwork.open(${instance?.constructor?.name ?? "unknown"})`;
+    });
+};
+
+installRuntimeOpenProfiler();
 
 const isRetryableChunkLookupError = (error: unknown) =>
     error instanceof Error &&
@@ -580,6 +704,7 @@ type OpenDiagnostics = {
     filesOpenStartedAt: number | null;
     filesOpenFinishedAt: number | null;
     finishedAt: number | null;
+    runtimeProfileSamples?: RuntimeOpenProfileSample[];
 };
 
 type UploadDiagnostics = {
@@ -1149,6 +1274,8 @@ export class Files extends Program<Args> {
 
     // Setup lifecycle, will be invoked on 'open'
     async open(args?: Args): Promise<void> {
+        const runtimeProfileStartIndex =
+            getRuntimeOpenProfilerState().samples.length;
         const openDiagnostics: OpenDiagnostics = {
             startedAt: Date.now(),
             trustGraphOpenStartedAt: null,
@@ -1196,5 +1323,8 @@ export class Files extends Program<Args> {
 
         await Promise.all([trustGraphOpenPromise, filesOpenPromise]);
         openDiagnostics.finishedAt = Date.now();
+        openDiagnostics.runtimeProfileSamples = getRuntimeOpenProfilerState().samples.slice(
+            runtimeProfileStartIndex
+        );
     }
 }

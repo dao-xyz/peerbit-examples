@@ -283,6 +283,12 @@ export const Drop = () => {
                     programAddress: files.program?.address ?? null,
                     programClosed: files.program?.closed ?? null,
                     persistChunkReads: files.program?.persistChunkReads ?? null,
+                    runtimeOpenProfileSamples:
+                        (window as Window & {
+                            __peerbitFileShareRuntimeOpenProfiler?: {
+                                samples?: Record<string, unknown>[];
+                            };
+                        }).__peerbitFileShareRuntimeOpenProfiler?.samples ?? null,
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
                     peerStatus,
                     peerLoading,
