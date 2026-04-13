@@ -98,6 +98,16 @@ const enableOpenProfiler = async (page) => {
     });
 };
 
+const getDiagnostics = async (page) => {
+    return await page.evaluate(async () => {
+        const hooks = window.__peerbitFileShareTestHooks;
+        if (!hooks?.getDiagnostics) {
+            throw new Error("Missing __peerbitFileShareTestHooks.getDiagnostics");
+        }
+        return await hooks.getDiagnostics();
+    });
+};
+
 const waitForFileListed = async (page, fileName, timeout = 180_000) => {
     await page.locator("li", { hasText: fileName }).first().waitFor({ timeout });
 };
@@ -391,6 +401,7 @@ const runWriter = async (coordinator) => {
     await enableOpenProfiler(page);
     const fileName = `file-share-two-runner-${Date.now()}.bin`;
     const preparedFile = await createSyntheticFileOnDisk(fileName, FILE_SIZE_MB);
+    let writerDiagnostics;
 
     try {
         const entryUrl = rootUrl(BASE_URL);
@@ -414,6 +425,7 @@ const runWriter = async (coordinator) => {
         await waitForFileListed(page, fileName, UPLOAD_TIMEOUT_MS);
         await waitForUploadComplete(page, UPLOAD_TIMEOUT_MS);
         const uploadFinishedAt = Date.now();
+        writerDiagnostics = await getDiagnostics(page);
 
         const result = {
             status: "passed",
@@ -434,6 +446,7 @@ const runWriter = async (coordinator) => {
                 FILE_SIZE_MB * 1024 * 1024,
                 uploadFinishedAt - uploadStartedAt
             ),
+            writerDiagnostics,
             startedAt: uploadStartedAt,
             finishedAt: uploadFinishedAt,
         };
@@ -454,12 +467,16 @@ const runWriter = async (coordinator) => {
         });
     } catch (error) {
         const failure = createFailure(error);
+        const failureDiagnostics =
+            writerDiagnostics ??
+            (await getDiagnostics(page).catch(() => undefined));
         await persistResult({
             status: "failed",
             role: "writer",
             scenario: "prod",
             fileName,
             fileSizeMb: FILE_SIZE_MB,
+            writerDiagnostics: failureDiagnostics,
             failure,
         });
         await coordinator.publish("writer-failed", failure).catch(() => {});
@@ -492,6 +509,7 @@ const runReader = async (coordinator) => {
     await enableOpenProfiler(page);
     const usesStreamingDownload =
         FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
+    let readerDiagnostics;
 
     try {
         if (usesStreamingDownload) {
@@ -502,6 +520,7 @@ const runReader = async (coordinator) => {
         const readerReadyAt = Date.now();
         await waitForFileListed(page, writer.fileName, UPLOAD_TIMEOUT_MS);
         const listedAt = Date.now();
+        readerDiagnostics = await getDiagnostics(page);
 
         const downloadStartedAt = Date.now();
         const downloaded = usesStreamingDownload
@@ -518,6 +537,9 @@ const runReader = async (coordinator) => {
                   DOWNLOAD_TIMEOUT_MS
               );
         const downloadFinishedAt = Date.now();
+        const readerDiagnosticsAfterDownload =
+            (await getDiagnostics(page).catch(() => undefined)) ??
+            readerDiagnostics;
 
         const result = {
             status: "passed",
@@ -541,6 +563,8 @@ const runReader = async (coordinator) => {
                 downloaded.size,
                 downloadFinishedAt - downloadStartedAt
             ),
+            readerDiagnostics,
+            readerDiagnosticsAfterDownload,
             startedAt: readerReadyAt,
             finishedAt: downloadFinishedAt,
         };
@@ -549,12 +573,16 @@ const runReader = async (coordinator) => {
         await coordinator.publish("reader-complete", result);
     } catch (error) {
         const failure = createFailure(error);
+        const failureDiagnostics =
+            (await getDiagnostics(page).catch(() => undefined)) ??
+            readerDiagnostics;
         await persistResult({
             status: "failed",
             role: "reader",
             scenario: "prod",
             fileName: writer.fileName,
             fileSizeMb: FILE_SIZE_MB,
+            readerDiagnostics: failureDiagnostics,
             failure,
         });
         await coordinator.publish("reader-failed", failure).catch(() => {});
