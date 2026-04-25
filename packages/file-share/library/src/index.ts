@@ -562,11 +562,30 @@ export class LargeFile extends AbstractFile {
                 debug.waitUntilReadyAttempts += 1;
             }
             const remoteFrom = await files.getReadPeerHints();
-            const latest = await files.resolveById(this.id, {
-                timeout: attemptTimeout,
-                replicate: true,
-                from: remoteFrom,
-            });
+            const matches = await files.files.index.search(
+                new SearchRequest({
+                    query: new StringMatch({
+                        key: "id",
+                        value: this.id,
+                        caseInsensitive: false,
+                        method: StringMatchMethod.exact,
+                    }),
+                    fetch: 0xffffffff,
+                }),
+                {
+                    local: remoteFrom == null,
+                    remote: {
+                        timeout: attemptTimeout,
+                        throwOnMissing: false,
+                        retryMissingResponses: true,
+                        replicate: true,
+                        from: remoteFrom,
+                    },
+                } as any
+            );
+            const latest =
+                matches.find((match) => match instanceof LargeFile && match.ready) ??
+                matches.find((match) => match instanceof LargeFile);
             if (debug) {
                 debug.lastReadyProbe = {
                     at: Date.now(),
@@ -1120,6 +1139,7 @@ export class Files extends Program<Args> {
             timeout?: number;
             replicate?: boolean;
             from?: string[];
+            wait?: boolean;
         }
     ): Promise<AbstractFile | undefined> {
         return this.files.index.get(id, {
@@ -1127,7 +1147,7 @@ export class Files extends Program<Args> {
             waitFor: properties?.timeout,
             remote: {
                 timeout: properties?.timeout ?? 10 * 1000,
-                wait: properties?.timeout
+                wait: properties?.timeout && properties.wait !== false
                     ? {
                           timeout: properties.timeout,
                           behavior: "keep-open",
