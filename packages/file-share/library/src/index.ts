@@ -3,6 +3,7 @@ import { Program, ProgramHandler } from "@peerbit/program";
 import {
     Documents,
     SearchRequest,
+    SearchRequestIndexed,
     StringMatch,
     StringMatchMethod,
     IsNull,
@@ -20,8 +21,7 @@ import { TrustedNetwork } from "@peerbit/trusted-network";
 import { ReplicationOptions, SharedLog } from "@peerbit/shared-log";
 import { SHA256 } from "@stablelib/sha256";
 
-const sleep = (ms: number) =>
-    new Promise((resolve) => setTimeout(resolve, ms));
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 type RuntimeOpenProfileSample = {
     label: string;
@@ -112,7 +112,10 @@ const describeOpenTarget = (target: unknown) => {
     if (typeof target === "string") {
         return "address";
     }
-    return (target as { constructor?: { name?: string } })?.constructor?.name ?? "unknown";
+    return (
+        (target as { constructor?: { name?: string } })?.constructor?.name ??
+        "unknown"
+    );
 };
 
 const installRuntimeOpenProfiler = () => {
@@ -251,7 +254,8 @@ const MAX_LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT - 256 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 16;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
-const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
+const LARGE_FILE_PREPARE_JOIN_BATCH_SIZE = 8;
+const LARGE_FILE_PREPARE_JOIN_TIMEOUT_MS = 15_000;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
 
 const roundUpTo = (value: number, multiple: number) =>
@@ -431,7 +435,10 @@ export class LargeFile extends AbstractFile {
             recordChunks(
                 await files.files.index.search(
                     new SearchRequest({
-                        query: new StringMatch({ key: "parentId", value: this.id }),
+                        query: new StringMatch({
+                            key: "parentId",
+                            value: this.id,
+                        }),
                         fetch: 0xffffffff,
                     }),
                     {
@@ -454,10 +461,14 @@ export class LargeFile extends AbstractFile {
             }
         }
 
-        return [...chunks.values()].sort((a, b) => (a.index || 0) - (b.index || 0));
+        return [...chunks.values()].sort(
+            (a, b) => (a.index || 0) - (b.index || 0)
+        );
     }
     async delete(files: Files) {
-        await Promise.all((await this.fetchChunks(files)).map((x) => files.files.del(x.id)));
+        await Promise.all(
+            (await this.fetchChunks(files)).map((x) => files.files.del(x.id))
+        );
     }
 
     private async resolveChunk(
@@ -467,6 +478,7 @@ export class LargeFile extends AbstractFile {
         properties?: {
             timeout?: number;
             debug?: Record<string, any>;
+            replicate?: boolean;
         }
     ): Promise<TinyFile> {
         const totalTimeout =
@@ -487,7 +499,8 @@ export class LargeFile extends AbstractFile {
             }
             const remoteFrom = await files.getReadPeerHints();
             if (properties?.debug) {
-                (properties.debug.chunkHints ||= {})[index] = remoteFrom ?? null;
+                (properties.debug.chunkHints ||= {})[index] =
+                    remoteFrom ?? null;
             }
 
             try {
@@ -504,7 +517,8 @@ export class LargeFile extends AbstractFile {
                         // instead.
                         throwOnMissing: false,
                         retryMissingResponses: true,
-                        replicate: files.persistChunkReads,
+                        replicate:
+                            properties?.replicate ?? files.persistChunkReads,
                         from: remoteFrom,
                     },
                 });
@@ -584,8 +598,9 @@ export class LargeFile extends AbstractFile {
                 } as any
             );
             const latest =
-                matches.find((match) => match instanceof LargeFile && match.ready) ??
-                matches.find((match) => match instanceof LargeFile);
+                matches.find(
+                    (match) => match instanceof LargeFile && match.ready
+                ) ?? matches.find((match) => match instanceof LargeFile);
             if (debug) {
                 debug.lastReadyProbe = {
                     at: Date.now(),
@@ -621,17 +636,17 @@ export class LargeFile extends AbstractFile {
             waitUntilReadyResolvedAt: null as number | null,
             waitUntilReadyResolvedReady: null as boolean | null,
             prefetchedChunkCount: 0,
+            chunkReadAhead: 0,
+            maxInFlightChunkReads: 0,
             finishedAt: null as number | null,
             chunkAttempts: {} as Record<number, number>,
             chunkHints: {} as Record<number, string[] | null>,
             chunkResolved: {} as Record<number, string>,
-            chunkFailure: null as
-                | {
-                      index: number;
-                      type: string;
-                      message: string;
-                  }
-                | null,
+            chunkFailure: null as {
+                index: number;
+                type: string;
+                message: string;
+            } | null,
         };
         files.lastReadDiagnostics = debug;
         const resolvedFile = await this.waitUntilReady(files, properties);
@@ -643,50 +658,12 @@ export class LargeFile extends AbstractFile {
         let processed = 0;
         const hasher = resolvedFile.finalHash ? new SHA256() : undefined;
         const knownChunks = new Map<number, TinyFile>();
-        if (!files.persistChunkReads) {
-            for (const chunk of await resolvedFile.fetchChunks(files, {
-                timeout: Math.min(
-                    properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS,
-                    LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS
-                ),
-            })) {
-                knownChunks.set(chunk.index || 0, chunk);
-            }
-            debug.prefetchedChunkCount = knownChunks.size;
-        }
-        const inFlightChunks = new Map<number, Promise<TinyFile>>();
-        const resolveChunkWithReadAhead = (index: number) => {
-            const cached = inFlightChunks.get(index);
-            if (cached) {
-                return cached;
-            }
-            const pending = this.resolveChunk(files, index, knownChunks, {
-                timeout: properties?.timeout,
-                debug,
-            });
-            inFlightChunks.set(index, pending);
-            return pending;
-        };
 
         const readAhead = files.persistChunkReads
             ? LARGE_FILE_PERSISTED_READ_AHEAD
             : LARGE_FILE_OBSERVER_READ_AHEAD;
-
-        for (
-            let index = 0;
-            index < Math.min(resolvedFile.chunkCount, readAhead);
-            index++
-        ) {
-            void resolveChunkWithReadAhead(index);
-        }
-
-        for (let index = 0; index < resolvedFile.chunkCount; index++) {
-            const nextIndex = index + readAhead;
-            if (nextIndex < resolvedFile.chunkCount) {
-                void resolveChunkWithReadAhead(nextIndex);
-            }
-            const chunkFile = await resolveChunkWithReadAhead(index);
-            inFlightChunks.delete(index);
+        debug.chunkReadAhead = readAhead;
+        const readChunkBytes = async (index: number, chunkFile: TinyFile) => {
             if (!chunkFile) {
                 throw new Error(
                     `Failed to resolve chunk ${index + 1}/${resolvedFile.chunkCount} for file ${resolvedFile.id}`
@@ -701,13 +678,56 @@ export class LargeFile extends AbstractFile {
             properties?.progress?.(
                 processed / Math.max(Number(resolvedFile.size), 1)
             );
-            yield chunk;
+            return chunk;
+        };
+
+        const inFlightChunks = new Map<number, Promise<TinyFile>>();
+        const resolveChunkWithReadAhead = (index: number) => {
+            const cached = inFlightChunks.get(index);
+            if (cached) {
+                return cached;
+            }
+            const pending = this.resolveChunk(files, index, knownChunks, {
+                timeout: properties?.timeout,
+                debug,
+                // Observers should not background-replicate every chunk just
+                // because they listed a file, but an explicit download should
+                // persist the chunks it reads. Chunk IDs are deterministic from
+                // the ready manifest, so direct gets avoid fragile distributed
+                // range queries for bulk payloads.
+                replicate: true,
+            });
+            inFlightChunks.set(index, pending);
+            return pending;
+        };
+
+        for (
+            let index = 0;
+            index < Math.min(resolvedFile.chunkCount, readAhead);
+            index++
+        ) {
+            void resolveChunkWithReadAhead(index);
+            debug.maxInFlightChunkReads = Math.max(
+                debug.maxInFlightChunkReads,
+                inFlightChunks.size
+            );
         }
 
-        if (
-            hasher &&
-            toBase64(hasher.digest()) !== resolvedFile.finalHash
-        ) {
+        for (let index = 0; index < resolvedFile.chunkCount; index++) {
+            const chunkFile = await resolveChunkWithReadAhead(index);
+            inFlightChunks.delete(index);
+            const nextIndex = index + readAhead;
+            if (nextIndex < resolvedFile.chunkCount) {
+                void resolveChunkWithReadAhead(nextIndex);
+                debug.maxInFlightChunkReads = Math.max(
+                    debug.maxInFlightChunkReads,
+                    inFlightChunks.size
+                );
+            }
+            yield await readChunkBytes(index, chunkFile);
+        }
+
+        if (hasher && toBase64(hasher.digest()) !== resolvedFile.finalHash) {
             throw new Error("File hash does not match the expected content");
         }
         debug.finishedAt = Date.now();
@@ -769,6 +789,7 @@ export class Files extends Program<Args> {
     persistChunkReads: boolean;
     openDiagnostics?: OpenDiagnostics;
     lastReadDiagnostics?: Record<string, any>;
+    lastDownloadPreparationDiagnostics?: Record<string, any>;
     lastUploadDiagnostics?: UploadDiagnostics;
 
     constructor(
@@ -1133,6 +1154,205 @@ export class Files extends Program<Args> {
         return count;
     }
 
+    async waitForLocalChunks(
+        file: LargeFile,
+        properties?: {
+            timeout?: number;
+            progress?: (progress: number) => void;
+        }
+    ): Promise<void> {
+        const totalTimeout =
+            properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
+        const deadline = Date.now() + totalTimeout;
+        const debug = {
+            fileId: file.id,
+            fileName: file.name,
+            mode: "local-chunks",
+            chunkCount: file.chunkCount,
+            startedAt: Date.now(),
+            lastLocalChunkCount: 0,
+            finishedAt: null as number | null,
+            failureAt: null as number | null,
+            failureMessage: null as string | null,
+        };
+        this.lastDownloadPreparationDiagnostics = debug;
+
+        try {
+            while (Date.now() < deadline) {
+                const localChunkCount = await this.countLocalChunks(file);
+                debug.lastLocalChunkCount = localChunkCount;
+                properties?.progress?.(
+                    Math.min(localChunkCount / Math.max(file.chunkCount, 1), 1)
+                );
+                if (localChunkCount >= file.chunkCount) {
+                    debug.finishedAt = Date.now();
+                    return;
+                }
+                await sleep(250);
+            }
+
+            throw new Error(
+                `Timed out waiting for ${file.name} chunks (${debug.lastLocalChunkCount}/${file.chunkCount} chunks available locally)`
+            );
+        } catch (error) {
+            debug.failureAt = Date.now();
+            debug.failureMessage =
+                error instanceof Error ? error.message : String(error);
+            throw error;
+        }
+    }
+
+    async prepareLargeFileDownload(
+        file: LargeFile,
+        properties?: {
+            timeout?: number;
+            progress?: (progress: number) => void;
+        }
+    ): Promise<() => Promise<void>> {
+        const totalTimeout =
+            properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
+        const deadline = Date.now() + totalTimeout;
+        const debug = {
+            fileId: file.id,
+            fileName: file.name,
+            chunkCount: file.chunkCount,
+            startedAt: Date.now(),
+            chunkHeadCount: 0,
+            chunkJoinAttempts: 0,
+            chunkJoinBatchSize: LARGE_FILE_PREPARE_JOIN_BATCH_SIZE,
+            lastJoinBatchStart: null as number | null,
+            lastJoinBatchSize: 0,
+            lastLocalChunkCount: 0,
+            finishedAt: null as number | null,
+            cleanupStartedAt: null as number | null,
+            cleanupFinishedAt: null as number | null,
+            failureAt: null as number | null,
+            failureMessage: null as string | null,
+            lastJoinError: null as string | null,
+        };
+        this.lastDownloadPreparationDiagnostics = debug;
+
+        const release = async () => {
+            debug.cleanupStartedAt = Date.now();
+            debug.cleanupFinishedAt = Date.now();
+        };
+
+        try {
+            const initialCount = await this.countLocalChunks(file);
+            debug.lastLocalChunkCount = initialCount;
+            if (initialCount >= file.chunkCount) {
+                properties?.progress?.(1);
+                debug.finishedAt = Date.now();
+                return async () => {};
+            }
+
+            const chunkHeads = new Map<string, string>();
+
+            while (Date.now() < deadline) {
+                const localChunkCount = await this.countLocalChunks(file);
+                debug.lastLocalChunkCount = localChunkCount;
+                properties?.progress?.(
+                    Math.min(localChunkCount / Math.max(file.chunkCount, 1), 1)
+                );
+                if (localChunkCount >= file.chunkCount) {
+                    debug.finishedAt = Date.now();
+                    return release;
+                }
+
+                const remoteFrom = await this.getReadPeerHints();
+                const indexedChunks = await this.files.index.search(
+                    new SearchRequestIndexed({
+                        query: new StringMatch({
+                            key: "parentId",
+                            value: file.id,
+                            caseInsensitive: false,
+                            method: StringMatchMethod.exact,
+                        }),
+                        fetch: file.chunkCount,
+                    }),
+                    {
+                        local: true,
+                        resolve: false,
+                        remote: {
+                            timeout: Math.min(
+                                Math.max(deadline - Date.now(), 1),
+                                30_000
+                            ),
+                            throwOnMissing: false,
+                            retryMissingResponses: true,
+                            from: remoteFrom,
+                        },
+                    } as any
+                );
+                for (const chunk of indexedChunks as any[]) {
+                    if (
+                        chunk?.parentId !== file.id ||
+                        chunk?.__context?.head == null
+                    ) {
+                        continue;
+                    }
+                    chunkHeads.set(chunk.id, chunk.__context.head);
+                }
+                debug.chunkHeadCount = chunkHeads.size;
+
+                if (chunkHeads.size > 0) {
+                    const heads = [...chunkHeads.values()];
+                    for (
+                        let i = 0;
+                        i < heads.length && Date.now() < deadline;
+                        i += LARGE_FILE_PREPARE_JOIN_BATCH_SIZE
+                    ) {
+                        const batch = heads.slice(
+                            i,
+                            i + LARGE_FILE_PREPARE_JOIN_BATCH_SIZE
+                        );
+                        debug.chunkJoinAttempts += 1;
+                        debug.lastJoinBatchStart = i;
+                        debug.lastJoinBatchSize = batch.length;
+                        try {
+                            await this.files.log.join(batch, {
+                                timeout: Math.min(
+                                    Math.max(deadline - Date.now(), 1),
+                                    LARGE_FILE_PREPARE_JOIN_TIMEOUT_MS
+                                ),
+                            });
+                            debug.lastJoinError = null;
+                        } catch (error) {
+                            debug.lastJoinError =
+                                error instanceof Error
+                                    ? error.message
+                                    : String(error);
+                        }
+
+                        const localChunkCount =
+                            await this.countLocalChunks(file);
+                        debug.lastLocalChunkCount = localChunkCount;
+                        properties?.progress?.(
+                            Math.min(
+                                localChunkCount / Math.max(file.chunkCount, 1),
+                                1
+                            )
+                        );
+                        if (localChunkCount >= file.chunkCount) {
+                            debug.finishedAt = Date.now();
+                            return release;
+                        }
+                    }
+                }
+                await sleep(250);
+            }
+
+            throw new Error(
+                `Timed out preparing ${file.name} for download (${debug.lastLocalChunkCount}/${file.chunkCount} chunks available locally)`
+            );
+        } catch (error) {
+            debug.failureAt = Date.now();
+            debug.failureMessage =
+                error instanceof Error ? error.message : String(error);
+            throw error;
+        }
+    }
+
     async resolveById(
         id: string,
         properties?: {
@@ -1147,12 +1367,13 @@ export class Files extends Program<Args> {
             waitFor: properties?.timeout,
             remote: {
                 timeout: properties?.timeout ?? 10 * 1000,
-                wait: properties?.timeout && properties.wait !== false
-                    ? {
-                          timeout: properties.timeout,
-                          behavior: "keep-open",
-                      }
-                    : undefined,
+                wait:
+                    properties?.timeout && properties.wait !== false
+                        ? {
+                              timeout: properties.timeout,
+                              behavior: "keep-open",
+                          }
+                        : undefined,
                 throwOnMissing: false,
                 retryMissingResponses: true,
                 replicate: properties?.replicate,
@@ -1195,7 +1416,9 @@ export class Files extends Program<Args> {
     }
 
     async getReadPeerHints(): Promise<string[] | undefined> {
-        const replicators = await this.files.log.getReplicators().catch(() => undefined);
+        const replicators = await this.files.log
+            .getReplicators()
+            .catch(() => undefined);
         if (!replicators || replicators.size === 0) {
             return undefined;
         }
@@ -1320,6 +1543,7 @@ export class Files extends Program<Args> {
             type: AbstractFile,
             // TODO add ACL
             replicate: args?.replicate,
+            keep: "self",
             replicas: { min: 3 },
             canPerform: async (operation) => {
                 if (!this.trustGraph) {
@@ -1343,8 +1567,9 @@ export class Files extends Program<Args> {
 
         await Promise.all([trustGraphOpenPromise, filesOpenPromise]);
         openDiagnostics.finishedAt = Date.now();
-        openDiagnostics.runtimeProfileSamples = getRuntimeOpenProfilerState().samples.slice(
-            runtimeProfileStartIndex
-        );
+        openDiagnostics.runtimeProfileSamples =
+            getRuntimeOpenProfilerState().samples.slice(
+                runtimeProfileStartIndex
+            );
     }
 }

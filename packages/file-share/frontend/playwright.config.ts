@@ -35,6 +35,8 @@ const explicitBaseUrl = process.env.PW_BASE_URL
 const viteMode = process.env.PW_VITE_MODE || "development";
 const viteConfig = process.env.PW_VITE_CONFIG;
 const viteConfigArg = viteConfig ? ` --config ${viteConfig}` : "";
+const viteForceArg =
+    process.env.PW_VITE_FORCE_OPTIMIZE_DEPS === "0" ? "" : " --force";
 const localProtocol =
     process.env.PW_PROTOCOL ||
     (viteConfig?.includes("remote") ? "https" : "http");
@@ -63,9 +65,9 @@ export default defineConfig({
     },
     projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
     webServer: explicitBaseUrl
-          ? undefined
+        ? undefined
         : {
-              command: `pnpm --filter @peerbit/please-lib build && pnpm exec vite dev --mode ${viteMode}${viteConfigArg} --port ${PORT} --strictPort --host ${HOST}`,
+              command: `pnpm --filter @peerbit/please-lib build && pnpm exec vite dev${viteForceArg} --mode ${viteMode}${viteConfigArg} --port ${PORT} --strictPort --host ${HOST}`,
               ignoreHTTPSErrors,
               url: localBaseUrl,
               reuseExistingServer: false,

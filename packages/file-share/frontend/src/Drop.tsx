@@ -9,7 +9,7 @@ import { File } from "./File";
 import { Spinner } from "./Spinner";
 import * as Switch from "@radix-ui/react-switch";
 import * as Slider from "@radix-ui/react-slider";
-import { SearchRequest } from "@peerbit/document";
+import { IsNull, SearchRequest } from "@peerbit/document";
 import * as Popover from "@radix-ui/react-popover";
 import { useStorageUsage } from "./MemoryUsage";
 import { useNetworkUsage } from "./NetworkUsage";
@@ -25,7 +25,7 @@ const getRoleFromLocalStorage = (files: Files) => {
 };
 
 const DEFAULT_REPLICATION_ROLE: ReplicationOptions = {
-    limits: { cpu: { max: 1, monitor: undefined } },
+    factor: 1,
 };
 
 const parseStoredRole = (
@@ -65,9 +65,7 @@ type ListingDiagnostics = {
 };
 
 type SaveFilePickerWindow = Window & {
-    showSaveFilePicker?: (options?: {
-        suggestedName?: string;
-    }) => Promise<{
+    showSaveFilePicker?: (options?: { suggestedName?: string }) => Promise<{
         createWritable(): Promise<BrowserFileWriter>;
     }>;
     __peerbitStreamingDownloadThresholdBytes?: number;
@@ -172,22 +170,21 @@ export const Drop = () => {
     );
 
     useEffect(() => {
-        diagnosticsRef.current = createListingDiagnostics(shareAddress, storedRole);
+        diagnosticsRef.current = createListingDiagnostics(
+            shareAddress,
+            storedRole
+        );
         // Reset diagnostics only when we enter a different share. Role changes
         // inside the same share are part of the same session we want to measure.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [shareAddress]);
 
-    const files = useProgram<Files>(
-        peer,
-        shareAddress,
-        {
-            existing: "reuse",
-            args: {
-                replicate: storedRole ?? DEFAULT_REPLICATION_ROLE,
-            },
-        }
-    );
+    const files = useProgram<Files>(peer, shareAddress, {
+        existing: "reuse",
+        args: {
+            replicate: storedRole ?? DEFAULT_REPLICATION_ROLE,
+        },
+    });
 
     useEffect(() => {
         if (peer && diagnosticsRef.current.firstPeerReadyAt == null) {
@@ -198,7 +195,10 @@ export const Drop = () => {
     useEffect(() => {
         diagnosticsRef.current.programHookStatus = files.status;
         diagnosticsRef.current.programHookLoading = files.loading;
-        if (files.program && diagnosticsRef.current.firstProgramHookReadyAt == null) {
+        if (
+            files.program &&
+            diagnosticsRef.current.firstProgramHookReadyAt == null
+        ) {
             diagnosticsRef.current.firstProgramHookReadyAt = Date.now();
         }
     }, [files.loading, files.program, files.status]);
@@ -211,7 +211,7 @@ export const Drop = () => {
     const [role, setRole] = useState<"replicator" | "observer">(
         storedRole === false ? "observer" : "replicator"
     );
-    const [limitCPU, setLimitCPU] = useState<number | undefined>(1);
+    const [limitCPU, setLimitCPU] = useState<number | undefined>();
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
     // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
@@ -251,7 +251,10 @@ export const Drop = () => {
         }
         testWindow.__peerbitFileShareTestHooks = {
             setReplicationRole: async (roleOptions) => {
-                saveRoleLocalStorage(files.program, JSON.stringify(roleOptions));
+                saveRoleLocalStorage(
+                    files.program,
+                    JSON.stringify(roleOptions)
+                );
                 setRole(roleOptions ? "replicator" : "observer");
                 await updateRole(roleOptions);
             },
@@ -284,11 +287,14 @@ export const Drop = () => {
                     programClosed: files.program?.closed ?? null,
                     persistChunkReads: files.program?.persistChunkReads ?? null,
                     runtimeOpenProfileSamples:
-                        (window as Window & {
-                            __peerbitFileShareRuntimeOpenProfiler?: {
-                                samples?: Record<string, unknown>[];
-                            };
-                        }).__peerbitFileShareRuntimeOpenProfiler?.samples ?? null,
+                        (
+                            window as Window & {
+                                __peerbitFileShareRuntimeOpenProfiler?: {
+                                    samples?: Record<string, unknown>[];
+                                };
+                            }
+                        ).__peerbitFileShareRuntimeOpenProfiler?.samples ??
+                        null,
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
                     peerStatus,
                     peerLoading,
@@ -296,6 +302,9 @@ export const Drop = () => {
                         files.program?.openDiagnostics ?? null,
                     lastUploadDiagnostics:
                         files.program?.lastUploadDiagnostics ?? null,
+                    lastDownloadPreparationDiagnostics:
+                        files.program?.lastDownloadPreparationDiagnostics ??
+                        null,
                     lastReadDiagnostics:
                         files.program?.lastReadDiagnostics ?? null,
                     replicatorCount:
@@ -331,15 +340,17 @@ export const Drop = () => {
 
             updateRole(
                 role === "replicator"
-                    ? {
-                          limits: {
-                              cpu:
-                                  limitCPU != null
-                                      ? { max: limitCPU }
-                                      : undefined,
-                              storage: limitStorage ? sizeBytes : undefined,
-                          },
-                      }
+                    ? limitCPU == null && !limitStorage
+                        ? DEFAULT_REPLICATION_ROLE
+                        : {
+                              limits: {
+                                  cpu:
+                                      limitCPU != null
+                                          ? { max: limitCPU }
+                                          : undefined,
+                                  storage: limitStorage ? sizeBytes : undefined,
+                              },
+                          }
                     : false
             );
         },
@@ -390,12 +401,11 @@ export const Drop = () => {
             const roleFromLocalstore = parseStoredRole(
                 serializedRoleFromStorage
             );
-            const desiredRole =
-                hasStoredRole
-                    ? roleFromLocalstore
-                    : role === "replicator"
-                      ? DEFAULT_REPLICATION_ROLE
-                      : false;
+            const desiredRole = hasStoredRole
+                ? roleFromLocalstore
+                : role === "replicator"
+                  ? DEFAULT_REPLICATION_ROLE
+                  : false;
 
             files.program.persistChunkReads = desiredRole !== false;
             setRole(desiredRole === false ? "observer" : "replicator");
@@ -487,7 +497,12 @@ export const Drop = () => {
             void (async () => {
                 try {
                     const [allFiles, replicators] = await Promise.all([
-                        files.program.files.index.search(new SearchRequest({})),
+                        files.program.files.index.search(
+                            new SearchRequest({
+                                query: new IsNull({ key: "parentId" }),
+                                fetch: 0xffffffff,
+                            })
+                        ),
                         files.program.files.log.getReplicators(),
                     ]);
                     setReplicationSet(new Set(allFiles.map((x) => x.id)));
@@ -521,10 +536,35 @@ export const Drop = () => {
         const timeout =
             file instanceof LargeFile
                 ? Math.max(
-                      60_000,
-                      Math.ceil(Number(file.size) / 1e6) * 1_000
+                      5 * 60_000,
+                      Math.ceil(Number(file.size) / 1e6) * 3_000
                   )
                 : 10_000;
+        let releasePreparedDownload: (() => Promise<void>) | undefined;
+        let preparedLargeDownload = false;
+        const prepareDownload = async () => {
+            if (!(file instanceof LargeFile) || !files.program) {
+                return;
+            }
+
+            if (files.program.persistChunkReads) {
+                await files.program.waitForLocalChunks(file, {
+                    timeout,
+                    progress: (value) => progress(value * 0.5),
+                });
+                preparedLargeDownload = true;
+            } else {
+                releasePreparedDownload =
+                    await files.program.prepareLargeFileDownload(file, {
+                        timeout,
+                        progress: (value) => progress(value * 0.5),
+                    });
+                preparedLargeDownload = true;
+            }
+        };
+        const downloadProgress = (value: number) => {
+            progress(preparedLargeDownload ? 0.5 + value * 0.5 : value);
+        };
         try {
             const saveFilePicker = (window as SaveFilePickerWindow)
                 .showSaveFilePicker;
@@ -542,22 +582,22 @@ export const Drop = () => {
                     throw error;
                 });
                 if (handle) {
+                    await prepareDownload();
                     const writable = await handle.createWritable();
                     await file.writeFile(files.program, writable, {
                         timeout,
-                        progress: (value) => {
-                            progress(value);
-                        },
+                        progress: downloadProgress,
                     });
                     return;
                 }
                 return;
             }
 
+            await prepareDownload();
             const bytes = await file.getFile(files.program, {
                 as: "chunks",
                 timeout,
-                progress,
+                progress: downloadProgress,
             });
             const blob = new Blob(bytes as BlobPart[]);
             const link = document.createElement("a");
@@ -569,6 +609,7 @@ export const Drop = () => {
                 window.URL.revokeObjectURL(url);
             }, 60_000);
         } finally {
+            await releasePreparedDownload?.();
             progress(null);
         }
     };
@@ -614,11 +655,18 @@ export const Drop = () => {
             // there will just by one file here in practice
             for (const file of filesToAdd) {
                 promises.push(
-                    files.program.addBlob(file.name, file, undefined, (progress) => {
-                        setUploadProgress((current) =>
-                            current == null ? progress : Math.max(progress, current)
-                        );
-                    })
+                    files.program.addBlob(
+                        file.name,
+                        file,
+                        undefined,
+                        (progress) => {
+                            setUploadProgress((current) =>
+                                current == null
+                                    ? progress
+                                    : Math.max(progress, current)
+                            );
+                        }
+                    )
                 );
             }
 

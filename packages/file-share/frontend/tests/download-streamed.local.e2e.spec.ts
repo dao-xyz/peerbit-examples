@@ -9,13 +9,14 @@ import {
     uploadSyntheticFile,
     waitForFileListed,
     waitForUploadComplete,
-    withPeer,
+    withBootstrap,
 } from "./helpers";
 
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "100");
+const READER_ROLE = process.env.PW_READER_ROLE || "replicator";
 
 test.describe("file-share streamed download via local bootstrap", () => {
-    test("observer can stream a large file to the save picker without buffering the whole blob", async ({
+    test(`${READER_ROLE} can stream a large file to the save picker without buffering the whole blob`, async ({
         browser,
         baseURL,
     }) => {
@@ -37,7 +38,7 @@ test.describe("file-share streamed download via local bootstrap", () => {
 
         try {
             await installMockSaveFilePicker(reader);
-            const entryUrl = withPeer(rootUrl(baseURL), bootstrap.addrs);
+            const entryUrl = withBootstrap(rootUrl(baseURL), bootstrap.addrs);
             const shareUrl = await createSpace(
                 writer,
                 entryUrl,
@@ -49,13 +50,8 @@ test.describe("file-share streamed download via local bootstrap", () => {
             await waitForUploadComplete(writer, 600_000);
 
             await reader.goto(shareUrl, { waitUntil: "domcontentloaded" });
-            await setSeedMode(reader, false);
+            await setSeedMode(reader, READER_ROLE === "replicator");
             await waitForFileListed(reader, fileName, 600_000);
-
-            await reader
-                .locator("li", { hasText: fileName })
-                .getByTestId("download-file")
-                .click();
 
             await expectSavedViaPicker(
                 reader,

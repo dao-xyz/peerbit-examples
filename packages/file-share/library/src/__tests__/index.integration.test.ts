@@ -179,7 +179,10 @@ describe("index", () => {
         it("records diagnostics for chunked uploads", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
-            const fileId = await filestore.add("diagnostic large file", largeFile);
+            const fileId = await filestore.add(
+                "diagnostic large file",
+                largeFile
+            );
 
             expect(fileId).to.be.a("string");
             expect(filestore.lastUploadDiagnostics).to.deep.include({
@@ -187,13 +190,15 @@ describe("index", () => {
                 fileName: "diagnostic large file",
                 sizeBytes: largeFile.byteLength,
             });
-            expect(filestore.lastUploadDiagnostics?.chunkCount).to.be.greaterThan(1);
+            expect(
+                filestore.lastUploadDiagnostics?.chunkCount
+            ).to.be.greaterThan(1);
             expect(filestore.lastUploadDiagnostics?.chunkPutCount).to.eq(
                 filestore.lastUploadDiagnostics?.chunkCount
             );
-            expect(filestore.lastUploadDiagnostics?.manifestFinishedAt).to.not.eq(
-                null
-            );
+            expect(
+                filestore.lastUploadDiagnostics?.manifestFinishedAt
+            ).to.not.eq(null);
             expect(
                 filestore.lastUploadDiagnostics?.readyManifestFinishedAt
             ).to.not.eq(null);
@@ -217,10 +222,12 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             expect(file).to.be.instanceOf(LargeFile);
 
-            const originalSearch =
-                filestoreReader.files.index.search.bind(filestoreReader.files.index);
-            const originalGet =
-                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const originalSearch = filestoreReader.files.index.search.bind(
+                filestoreReader.files.index
+            );
+            const originalGet = filestoreReader.files.index.get.bind(
+                filestoreReader.files.index
+            );
             let parentIdSearches = 0;
             let directChunkGets = 0;
             let inflightChunkGets = 0;
@@ -278,11 +285,11 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("waits for all chunk documents before streaming observer downloads", async () => {
+        it("streams observer downloads with bounded direct chunk reads", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
-                "observer download waits for full chunk set",
+                "observer download uses bounded direct chunks",
                 largeFile
             );
 
@@ -296,52 +303,56 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             expect(file).to.be.instanceOf(LargeFile);
 
-            const originalSearch =
-                filestoreReader.files.index.search.bind(filestoreReader.files.index);
-            const originalGet =
-                filestoreReader.files.index.get.bind(filestoreReader.files.index);
-            let fetchSearchCalls = 0;
-            let partialFetches = 0;
+            const originalSearch = filestoreReader.files.index.search.bind(
+                filestoreReader.files.index
+            );
+            const originalGet = filestoreReader.files.index.get.bind(
+                filestoreReader.files.index
+            );
+            let parentIdSearches = 0;
             let directChunkGets = 0;
+            let inflightChunkGets = 0;
+            let maxInflightChunkGets = 0;
+            let sawChunkReplicate = false;
 
             (filestoreReader.files.index as any).search = async (
-                request: unknown,
+                request: { query: unknown | unknown[] },
                 options: unknown
             ) => {
-                const results = await originalSearch(
-                    request as never,
-                    options as never
-                );
-                const chunkResults = results.filter(
-                    (result: unknown) =>
-                        result instanceof TinyFile && result.parentId === fileId
-                );
-                if (chunkResults.length === 0) {
-                    return results;
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentIdLookup = queries.some((query: any) => {
+                    const key = Array.isArray(query?.key)
+                        ? query.key[0]
+                        : query?.key;
+                    return key === "parentId" && query?.value === fileId;
+                });
+                if (hasParentIdLookup) {
+                    parentIdSearches++;
                 }
 
-                fetchSearchCalls++;
-                if (partialFetches < 2) {
-                    partialFetches++;
-                    return results.filter(
-                        (result: unknown) =>
-                            !(
-                                result instanceof TinyFile &&
-                                result.parentId === fileId &&
-                                result.index === 1
-                            )
-                    );
-                }
-
-                return results;
+                return originalSearch(request as never, options as never);
             };
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
-                options: unknown
+                options: { remote?: { replicate?: boolean } }
             ) => {
                 if (id.startsWith(`${fileId}:`)) {
                     directChunkGets++;
+                    sawChunkReplicate ||= options?.remote?.replicate === true;
+                    inflightChunkGets++;
+                    maxInflightChunkGets = Math.max(
+                        maxInflightChunkGets,
+                        inflightChunkGets
+                    );
+                    try {
+                        await delay(25);
+                        return originalGet(id as never, options as never);
+                    } finally {
+                        inflightChunkGets--;
+                    }
                 }
                 return originalGet(id as never, options as never);
             };
@@ -353,18 +364,29 @@ describe("index", () => {
                 },
             });
 
-            expect(fetchSearchCalls).to.be.greaterThan(0);
-            expect(partialFetches).to.eq(2);
-            expect(directChunkGets).to.eq(0);
+            expect(parentIdSearches).to.eq(0);
+            expect(directChunkGets).to.be.greaterThan(1);
+            expect(maxInflightChunkGets).to.be.greaterThan(1);
+            expect(maxInflightChunkGets).to.be.lessThanOrEqual(2);
+            expect(sawChunkReplicate).to.be.true;
+            expect(
+                filestoreReader.lastReadDiagnostics?.prefetchedChunkCount
+            ).to.eq(0);
+            expect(filestoreReader.lastReadDiagnostics?.chunkReadAhead).to.eq(
+                2
+            );
+            expect(
+                filestoreReader.lastReadDiagnostics?.maxInFlightChunkReads
+            ).to.be.lessThanOrEqual(2);
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("falls back to chunk-id lookups when observer chunk searches miss available chunks", async () => {
+        it("buffers observer downloads with bounded direct chunk reads", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
-                "observer download falls back to chunk-id lookups",
+                "observer buffered download uses bounded direct chunks",
                 largeFile
             );
 
@@ -378,49 +400,157 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             expect(file).to.be.instanceOf(LargeFile);
 
-            const originalSearch =
-                filestoreReader.files.index.search.bind(filestoreReader.files.index);
-            const originalGet =
-                filestoreReader.files.index.get.bind(filestoreReader.files.index);
-            let parentIdSearchCalls = 0;
-            let directChunkGets = 0;
+            const originalSearch = filestoreReader.files.index.search.bind(
+                filestoreReader.files.index
+            );
+            const originalGet = filestoreReader.files.index.get.bind(
+                filestoreReader.files.index
+            );
+            let parentIdSearches = 0;
+            let directChunkLookups = 0;
+            let inflightChunkGets = 0;
+            let maxInflightChunkGets = 0;
+            let sawChunkReplicate = false;
 
             (filestoreReader.files.index as any).search = async (
-                request: unknown,
+                request: { query?: unknown | unknown[] },
                 options: unknown
             ) => {
-                const results = await originalSearch(
-                    request as never,
-                    options as never
-                );
-                const chunkResults = results.filter(
-                    (result: unknown) =>
-                        result instanceof TinyFile && result.parentId === fileId
-                );
-                if (chunkResults.length === 0) {
-                    return results;
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentIdLookup = queries.some((query: any) => {
+                    const key = Array.isArray(query?.key)
+                        ? query.key[0]
+                        : query?.key;
+                    return key === "parentId" && query?.value === fileId;
+                });
+                if (hasParentIdLookup) {
+                    parentIdSearches++;
                 }
-
-                parentIdSearchCalls++;
-                return results.filter(
-                    (result: unknown) =>
-                        !(
-                            result instanceof TinyFile &&
-                            result.parentId === fileId &&
-                            result.index === 1
-                        )
-                );
+                return originalSearch(request as never, options as never);
             };
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
-                options: unknown
+                options: { remote?: { replicate?: boolean } }
             ) => {
                 if (id.startsWith(`${fileId}:`)) {
-                    directChunkGets++;
+                    directChunkLookups++;
+                    sawChunkReplicate ||= options?.remote?.replicate === true;
+                    inflightChunkGets++;
+                    maxInflightChunkGets = Math.max(
+                        maxInflightChunkGets,
+                        inflightChunkGets
+                    );
+                    try {
+                        await delay(25);
+                        return originalGet(id as never, options as never);
+                    } finally {
+                        inflightChunkGets--;
+                    }
                 }
                 return originalGet(id as never, options as never);
             };
+
+            const bytes = await file!.getFile(filestoreReader, {
+                as: "joined",
+            });
+
+            expect(parentIdSearches).to.eq(0);
+            expect(directChunkLookups).to.be.greaterThan(1);
+            expect(maxInflightChunkGets).to.be.greaterThan(1);
+            expect(maxInflightChunkGets).to.be.lessThanOrEqual(2);
+            expect(sawChunkReplicate).to.be.true;
+            expect(
+                filestoreReader.lastReadDiagnostics?.prefetchedChunkCount
+            ).to.eq(0);
+            expect(filestoreReader.lastReadDiagnostics?.chunkReadAhead).to.eq(
+                2
+            );
+            expect(
+                filestoreReader.lastReadDiagnostics?.maxInFlightChunkReads
+            ).to.be.lessThanOrEqual(2);
+            expect(equals(bytes, largeFile)).to.be.true;
+        });
+
+        it("prepares observer downloads with temporary chunk replication", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "observer download is prepared through replication",
+                largeFile
+            );
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: false },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+            const release = await filestoreReader.prepareLargeFileDownload(
+                file as LargeFile,
+                { timeout: 30_000 }
+            );
+
+            try {
+                expect(
+                    await filestoreReader.countLocalChunks(file as LargeFile)
+                ).to.eq((file as LargeFile).chunkCount);
+                expect(
+                    filestoreReader.lastDownloadPreparationDiagnostics
+                        ?.lastLocalChunkCount
+                ).to.eq((file as LargeFile).chunkCount);
+
+                const bytes = await file!.getFile(filestoreReader, {
+                    as: "joined",
+                });
+                expect(equals(bytes, largeFile)).to.be.true;
+            } finally {
+                await release();
+            }
+
+            expect(
+                filestoreReader.lastDownloadPreparationDiagnostics
+                    ?.cleanupFinishedAt
+            ).to.be.a("number");
+        });
+
+        it("waits for replicated chunks before local streaming", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "replicator download waits for local chunks",
+                largeFile
+            );
+
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: { replicate: { factor: 1 } },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            await filestoreReader.waitForLocalChunks(file as LargeFile, {
+                timeout: 60_000,
+            });
+
+            expect(
+                await filestoreReader.countLocalChunks(file as LargeFile)
+            ).to.eq((file as LargeFile).chunkCount);
+            expect(
+                filestoreReader.lastDownloadPreparationDiagnostics?.mode
+            ).to.eq("local-chunks");
+            expect(
+                filestoreReader.lastDownloadPreparationDiagnostics
+                    ?.lastLocalChunkCount
+            ).to.eq((file as LargeFile).chunkCount);
 
             const streamedChunks: Uint8Array[] = [];
             await file!.writeFile(filestoreReader, {
@@ -428,10 +558,6 @@ describe("index", () => {
                     streamedChunks.push(chunk);
                 },
             });
-
-            expect(parentIdSearchCalls).to.be.greaterThan(0);
-            expect(directChunkGets).to.be.greaterThan(0);
-            expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
@@ -453,40 +579,14 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             expect(file).to.be.instanceOf(LargeFile);
 
-            const originalSearch =
-                filestoreReader.files.index.search.bind(filestoreReader.files.index);
-            const originalGet =
-                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const originalGet = filestoreReader.files.index.get.bind(
+                filestoreReader.files.index
+            );
             let observedChunkGets = 0;
             let sawKeepOpenWait = false;
             let sawSelfInHints = false;
+            let sawChunkReplicate = false;
             const selfHash = peer2.identity.publicKey.hashcode();
-
-            (filestoreReader.files.index as any).search = async (
-                request: unknown,
-                options: unknown
-            ) => {
-                const results = await originalSearch(
-                    request as never,
-                    options as never
-                );
-                const chunkResults = results.filter(
-                    (result: unknown) =>
-                        result instanceof TinyFile && result.parentId === fileId
-                );
-                if (chunkResults.length === 0) {
-                    return results;
-                }
-
-                return results.filter(
-                    (result: unknown) =>
-                        !(
-                            result instanceof TinyFile &&
-                            result.parentId === fileId &&
-                            result.index === 1
-                        )
-                );
-            };
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
@@ -496,13 +596,18 @@ describe("index", () => {
                             timeout: number;
                             behavior: string;
                         };
+                        from?: string[];
+                        replicate?: boolean;
                     };
                 }
             ) => {
                 if (id.startsWith(`${fileId}:`)) {
                     observedChunkGets++;
-                    sawKeepOpenWait ||= options?.remote?.wait?.behavior === "keep-open";
-                    sawSelfInHints ||= options?.remote?.from?.includes(selfHash) === true;
+                    sawKeepOpenWait ||=
+                        options?.remote?.wait?.behavior === "keep-open";
+                    sawSelfInHints ||=
+                        options?.remote?.from?.includes(selfHash) === true;
+                    sawChunkReplicate ||= options?.remote?.replicate === true;
                 }
                 return originalGet(id as never, options as never);
             };
@@ -517,6 +622,7 @@ describe("index", () => {
             expect(observedChunkGets).to.be.greaterThan(0);
             expect(sawKeepOpenWait).to.be.false;
             expect(sawSelfInHints).to.be.false;
+            expect(sawChunkReplicate).to.be.true;
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
@@ -537,8 +643,9 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             expect(file).to.be.instanceOf(LargeFile);
 
-            const originalGet =
-                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const originalGet = filestoreReader.files.index.get.bind(
+                filestoreReader.files.index
+            );
             const transientChunkId = `${fileId}:1`;
             let abortedOnce = false;
 
