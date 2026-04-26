@@ -1,0 +1,149 @@
+diff --git a/node_modules/@peerbit/log/src/log.ts b/node_modules/@peerbit/log/src/log.ts
+--- a/node_modules/@peerbit/log/src/log.ts
++++ b/node_modules/@peerbit/log/src/log.ts
+@@ -42,6 +42,10 @@ const isRecoverableJoinResolveError = (error: unknown): boolean => {
+ 		error instanceof Error ? error.message : typeof error === "string" ? error : "";
+ 	return (
+ 		message.includes("Failed to resolve block") ||
++		message.includes("Failed to load entry from head") ||
++		message.includes("Message did not have any valid receivers") ||
++		(error instanceof Error && error.name === "DeliveryError") ||
++		(error instanceof Error && error.name === "StreamStateError") ||
+ 		(error instanceof Error && error.name === "AbortError")
+ 	);
+ };
+@@ -728,13 +732,21 @@ export class Log<T> {
+ 					}
+ 
+ 					const from = await resolveRemoteFrom(element, this._closeController.signal);
+-					const entry = await Entry.fromMultihash<T>(this._storage, element, {
+-						remote: {
+-							timeout: remote.timeout,
+-							signal: remote.signal,
+-							...(from && from.length > 0 ? { from } : {}),
+-						},
+-					});
++					let entry: Entry<T>;
++					try {
++						entry = await Entry.fromMultihash<T>(this._storage, element, {
++							remote: {
++								timeout: remote.timeout,
++								signal: remote.signal,
++								...(from && from.length > 0 ? { from } : {}),
++							},
++						});
++					} catch (error) {
++						if (isRecoverableJoinResolveError(error)) {
++							continue;
++						}
++						throw error;
++					}
+ 					entries.push(entry);
+ 					references.set(entry.hash, entry);
+ 					continue;
+@@ -749,13 +761,25 @@ export class Log<T> {
+ 						element.hash,
+ 						this._closeController.signal,
+ 					);
+-					const entry = await Entry.fromMultihash<T>(this._storage, element.hash, {
+-						remote: {
+-							timeout: remote.timeout,
+-							signal: remote.signal,
+-							...(from && from.length > 0 ? { from } : {}),
+-						},
+-					});
++					let entry: Entry<T>;
++					try {
++						entry = await Entry.fromMultihash<T>(
++							this._storage,
++							element.hash,
++							{
++								remote: {
++									timeout: remote.timeout,
++									signal: remote.signal,
++									...(from && from.length > 0 ? { from } : {}),
++								},
++							},
++						);
++					} catch (error) {
++						if (isRecoverableJoinResolveError(error)) {
++							continue;
++						}
++						throw error;
++					}
+ 					entries.push(entry);
+ 					references.set(entry.hash, entry);
+ 					continue;
+diff --git a/node_modules/@peerbit/log/dist/src/log.js b/node_modules/@peerbit/log/dist/src/log.js
+--- a/node_modules/@peerbit/log/dist/src/log.js
++++ b/node_modules/@peerbit/log/dist/src/log.js
+@@ -55,5 +55,9 @@ const isRecoverableJoinResolveError = (error) => {
+     const message = error instanceof Error ? error.message : typeof error === "string" ? error : "";
+     return (message.includes("Failed to resolve block") ||
++        message.includes("Failed to load entry from head") ||
++        message.includes("Message did not have any valid receivers") ||
++        (error instanceof Error && error.name === "DeliveryError") ||
++        (error instanceof Error && error.name === "StreamStateError") ||
+         (error instanceof Error && error.name === "AbortError"));
+ };
+ let sqliteCreate;
+@@ -555,13 +559,22 @@ let Log = (() => {
+                             continue; // already in log
+                         }
+                         const from = await resolveRemoteFrom(element, this._closeController.signal);
+-                        const entry = await Entry.fromMultihash(this._storage, element, {
+-                            remote: {
+-                                timeout: remote.timeout,
+-                                signal: remote.signal,
+-                                ...(from && from.length > 0 ? { from } : {}),
+-                            },
+-                        });
++                        let entry;
++                        try {
++                            entry = await Entry.fromMultihash(this._storage, element, {
++                                remote: {
++                                    timeout: remote.timeout,
++                                    signal: remote.signal,
++                                    ...(from && from.length > 0 ? { from } : {}),
++                                },
++                            });
++                        }
++                        catch (error) {
++                            if (isRecoverableJoinResolveError(error)) {
++                                continue;
++                            }
++                            throw error;
++                        }
+                         entries.push(entry);
+                         references.set(entry.hash, entry);
+                         continue;
+@@ -571,13 +584,22 @@ let Log = (() => {
+                             continue; // already in log
+                         }
+                         const from = await resolveRemoteFrom(element.hash, this._closeController.signal);
+-                        const entry = await Entry.fromMultihash(this._storage, element.hash, {
+-                            remote: {
+-                                timeout: remote.timeout,
+-                                signal: remote.signal,
+-                                ...(from && from.length > 0 ? { from } : {}),
+-                            },
+-                        });
++                        let entry;
++                        try {
++                            entry = await Entry.fromMultihash(this._storage, element.hash, {
++                                remote: {
++                                    timeout: remote.timeout,
++                                    signal: remote.signal,
++                                    ...(from && from.length > 0 ? { from } : {}),
++                                },
++                            });
++                        }
++                        catch (error) {
++                            if (isRecoverableJoinResolveError(error)) {
++                                continue;
++                            }
++                            throw error;
++                        }
+                         entries.push(entry);
+                         references.set(entry.hash, entry);
+                         continue;

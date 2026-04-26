@@ -12,7 +12,7 @@ import {
 } from "./helpers";
 
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "100");
-const READER_ROLE = process.env.PW_READER_ROLE || "replicator";
+const READER_ROLE = process.env.PW_READER_ROLE || "adaptive";
 
 test.describe("file-share download via local bootstrap", () => {
     test(`${READER_ROLE} can download a 100 MB file with the download button`, async ({
@@ -48,7 +48,7 @@ test.describe("file-share download via local bootstrap", () => {
             await waitForUploadComplete(writer, 600_000);
 
             await reader.goto(shareUrl, { waitUntil: "domcontentloaded" });
-            await setSeedMode(reader, READER_ROLE === "replicator");
+            await setSeedMode(reader, READER_ROLE !== "observer");
             await waitForFileListed(reader, fileName, 600_000);
 
             await expectDownloadedFile(reader, fileName, FILE_SIZE_MB, 600_000);

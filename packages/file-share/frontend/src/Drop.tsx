@@ -25,7 +25,7 @@ const getRoleFromLocalStorage = (files: Files) => {
 };
 
 const DEFAULT_REPLICATION_ROLE: ReplicationOptions = {
-    factor: 1,
+    limits: { cpu: { max: 1, monitor: undefined } },
 };
 
 const parseStoredRole = (
@@ -211,7 +211,7 @@ export const Drop = () => {
     const [role, setRole] = useState<"replicator" | "observer">(
         storedRole === false ? "observer" : "replicator"
     );
-    const [limitCPU, setLimitCPU] = useState<number | undefined>();
+    const [limitCPU, setLimitCPU] = useState<number | undefined>(1);
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
 
     // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
@@ -547,13 +547,7 @@ export const Drop = () => {
                 return;
             }
 
-            if (files.program.persistChunkReads) {
-                await files.program.waitForLocalChunks(file, {
-                    timeout,
-                    progress: (value) => progress(value * 0.5),
-                });
-                preparedLargeDownload = true;
-            } else {
+            if (!files.program.persistChunkReads) {
                 releasePreparedDownload =
                     await files.program.prepareLargeFileDownload(file, {
                         timeout,

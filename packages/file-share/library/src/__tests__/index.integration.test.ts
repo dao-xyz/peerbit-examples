@@ -519,48 +519,6 @@ describe("index", () => {
             ).to.be.a("number");
         });
 
-        it("waits for replicated chunks before local streaming", async () => {
-            const filestore = await peer.open(new Files());
-            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
-            const fileId = await filestore.add(
-                "replicator download waits for local chunks",
-                largeFile
-            );
-
-            const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: { replicate: { factor: 1 } },
-            });
-            await filestoreReader.files.log.waitForReplicator(
-                peer.identity.publicKey
-            );
-
-            const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
-
-            await filestoreReader.waitForLocalChunks(file as LargeFile, {
-                timeout: 60_000,
-            });
-
-            expect(
-                await filestoreReader.countLocalChunks(file as LargeFile)
-            ).to.eq((file as LargeFile).chunkCount);
-            expect(
-                filestoreReader.lastDownloadPreparationDiagnostics?.mode
-            ).to.eq("local-chunks");
-            expect(
-                filestoreReader.lastDownloadPreparationDiagnostics
-                    ?.lastLocalChunkCount
-            ).to.eq((file as LargeFile).chunkCount);
-
-            const streamedChunks: Uint8Array[] = [];
-            await file!.writeFile(filestoreReader, {
-                write: async (chunk) => {
-                    streamedChunks.push(chunk);
-                },
-            });
-            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
-        });
-
         it("avoids keep-open remote waits for observer chunk downloads", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
@@ -627,11 +585,11 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("retries transient chunk lookup aborts", async () => {
+        it("retries transient chunk lookup failures", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
-                "streamed download with transient abort",
+                "streamed download with transient lookup failures",
                 largeFile
             );
 
@@ -648,6 +606,8 @@ describe("index", () => {
             );
             const transientChunkId = `${fileId}:1`;
             let abortedOnce = false;
+            let failedBlockOnce = false;
+            let deliveryFailedOnce = false;
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
@@ -658,6 +618,20 @@ describe("index", () => {
                     const error = new Error("fanout channel closed");
                     error.name = "AbortError";
                     throw error;
+                }
+                if (id === transientChunkId && !failedBlockOnce) {
+                    failedBlockOnce = true;
+                    throw new Error(
+                        "Failed to resolve block: transient-test-block"
+                    );
+                }
+                if (id === transientChunkId && !deliveryFailedOnce) {
+                    deliveryFailedOnce = true;
+                    throw {
+                        name: "DeliveryError",
+                        message:
+                            "Failed to get message test delivery acknowledges from all nodes (0/1)",
+                    };
                 }
                 return originalGet(id as never, options as never);
             };
@@ -671,6 +645,8 @@ describe("index", () => {
             });
 
             expect(abortedOnce).to.be.true;
+            expect(failedBlockOnce).to.be.true;
+            expect(deliveryFailedOnce).to.be.true;
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });

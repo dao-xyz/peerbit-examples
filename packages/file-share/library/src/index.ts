@@ -150,10 +150,44 @@ const installRuntimeOpenProfiler = () => {
 
 installRuntimeOpenProfiler();
 
-const isRetryableChunkLookupError = (error: unknown) =>
-    error instanceof Error &&
-    (error.name === "AbortError" ||
-        error.message.includes("fanout channel closed"));
+const getErrorName = (error: unknown) =>
+    typeof (error as { name?: unknown })?.name === "string"
+        ? ((error as { name: string }).name as string)
+        : undefined;
+
+const getErrorMessage = (error: unknown) =>
+    error instanceof Error
+        ? error.message
+        : typeof error === "string"
+          ? error
+          : typeof (error as { message?: unknown })?.message === "string"
+            ? ((error as { message: string }).message as string)
+            : String(error);
+
+const isRetryableChunkLookupError = (error: unknown) => {
+    const name = getErrorName(error);
+    const message = getErrorMessage(error);
+    return (
+        name === "AbortError" ||
+        name === "DeliveryError" ||
+        name === "StreamStateError" ||
+        message.includes("fanout channel closed") ||
+        message.includes("Failed to resolve block") ||
+        message.includes("Failed to load entry from head") ||
+        message.includes("Message did not have any valid receivers") ||
+        message.includes("delivery acknowledges from all nodes")
+    );
+};
+
+const shouldRetryChunkLookupWithoutHints = (error: unknown) => {
+    const name = getErrorName(error);
+    const message = getErrorMessage(error);
+    return (
+        name === "DeliveryError" ||
+        message.includes("delivery acknowledges from all nodes") ||
+        message.includes("Message did not have any valid receivers")
+    );
+};
 
 type FileReadOptions = {
     timeout?: number;
@@ -486,6 +520,7 @@ export class LargeFile extends AbstractFile {
         const deadline = Date.now() + totalTimeout;
         const attemptTimeout = Math.min(totalTimeout, 5_000);
         const chunkId = getChunkId(this.id, index);
+        let hintedDeliveryFailures = 0;
 
         while (Date.now() < deadline) {
             properties?.debug &&
@@ -497,7 +532,10 @@ export class LargeFile extends AbstractFile {
                     ((properties.debug.chunkResolved ||= {})[index] = "cached");
                 return cached;
             }
-            const remoteFrom = await files.getReadPeerHints();
+            const remoteFrom =
+                hintedDeliveryFailures >= 3
+                    ? undefined
+                    : await files.getReadPeerHints();
             if (properties?.debug) {
                 (properties.debug.chunkHints ||= {})[index] =
                     remoteFrom ?? null;
@@ -546,6 +584,9 @@ export class LargeFile extends AbstractFile {
                                     : String(error),
                         });
                     throw error;
+                }
+                if (remoteFrom && shouldRetryChunkLookupWithoutHints(error)) {
+                    hintedDeliveryFailures += 1;
                 }
             }
 
@@ -706,7 +747,7 @@ export class LargeFile extends AbstractFile {
             index < Math.min(resolvedFile.chunkCount, readAhead);
             index++
         ) {
-            void resolveChunkWithReadAhead(index);
+            void resolveChunkWithReadAhead(index).catch(() => undefined);
             debug.maxInFlightChunkReads = Math.max(
                 debug.maxInFlightChunkReads,
                 inFlightChunks.size
@@ -718,7 +759,9 @@ export class LargeFile extends AbstractFile {
             inFlightChunks.delete(index);
             const nextIndex = index + readAhead;
             if (nextIndex < resolvedFile.chunkCount) {
-                void resolveChunkWithReadAhead(nextIndex);
+                void resolveChunkWithReadAhead(nextIndex).catch(
+                    () => undefined
+                );
                 debug.maxInFlightChunkReads = Math.max(
                     debug.maxInFlightChunkReads,
                     inFlightChunks.size
@@ -1152,54 +1195,6 @@ export class Files extends Program<Args> {
             })
         );
         return count;
-    }
-
-    async waitForLocalChunks(
-        file: LargeFile,
-        properties?: {
-            timeout?: number;
-            progress?: (progress: number) => void;
-        }
-    ): Promise<void> {
-        const totalTimeout =
-            properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
-        const deadline = Date.now() + totalTimeout;
-        const debug = {
-            fileId: file.id,
-            fileName: file.name,
-            mode: "local-chunks",
-            chunkCount: file.chunkCount,
-            startedAt: Date.now(),
-            lastLocalChunkCount: 0,
-            finishedAt: null as number | null,
-            failureAt: null as number | null,
-            failureMessage: null as string | null,
-        };
-        this.lastDownloadPreparationDiagnostics = debug;
-
-        try {
-            while (Date.now() < deadline) {
-                const localChunkCount = await this.countLocalChunks(file);
-                debug.lastLocalChunkCount = localChunkCount;
-                properties?.progress?.(
-                    Math.min(localChunkCount / Math.max(file.chunkCount, 1), 1)
-                );
-                if (localChunkCount >= file.chunkCount) {
-                    debug.finishedAt = Date.now();
-                    return;
-                }
-                await sleep(250);
-            }
-
-            throw new Error(
-                `Timed out waiting for ${file.name} chunks (${debug.lastLocalChunkCount}/${file.chunkCount} chunks available locally)`
-            );
-        } catch (error) {
-            debug.failureAt = Date.now();
-            debug.failureMessage =
-                error instanceof Error ? error.message : String(error);
-            throw error;
-        }
     }
 
     async prepareLargeFileDownload(

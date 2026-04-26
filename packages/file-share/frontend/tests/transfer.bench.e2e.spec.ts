@@ -15,7 +15,8 @@ import {
 
 const ENABLED = process.env.PW_BENCH === "1";
 const SCENARIO = process.env.PW_BENCH_SCENARIO || "local";
-const READER_ROLE = process.env.PW_READER_ROLE || "replicator";
+const READER_ROLE = process.env.PW_READER_ROLE || "adaptive";
+const ADAPTIVE_REPLICATION_ROLE = { limits: { cpu: { max: 1 } } };
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "1024");
 const RESULT_FILE = process.env.PW_RESULT_FILE;
 const UPLOAD_TIMEOUT_MS = Number(process.env.PW_UPLOAD_TIMEOUT_MS || "1800000");
@@ -28,7 +29,7 @@ if (!["local", "prod"].includes(SCENARIO)) {
     throw new Error(`Unsupported PW_BENCH_SCENARIO='${SCENARIO}'`);
 }
 
-if (!["observer", "replicator"].includes(READER_ROLE)) {
+if (!["adaptive", "observer", "replicator"].includes(READER_ROLE)) {
     throw new Error(`Unsupported PW_READER_ROLE='${READER_ROLE}'`);
 }
 
@@ -180,7 +181,9 @@ test.describe("file-share transfer benchmark", () => {
             await seedReplicationRole(
                 reader,
                 address,
-                READER_ROLE === "observer" ? false : { factor: 1 }
+                READER_ROLE === "observer"
+                    ? false
+                    : ADAPTIVE_REPLICATION_ROLE
             );
 
             logStage("open-reader", { shareUrl: shareUrl.toString() });

@@ -1,0 +1,47 @@
+diff --git a/node_modules/@peerbit/shared-log/src/pid.ts b/node_modules/@peerbit/shared-log/src/pid.ts
+index 6d0b3cb..4b26ef4 100644
+--- a/node_modules/@peerbit/shared-log/src/pid.ts
++++ b/node_modules/@peerbit/shared-log/src/pid.ts
+@@ -157,7 +157,18 @@ export class PIDReplicationController {
+ 
+ 		// Calculate the new replication factor
+ 		const change = pTerm + iTerm + dTerm;
+-		const newFactor = currentFactor + change;
++		let newFactor = currentFactor + change;
++
++		if (this.maxCPUUsage != null && this.maxMemoryLimit == null) {
++			// CPU pressure can shed surplus, but it must not create coverage gaps.
++			const coverageSurplus = Math.max(0, totalFactor - 1);
++			if (newFactor < currentFactor) {
++				newFactor =
++					coverageSurplus <= 0
++						? currentFactor
++						: Math.max(newFactor, currentFactor - coverageSurplus);
++			}
++		}
+ 
+ 		// Update state for the next iteration
+ 		this.prevError = totalError;
+diff --git a/node_modules/@peerbit/shared-log/dist/src/pid.js b/node_modules/@peerbit/shared-log/dist/src/pid.js
+index 7f31176..ab3f89e 100644
+--- a/node_modules/@peerbit/shared-log/dist/src/pid.js
++++ b/node_modules/@peerbit/shared-log/dist/src/pid.js
+@@ -113,7 +113,17 @@ export class PIDReplicationController {
+         const dTerm = this.kd * derivative;
+         // Calculate the new replication factor
+         const change = pTerm + iTerm + dTerm;
+-        const newFactor = currentFactor + change;
++        let newFactor = currentFactor + change;
++        if (this.maxCPUUsage != null && this.maxMemoryLimit == null) {
++            // CPU pressure can shed surplus, but it must not create coverage gaps.
++            const coverageSurplus = Math.max(0, totalFactor - 1);
++            if (newFactor < currentFactor) {
++                newFactor =
++                    coverageSurplus <= 0
++                        ? currentFactor
++                        : Math.max(newFactor, currentFactor - coverageSurplus);
++            }
++        }
+         // Update state for the next iteration
+         this.prevError = totalError;
+         // reset integral term if we are "way" out of bounds

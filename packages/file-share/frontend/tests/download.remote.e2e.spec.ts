@@ -11,7 +11,7 @@ import {
 
 const PROD_ONLY = process.env.PW_PROD_SMOKE === "1";
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "100");
-const READER_ROLE = process.env.PW_READER_ROLE || "replicator";
+const READER_ROLE = process.env.PW_READER_ROLE || "adaptive";
 
 test.describe("file-share download via production site", () => {
     test.skip(!PROD_ONLY, "Set PW_PROD_SMOKE=1 to run against production");
@@ -47,7 +47,7 @@ test.describe("file-share download via production site", () => {
             await waitForUploadComplete(writer, 600_000);
 
             await reader.goto(shareUrl, { waitUntil: "domcontentloaded" });
-            await setSeedMode(reader, READER_ROLE === "replicator");
+            await setSeedMode(reader, READER_ROLE !== "observer");
             await waitForFileListed(reader, fileName, 600_000);
 
             await expectDownloadedFile(reader, fileName, FILE_SIZE_MB, 600_000);
