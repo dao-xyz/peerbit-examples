@@ -44,7 +44,7 @@
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "13.0.27",
+        "@peerbit/document": "13.0.28",
         "@peerbit/media-streaming": "workspace:*",
         "peerbit": "^5.2.7",
         "uuid": "^10.0.0"

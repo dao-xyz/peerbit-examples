@@ -14,7 +14,7 @@
     },
     "dependencies": {
         "@giga-app/sdk": "workspace:*",
-        "@peerbit/document-react": "^1.0.27",
+        "@peerbit/document-react": "^1.0.28",
         "@peerbit/react": "^1.1.10",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",

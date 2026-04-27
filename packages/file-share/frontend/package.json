@@ -17,10 +17,10 @@
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/document": "13.0.27",
+        "@peerbit/document": "13.0.28",
         "@peerbit/please-lib": "workspace:*",
         "@peerbit/react": "^1.1.10",
-        "@peerbit/shared-log": "13.1.1",
+        "@peerbit/shared-log": "13.1.2",
         "@peerbit/stream": "^5.0.9",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",
