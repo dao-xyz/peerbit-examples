@@ -742,8 +742,12 @@ export class LargeFile extends AbstractFile {
                 directMisses + retryableFailures >=
                 nextNonReplicatingReadAfterFailures
             ) {
+                if (remoteFrom) {
+                    hintedDeliveryFailures = Math.max(hintedDeliveryFailures, 3);
+                }
+                const fallbackFrom: string[] | undefined = undefined;
                 try {
-                    const chunk = await resolveChunkWithoutPersisting(remoteFrom);
+                    const chunk = await resolveChunkWithoutPersisting(fallbackFrom);
                     if (chunk) {
                         return chunk;
                     }

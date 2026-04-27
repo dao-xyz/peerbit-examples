@@ -397,14 +397,17 @@ describe("index", () => {
             let directChunkMisses = 0;
             let preciseChunkSearches = 0;
             let nonReplicatingChunkGets = 0;
+            let sawUnhintedNonReplicatingGet = false;
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
-                options: { remote?: { replicate?: boolean } }
+                options: { remote?: { from?: string[]; replicate?: boolean } }
             ) => {
                 if (id === missingDirectChunkId) {
                     if (options?.remote?.replicate === false) {
                         nonReplicatingChunkGets++;
+                        sawUnhintedNonReplicatingGet ||=
+                            options.remote.from == null;
                         return originalGet(id as never, options as never);
                     }
                     directChunkMisses++;
@@ -450,6 +453,7 @@ describe("index", () => {
             expect(directChunkMisses).to.be.greaterThan(0);
             expect(preciseChunkSearches).to.be.greaterThan(0);
             expect(nonReplicatingChunkGets).to.be.greaterThan(0);
+            expect(sawUnhintedNonReplicatingGet).to.be.true;
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
