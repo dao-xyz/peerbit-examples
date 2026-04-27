@@ -283,7 +283,7 @@ const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT - 256 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
-const LARGE_FILE_PERSISTED_READ_AHEAD = 16;
+const LARGE_FILE_PERSISTED_READ_AHEAD = 4;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
@@ -767,14 +767,14 @@ export class LargeFile extends AbstractFile {
         }
 
         for (let index = 0; index < resolvedFile.chunkCount; index++) {
+            const chunkFile = await resolveChunkWithReadAhead(index);
+            inFlightChunks.delete(index);
             const nextIndex = index + readAhead;
             if (nextIndex < resolvedFile.chunkCount) {
                 void resolveChunkWithReadAhead(nextIndex).catch(
                     () => undefined
                 );
             }
-            const chunkFile = await resolveChunkWithReadAhead(index);
-            inFlightChunks.delete(index);
             if (!chunkFile) {
                 throw new Error(
                     `Failed to resolve chunk ${index + 1}/${resolvedFile.chunkCount} for file ${resolvedFile.id}`

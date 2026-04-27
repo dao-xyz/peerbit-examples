@@ -288,6 +288,7 @@ describe("index", () => {
             expect(parentIdSearches).to.eq(0);
             expect(directChunkGets).to.be.greaterThan(1);
             expect(maxInflightChunkGets).to.be.greaterThan(1);
+            expect(maxInflightChunkGets).to.be.lessThanOrEqual(4);
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
