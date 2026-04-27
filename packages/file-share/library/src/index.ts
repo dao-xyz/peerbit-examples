@@ -245,7 +245,7 @@ export class IndexableFile {
 
 const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
 const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
-const LARGE_FILE_TARGET_CHUNK_COUNT = 1024;
+const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT - 256 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
@@ -291,6 +291,54 @@ const readBlobChunk = async (blob: Blob, index: number, chunkSize: number) =>
             )
             .arrayBuffer()
     );
+const readBlobSequentialChunks = async function* (
+    blob: Blob,
+    chunkSize: number
+): AsyncIterable<Uint8Array> {
+    if (typeof blob.stream !== "function") {
+        for (let index = 0; index < getChunkCount(blob.size, chunkSize); index++) {
+            yield readBlobChunk(blob, index, chunkSize);
+        }
+        return;
+    }
+
+    const reader = blob.stream().getReader();
+    let pending = new Uint8Array(chunkSize);
+    let pendingOffset = 0;
+
+    try {
+        while (true) {
+            const { done, value } = await reader.read();
+            if (done) {
+                break;
+            }
+            if (!value || value.byteLength === 0) {
+                continue;
+            }
+
+            let offset = 0;
+            while (offset < value.byteLength) {
+                const available = chunkSize - pendingOffset;
+                const take = Math.min(available, value.byteLength - offset);
+                pending.set(value.subarray(offset, offset + take), pendingOffset);
+                pendingOffset += take;
+                offset += take;
+
+                if (pendingOffset === chunkSize) {
+                    yield pending;
+                    pending = new Uint8Array(chunkSize);
+                    pendingOffset = 0;
+                }
+            }
+        }
+
+        if (pendingOffset > 0) {
+            yield pending.slice(0, pendingOffset);
+        }
+    } finally {
+        reader.releaseLock();
+    }
+};
 const ensureSourceSize = (actual: bigint, expected: bigint) => {
     if (actual !== expected) {
         throw new Error(
@@ -578,7 +626,7 @@ export class LargeFile extends AbstractFile {
                         timeout: attemptTimeout,
                         throwOnMissing: false,
                         retryMissingResponses: true,
-                        replicate: true,
+                        replicate: files.persistChunkReads,
                         from: remoteFrom,
                     },
                 } as any
@@ -849,12 +897,13 @@ export class Files extends Program<Args> {
             return tinyFile.id;
         }
 
-        const chunkSize = getLargeFileSegmentSize(file.size);
-        return this.addChunkedFile(
+        return this.addSource(
             name,
-            BigInt(file.size),
-            (index) => readBlobChunk(file, index, chunkSize),
-            chunkSize,
+            {
+                size: BigInt(file.size),
+                readChunks: (chunkSize) =>
+                    readBlobSequentialChunks(file, chunkSize),
+            },
             parentId,
             progress
         );
@@ -1115,7 +1164,7 @@ export class Files extends Program<Args> {
                     // throw on missing shards here, the UI can appear "empty" until
                     // all shard roots respond, which feels broken during joins/churn.
                     throwOnMissing: false,
-                    replicate: true, // sync here because this, because we might want to access it offline, even though we are not replicators
+                    replicate: this.persistChunkReads,
                     from: remoteFrom,
                 },
             } as any

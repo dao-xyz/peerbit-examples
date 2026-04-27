@@ -40,10 +40,10 @@
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/document": "13.0.27",
+        "@peerbit/document": "13.0.28",
         "@peerbit/program": "6.0.18",
-        "@peerbit/shared-log": "13.1.1",
-        "@peerbit/trusted-network": "6.0.27",
+        "@peerbit/shared-log": "13.1.2",
+        "@peerbit/trusted-network": "6.0.28",
         "@stablelib/sha256": "^2.0.1",
         "peerbit": "^5.2.7",
         "uint8arrays": "^5.1.0",
