@@ -535,11 +535,11 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("retries transient chunk lookup aborts", async () => {
+        it("retries transient chunk lookup transport failures", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
-                "streamed download with transient abort",
+                "streamed download with transient transport failures",
                 largeFile
             );
 
@@ -555,6 +555,8 @@ describe("index", () => {
                 filestoreReader.files.index.get.bind(filestoreReader.files.index);
             const transientChunkId = `${fileId}:1`;
             let abortedOnce = false;
+            let failedBlockOnce = false;
+            let deliveryFailedOnce = false;
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
@@ -565,6 +567,20 @@ describe("index", () => {
                     const error = new Error("fanout channel closed");
                     error.name = "AbortError";
                     throw error;
+                }
+                if (id === transientChunkId && !failedBlockOnce) {
+                    failedBlockOnce = true;
+                    throw new Error(
+                        "Failed to resolve block: transient-test-block"
+                    );
+                }
+                if (id === transientChunkId && !deliveryFailedOnce) {
+                    deliveryFailedOnce = true;
+                    throw {
+                        name: "DeliveryError",
+                        message:
+                            "Failed to get message test delivery acknowledges from all nodes (0/1)",
+                    };
                 }
                 return originalGet(id as never, options as never);
             };
@@ -578,6 +594,8 @@ describe("index", () => {
             });
 
             expect(abortedOnce).to.be.true;
+            expect(failedBlockOnce).to.be.true;
+            expect(deliveryFailedOnce).to.be.true;
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
