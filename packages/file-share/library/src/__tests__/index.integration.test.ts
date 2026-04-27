@@ -123,10 +123,23 @@ describe("index", () => {
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const expectedId = sha256Base64Sync(largeFile);
             const addProgress: number[] = [];
+            class StreamingOnlyBlob extends Blob {
+                streamCalls = 0;
+
+                stream() {
+                    this.streamCalls += 1;
+                    return super.stream();
+                }
+
+                slice(): Blob {
+                    throw new Error("large blob uploads should use stream()");
+                }
+            }
+            const blob = new StreamingOnlyBlob([largeFile]);
 
             const addedId = await filestore.add(
                 "streamed large blob",
-                new Blob([largeFile]),
+                blob,
                 undefined,
                 (progress) => {
                     addProgress.push(progress);
@@ -136,6 +149,7 @@ describe("index", () => {
             const added = await filestore.files.index.get(addedId);
             expect(added).to.be.instanceOf(LargeFile);
             expect((added as LargeFile).finalHash).to.eq(expectedId);
+            expect(blob.streamCalls).to.eq(1);
             expect(addProgress.some((x) => x > 0 && x < 1)).to.be.true;
 
             const filestoreReader = await peer2.open<Files>(filestore.address, {
@@ -609,6 +623,27 @@ describe("index", () => {
             expect(error?.message).to.eq("stop-after-measuring");
             expect(requestedChunkSize).to.be.greaterThan(500_000);
             expect(requestedChunkSize).to.be.greaterThan(4_000_000);
+        });
+
+        it("keeps runner-sized uploads to a bounded chunk count", async () => {
+            const filestore = await peer.open(new Files());
+            let requestedChunkSize = 0;
+            let error: any;
+
+            try {
+                await filestore.addSource("runner-sized-file", {
+                    size: 512n * 1024n * 1024n,
+                    async *readChunks(chunkSize: number) {
+                        requestedChunkSize = chunkSize;
+                        throw new Error("stop-after-measuring");
+                    },
+                });
+            } catch (caught) {
+                error = caught;
+            }
+
+            expect(error?.message).to.eq("stop-after-measuring");
+            expect(requestedChunkSize).to.be.greaterThanOrEqual(2 * 1024 * 1024);
         });
 
         it("exposes large file metadata before chunk upload finishes", async () => {
