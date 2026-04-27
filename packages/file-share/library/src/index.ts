@@ -557,6 +557,89 @@ export class LargeFile extends AbstractFile {
         const attemptTimeout = Math.min(totalTimeout, 5_000);
         const chunkId = getChunkId(this.id, index);
         let hintedDeliveryFailures = 0;
+        let directMisses = 0;
+        let retryableFailures = 0;
+        let nextNonReplicatingReadAfterFailures = 3;
+        const resolveChunkByIndexedFields = async (
+            remoteFrom: string[] | undefined
+        ): Promise<TinyFile | undefined> => {
+            properties?.debug &&
+                ((properties.debug.chunkIndexedSearches ||= {})[index] =
+                    ((properties.debug.chunkIndexedSearches ||= {})[index] ??
+                        0) + 1);
+            const chunks = await files.files.index.search(
+                new SearchRequest({
+                    query: [
+                        new StringMatch({
+                            key: "parentId",
+                            value: this.id,
+                            caseInsensitive: false,
+                            method: StringMatchMethod.exact,
+                        }),
+                        new StringMatch({
+                            key: "name",
+                            value: `${this.name}/${index}`,
+                            caseInsensitive: false,
+                            method: StringMatchMethod.exact,
+                        }),
+                    ],
+                    fetch: 1,
+                }),
+                {
+                    local: true,
+                    remote: {
+                        timeout: attemptTimeout,
+                        throwOnMissing: false,
+                        retryMissingResponses: true,
+                        replicate: files.persistChunkReads,
+                        from: remoteFrom,
+                    },
+                } as any
+            );
+            const chunk = chunks.find(
+                (candidate) =>
+                    candidate instanceof TinyFile &&
+                    candidate.parentId === this.id &&
+                    candidate.index === index
+            ) as TinyFile | undefined;
+            if (chunk) {
+                knownChunks.set(index, chunk);
+                properties?.debug &&
+                    ((properties.debug.chunkResolved ||= {})[index] =
+                        "indexed-search");
+                return chunk;
+            }
+        };
+        const resolveChunkWithoutPersisting = async (
+            remoteFrom: string[] | undefined
+        ): Promise<TinyFile | undefined> => {
+            properties?.debug &&
+                ((properties.debug.chunkNonReplicatingGets ||= {})[index] =
+                    ((properties.debug.chunkNonReplicatingGets ||= {})[index] ??
+                        0) + 1);
+            const chunk = await files.files.index.get(chunkId, {
+                local: true,
+                waitFor: attemptTimeout,
+                remote: {
+                    timeout: attemptTimeout,
+                    throwOnMissing: false,
+                    retryMissingResponses: true,
+                    replicate: false,
+                    from: remoteFrom,
+                },
+            });
+            if (
+                chunk instanceof TinyFile &&
+                chunk.parentId === this.id &&
+                chunk.index === index
+            ) {
+                knownChunks.set(index, chunk);
+                properties?.debug &&
+                    ((properties.debug.chunkResolved ||= {})[index] =
+                        "non-replicating-get");
+                return chunk;
+            }
+        };
 
         while (Date.now() < deadline) {
             properties?.debug &&
@@ -606,6 +689,11 @@ export class LargeFile extends AbstractFile {
                             "remote-get");
                     return chunk;
                 }
+                properties?.debug &&
+                    ((properties.debug.chunkGetMisses ||= {})[index] =
+                        ((properties.debug.chunkGetMisses ||= {})[index] ?? 0) +
+                        1);
+                directMisses += 1;
             } catch (error) {
                 if (!isRetryableChunkLookupError(error)) {
                     properties?.debug &&
@@ -619,6 +707,67 @@ export class LargeFile extends AbstractFile {
                 if (remoteFrom && shouldRetryChunkLookupWithoutHints(error)) {
                     hintedDeliveryFailures += 1;
                 }
+                retryableFailures += 1;
+                properties?.debug &&
+                    ((properties.debug.chunkRetryableErrors ||= {})[index] =
+                        getErrorMessage(error));
+            }
+
+            try {
+                const chunk = await resolveChunkByIndexedFields(remoteFrom);
+                if (chunk) {
+                    return chunk;
+                }
+            } catch (error) {
+                if (!isRetryableChunkLookupError(error)) {
+                    properties?.debug &&
+                        (properties.debug.chunkFailure = {
+                            index,
+                            type: "non-retryable-indexed-search",
+                            message: getErrorMessage(error),
+                        });
+                    throw error;
+                }
+                if (remoteFrom && shouldRetryChunkLookupWithoutHints(error)) {
+                    hintedDeliveryFailures += 1;
+                }
+                retryableFailures += 1;
+                properties?.debug &&
+                    ((properties.debug.chunkRetryableSearchErrors ||= {})[
+                        index
+                    ] = getErrorMessage(error));
+            }
+
+            if (
+                directMisses + retryableFailures >=
+                nextNonReplicatingReadAfterFailures
+            ) {
+                try {
+                    const chunk = await resolveChunkWithoutPersisting(remoteFrom);
+                    if (chunk) {
+                        return chunk;
+                    }
+                } catch (error) {
+                    if (!isRetryableChunkLookupError(error)) {
+                        properties?.debug &&
+                            (properties.debug.chunkFailure = {
+                                index,
+                                type: "non-retryable-non-replicating-get",
+                                message: getErrorMessage(error),
+                            });
+                        throw error;
+                    }
+                    if (remoteFrom && shouldRetryChunkLookupWithoutHints(error)) {
+                        hintedDeliveryFailures += 1;
+                    }
+                    retryableFailures += 1;
+                    properties?.debug &&
+                        ((properties.debug
+                            .chunkRetryableNonReplicatingGetErrors ||= {})[
+                            index
+                        ] = getErrorMessage(error));
+                }
+                nextNonReplicatingReadAfterFailures *= 2;
             }
 
             await sleep(250);
