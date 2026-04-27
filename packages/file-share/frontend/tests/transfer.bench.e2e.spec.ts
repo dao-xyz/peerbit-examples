@@ -15,6 +15,8 @@ import {
 
 const ENABLED = process.env.PW_BENCH === "1";
 const SCENARIO = process.env.PW_BENCH_SCENARIO || "local";
+const READER_ROLE = process.env.PW_READER_ROLE || "adaptive";
+const ADAPTIVE_REPLICATION_ROLE = { limits: { cpu: { max: 1 } } };
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "1024");
 const RESULT_FILE = process.env.PW_RESULT_FILE;
 const UPLOAD_TIMEOUT_MS = Number(
@@ -27,6 +29,10 @@ const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000;
 
 if (!["local", "prod"].includes(SCENARIO)) {
     throw new Error(`Unsupported PW_BENCH_SCENARIO='${SCENARIO}'`);
+}
+
+if (!["adaptive", "observer"].includes(READER_ROLE)) {
+    throw new Error(`Unsupported PW_READER_ROLE='${READER_ROLE}'`);
 }
 
 const persistResult = async (result: Record<string, unknown>) => {
@@ -42,6 +48,7 @@ const logStage = (stage: string, details: Record<string, unknown> = {}) => {
         `FILE_SHARE_TRANSFER_BENCH_STAGE ${JSON.stringify({
             stage,
             scenario: SCENARIO,
+            readerRole: READER_ROLE,
             fileSizeMb: FILE_SIZE_MB,
             ...details,
         })}`
@@ -171,7 +178,11 @@ test.describe("file-share transfer benchmark", () => {
             const shareUrl = new URL(entryUrl);
             shareUrl.hash = `/s/${address}`;
             logStage("seed-reader-role");
-            await seedReplicationRole(reader, address, false);
+            await seedReplicationRole(
+                reader,
+                address,
+                READER_ROLE === "observer" ? false : ADAPTIVE_REPLICATION_ROLE
+            );
 
             logStage("open-reader", { shareUrl: shareUrl.toString() });
             logStage("open-writer-page");
@@ -229,6 +240,7 @@ test.describe("file-share transfer benchmark", () => {
             const result = {
                 status: "passed",
                 scenario: SCENARIO,
+                readerRole: READER_ROLE,
                 baseURL,
                 shareUrl: shareUrl.toString(),
                 fileName,
@@ -276,6 +288,7 @@ test.describe("file-share transfer benchmark", () => {
             const result = {
                 status: "failed",
                 scenario: SCENARIO,
+                readerRole: READER_ROLE,
                 fileName,
                 fileSizeMb: FILE_SIZE_MB,
                 failure: {

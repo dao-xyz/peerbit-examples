@@ -21,6 +21,14 @@ on:
                 required: true
                 type: number
                 default: 1
+            reader_role:
+                description: Reader replication role
+                required: true
+                type: choice
+                default: adaptive
+                options:
+                    - adaptive
+                    - observer
             min_upload_mbps:
                 description: Fail if median upload throughput is below this value (0 disables)
                 required: true
@@ -69,6 +77,7 @@ jobs:
               env:
                   PW_BENCH: "1"
                   PW_BENCH_SCENARIO: ${{ inputs.scenario }}
+                  PW_READER_ROLE: ${{ inputs.reader_role }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
                   PW_BASE_URL: ${{ inputs.scenario == 'prod' && 'https://files.dao.xyz' || '' }}
               working-directory: packages/file-share/frontend
@@ -83,6 +92,7 @@ jobs:
             - name: Summarize results
               env:
                   BENCH_SCENARIO: ${{ inputs.scenario }}
+                  BENCH_READER_ROLE: ${{ inputs.reader_role }}
                   BENCH_FILE_MB: ${{ inputs.file_mb }}
                   BENCH_RUNS: ${{ inputs.runs }}
                   BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
@@ -132,6 +142,7 @@ jobs:
 
                   const summary = {
                     scenario: process.env.BENCH_SCENARIO,
+                    readerRole: process.env.BENCH_READER_ROLE,
                     fileSizeMb: Number(process.env.BENCH_FILE_MB),
                     runs: Number(process.env.BENCH_RUNS),
                     medianUploadMbps: median(uploadMbps),
@@ -153,6 +164,7 @@ jobs:
                     "# File-share benchmark",
                     "",
                     `- Scenario: \`${summary.scenario}\``,
+                    `- Reader role: \`${summary.readerRole}\``,
                     `- File size: \`${summary.fileSizeMb} MiB\``,
                     `- Runs: \`${summary.runs}\``,
                     `- Median upload: \`${summary.medianUploadSeconds.toFixed(2)}s\` at \`${summary.medianUploadMbps.toFixed(2)} Mbps\``,
