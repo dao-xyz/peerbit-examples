@@ -299,9 +299,6 @@ const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 4;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
-const LARGE_FILE_CHUNK_ATTEMPT_MIN_TIMEOUT_MS = 5_000;
-const LARGE_FILE_CHUNK_ATTEMPT_MAX_TIMEOUT_MS = 30_000;
-const LARGE_FILE_CHUNK_ATTEMPT_TARGET_BYTES_PER_MS = 64;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
 
 const roundUpTo = (value: number, multiple: number) =>
@@ -328,26 +325,6 @@ const getChunkCount = (
     size: number | bigint,
     chunkSize = LARGE_FILE_SEGMENT_SIZE
 ) => Math.ceil(Number(size) / chunkSize);
-const getChunkLookupAttemptTimeout = (
-    totalTimeout: number,
-    size: number | bigint,
-    chunkCount: number
-) => {
-    const averageChunkSize = Number(size) / Math.max(chunkCount, 1);
-    const chunkTransferBudget = Math.ceil(
-        averageChunkSize / LARGE_FILE_CHUNK_ATTEMPT_TARGET_BYTES_PER_MS
-    );
-    return Math.min(
-        totalTimeout,
-        Math.max(
-            LARGE_FILE_CHUNK_ATTEMPT_MIN_TIMEOUT_MS,
-            Math.min(
-                LARGE_FILE_CHUNK_ATTEMPT_MAX_TIMEOUT_MS,
-                chunkTransferBudget
-            )
-        )
-    );
-};
 const getChunkId = (parentId: string, index: number) => `${parentId}:${index}`;
 const createUploadId = () => toBase64URL(randomBytes(16));
 const isBlobLike = (value: Uint8Array | Blob): value is Blob =>
@@ -591,11 +568,7 @@ export class LargeFile extends AbstractFile {
         const totalTimeout =
             properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
         const deadline = Date.now() + totalTimeout;
-        const attemptTimeout = getChunkLookupAttemptTimeout(
-            totalTimeout,
-            this.size,
-            this.chunkCount
-        );
+        const attemptTimeout = Math.min(totalTimeout, 5_000);
         if (properties?.debug) {
             properties.debug.chunkAttemptTimeoutMs = attemptTimeout;
         }
@@ -663,7 +636,6 @@ export class LargeFile extends AbstractFile {
                         0) + 1);
             const chunk = await files.files.index.get(chunkId, {
                 local: true,
-                waitFor: attemptTimeout,
                 remote: {
                     timeout: attemptTimeout,
                     // Exact chunk reads must still ask the hinted remote when
@@ -755,7 +727,6 @@ export class LargeFile extends AbstractFile {
             try {
                 const chunk = await files.files.index.get(chunkId, {
                     local: true,
-                    waitFor: attemptTimeout,
                     remote: {
                         timeout: attemptTimeout,
                         // Exact chunk reads must still ask the hinted remote when

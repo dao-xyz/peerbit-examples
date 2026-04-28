@@ -245,6 +245,7 @@ describe("index", () => {
             let directChunkGets = 0;
             let inflightChunkGets = 0;
             let maxInflightChunkGets = 0;
+            let sawChunkWaitFor = false;
 
             (filestoreReader.files.index as any).search = async (
                 request: { query: unknown | unknown[] },
@@ -272,6 +273,8 @@ describe("index", () => {
                 options: unknown
             ) => {
                 if (id.startsWith(`${fileId}:`)) {
+                    sawChunkWaitFor ||=
+                        (options as { waitFor?: number })?.waitFor != null;
                     directChunkGets++;
                     inflightChunkGets++;
                     maxInflightChunkGets = Math.max(
@@ -299,7 +302,8 @@ describe("index", () => {
             expect(readAhead).to.eq(4);
             expect(
                 filestoreReader.lastReadDiagnostics?.chunkAttemptTimeoutMs
-            ).to.be.greaterThan(5_000);
+            ).to.eq(5_000);
+            expect(sawChunkWaitFor).to.be.false;
             expect(maxInflightChunkGets).to.be.lessThanOrEqual(readAhead);
             expect(
                 Object.keys(
