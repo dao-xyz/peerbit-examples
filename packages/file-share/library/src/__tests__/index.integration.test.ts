@@ -639,7 +639,13 @@ describe("index", () => {
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
-                options: { remote?: { from?: string[]; replicate?: boolean } }
+                options: {
+                    remote?: {
+                        from?: string[];
+                        replicate?: boolean;
+                        strategy?: string;
+                    };
+                }
             ) => {
                 if (id === delayedChunkId) {
                     if (options?.remote?.replicate === false) {
@@ -657,7 +663,8 @@ describe("index", () => {
                     if (directChunkGets <= 4) {
                         return undefined;
                     }
-                    return options?.remote?.from?.includes(writerHash)
+                    return options?.remote?.from?.includes(writerHash) &&
+                        options.remote.strategy === "always"
                         ? originalGet(id as never, options as never)
                         : undefined;
                 }

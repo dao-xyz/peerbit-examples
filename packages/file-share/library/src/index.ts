@@ -636,6 +636,10 @@ export class LargeFile extends AbstractFile {
                 waitFor: attemptTimeout,
                 remote: {
                     timeout: attemptTimeout,
+                    // Exact chunk reads must still ask the hinted remote when
+                    // a local indexed row exists but its payload blocks are no
+                    // longer materializable locally.
+                    strategy: "always" as any,
                     throwOnMissing: false,
                     retryMissingResponses: true,
                     replicate: false,
@@ -724,6 +728,10 @@ export class LargeFile extends AbstractFile {
                     waitFor: attemptTimeout,
                     remote: {
                         timeout: attemptTimeout,
+                        // Exact chunk reads must still ask the hinted remote when
+                        // a local indexed row exists but its payload blocks are no
+                        // longer materializable locally.
+                        strategy: "always" as any,
                         // Chunk docs are immutable once the ready manifest is
                         // visible. Using keep-open waits here under read-ahead
                         // fan-out creates long-lived remote queries that can
