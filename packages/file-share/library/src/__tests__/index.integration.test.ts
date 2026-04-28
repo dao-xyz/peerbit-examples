@@ -1137,6 +1137,45 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
+        it("prefers ready manifests when listing duplicate large-file roots", async () => {
+            const filestore = await peer.open(new Files());
+            const uploadId = "duplicate-ready-manifest";
+            const pending = new LargeFile({
+                id: uploadId,
+                name: "duplicate-ready.bin",
+                size: 12n * 1024n * 1024n,
+                chunkCount: 3,
+                ready: false,
+            });
+            const ready = new LargeFile({
+                id: uploadId,
+                name: "duplicate-ready.bin",
+                size: pending.size,
+                chunkCount: pending.chunkCount,
+                ready: true,
+                finalHash: "ready-hash",
+            });
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            let searchCalls = 0;
+
+            (filestore.files.index as any).search = async () => {
+                searchCalls++;
+                return searchCalls === 1 ? [pending] : [pending, ready];
+            };
+            try {
+                const listed = await filestore.list();
+                expect(listed).to.have.length(1);
+                expect(listed[0]).to.be.instanceOf(LargeFile);
+                expect((listed[0] as LargeFile).ready).to.be.true;
+                expect((listed[0] as LargeFile).finalHash).to.eq("ready-hash");
+                expect(searchCalls).to.eq(2);
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+            }
+        });
+
         it("replicates", async () => {
             const filestore = await peer.open(new Files());
 
