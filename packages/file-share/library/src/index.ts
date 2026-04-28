@@ -560,6 +560,7 @@ export class LargeFile extends AbstractFile {
         let directMisses = 0;
         let retryableFailures = 0;
         let nextNonReplicatingReadAfterFailures = 3;
+        let lastReadPeerHints: string[] | undefined;
         const resolveChunkByIndexedFields = async (
             remoteFrom: string[] | undefined
         ): Promise<TinyFile | undefined> => {
@@ -651,10 +652,14 @@ export class LargeFile extends AbstractFile {
                     ((properties.debug.chunkResolved ||= {})[index] = "cached");
                 return cached;
             }
+            const candidateReadPeerHints = await files.getReadPeerHints();
+            if (candidateReadPeerHints) {
+                lastReadPeerHints = candidateReadPeerHints;
+            }
             const remoteFrom =
                 hintedDeliveryFailures >= 3
                     ? undefined
-                    : await files.getReadPeerHints();
+                    : candidateReadPeerHints;
             if (properties?.debug) {
                 (properties.debug.chunkHints ||= {})[index] = remoteFrom ?? null;
             }
@@ -745,31 +750,43 @@ export class LargeFile extends AbstractFile {
                 if (remoteFrom) {
                     hintedDeliveryFailures = Math.max(hintedDeliveryFailures, 3);
                 }
-                const fallbackFrom: string[] | undefined = undefined;
-                try {
-                    const chunk = await resolveChunkWithoutPersisting(fallbackFrom);
-                    if (chunk) {
-                        return chunk;
-                    }
-                } catch (error) {
-                    if (!isRetryableChunkLookupError(error)) {
+                const fallbackHints =
+                    remoteFrom ??
+                    lastReadPeerHints ??
+                    (await files.getReadPeerHints());
+                const fallbackSources = fallbackHints
+                    ? [undefined, fallbackHints]
+                    : [undefined];
+                for (const fallbackFrom of fallbackSources) {
+                    try {
+                        const chunk =
+                            await resolveChunkWithoutPersisting(fallbackFrom);
+                        if (chunk) {
+                            return chunk;
+                        }
+                    } catch (error) {
+                        if (!isRetryableChunkLookupError(error)) {
+                            properties?.debug &&
+                                (properties.debug.chunkFailure = {
+                                    index,
+                                    type: "non-retryable-non-replicating-get",
+                                    message: getErrorMessage(error),
+                                });
+                            throw error;
+                        }
+                        if (
+                            fallbackFrom &&
+                            shouldRetryChunkLookupWithoutHints(error)
+                        ) {
+                            hintedDeliveryFailures += 1;
+                        }
+                        retryableFailures += 1;
                         properties?.debug &&
-                            (properties.debug.chunkFailure = {
-                                index,
-                                type: "non-retryable-non-replicating-get",
-                                message: getErrorMessage(error),
-                            });
-                        throw error;
+                            ((properties.debug
+                                .chunkRetryableNonReplicatingGetErrors ||= {})[
+                                index
+                            ] = getErrorMessage(error));
                     }
-                    if (remoteFrom && shouldRetryChunkLookupWithoutHints(error)) {
-                        hintedDeliveryFailures += 1;
-                    }
-                    retryableFailures += 1;
-                    properties?.debug &&
-                        ((properties.debug
-                            .chunkRetryableNonReplicatingGetErrors ||= {})[
-                            index
-                        ] = getErrorMessage(error));
                 }
                 nextNonReplicatingReadAfterFailures *= 2;
             }
