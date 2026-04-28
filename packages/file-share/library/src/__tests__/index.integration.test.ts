@@ -6,6 +6,12 @@ import { delay, waitForResolved } from "@peerbit/time";
 import { sha256Base64Sync } from "@peerbit/crypto";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { expect, describe, it, beforeEach, afterEach } from "vitest";
+
+const getQueryKey = (query: any) =>
+    Array.isArray(query?.key) ? query.key.join(".") : query?.key;
+
+const getQueryValue = (query: any) => query?.value?.value ?? query?.value;
+
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
 
@@ -249,7 +255,8 @@ describe("index", () => {
                     : [request.query];
                 const isBulkChunkLookup = queries.some(
                     (query: any) =>
-                        query?.key === "parentId" && query?.value === fileId
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
                 );
 
                 if (isBulkChunkLookup) {
@@ -288,6 +295,343 @@ describe("index", () => {
             expect(parentIdSearches).to.eq(0);
             expect(directChunkGets).to.be.greaterThan(1);
             expect(maxInflightChunkGets).to.be.greaterThan(1);
+            expect(maxInflightChunkGets).to.be.lessThanOrEqual(4);
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("falls back to indexed chunk search when direct chunk lookup misses", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileName = "streamed download with indexed chunk fallback";
+            const fileId = await filestore.add(
+                fileName,
+                largeFile
+            );
+
+            const filestoreReader = await peer2.open<Files>(filestore.address);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const missingDirectChunkId = `${fileId}:1`;
+            let directChunkMisses = 0;
+            let indexedChunkSearches = 0;
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id === missingDirectChunkId) {
+                    directChunkMisses++;
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            (filestoreReader.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
+                );
+                const hasChunkName = queries.some((query: any) => {
+                    return (
+                        getQueryKey(query) === "name" &&
+                        getQueryValue(query) === `${fileName}/1`
+                    );
+                });
+                if (hasParentId && hasChunkName) {
+                    indexedChunkSearches++;
+                }
+
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(directChunkMisses).to.be.greaterThan(0);
+            expect(indexedChunkSearches).to.be.greaterThan(0);
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("falls back to non-replicating chunk reads when persisted and precise lookups miss", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileName = "streamed download with non-replicating fallback";
+            const fileId = await filestore.add(fileName, largeFile);
+
+            const filestoreReader = await peer2.open<Files>(filestore.address);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const missingDirectChunkId = `${fileId}:1`;
+            let directChunkMisses = 0;
+            let preciseChunkSearches = 0;
+            let nonReplicatingChunkGets = 0;
+            let sawUnhintedNonReplicatingGet = false;
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: { remote?: { from?: string[]; replicate?: boolean } }
+            ) => {
+                if (id === missingDirectChunkId) {
+                    if (options?.remote?.replicate === false) {
+                        nonReplicatingChunkGets++;
+                        sawUnhintedNonReplicatingGet ||=
+                            options.remote.from == null;
+                        return originalGet(id as never, options as never);
+                    }
+                    directChunkMisses++;
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            (filestoreReader.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
+                );
+                const hasChunkName = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "name" &&
+                        getQueryValue(query) === `${fileName}/1`
+                );
+
+                if (hasParentId && hasChunkName) {
+                    preciseChunkSearches++;
+                    return [];
+                }
+
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            await file!.writeFile(filestoreReader, {
+                write: async (chunk) => {
+                    streamedChunks.push(chunk);
+                },
+            });
+
+            expect(directChunkMisses).to.be.greaterThan(0);
+            expect(preciseChunkSearches).to.be.greaterThan(0);
+            expect(nonReplicatingChunkGets).to.be.greaterThan(0);
+            expect(sawUnhintedNonReplicatingGet).to.be.true;
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("tries hinted non-replicating chunk reads when unhinted fallback misses", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileName = "streamed download with hinted exact fallback";
+            const fileId = await filestore.add(fileName, largeFile);
+
+            const filestoreReader = await peer2.open<Files>(filestore.address);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const writerHash = peer.identity.publicKey.hashcode();
+            let readPeerHintLookups = 0;
+            (filestoreReader as any).getReadPeerHints = async () => {
+                readPeerHintLookups++;
+                return readPeerHintLookups === 1 ? [writerHash] : undefined;
+            };
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const missingDirectChunkId = `${fileId}:1`;
+            let directChunkMisses = 0;
+            let preciseChunkSearches = 0;
+            let unhintedNonReplicatingGets = 0;
+            let hintedNonReplicatingGets = 0;
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: { remote?: { from?: string[]; replicate?: boolean } }
+            ) => {
+                if (id === missingDirectChunkId) {
+                    if (options?.remote?.replicate === false) {
+                        if (options.remote.from == null) {
+                            unhintedNonReplicatingGets++;
+                            return undefined;
+                        }
+                        hintedNonReplicatingGets++;
+                        return originalGet(id as never, options as never);
+                    }
+                    directChunkMisses++;
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            (filestoreReader.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
+                );
+                const hasChunkName = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "name" &&
+                        getQueryValue(query) === `${fileName}/1`
+                );
+
+                if (hasParentId && hasChunkName) {
+                    preciseChunkSearches++;
+                    return [];
+                }
+
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            await file!.writeFile(
+                filestoreReader,
+                {
+                    write: async (chunk) => {
+                        streamedChunks.push(chunk);
+                    },
+                },
+                { timeout: 15_000 }
+            );
+
+            expect(directChunkMisses).to.be.greaterThan(0);
+            expect(preciseChunkSearches).to.be.greaterThan(0);
+            expect(readPeerHintLookups).to.be.greaterThan(1);
+            expect(unhintedNonReplicatingGets).to.be.greaterThan(0);
+            expect(hintedNonReplicatingGets).to.be.greaterThan(0);
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("falls back to parent chunk search when exact chunk routes miss", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileName = "streamed download with parent search fallback";
+            const fileId = await filestore.add(fileName, largeFile);
+
+            const filestoreReader = await peer2.open<Files>(filestore.address);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
+            const originalGet =
+                filestoreReader.files.index.get.bind(filestoreReader.files.index);
+            const missingDirectChunkId = `${fileId}:1`;
+            let directChunkMisses = 0;
+            let preciseChunkSearches = 0;
+            let parentChunkSearches = 0;
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id === missingDirectChunkId) {
+                    directChunkMisses++;
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            (filestoreReader.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
+                );
+                const hasChunkName = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "name" &&
+                        getQueryValue(query) === `${fileName}/1`
+                );
+
+                if (hasParentId && hasChunkName) {
+                    preciseChunkSearches++;
+                    return [];
+                }
+                if (hasParentId) {
+                    parentChunkSearches++;
+                }
+
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            await file!.writeFile(
+                filestoreReader,
+                {
+                    write: async (chunk) => {
+                        streamedChunks.push(chunk);
+                    },
+                },
+                { timeout: 15_000 }
+            );
+
+            expect(directChunkMisses).to.be.greaterThan(0);
+            expect(preciseChunkSearches).to.be.greaterThan(0);
+            expect(parentChunkSearches).to.be.greaterThan(0);
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
@@ -535,11 +879,12 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("retries transient chunk lookup aborts", async () => {
+        it("retries transient chunk lookup transport failures", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileName = "streamed download with transient transport failures";
             const fileId = await filestore.add(
-                "streamed download with transient abort",
+                fileName,
                 largeFile
             );
 
@@ -551,10 +896,43 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             expect(file).to.be.instanceOf(LargeFile);
 
+            const originalSearch =
+                filestoreReader.files.index.search.bind(filestoreReader.files.index);
             const originalGet =
                 filestoreReader.files.index.get.bind(filestoreReader.files.index);
             const transientChunkId = `${fileId}:1`;
             let abortedOnce = false;
+            let failedBlockOnce = false;
+            let deliveryFailedOnce = false;
+
+            (filestoreReader.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const isTransientChunkSearch =
+                    queries.some(
+                        (query: any) =>
+                            getQueryKey(query) === "parentId" &&
+                            getQueryValue(query) === fileId
+                    ) &&
+                    queries.some(
+                        (query: any) =>
+                            getQueryKey(query) === "name" &&
+                            getQueryValue(query) === `${fileName}/1`
+                    );
+
+                if (
+                    isTransientChunkSearch &&
+                    !(abortedOnce && failedBlockOnce && deliveryFailedOnce)
+                ) {
+                    return [];
+                }
+
+                return originalSearch(request as never, options as never);
+            };
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
@@ -565,6 +943,20 @@ describe("index", () => {
                     const error = new Error("fanout channel closed");
                     error.name = "AbortError";
                     throw error;
+                }
+                if (id === transientChunkId && !failedBlockOnce) {
+                    failedBlockOnce = true;
+                    throw new Error(
+                        "Failed to resolve block: transient-test-block"
+                    );
+                }
+                if (id === transientChunkId && !deliveryFailedOnce) {
+                    deliveryFailedOnce = true;
+                    throw {
+                        name: "DeliveryError",
+                        message:
+                            "Failed to get message test delivery acknowledges from all nodes (0/1)",
+                    };
                 }
                 return originalGet(id as never, options as never);
             };
@@ -578,6 +970,8 @@ describe("index", () => {
             });
 
             expect(abortedOnce).to.be.true;
+            expect(failedBlockOnce).to.be.true;
+            expect(deliveryFailedOnce).to.be.true;
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });

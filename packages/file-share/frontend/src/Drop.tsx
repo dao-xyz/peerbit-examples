@@ -158,7 +158,6 @@ export const Drop = () => {
         new Set()
     );
     const [isHost, setIsHost] = useState<boolean>();
-    const [currentRole, setCurrentRole] = useState<ReplicationOptions>(false);
     const [replicatorCount, setReplicatorCount] = useState(0);
     const [left, setLeft] = useState(false);
     const shareAddress = params.address && decodeURIComponent(params.address);
@@ -166,6 +165,9 @@ export const Drop = () => {
         typeof window === "undefined" || !shareAddress
             ? null
             : window.localStorage.getItem(`${shareAddress}-role`)
+    );
+    const [currentRole, setCurrentRole] = useState<ReplicationOptions>(
+        storedRole ?? DEFAULT_REPLICATION_ROLE
     );
     const diagnosticsRef = useRef<ListingDiagnostics>(
         createListingDiagnostics(shareAddress, storedRole)
@@ -225,6 +227,7 @@ export const Drop = () => {
             roleOptions === false ? "observer" : "replicator";
         diagnosticsRef.current.lastUpdateRoleStartedAt = Date.now();
 
+        setCurrentRole(roleOptions);
         files.program.persistChunkReads = roleOptions !== false;
 
         // console.log("X", files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]?.max)
@@ -234,6 +237,17 @@ export const Drop = () => {
             await files.program.files.log.replicate(roleOptions);
         }
         diagnosticsRef.current.lastUpdateRoleFinishedAt = Date.now();
+    };
+
+    const refreshAdaptiveReplication = async () => {
+        if (!files.program || currentRole === false) {
+            return;
+        }
+
+        files.program.persistChunkReads = true;
+        await files.program.files.log.replicate(currentRole, {
+            rebalance: true,
+        });
     };
 
     useEffect(() => {
@@ -398,6 +412,7 @@ export const Drop = () => {
                       : false;
 
             files.program.persistChunkReads = desiredRole !== false;
+            setCurrentRole(desiredRole);
             setRole(desiredRole === false ? "observer" : "replicator");
             void updateList("initial-open");
 
@@ -526,6 +541,8 @@ export const Drop = () => {
                   )
                 : 10_000;
         try {
+            await refreshAdaptiveReplication();
+
             const saveFilePicker = (window as SaveFilePickerWindow)
                 .showSaveFilePicker;
 
@@ -624,7 +641,8 @@ export const Drop = () => {
 
             if (promises.length === filesToAdd.length) {
                 Promise.all(promises)
-                    .then(() => {
+                    .then(async () => {
+                        await refreshAdaptiveReplication();
                         if (endProgress) {
                             setUploadProgress(null);
                         }
