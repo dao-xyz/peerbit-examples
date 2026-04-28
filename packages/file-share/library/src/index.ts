@@ -191,6 +191,10 @@ type FileReadOptions = {
     progress?: (progress: number) => any;
 };
 
+type ChunkReadContext = {
+    lastReadPeerHints?: string[];
+};
+
 export interface ReReadableChunkSource {
     size: bigint;
     readChunks(chunkSize: number): AsyncIterable<Uint8Array>;
@@ -546,6 +550,7 @@ export class LargeFile extends AbstractFile {
         files: Files,
         index: number,
         knownChunks: Map<number, TinyFile>,
+        readContext: ChunkReadContext,
         properties?: {
             timeout?: number;
             debug?: Record<string, any>;
@@ -560,7 +565,6 @@ export class LargeFile extends AbstractFile {
         let directMisses = 0;
         let retryableFailures = 0;
         let nextNonReplicatingReadAfterFailures = 3;
-        let lastReadPeerHints: string[] | undefined;
         const resolveChunkByIndexedFields = async (
             remoteFrom: string[] | undefined
         ): Promise<TinyFile | undefined> => {
@@ -654,12 +658,14 @@ export class LargeFile extends AbstractFile {
             }
             const candidateReadPeerHints = await files.getReadPeerHints();
             if (candidateReadPeerHints) {
-                lastReadPeerHints = candidateReadPeerHints;
+                readContext.lastReadPeerHints = candidateReadPeerHints;
             }
+            const availableReadPeerHints =
+                candidateReadPeerHints ?? readContext.lastReadPeerHints;
             const remoteFrom =
                 hintedDeliveryFailures >= 3
                     ? undefined
-                    : candidateReadPeerHints;
+                    : availableReadPeerHints;
             if (properties?.debug) {
                 (properties.debug.chunkHints ||= {})[index] = remoteFrom ?? null;
             }
@@ -752,7 +758,7 @@ export class LargeFile extends AbstractFile {
                 }
                 const fallbackHints =
                     remoteFrom ??
-                    lastReadPeerHints ??
+                    readContext.lastReadPeerHints ??
                     (await files.getReadPeerHints());
                 const fallbackSources = fallbackHints
                     ? [undefined, fallbackHints]
@@ -899,6 +905,7 @@ export class LargeFile extends AbstractFile {
         let processed = 0;
         const hasher = resolvedFile.finalHash ? new SHA256() : undefined;
         const knownChunks = new Map<number, TinyFile>();
+        const readContext: ChunkReadContext = {};
         if (!files.persistChunkReads) {
             for (const chunk of await resolvedFile.fetchChunks(files, {
                 timeout: Math.min(
@@ -916,10 +923,16 @@ export class LargeFile extends AbstractFile {
             if (cached) {
                 return cached;
             }
-            const pending = this.resolveChunk(files, index, knownChunks, {
-                timeout: properties?.timeout,
-                debug,
-            });
+            const pending = this.resolveChunk(
+                files,
+                index,
+                knownChunks,
+                readContext,
+                {
+                    timeout: properties?.timeout,
+                    debug,
+                }
+            );
             inFlightChunks.set(index, pending);
             return pending;
         };

@@ -472,6 +472,12 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             expect(file).to.be.instanceOf(LargeFile);
 
+            const writerHash = peer.identity.publicKey.hashcode();
+            let readPeerHintLookups = 0;
+            (filestoreReader as any).getReadPeerHints = async () => {
+                readPeerHintLookups++;
+                return readPeerHintLookups === 1 ? [writerHash] : undefined;
+            };
             const originalSearch =
                 filestoreReader.files.index.search.bind(filestoreReader.files.index);
             const originalGet =
@@ -541,6 +547,7 @@ describe("index", () => {
 
             expect(directChunkMisses).to.be.greaterThan(0);
             expect(preciseChunkSearches).to.be.greaterThan(0);
+            expect(readPeerHintLookups).to.be.greaterThan(1);
             expect(unhintedNonReplicatingGets).to.be.greaterThan(0);
             expect(hintedNonReplicatingGets).to.be.greaterThan(0);
             expect(streamedChunks.length).to.be.greaterThan(1);
