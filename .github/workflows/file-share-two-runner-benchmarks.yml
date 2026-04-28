@@ -13,6 +13,14 @@ on:
                 required: true
                 type: string
                 default: https://files.dao.xyz
+            reader_role:
+                description: Reader replication role
+                required: true
+                type: choice
+                default: adaptive
+                options:
+                    - adaptive
+                    - observer
             min_upload_mbps:
                 description: Fail if upload throughput is below this value (0 disables)
                 required: true
@@ -178,6 +186,7 @@ jobs:
                   COORDINATION_ISSUE: ${{ needs.coordinator.outputs.issue_number }}
                   PW_BASE_URL: ${{ inputs.base_url }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
+                  PW_READER_ROLE: ${{ inputs.reader_role }}
                   PW_RESULT_FILE: ${{ github.workspace }}/bench-results/reader.json
               run: |
                   mkdir -p "$GITHUB_WORKSPACE/bench-results"
@@ -214,6 +223,7 @@ jobs:
               env:
                   BENCH_FILE_MB: ${{ inputs.file_mb }}
                   BENCH_BASE_URL: ${{ inputs.base_url }}
+                  BENCH_READER_ROLE: ${{ inputs.reader_role }}
                   BENCH_MIN_UPLOAD_MBPS: ${{ inputs.min_upload_mbps }}
                   BENCH_MIN_DOWNLOAD_MBPS: ${{ inputs.min_download_mbps }}
               run: |
@@ -232,6 +242,7 @@ jobs:
                     "",
                     `- Base URL: \`${process.env.BENCH_BASE_URL}\``,
                     `- File size: \`${process.env.BENCH_FILE_MB} MiB\``,
+                    `- Reader role: \`${process.env.BENCH_READER_ROLE}\``,
                     `- Writer status: \`${writer.status}\``,
                     `- Reader status: \`${reader.status}\``,
                   ];
