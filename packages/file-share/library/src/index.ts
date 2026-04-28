@@ -801,9 +801,9 @@ export class LargeFile extends AbstractFile {
                 directMisses + retryableFailures >=
                 nextNonReplicatingReadAfterFailures
             ) {
-                if (remoteFrom) {
-                    hintedDeliveryFailures = Math.max(hintedDeliveryFailures, 3);
-                }
+                // A miss is not evidence that a peer hint is stale. Keep using
+                // the known writer/replicator hint for direct reads unless a
+                // delivery error specifically tells us to fall back without it.
                 const fallbackHints =
                     remoteFrom ??
                     readContext.lastReadPeerHints ??
@@ -961,6 +961,7 @@ export class LargeFile extends AbstractFile {
             waitUntilReadyResolvedReady: null as boolean | null,
             prefetchedChunkCount: 0,
             readAhead: 0,
+            initialReadPeerHints: null as string[] | null,
             finishedAt: null as number | null,
             chunkAttempts: {} as Record<number, number>,
             chunkHints: {} as Record<number, string[] | null>,
@@ -992,6 +993,13 @@ export class LargeFile extends AbstractFile {
         const hasher = resolvedFile.finalHash ? new SHA256() : undefined;
         const knownChunks = new Map<number, TinyFile>();
         const readContext: ChunkReadContext = {};
+        if (files.persistChunkReads) {
+            const initialReadPeerHints = await files.getReadPeerHints();
+            if (initialReadPeerHints) {
+                readContext.lastReadPeerHints = initialReadPeerHints;
+                debug.initialReadPeerHints = initialReadPeerHints;
+            }
+        }
         if (!files.persistChunkReads) {
             for (const chunk of await resolvedFile.fetchChunks(files, {
                 timeout: Math.min(
