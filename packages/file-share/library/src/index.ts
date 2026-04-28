@@ -645,6 +645,45 @@ export class LargeFile extends AbstractFile {
                 return chunk;
             }
         };
+        const resolveChunksByParentSearch = async (
+            remoteFrom: string[] | undefined
+        ): Promise<TinyFile | undefined> => {
+            properties?.debug &&
+                ((properties.debug.chunkParentSearches ||= {})[index] =
+                    ((properties.debug.chunkParentSearches ||= {})[index] ??
+                        0) + 1);
+            const chunks = await files.files.index.search(
+                new SearchRequest({
+                    query: new StringMatch({
+                        key: "parentId",
+                        value: this.id,
+                    }),
+                    fetch: 0xffffffff,
+                }),
+                {
+                    local: true,
+                    remote: {
+                        timeout: attemptTimeout,
+                        throwOnMissing: false,
+                        retryMissingResponses: true,
+                        replicate: files.persistChunkReads,
+                        from: remoteFrom,
+                    },
+                } as any
+            );
+            for (const chunk of chunks) {
+                if (chunk instanceof TinyFile && chunk.parentId === this.id) {
+                    knownChunks.set(chunk.index || 0, chunk);
+                }
+            }
+            const chunk = knownChunks.get(index);
+            if (chunk) {
+                properties?.debug &&
+                    ((properties.debug.chunkResolved ||= {})[index] =
+                        "parent-search");
+                return chunk;
+            }
+        };
 
         while (Date.now() < deadline) {
             properties?.debug &&
@@ -792,6 +831,35 @@ export class LargeFile extends AbstractFile {
                                 .chunkRetryableNonReplicatingGetErrors ||= {})[
                                 index
                             ] = getErrorMessage(error));
+                    }
+                }
+                for (const fallbackFrom of fallbackSources) {
+                    try {
+                        const chunk =
+                            await resolveChunksByParentSearch(fallbackFrom);
+                        if (chunk) {
+                            return chunk;
+                        }
+                    } catch (error) {
+                        if (!isRetryableChunkLookupError(error)) {
+                            properties?.debug &&
+                                (properties.debug.chunkFailure = {
+                                    index,
+                                    type: "non-retryable-parent-search",
+                                    message: getErrorMessage(error),
+                                });
+                            throw error;
+                        }
+                        if (
+                            fallbackFrom &&
+                            shouldRetryChunkLookupWithoutHints(error)
+                        ) {
+                            hintedDeliveryFailures += 1;
+                        }
+                        retryableFailures += 1;
+                        properties?.debug &&
+                            ((properties.debug.chunkRetryableParentSearchErrors ||=
+                                {})[index] = getErrorMessage(error));
                     }
                 }
                 nextNonReplicatingReadAfterFailures *= 2;
