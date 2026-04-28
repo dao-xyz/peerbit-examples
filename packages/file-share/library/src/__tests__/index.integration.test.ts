@@ -75,6 +75,56 @@ describe("index", () => {
     });
 
     describe("large file", () => {
+        it("keeps self-signed shallow chunk entries during adaptive pruning", async () => {
+            const filestore = await peer.open(new Files());
+            const entryHash = "self-signed-chunk-entry";
+
+            expect(
+                await (filestore as any).shouldKeepFileEntry({
+                    hash: entryHash,
+                    signatures: [{ publicKey: peer.identity.publicKey }],
+                })
+            ).to.be.true;
+        });
+
+        it("keeps retained shallow chunk entries by metadata during adaptive pruning", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "metadata retained chunks",
+                largeFile
+            );
+            const retainedChunkId = `${fileId}:2`;
+            const retainedChunk = await filestore.files.index.get(
+                retainedChunkId,
+                {
+                    local: true,
+                    remote: false,
+                }
+            );
+            const retainedHead = (retainedChunk as any).__context.head;
+            const shallowEntry =
+                await filestore.files.log.log.getShallow(retainedHead);
+            const originalGet = filestore.files.log.log.get.bind(
+                filestore.files.log.log
+            );
+
+            expect(shallowEntry?.meta.data?.byteLength).to.be.greaterThan(0);
+            filestore.retainChunkRead(retainedChunkId);
+
+            (filestore.files.log.log as any).get = async () => {
+                throw new Error("full entry payload should not be required");
+            };
+
+            try {
+                expect(
+                    await (filestore as any).shouldKeepFileEntry(shallowEntry)
+                ).to.be.true;
+            } finally {
+                (filestore.files.log.log as any).get = originalGet;
+            }
+        });
+
         it("stores upload-scoped chunks for repeated large-file segments", async () => {
             // Peer 1 is subscribing to a replication topic (to start helping the network)
             const filestore = await peer.open(new Files());
@@ -194,6 +244,32 @@ describe("index", () => {
 
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("pins persisted large-file chunk reads before streaming starts", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "pinned streamed download",
+                largeFile
+            );
+            const file = (await filestore.files.index.get(fileId)) as LargeFile;
+            const retainedChunks = new Set<string>();
+            const retainChunkRead = filestore.retainChunkRead.bind(filestore);
+            let firstWriteRetainedCount: number | undefined;
+
+            (filestore as any).retainChunkRead = (chunkId: string) => {
+                retainedChunks.add(chunkId);
+                return retainChunkRead(chunkId);
+            };
+
+            await file.writeFile(filestore, {
+                write: async () => {
+                    firstWriteRetainedCount ??= retainedChunks.size;
+                },
+            });
+
+            expect(firstWriteRetainedCount).to.eq(file.chunkCount);
         });
 
         it("records diagnostics for chunked uploads", async () => {

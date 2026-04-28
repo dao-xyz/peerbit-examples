@@ -643,6 +643,9 @@ export const Drop = () => {
                 ? Math.max(60_000, Math.ceil(Number(file.size) / 1e6) * 1_000)
                 : 10_000;
         try {
+            if (file instanceof LargeFile) {
+                files.program?.retainFileRead(file);
+            }
             scheduleAdaptiveRefresh("download-start");
 
             const saveFilePicker = (window as SaveFilePickerWindow)

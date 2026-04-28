@@ -1,4 +1,11 @@
-import { field, variant, vec, option } from "@dao-xyz/borsh";
+import {
+    deserialize,
+    field,
+    option,
+    serialize,
+    variant,
+    vec,
+} from "@dao-xyz/borsh";
 import { Program, ProgramHandler } from "@peerbit/program";
 import {
     Documents,
@@ -296,6 +303,16 @@ export class IndexableFile {
     }
 }
 
+@variant("files_entry_metadata")
+class FileEntryMetadata {
+    @field({ type: "string" })
+    id: string;
+
+    constructor(properties?: { id: string }) {
+        this.id = properties?.id ?? "";
+    }
+}
+
 const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
 const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
 const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
@@ -337,6 +354,25 @@ const getEntryHash = (entry: unknown) =>
     typeof (entry as { hash?: unknown })?.hash === "string"
         ? (entry as { hash: string }).hash
         : undefined;
+const getEntrySignatures = (entry: unknown) => {
+    const signatures = (entry as { signatures?: unknown })?.signatures;
+    return Array.isArray(signatures)
+        ? (signatures as {
+              publicKey?: { equals?: (key: unknown) => boolean };
+          }[])
+        : undefined;
+};
+const getEntryMetadata = (entry: unknown) => {
+    const data = (entry as { meta?: { data?: unknown } })?.meta?.data;
+    if (!(data instanceof Uint8Array)) {
+        return undefined;
+    }
+    try {
+        return deserialize(data, FileEntryMetadata);
+    } catch {
+        return undefined;
+    }
+};
 const getContextHead = (value: unknown) =>
     typeof (value as { __context?: { head?: unknown } })?.__context?.head ===
     "string"
@@ -408,6 +444,10 @@ const readBlobSequentialChunks = async function* (
         reader.releaseLock();
     }
 };
+const getEntryMetadataForFile = (file: AbstractFile) =>
+    file.parentId != null
+        ? serialize(new FileEntryMetadata({ id: file.id }))
+        : undefined;
 const ensureSourceSize = (actual: bigint, expected: bigint) => {
     if (actual !== expected) {
         throw new Error(
@@ -1217,6 +1257,9 @@ export class LargeFile extends AbstractFile {
         const resolvedFile = await this.waitUntilReady(files, properties);
         debug.waitUntilReadyResolvedAt = Date.now();
         debug.waitUntilReadyResolvedReady = resolvedFile.ready;
+        if (files.persistChunkReads) {
+            files.retainFileRead(resolvedFile);
+        }
 
         properties?.progress?.(0);
 
@@ -1443,11 +1486,57 @@ export class Files extends Program<Args> {
         }
     }
 
+    retainFileRead(file: AbstractFile) {
+        if (file instanceof TinyFile && file.parentId != null) {
+            this.retainChunkRead(file.id);
+            return;
+        }
+        if (file instanceof LargeFile) {
+            for (let index = 0; index < file.chunkCount; index++) {
+                this.retainChunkRead(getChunkId(file.id, index));
+            }
+        }
+    }
+
+    private retainAuthoredChunk(chunk: TinyFile, entryHash?: string) {
+        if (chunk.parentId != null) {
+            this.retainChunkRead(chunk.id);
+        }
+        if (entryHash) {
+            this.retainedChunkEntryHeads ??= new Set();
+            this.retainedChunkEntryHeads.add(entryHash);
+        }
+    }
+
     private async shouldKeepFileEntry(entryLike: unknown) {
         this.retainedChunkIds ??= new Set();
         this.retainedChunkEntryHeads ??= new Set();
         const hash = getEntryHash(entryLike);
         if (hash && this.retainedChunkEntryHeads.has(hash)) {
+            return true;
+        }
+
+        const metadata = getEntryMetadata(entryLike);
+        if (metadata && this.retainedChunkIds.has(metadata.id)) {
+            if (hash) {
+                this.retainedChunkEntryHeads.add(hash);
+            }
+            return true;
+        }
+
+        const isSignedBySelf = (
+            signatures:
+                | { publicKey?: { equals?: (key: unknown) => boolean } }[]
+                | undefined
+        ) =>
+            signatures?.some((signature) =>
+                signature.publicKey?.equals?.(this.node.identity.publicKey)
+            ) === true;
+
+        if (isSignedBySelf(getEntrySignatures(entryLike))) {
+            if (hash) {
+                this.retainedChunkEntryHeads.add(hash);
+            }
             return true;
         }
 
@@ -1472,24 +1561,28 @@ export class Files extends Program<Args> {
             return false;
         }
 
-        if (!entry) {
-            return false;
+        if (isSignedBySelf(getEntrySignatures(entry))) {
+            const entryHash = hash ?? getEntryHash(entry);
+            if (entryHash) {
+                this.retainedChunkEntryHeads.add(entryHash);
+            }
+            return true;
         }
 
-        const signatures = (
-            entry as {
-                signatures?: {
-                    publicKey?: { equals?: (key: unknown) => boolean };
-                }[];
-            }
-        ).signatures;
+        const resolvedMetadata = getEntryMetadata(entry);
         if (
-            signatures?.some((signature) =>
-                signature.publicKey?.equals?.(this.node.identity.publicKey)
-            )
+            resolvedMetadata &&
+            this.retainedChunkIds.has(resolvedMetadata.id)
         ) {
-            this.retainedChunkEntryHeads.add(entry.hash);
+            const entryHash = hash ?? getEntryHash(entry);
+            if (entryHash) {
+                this.retainedChunkEntryHeads.add(entryHash);
+            }
             return true;
+        }
+
+        if (!entry) {
+            return false;
         }
 
         if (!this.persistChunkReads) {
@@ -1629,14 +1722,17 @@ export class Files extends Program<Args> {
             let chunkCount = 0;
             for await (const chunkBytes of source.readChunks(chunkSize)) {
                 hasher.update(chunkBytes);
-                await this.files.put(
-                    new TinyFile({
-                        name: name + "/" + chunkCount,
-                        file: chunkBytes,
-                        parentId: uploadId,
-                        index: chunkCount,
-                    })
-                );
+                const chunk = new TinyFile({
+                    name: name + "/" + chunkCount,
+                    file: chunkBytes,
+                    parentId: uploadId,
+                    index: chunkCount,
+                });
+                this.retainAuthoredChunk(chunk);
+                const appended = await this.files.put(chunk, {
+                    meta: { data: getEntryMetadataForFile(chunk) },
+                });
+                this.retainAuthoredChunk(chunk, appended.entry.hash);
                 uploadedBytes += BigInt(chunkBytes.byteLength);
                 chunkCount++;
                 progress?.(Number(uploadedBytes) / Math.max(Number(size), 1));
@@ -1742,14 +1838,17 @@ export class Files extends Program<Args> {
                 hasher.update(chunkBytes);
                 const putStartedAt = Date.now();
                 diagnostics.firstChunkStartedAt ??= putStartedAt;
-                await this.files.put(
-                    new TinyFile({
-                        name: name + "/" + i,
-                        file: chunkBytes,
-                        parentId: uploadId,
-                        index: i,
-                    })
-                );
+                const chunk = new TinyFile({
+                    name: name + "/" + i,
+                    file: chunkBytes,
+                    parentId: uploadId,
+                    index: i,
+                });
+                this.retainAuthoredChunk(chunk);
+                const appended = await this.files.put(chunk, {
+                    meta: { data: getEntryMetadataForFile(chunk) },
+                });
+                this.retainAuthoredChunk(chunk, appended.entry.hash);
                 const putFinishedAt = Date.now();
                 const putDurationMs = putFinishedAt - putStartedAt;
                 diagnostics.firstChunkFinishedAt ??= putFinishedAt;
