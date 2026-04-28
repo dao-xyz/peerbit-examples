@@ -149,7 +149,9 @@ export async function waitForFileListed(
 }
 
 export async function waitForUploadComplete(page: Page, timeout = 600_000) {
-    const progress = page.locator('[data-testid="upload-progress"], .progress-root');
+    const progress = page.locator(
+        '[data-testid="upload-progress"], .progress-root'
+    );
     if ((await progress.count()) === 0) {
         return;
     }
@@ -158,10 +160,9 @@ export async function waitForUploadComplete(page: Page, timeout = 600_000) {
 
 export async function setSeedMode(page: Page, seeded: boolean) {
     const byTestId = page.getByTestId("seed-toggle");
-    const toggle =
-        (await byTestId.count())
-            ? byTestId
-            : page.locator("button", { hasText: "Seed" }).first();
+    const toggle = (await byTestId.count())
+        ? byTestId
+        : page.locator("button", { hasText: "Seed" }).first();
     await expect(toggle).toBeVisible({ timeout: 60_000 });
     const expected = seeded ? "on" : "off";
     const current = await toggle.getAttribute("data-state");
@@ -177,7 +178,7 @@ export async function expectDownloadedFile(
     expectedSizeMb: number,
     timeout = 8 * 60 * 1000
 ) {
-    const { button } = await getDownloadButton(page, fileName);
+    const { button } = await getDownloadButton(page, fileName, timeout);
 
     const downloadPromise = page.waitForEvent("download", { timeout });
     const dialogFailure = ignoreTimeout(
@@ -225,24 +226,33 @@ const ignoreTimeout = <T>(promise: Promise<T>) =>
         throw error;
     });
 
-const getDownloadButton = async (page: Page, fileName: string) => {
+const getDownloadButton = async (
+    page: Page,
+    fileName: string,
+    timeout = 60_000
+) => {
     const row = page.locator("li", { hasText: fileName }).first();
-    await expect(row).toBeVisible({ timeout: 60_000 });
+    await expect(row).toBeVisible({ timeout });
     const byTestId = row.getByTestId("download-file");
     const button =
         (await byTestId.count()) > 0 ? byTestId : row.locator("button").first();
+    await expect(button).toBeEnabled({ timeout });
     return { row, button };
 };
 
 export async function installMockSaveFilePicker(page: Page) {
     await page.addInitScript(() => {
         const savedFiles: Array<{ name: string; size: number }> = [];
-        Object.defineProperty(window, "__peerbitStreamingDownloadThresholdBytes", {
-            value: 1,
-            configurable: true,
-            enumerable: false,
-            writable: true,
-        });
+        Object.defineProperty(
+            window,
+            "__peerbitStreamingDownloadThresholdBytes",
+            {
+                value: 1,
+                configurable: true,
+                enumerable: false,
+                writable: true,
+            }
+        );
         Object.defineProperty(window, "__mockSavedFiles", {
             value: savedFiles,
             configurable: true,
@@ -281,7 +291,7 @@ export async function expectSavedViaPicker(
     timeout = 8 * 60 * 1000
 ) {
     const expectedBytes = expectedSizeMb * 1024 * 1024;
-    const { button } = await getDownloadButton(page, fileName);
+    const { button } = await getDownloadButton(page, fileName, timeout);
     const dialogFailure = ignoreTimeout(
         page.waitForEvent("dialog", { timeout }).then(async (dialog) => {
             const message = dialog.message();
@@ -299,9 +309,14 @@ export async function expectSavedViaPicker(
             async () =>
                 page.evaluate((expectedName) => {
                     const savedFiles =
-                        ((window as unknown as {
-                            __mockSavedFiles?: Array<{ name: string; size: number }>;
-                        }).__mockSavedFiles ?? []);
+                        (
+                            window as unknown as {
+                                __mockSavedFiles?: Array<{
+                                    name: string;
+                                    size: number;
+                                }>;
+                            }
+                        ).__mockSavedFiles ?? [];
                     return (
                         savedFiles.find((file) => file.name === expectedName) ??
                         null

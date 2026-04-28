@@ -147,13 +147,20 @@ const ignoreTimeout = (promise) =>
         throw error;
     });
 
-const getDownloadButton = async (page, fileName) => {
+const getDownloadButton = async (page, fileName, timeout = 60_000) => {
     const row = page.locator("li", { hasText: fileName }).first();
-    await row.waitFor({ timeout: 60_000 });
+    await row.waitFor({ timeout });
     const byTestId = row.getByTestId("download-file");
     const button =
         (await byTestId.count()) > 0 ? byTestId : row.locator("button").first();
-    return { row, button };
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+        if (await button.isEnabled().catch(() => false)) {
+            return { row, button };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`Download button for ${fileName} did not become enabled`);
 };
 
 const installMockSaveFilePicker = async (page) => {
@@ -206,7 +213,7 @@ const expectDownloadedFile = async (
     expectedSizeMb,
     timeout = 8 * 60 * 1000
 ) => {
-    const { button } = await getDownloadButton(page, fileName);
+    const { button } = await getDownloadButton(page, fileName, timeout);
 
     const downloadPromise = page.waitForEvent("download", { timeout });
     const dialogFailure = ignoreTimeout(
@@ -250,7 +257,7 @@ const expectSavedViaPicker = async (
     timeout = 8 * 60 * 1000
 ) => {
     const expectedBytes = expectedSizeMb * 1024 * 1024;
-    const { button } = await getDownloadButton(page, fileName);
+    const { button } = await getDownloadButton(page, fileName, timeout);
     const dialogFailure = ignoreTimeout(
         page.waitForEvent("dialog", { timeout }).then(async (dialog) => {
             const message = dialog.message();
