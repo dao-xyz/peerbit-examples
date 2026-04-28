@@ -1765,6 +1765,7 @@ export class Files extends Program<Args> {
             // TODO add ACL
             replicate: args?.replicate,
             replicas: { min: 3 },
+            keep: "self",
             canPerform: async (operation) => {
                 if (!this.trustGraph) {
                     return true;
