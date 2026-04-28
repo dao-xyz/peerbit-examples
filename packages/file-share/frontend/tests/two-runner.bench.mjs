@@ -10,11 +10,10 @@ const BASE_URL = (process.env.PW_BASE_URL || "https://files.dao.xyz").replace(
     ""
 );
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "512");
+const READER_ROLE = process.env.PW_READER_ROLE || "adaptive";
 const RESULT_FILE = process.env.PW_RESULT_FILE;
 const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000;
-const UPLOAD_TIMEOUT_MS = Number(
-    process.env.PW_UPLOAD_TIMEOUT_MS || "1800000"
-);
+const UPLOAD_TIMEOUT_MS = Number(process.env.PW_UPLOAD_TIMEOUT_MS || "1800000");
 const DOWNLOAD_TIMEOUT_MS = Number(
     process.env.PW_DOWNLOAD_TIMEOUT_MS || "1800000"
 );
@@ -29,6 +28,16 @@ const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY;
 const COORDINATION_ISSUE = process.env.COORDINATION_ISSUE;
 
 const rootUrl = (baseURL) => `${baseURL.replace(/\/$/, "")}/#/`;
+
+const getReaderRoleOptions = () => {
+    if (READER_ROLE === "observer") {
+        return false;
+    }
+    if (READER_ROLE === "adaptive") {
+        return { limits: { cpu: { max: 1 } } };
+    }
+    throw new Error(`Unsupported PW_READER_ROLE='${READER_ROLE}'`);
+};
 
 const persistResult = async (result) => {
     if (!RESULT_FILE) {
@@ -102,14 +111,19 @@ const getDiagnostics = async (page) => {
     return await page.evaluate(async () => {
         const hooks = window.__peerbitFileShareTestHooks;
         if (!hooks?.getDiagnostics) {
-            throw new Error("Missing __peerbitFileShareTestHooks.getDiagnostics");
+            throw new Error(
+                "Missing __peerbitFileShareTestHooks.getDiagnostics"
+            );
         }
         return await hooks.getDiagnostics();
     });
 };
 
 const waitForFileListed = async (page, fileName, timeout = 180_000) => {
-    await page.locator("li", { hasText: fileName }).first().waitFor({ timeout });
+    await page
+        .locator("li", { hasText: fileName })
+        .first()
+        .waitFor({ timeout });
 };
 
 const waitForUploadComplete = async (page, timeout = 600_000) => {
@@ -145,12 +159,16 @@ const getDownloadButton = async (page, fileName) => {
 const installMockSaveFilePicker = async (page) => {
     await page.addInitScript(() => {
         const savedFiles = [];
-        Object.defineProperty(window, "__peerbitStreamingDownloadThresholdBytes", {
-            value: 1,
-            configurable: true,
-            enumerable: false,
-            writable: true,
-        });
+        Object.defineProperty(
+            window,
+            "__peerbitStreamingDownloadThresholdBytes",
+            {
+                value: 1,
+                configurable: true,
+                enumerable: false,
+                writable: true,
+            }
+        );
         Object.defineProperty(window, "__mockSavedFiles", {
             value: savedFiles,
             configurable: true,
@@ -308,12 +326,16 @@ const createFileCoordinator = (filePath) => ({
                     .filter(Boolean)
                     .map((line) => JSON.parse(line))
                     .filter((event) => event.runId === RUN_ID);
-                const match = events.find((event) => kinds.includes(event.kind));
+                const match = events.find((event) =>
+                    kinds.includes(event.kind)
+                );
                 if (match) {
                     return match;
                 }
             }
-            await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+            await new Promise((resolve) =>
+                setTimeout(resolve, POLL_INTERVAL_MS)
+            );
         }
         throw new Error(
             `Timed out waiting for coordination event ${kinds.join(", ")}`
@@ -400,7 +422,10 @@ const runWriter = async (coordinator) => {
     const page = await context.newPage();
     await enableOpenProfiler(page);
     const fileName = `file-share-two-runner-${Date.now()}.bin`;
-    const preparedFile = await createSyntheticFileOnDisk(fileName, FILE_SIZE_MB);
+    const preparedFile = await createSyntheticFileOnDisk(
+        fileName,
+        FILE_SIZE_MB
+    );
     let writerDiagnostics;
 
     try {
@@ -507,6 +532,7 @@ const runReader = async (coordinator) => {
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
     await enableOpenProfiler(page);
+    const readerRoleOptions = getReaderRoleOptions();
     const usesStreamingDownload =
         FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
     let readerDiagnostics;
@@ -515,7 +541,7 @@ const runReader = async (coordinator) => {
         if (usesStreamingDownload) {
             await installMockSaveFilePicker(page);
         }
-        await seedReplicationRole(page, writer.address, false);
+        await seedReplicationRole(page, writer.address, readerRoleOptions);
         await page.goto(writer.shareUrl, { waitUntil: "domcontentloaded" });
         const readerReadyAt = Date.now();
         await waitForFileListed(page, writer.fileName, UPLOAD_TIMEOUT_MS);
@@ -544,6 +570,7 @@ const runReader = async (coordinator) => {
         const result = {
             status: "passed",
             role: "reader",
+            readerRole: READER_ROLE,
             scenario: "prod",
             baseURL: BASE_URL,
             shareUrl: writer.shareUrl,
@@ -579,6 +606,7 @@ const runReader = async (coordinator) => {
         await persistResult({
             status: "failed",
             role: "reader",
+            readerRole: READER_ROLE,
             scenario: "prod",
             fileName: writer.fileName,
             fileSizeMb: FILE_SIZE_MB,
