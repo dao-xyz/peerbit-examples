@@ -1053,6 +1053,33 @@ export class LargeFile extends AbstractFile {
     }
 }
 
+const preferListCandidate = (
+    candidate: AbstractFile,
+    existing: AbstractFile
+) => {
+    if (candidate instanceof LargeFile && existing instanceof LargeFile) {
+        if (candidate.ready !== existing.ready) {
+            return candidate.ready;
+        }
+        if (candidate.finalHash && !existing.finalHash) {
+            return true;
+        }
+        return candidate.chunkCount > existing.chunkCount;
+    }
+    return false;
+};
+
+const deduplicateListedRoots = (files: AbstractFile[]) => {
+    const byId = new Map<string, AbstractFile>();
+    for (const file of files) {
+        const existing = byId.get(file.id);
+        if (!existing || preferListCandidate(file, existing)) {
+            byId.set(file.id, file);
+        }
+    }
+    return [...byId.values()];
+};
+
 type Args = { replicate: ReplicationOptions };
 
 type OpenDiagnostics = {
@@ -1460,7 +1487,46 @@ export class Files extends Program<Args> {
                 },
             } as any
         );
-        return files;
+        const rootFiles = deduplicateListedRoots(files);
+        const resolvedRoots = await Promise.all(
+            rootFiles.map(async (file) => {
+                if (!(file instanceof LargeFile) || file.ready) {
+                    return file;
+                }
+                try {
+                    const matches = await this.files.index.search(
+                        new SearchRequest({
+                            query: new StringMatch({
+                                key: "id",
+                                value: file.id,
+                                caseInsensitive: false,
+                                method: StringMatchMethod.exact,
+                            }),
+                            fetch: 0xffffffff,
+                        }),
+                        {
+                            local: true,
+                            remote: {
+                                timeout: 5_000,
+                                throwOnMissing: false,
+                                retryMissingResponses: true,
+                                replicate: this.persistChunkReads,
+                                from: remoteFrom,
+                            },
+                        } as any
+                    );
+                    const resolved = deduplicateListedRoots(
+                        matches.filter((match) => !match.parentId)
+                    ).find((match) => match.id === file.id);
+                    return resolved && preferListCandidate(resolved, file)
+                        ? resolved
+                        : file;
+                } catch {
+                    return file;
+                }
+            })
+        );
+        return deduplicateListedRoots(resolvedRoots);
     }
 
     async countLocalChunks(parent: LargeFile): Promise<number> {

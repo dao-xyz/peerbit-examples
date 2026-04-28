@@ -62,12 +62,16 @@ type ListingDiagnostics = {
     lastUpdateRoleFinishedAt: number | null;
     lastAppliedRole: "replicator" | "observer" | null;
     listCallCount: number;
+    adaptiveRefreshCount: number;
+    adaptiveRefreshInFlight: boolean;
+    lastAdaptiveRefreshReason: string | null;
+    lastAdaptiveRefreshStartedAt: number | null;
+    lastAdaptiveRefreshFinishedAt: number | null;
+    lastAdaptiveRefreshError: string | null;
 };
 
 type SaveFilePickerWindow = Window & {
-    showSaveFilePicker?: (options?: {
-        suggestedName?: string;
-    }) => Promise<{
+    showSaveFilePicker?: (options?: { suggestedName?: string }) => Promise<{
         createWritable(): Promise<BrowserFileWriter>;
     }>;
     __peerbitStreamingDownloadThresholdBytes?: number;
@@ -88,6 +92,20 @@ const getStreamingDownloadThresholdBytes = () => {
 
 const getFileSizeBigInt = (file: AbstractFile) =>
     typeof file.size === "bigint" ? file.size : BigInt(file.size);
+
+const getReadyLargeFileSignature = (files: AbstractFile[]) => {
+    const readyFiles = files
+        .filter(
+            (file): file is LargeFile =>
+                file instanceof LargeFile && file.ready && !!file.finalHash
+        )
+        .map(
+            (file) =>
+                `${file.id}:${file.size.toString()}:${file.chunkCount}:${file.finalHash}`
+        )
+        .sort();
+    return readyFiles.length > 0 ? readyFiles.join("|") : null;
+};
 
 const createListingDiagnostics = (
     shareAddress: string | undefined,
@@ -118,6 +136,12 @@ const createListingDiagnostics = (
     lastUpdateRoleFinishedAt: null,
     lastAppliedRole: null,
     listCallCount: 0,
+    adaptiveRefreshCount: 0,
+    adaptiveRefreshInFlight: false,
+    lastAdaptiveRefreshReason: null,
+    lastAdaptiveRefreshStartedAt: null,
+    lastAdaptiveRefreshFinishedAt: null,
+    lastAdaptiveRefreshError: null,
 });
 
 export const useDebouncedEffect = (effect, deps, delay) => {
@@ -172,24 +196,27 @@ export const Drop = () => {
     const diagnosticsRef = useRef<ListingDiagnostics>(
         createListingDiagnostics(shareAddress, storedRole)
     );
+    const adaptiveRefreshRef = useRef<Promise<void> | null>(null);
+    const adaptiveRefreshSignatureRef = useRef<string | null>(null);
 
     useEffect(() => {
-        diagnosticsRef.current = createListingDiagnostics(shareAddress, storedRole);
+        diagnosticsRef.current = createListingDiagnostics(
+            shareAddress,
+            storedRole
+        );
+        adaptiveRefreshRef.current = null;
+        adaptiveRefreshSignatureRef.current = null;
         // Reset diagnostics only when we enter a different share. Role changes
         // inside the same share are part of the same session we want to measure.
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [shareAddress]);
 
-    const files = useProgram<Files>(
-        peer,
-        shareAddress,
-        {
-            existing: "reuse",
-            args: {
-                replicate: storedRole ?? DEFAULT_REPLICATION_ROLE,
-            },
-        }
-    );
+    const files = useProgram<Files>(peer, shareAddress, {
+        existing: "reuse",
+        args: {
+            replicate: storedRole ?? DEFAULT_REPLICATION_ROLE,
+        },
+    });
 
     useEffect(() => {
         if (peer && diagnosticsRef.current.firstPeerReadyAt == null) {
@@ -200,7 +227,10 @@ export const Drop = () => {
     useEffect(() => {
         diagnosticsRef.current.programHookStatus = files.status;
         diagnosticsRef.current.programHookLoading = files.loading;
-        if (files.program && diagnosticsRef.current.firstProgramHookReadyAt == null) {
+        if (
+            files.program &&
+            diagnosticsRef.current.firstProgramHookReadyAt == null
+        ) {
             diagnosticsRef.current.firstProgramHookReadyAt = Date.now();
         }
     }, [files.loading, files.program, files.status]);
@@ -239,14 +269,70 @@ export const Drop = () => {
         diagnosticsRef.current.lastUpdateRoleFinishedAt = Date.now();
     };
 
-    const refreshAdaptiveReplication = async () => {
-        if (!files.program || currentRole === false) {
+    const refreshAdaptiveReplication = async (reason: string) => {
+        if (!files.program || files.program.closed || currentRole === false) {
             return;
         }
+        if (adaptiveRefreshRef.current) {
+            return adaptiveRefreshRef.current;
+        }
 
-        files.program.persistChunkReads = true;
-        await files.program.files.log.replicate(currentRole, {
-            rebalance: true,
+        const program = files.program;
+        const roleOptions = currentRole;
+        diagnosticsRef.current.adaptiveRefreshCount += 1;
+        diagnosticsRef.current.adaptiveRefreshInFlight = true;
+        diagnosticsRef.current.lastAdaptiveRefreshReason = reason;
+        diagnosticsRef.current.lastAdaptiveRefreshStartedAt = Date.now();
+        diagnosticsRef.current.lastAdaptiveRefreshFinishedAt = null;
+        diagnosticsRef.current.lastAdaptiveRefreshError = null;
+
+        const refresh = (async () => {
+            program.persistChunkReads = true;
+            await program.files.log.replicate(roleOptions, {
+                rebalance: true,
+            });
+        })();
+
+        adaptiveRefreshRef.current = refresh;
+        try {
+            await refresh;
+        } catch (error) {
+            diagnosticsRef.current.lastAdaptiveRefreshError =
+                error instanceof Error ? error.message : String(error);
+            throw error;
+        } finally {
+            if (adaptiveRefreshRef.current === refresh) {
+                adaptiveRefreshRef.current = null;
+            }
+            diagnosticsRef.current.adaptiveRefreshInFlight = false;
+            diagnosticsRef.current.lastAdaptiveRefreshFinishedAt = Date.now();
+        }
+    };
+
+    const scheduleAdaptiveRefresh = (
+        reason: string,
+        signature?: string | null
+    ) => {
+        if (!files.program || files.program.closed || currentRole === false) {
+            return;
+        }
+        if (signature) {
+            if (adaptiveRefreshSignatureRef.current === signature) {
+                return;
+            }
+            adaptiveRefreshSignatureRef.current = signature;
+        }
+        void refreshAdaptiveReplication(reason).catch((error) => {
+            if (
+                signature &&
+                adaptiveRefreshSignatureRef.current === signature
+            ) {
+                adaptiveRefreshSignatureRef.current = null;
+            }
+            console.warn(
+                "Failed to refresh adaptive replication: " +
+                    (error instanceof Error ? error.message : String(error))
+            );
         });
     };
 
@@ -265,7 +351,10 @@ export const Drop = () => {
         }
         testWindow.__peerbitFileShareTestHooks = {
             setReplicationRole: async (roleOptions) => {
-                saveRoleLocalStorage(files.program, JSON.stringify(roleOptions));
+                saveRoleLocalStorage(
+                    files.program,
+                    JSON.stringify(roleOptions)
+                );
                 setRole(roleOptions ? "replicator" : "observer");
                 await updateRole(roleOptions);
             },
@@ -298,11 +387,14 @@ export const Drop = () => {
                     programClosed: files.program?.closed ?? null,
                     persistChunkReads: files.program?.persistChunkReads ?? null,
                     runtimeOpenProfileSamples:
-                        (window as Window & {
-                            __peerbitFileShareRuntimeOpenProfiler?: {
-                                samples?: Record<string, unknown>[];
-                            };
-                        }).__peerbitFileShareRuntimeOpenProfiler?.samples ?? null,
+                        (
+                            window as Window & {
+                                __peerbitFileShareRuntimeOpenProfiler?: {
+                                    samples?: Record<string, unknown>[];
+                                };
+                            }
+                        ).__peerbitFileShareRuntimeOpenProfiler?.samples ??
+                        null,
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
                     peerStatus,
                     peerLoading,
@@ -381,10 +473,17 @@ export const Drop = () => {
             updateListDebounced
         );
 
-        const replicatorsChangeListener = async (ev) => {
-            setReplicatorCount(
-                (await files.program.files.log.getReplicators()).size
-            );
+        const replicatorsChangeListener = async () => {
+            try {
+                setReplicatorCount(
+                    (await files.program.files.log.getReplicators()).size
+                );
+            } catch (error) {
+                console.warn(
+                    "Failed to refresh replicator count: " +
+                        (error instanceof Error ? error.message : String(error))
+                );
+            }
 
             //  setCurrentRole(ev.detail.replicate); TODO this should be somewhere else
         };
@@ -404,12 +503,11 @@ export const Drop = () => {
             const roleFromLocalstore = parseStoredRole(
                 serializedRoleFromStorage
             );
-            const desiredRole =
-                hasStoredRole
-                    ? roleFromLocalstore
-                    : role === "replicator"
-                      ? DEFAULT_REPLICATION_ROLE
-                      : false;
+            const desiredRole = hasStoredRole
+                ? roleFromLocalstore
+                : role === "replicator"
+                  ? DEFAULT_REPLICATION_ROLE
+                  : false;
 
             files.program.persistChunkReads = desiredRole !== false;
             setCurrentRole(desiredRole);
@@ -493,11 +591,18 @@ export const Drop = () => {
                 diagnosticsRef.current.firstListDurationMs =
                     finishedAt - startedAt;
             }
-            setList(
-                list
-                    .filter((x) => !x.parentId)
-                    .sort((a, b) => a.name.localeCompare(b.name))
-            );
+            const rootFiles = list
+                .filter((x) => !x.parentId)
+                .sort((a, b) => a.name.localeCompare(b.name));
+            setList(rootFiles);
+            const readyLargeFileSignature =
+                getReadyLargeFileSignature(rootFiles);
+            if (readyLargeFileSignature) {
+                scheduleAdaptiveRefresh(
+                    `ready-list:${source}`,
+                    readyLargeFileSignature
+                );
+            }
             forceUpdate();
             void (async () => {
                 try {
@@ -535,13 +640,10 @@ export const Drop = () => {
     ) => {
         const timeout =
             file instanceof LargeFile
-                ? Math.max(
-                      60_000,
-                      Math.ceil(Number(file.size) / 1e6) * 1_000
-                  )
+                ? Math.max(60_000, Math.ceil(Number(file.size) / 1e6) * 1_000)
                 : 10_000;
         try {
-            await refreshAdaptiveReplication();
+            scheduleAdaptiveRefresh("download-start");
 
             const saveFilePicker = (window as SaveFilePickerWindow)
                 .showSaveFilePicker;
@@ -631,18 +733,25 @@ export const Drop = () => {
             // there will just by one file here in practice
             for (const file of filesToAdd) {
                 promises.push(
-                    files.program.addBlob(file.name, file, undefined, (progress) => {
-                        setUploadProgress((current) =>
-                            current == null ? progress : Math.max(progress, current)
-                        );
-                    })
+                    files.program.addBlob(
+                        file.name,
+                        file,
+                        undefined,
+                        (progress) => {
+                            setUploadProgress((current) =>
+                                current == null
+                                    ? progress
+                                    : Math.max(progress, current)
+                            );
+                        }
+                    )
                 );
             }
 
             if (promises.length === filesToAdd.length) {
                 Promise.all(promises)
                     .then(async () => {
-                        await refreshAdaptiveReplication();
+                        scheduleAdaptiveRefresh("upload-complete");
                         if (endProgress) {
                             setUploadProgress(null);
                         }
