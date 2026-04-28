@@ -295,7 +295,21 @@ describe("index", () => {
             expect(parentIdSearches).to.eq(0);
             expect(directChunkGets).to.be.greaterThan(1);
             expect(maxInflightChunkGets).to.be.greaterThan(1);
-            expect(maxInflightChunkGets).to.be.lessThanOrEqual(4);
+            const readAhead = filestoreReader.lastReadDiagnostics?.readAhead;
+            expect(readAhead).to.eq(4);
+            expect(maxInflightChunkGets).to.be.lessThanOrEqual(readAhead);
+            expect(
+                Object.keys(
+                    filestoreReader.lastReadDiagnostics?.chunkResolveStartedAt ??
+                        {}
+                ).length
+            ).to.be.greaterThan(1);
+            expect(
+                Object.keys(
+                    filestoreReader.lastReadDiagnostics?.chunkMaterializeFinishedAt ??
+                        {}
+                ).length
+            ).to.eq(streamedChunks.length);
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });

@@ -239,9 +239,18 @@ export abstract class AbstractFile {
         writable: ChunkWritable,
         properties?: FileReadOptions
     ) {
+        let chunkIndex = 0;
         try {
             for await (const chunk of this.streamFile(files, properties)) {
+                const debug = files.lastReadDiagnostics;
+                if (debug) {
+                    (debug.chunkWriteStartedAt ||= {})[chunkIndex] = Date.now();
+                }
                 await writable.write(chunk);
+                if (debug) {
+                    (debug.chunkWriteFinishedAt ||= {})[chunkIndex] = Date.now();
+                }
+                chunkIndex++;
             }
             await writable.close?.();
         } catch (error) {
@@ -951,10 +960,19 @@ export class LargeFile extends AbstractFile {
             waitUntilReadyResolvedAt: null as number | null,
             waitUntilReadyResolvedReady: null as boolean | null,
             prefetchedChunkCount: 0,
+            readAhead: 0,
             finishedAt: null as number | null,
             chunkAttempts: {} as Record<number, number>,
             chunkHints: {} as Record<number, string[] | null>,
             chunkResolved: {} as Record<number, string>,
+            chunkResolveStartedAt: {} as Record<number, number>,
+            chunkResolveFinishedAt: {} as Record<number, number>,
+            chunkMaterializeStartedAt: {} as Record<number, number>,
+            chunkMaterializeFinishedAt: {} as Record<number, number>,
+            chunkHashStartedAt: {} as Record<number, number>,
+            chunkHashFinishedAt: {} as Record<number, number>,
+            chunkWriteStartedAt: {} as Record<number, number>,
+            chunkWriteFinishedAt: {} as Record<number, number>,
             chunkFailure: null as
                 | {
                       index: number;
@@ -991,16 +1009,23 @@ export class LargeFile extends AbstractFile {
             if (cached) {
                 return cached;
             }
-            const pending = this.resolveChunk(
-                files,
-                index,
-                knownChunks,
-                readContext,
-                {
-                    timeout: properties?.timeout,
-                    debug,
+            const pending = (async () => {
+                debug.chunkResolveStartedAt[index] = Date.now();
+                try {
+                    return await this.resolveChunk(
+                        files,
+                        index,
+                        knownChunks,
+                        readContext,
+                        {
+                            timeout: properties?.timeout,
+                            debug,
+                        }
+                    );
+                } finally {
+                    debug.chunkResolveFinishedAt[index] = Date.now();
                 }
-            );
+            })();
             inFlightChunks.set(index, pending);
             return pending;
         };
@@ -1008,6 +1033,7 @@ export class LargeFile extends AbstractFile {
         const readAhead = files.persistChunkReads
             ? LARGE_FILE_PERSISTED_READ_AHEAD
             : LARGE_FILE_OBSERVER_READ_AHEAD;
+        debug.readAhead = readAhead;
 
         for (
             let index = 0;
@@ -1031,11 +1057,15 @@ export class LargeFile extends AbstractFile {
                     `Failed to resolve chunk ${index + 1}/${resolvedFile.chunkCount} for file ${resolvedFile.id}`
                 );
             }
+            debug.chunkMaterializeStartedAt[index] = Date.now();
             const chunk = await chunkFile.getFile(files, {
                 as: "joined",
                 timeout: properties?.timeout,
             });
+            debug.chunkMaterializeFinishedAt[index] = Date.now();
+            debug.chunkHashStartedAt[index] = Date.now();
             hasher?.update(chunk);
+            debug.chunkHashFinishedAt[index] = Date.now();
             processed += chunk.byteLength;
             properties?.progress?.(
                 processed / Math.max(Number(resolvedFile.size), 1)
