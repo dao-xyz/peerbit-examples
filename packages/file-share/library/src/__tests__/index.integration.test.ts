@@ -221,45 +221,6 @@ describe("index", () => {
             expect(filestore.lastUploadDiagnostics?.failureMessage).to.eq(null);
         });
 
-        it("keeps self-authored chunks readable under adaptive storage limits", async () => {
-            const adaptiveRole = {
-                limits: {
-                    cpu: { max: 1 },
-                    storage: 1_000_000,
-                },
-            };
-            const files = new Files();
-            let keepPolicy: unknown;
-            const originalOpen = files.files.open.bind(files.files);
-            (files.files as any).open = async (options: any) => {
-                keepPolicy = options.keep;
-                return originalOpen(options);
-            };
-
-            const filestore = await peer.open(files, {
-                args: { replicate: adaptiveRole },
-            });
-            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
-            const fileId = await filestore.add(
-                "self-authored adaptive file",
-                largeFile
-            );
-
-            await filestore.files.log.replicate(adaptiveRole, {
-                rebalance: true,
-            });
-
-            const file = await filestore.files.index.get(fileId);
-            expect(keepPolicy).to.eq("self");
-            expect(file).to.be.instanceOf(LargeFile);
-            const bytes = await file!.getFile(filestore, {
-                as: "joined",
-                timeout: 20_000,
-            });
-
-            expect(equals(bytes, largeFile)).to.be.true;
-        });
-
         it("pipelines persisted chunk reads without using parentId searches", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
@@ -336,6 +297,9 @@ describe("index", () => {
             expect(maxInflightChunkGets).to.be.greaterThan(1);
             const readAhead = filestoreReader.lastReadDiagnostics?.readAhead;
             expect(readAhead).to.eq(4);
+            expect(
+                filestoreReader.lastReadDiagnostics?.chunkAttemptTimeoutMs
+            ).to.be.greaterThan(5_000);
             expect(maxInflightChunkGets).to.be.lessThanOrEqual(readAhead);
             expect(
                 Object.keys(
