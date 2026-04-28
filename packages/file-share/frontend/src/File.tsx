@@ -22,7 +22,7 @@ export const File = (properties: {
     const largeFile =
         properties.file instanceof LargeFile ? properties.file : undefined;
     const chunkCount = largeFile?.chunkCount ?? 0;
-    const downloadDisabled = progress != null || !!(largeFile && !largeFile.ready);
+    const downloadDisabled = progress != null;
 
     useEffect(() => {
         if (!properties.files) {
@@ -38,23 +38,20 @@ export const File = (properties: {
                             Math.round((count * 100) / Math.max(chunkCount, 1))
                         );
                 });
-        let changeListener =
-            largeFile
-                ? (
-                      e: CustomEvent<
-                          DocumentsChange<AbstractFile, IndexableFile>
-                      >
-                  ) => {
-                      for (const added of e.detail.added) {
-                          if (
-                              added instanceof TinyFile &&
-                              added.parentId === properties.file.id
-                          ) {
-                              fetchLocalChunks();
-                          }
+        let changeListener = largeFile
+            ? (
+                  e: CustomEvent<DocumentsChange<AbstractFile, IndexableFile>>
+              ) => {
+                  for (const added of e.detail.added) {
+                      if (
+                          added instanceof TinyFile &&
+                          added.parentId === properties.file.id
+                      ) {
+                          fetchLocalChunks();
                       }
                   }
-                : undefined;
+              }
+            : undefined;
 
         changeListener &&
             properties.files.files.events.addEventListener(
@@ -113,6 +110,7 @@ export const File = (properties: {
                 disabled={downloadDisabled}
                 onClick={() => {
                     setFailedDownload(false);
+                    setProgess(0);
                     properties
                         .download((p) => {
                             setProgess(p);
