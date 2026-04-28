@@ -530,6 +530,137 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
+        it("falls back to resolved precise search when adaptive indexed chunks do not materialize", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileName = "streamed download with resolved precise fallback";
+            const fileId = await filestore.add(fileName, largeFile);
+
+            const filestoreReader = await peer2.open<Files>(filestore.address);
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const file = await filestoreReader.files.index.get(fileId);
+            expect(file).to.be.instanceOf(LargeFile);
+
+            const writerHash = peer.identity.publicKey.hashcode();
+            (filestoreReader as any).getReadPeerHints = async () => [
+                writerHash,
+            ];
+            const originalSearch = filestoreReader.files.index.search.bind(
+                filestoreReader.files.index
+            );
+            const originalGet = filestoreReader.files.index.get.bind(
+                filestoreReader.files.index
+            );
+            const delayedChunkId = `${fileId}:1`;
+            let indexedChunkGets = 0;
+            let exactNonReplicatingGets = 0;
+            let indexedPreciseSearches = 0;
+            let resolvedPreciseSearches = 0;
+            let parentChunkSearches = 0;
+
+            (filestoreReader.files.index as any).get = async (
+                id: string,
+                options: {
+                    resolve?: boolean;
+                    remote?:
+                        | {
+                              from?: string[];
+                              replicate?: boolean;
+                              strategy?: string;
+                          }
+                        | false;
+                }
+            ) => {
+                if (id === delayedChunkId) {
+                    const remote = options?.remote;
+                    if (remote === false) {
+                        return undefined;
+                    }
+                    if (remote?.replicate === false) {
+                        exactNonReplicatingGets++;
+                        return undefined;
+                    }
+                    if (options?.resolve === false) {
+                        indexedChunkGets++;
+                        return originalGet(id as never, options as never);
+                    }
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            (filestoreReader.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: {
+                    resolve?: boolean;
+                    remote?: false | { replicate?: boolean };
+                }
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
+                );
+                const hasChunkName = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "name" &&
+                        getQueryValue(query) === `${fileName}/1`
+                );
+
+                if (hasParentId && hasChunkName) {
+                    if (
+                        options?.remote &&
+                        options.remote !== false &&
+                        options.remote.replicate === false &&
+                        options.resolve !== false
+                    ) {
+                        resolvedPreciseSearches++;
+                        return originalSearch(
+                            request as never,
+                            options as never
+                        );
+                    }
+                    indexedPreciseSearches++;
+                    return [];
+                }
+                if (hasParentId) {
+                    parentChunkSearches++;
+                    return [];
+                }
+
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            await file!.writeFile(
+                filestoreReader,
+                {
+                    write: async (chunk) => {
+                        streamedChunks.push(chunk);
+                    },
+                },
+                { timeout: 20_000 }
+            );
+
+            expect(indexedChunkGets).to.be.greaterThan(0);
+            expect(indexedPreciseSearches).to.be.greaterThan(0);
+            expect(exactNonReplicatingGets).to.be.greaterThan(0);
+            expect(resolvedPreciseSearches).to.be.greaterThan(0);
+            expect(parentChunkSearches).to.eq(0);
+            expect(
+                filestoreReader.lastReadDiagnostics?.chunkResolved?.[1]
+            ).to.eq("resolved-search");
+            expect(streamedChunks.length).to.be.greaterThan(1);
+            expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
         it("tries hinted non-replicating chunk reads when unhinted fallback misses", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;

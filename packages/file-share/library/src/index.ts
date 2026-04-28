@@ -736,18 +736,69 @@ export class LargeFile extends AbstractFile {
                     },
                 } as any
             );
-            const chunk = chunks.find(
-                (candidate) =>
+            const chunk = (chunks as unknown[]).find(
+                (candidate): candidate is TinyFile =>
                     candidate instanceof TinyFile &&
                     candidate.parentId === this.id &&
                     candidate.index === index
-            ) as TinyFile | undefined;
+            );
             if (chunk) {
                 knownChunks.set(index, chunk);
                 files.retainResolvedChunk(chunk);
                 properties?.debug &&
                     ((properties.debug.chunkResolved ||= {})[index] =
                         "indexed-search");
+                return chunk;
+            }
+        };
+        const resolveChunkByResolvedFields = async (
+            remoteFrom: string[] | undefined
+        ): Promise<TinyFile | undefined> => {
+            properties?.debug &&
+                ((properties.debug.chunkResolvedSearches ||= {})[index] =
+                    ((properties.debug.chunkResolvedSearches ||= {})[index] ??
+                        0) + 1);
+            const chunks = await files.files.index.search(
+                new SearchRequest({
+                    query: [
+                        new StringMatch({
+                            key: "parentId",
+                            value: this.id,
+                            caseInsensitive: false,
+                            method: StringMatchMethod.exact,
+                        }),
+                        new StringMatch({
+                            key: "name",
+                            value: `${this.name}/${index}`,
+                            caseInsensitive: false,
+                            method: StringMatchMethod.exact,
+                        }),
+                    ],
+                    fetch: 1,
+                }),
+                {
+                    local: false,
+                    remote: {
+                        timeout: attemptTimeout,
+                        throwOnMissing: false,
+                        retryMissingResponses: true,
+                        replicate: false,
+                        from: remoteFrom,
+                    },
+                } as any
+            );
+            const chunk = (chunks as unknown[]).find(
+                (candidate): candidate is TinyFile =>
+                    candidate instanceof TinyFile &&
+                    candidate.parentId === this.id &&
+                    candidate.index === index
+            );
+            if (chunk) {
+                knownChunks.set(index, chunk);
+                files.retainResolvedChunk(chunk);
+                properties?.debug &&
+                    ((properties.debug.chunkResolved ||= {})[index] =
+                        "resolved-search");
                 return chunk;
             }
         };
@@ -892,14 +943,20 @@ export class LargeFile extends AbstractFile {
                             ((properties.debug.chunkGetMisses ||= {})[index] ??
                                 0) + 1);
                     directMisses += 1;
-                    await sleep(250);
-                    continue;
+                    if (
+                        directMisses + retryableFailures <
+                        nextNonReplicatingReadAfterFailures
+                    ) {
+                        await sleep(250);
+                        continue;
+                    }
+                } else {
+                    properties?.debug &&
+                        ((properties.debug.chunkGetMisses ||= {})[index] =
+                            ((properties.debug.chunkGetMisses ||= {})[index] ??
+                                0) + 1);
+                    directMisses += 1;
                 }
-                properties?.debug &&
-                    ((properties.debug.chunkGetMisses ||= {})[index] =
-                        ((properties.debug.chunkGetMisses ||= {})[index] ?? 0) +
-                        1);
-                directMisses += 1;
             } catch (error) {
                 if (!isRetryableChunkLookupError(error)) {
                     properties?.debug &&
@@ -984,6 +1041,35 @@ export class LargeFile extends AbstractFile {
                         retryableFailures += 1;
                         properties?.debug &&
                             ((properties.debug.chunkRetryableNonReplicatingGetErrors ||=
+                                {})[index] = getErrorMessage(error));
+                    }
+                }
+                for (const fallbackFrom of fallbackSources) {
+                    try {
+                        const chunk =
+                            await resolveChunkByResolvedFields(fallbackFrom);
+                        if (chunk) {
+                            return chunk;
+                        }
+                    } catch (error) {
+                        if (!isRetryableChunkLookupError(error)) {
+                            properties?.debug &&
+                                (properties.debug.chunkFailure = {
+                                    index,
+                                    type: "non-retryable-resolved-search",
+                                    message: getErrorMessage(error),
+                                });
+                            throw error;
+                        }
+                        if (
+                            fallbackFrom &&
+                            shouldRetryChunkLookupWithoutHints(error)
+                        ) {
+                            hintedDeliveryFailures += 1;
+                        }
+                        retryableFailures += 1;
+                        properties?.debug &&
+                            ((properties.debug.chunkRetryableResolvedSearchErrors ||=
                                 {})[index] = getErrorMessage(error));
                     }
                 }
