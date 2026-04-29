@@ -1617,7 +1617,11 @@ export class LargeFile extends AbstractFile {
                 }
                 try {
                     const indexedMatches = await files.files.index.search(
-                        request,
+                        new SearchRequestIndexed({
+                            query: request.query,
+                            fetch: request.fetch,
+                            sort: request.sort,
+                        }),
                         {
                             resolve: false,
                             local: false,

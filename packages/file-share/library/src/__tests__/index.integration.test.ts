@@ -12,6 +12,7 @@ import { delay, waitForResolved } from "@peerbit/time";
 import { sha256Base64Sync } from "@peerbit/crypto";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { expect, describe, it, beforeEach, afterEach } from "vitest";
+import { SearchRequestIndexed } from "@peerbit/document";
 
 const getQueryKey = (query: any) =>
     Array.isArray(query?.key) ? query.key.join(".") : query?.key;
@@ -1808,6 +1809,9 @@ describe("index", () => {
                     }
                     if ((options as any)?.remote) {
                         if ((options as any)?.resolve === false) {
+                            expect(request).to.be.instanceOf(
+                                SearchRequestIndexed
+                            );
                             indexedReadySearches++;
                             return [readyIndexed];
                         }
