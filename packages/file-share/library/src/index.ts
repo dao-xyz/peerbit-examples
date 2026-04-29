@@ -319,7 +319,7 @@ const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
 const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
 const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
-const MAX_LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT - 256 * 1024;
+const MAX_LARGE_FILE_SEGMENT_SIZE = 512 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
 const LARGE_FILE_PENDING_STREAM_MIN_CHUNKS = LARGE_FILE_TARGET_CHUNK_COUNT / 2;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 4;
@@ -2484,7 +2484,7 @@ export class Files extends Program<Args> {
             ready: false,
         });
 
-        await this.files.put(manifest);
+        const pendingManifest = await this.files.put(manifest);
         const hasher = new SHA256();
         try {
             let uploadedBytes = 0n;
@@ -2518,7 +2518,8 @@ export class Files extends Program<Args> {
                     ready: true,
                     finalHash: toBase64(hasher.digest()),
                     chunkEntryHeads,
-                })
+                }),
+                { meta: { next: [pendingManifest.entry] } }
             );
         } catch (error) {
             await this.cleanupChunkedUpload(uploadId).catch(() => {});
@@ -2593,7 +2594,7 @@ export class Files extends Program<Args> {
         });
 
         diagnostics.manifestStartedAt = Date.now();
-        await this.files.put(manifest);
+        const pendingManifest = await this.files.put(manifest);
         diagnostics.manifestFinishedAt = Date.now();
         const hasher = new SHA256();
         try {
@@ -2653,7 +2654,8 @@ export class Files extends Program<Args> {
                     ready: true,
                     finalHash: toBase64(hasher.digest()),
                     chunkEntryHeads,
-                })
+                }),
+                { meta: { next: [pendingManifest.entry] } }
             );
             diagnostics.readyManifestFinishedAt = Date.now();
         } catch (error) {

@@ -247,6 +247,53 @@ describe("index", () => {
             expect(equals(file!.bytes, largeFile)).to.be.true;
         });
 
+        it("links streamed ready manifests after pending upload manifests", async () => {
+            const filestore = await peer.open(new Files());
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let pendingHead: string | undefined;
+            let readyNext: unknown[] | undefined;
+
+            (filestore.files as any).put = async (
+                entry: unknown,
+                options: unknown
+            ) => {
+                const result = await originalPut(
+                    entry as never,
+                    options as never
+                );
+                if (entry instanceof LargeFile && entry.ready === false) {
+                    pendingHead = result.entry.hash;
+                }
+                if (entry instanceof LargeFile && entry.ready === true) {
+                    readyNext = result.entry.meta.next;
+                }
+                return result;
+            };
+
+            try {
+                const largeFile = crypto.randomBytes(6 * 1e6) as Uint8Array;
+                const fileId = await filestore.add(
+                    "linked streamed ready manifest",
+                    new Blob([largeFile])
+                );
+                const listed = await filestore.list();
+                const listedFile = listed.find((file) => file.id === fileId);
+
+                expect(pendingHead).to.be.a("string");
+                expect(
+                    readyNext?.some((next: any) =>
+                        typeof next === "string"
+                            ? next === pendingHead
+                            : next?.hash === pendingHead
+                    )
+                ).to.be.true;
+                expect(listedFile).to.be.instanceOf(LargeFile);
+                expect((listedFile as LargeFile).ready).to.be.true;
+            } finally {
+                (filestore.files as any).put = originalPut;
+            }
+        });
+
         it("streams downloaded files chunk by chunk", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
@@ -520,6 +567,28 @@ describe("index", () => {
             expect(
                 filestore.lastReadDiagnostics?.chunkAttemptTimeoutMs
             ).to.be.lessThanOrEqual(45_000);
+        });
+
+        it("caps large file chunks to browser transport-safe payloads", async () => {
+            const filestore = await peer.open(new Files());
+            let observedChunkSize: number | undefined;
+
+            try {
+                await filestore.addSource("transport-safe chunks", {
+                    size: BigInt(512 * 1024 * 1024),
+                    readChunks: async function* (chunkSize: number) {
+                        observedChunkSize = chunkSize;
+                        yield new Uint8Array(0);
+                    },
+                });
+                expect.fail("expected source size mismatch");
+            } catch (error) {
+                expect((error as Error).message).to.contain(
+                    "Source size changed during upload"
+                );
+            }
+
+            expect(observedChunkSize).to.eq(512 * 1024);
         });
 
         it("falls back to indexed chunk search when direct chunk lookup misses", async () => {
@@ -2904,7 +2973,7 @@ describe("index", () => {
             expect(decodedIndexable.size).to.eq(size);
         });
 
-        it("scales chunk sizes for multi-gigabyte sources", async () => {
+        it("caps chunk sizes for multi-gigabyte browser sources", async () => {
             const filestore = await peer.open(new Files());
             let requestedChunkSize = 0;
             let error: any;
@@ -2922,11 +2991,10 @@ describe("index", () => {
             }
 
             expect(error?.message).to.eq("stop-after-measuring");
-            expect(requestedChunkSize).to.be.greaterThan(500_000);
-            expect(requestedChunkSize).to.be.greaterThan(4_000_000);
+            expect(requestedChunkSize).to.eq(512 * 1024);
         });
 
-        it("keeps runner-sized uploads to a bounded chunk count", async () => {
+        it("keeps runner-sized uploads to browser-safe chunks", async () => {
             const filestore = await peer.open(new Files());
             let requestedChunkSize = 0;
             let error: any;
@@ -2944,9 +3012,7 @@ describe("index", () => {
             }
 
             expect(error?.message).to.eq("stop-after-measuring");
-            expect(requestedChunkSize).to.be.greaterThanOrEqual(
-                2 * 1024 * 1024
-            );
+            expect(requestedChunkSize).to.eq(512 * 1024);
         });
 
         it("exposes large file metadata before chunk upload finishes", async () => {
