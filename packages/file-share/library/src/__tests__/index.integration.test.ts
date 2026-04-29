@@ -12,6 +12,7 @@ import { delay, waitForResolved } from "@peerbit/time";
 import { sha256Base64Sync } from "@peerbit/crypto";
 import { deserialize, serialize } from "@dao-xyz/borsh";
 import { expect, describe, it, beforeEach, afterEach } from "vitest";
+import { decodeReplicas } from "@peerbit/shared-log";
 
 const getQueryKey = (query: any) =>
     Array.isArray(query?.key) ? query.key.join(".") : query?.key;
@@ -96,15 +97,16 @@ describe("index", () => {
             ).to.be.true;
         });
 
-        it("keeps retained shallow chunk entries by metadata during adaptive pruning", async () => {
-            const filestore = await peer.open(new Files());
+        it("keeps retained chunk entries by payload during adaptive pruning", async () => {
+            const writer = await peer.open(new Files());
+            const reader = await peer2.open<Files>(writer.address);
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
-            const fileId = await filestore.add(
-                "metadata retained chunks",
+            const fileId = await writer.add(
+                "retained chunk payload",
                 largeFile
             );
             const retainedChunkId = `${fileId}:2`;
-            const retainedChunk = await filestore.files.index.get(
+            const retainedChunk = await writer.files.index.get(
                 retainedChunkId,
                 {
                     local: true,
@@ -112,55 +114,61 @@ describe("index", () => {
                 }
             );
             const retainedHead = (retainedChunk as any).__context.head;
-            const shallowEntry =
-                await filestore.files.log.log.getShallow(retainedHead);
+            const retainedEntry = await writer.files.log.log.get(retainedHead);
+            reader.retainChunkRead(retainedChunkId);
+
+            expect(await (reader as any).shouldKeepFileEntry(retainedEntry)).to
+                .be.true;
+        });
+
+        it("does not keep unknown shallow entries by hash alone during adaptive pruning", async () => {
+            const filestore = await peer.open(new Files());
             const originalGet = filestore.files.log.log.get.bind(
                 filestore.files.log.log
             );
 
-            expect(shallowEntry?.meta.data?.byteLength).to.be.greaterThan(0);
-            filestore.retainChunkRead(retainedChunkId);
-
-            (filestore.files.log.log as any).get = async () => {
-                throw new Error("full entry payload should not be required");
-            };
+            (filestore.files.log.log as any).get = async () => undefined;
 
             try {
                 expect(
-                    await (filestore as any).shouldKeepFileEntry(shallowEntry)
-                ).to.be.true;
+                    await (filestore as any).shouldKeepFileEntry({
+                        hash: "unresolved-entry",
+                    })
+                ).to.be.false;
             } finally {
                 (filestore.files.log.log as any).get = originalGet;
             }
         });
 
-        it("keeps shallow root entries during adaptive pruning", async () => {
+        it("replicates root manifests more widely than adaptive chunks", async () => {
             const writer = await peer.open(new Files());
-            const reader = await peer2.open<Files>(writer.address);
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
-            const fileId = await writer.add("metadata retained root", largeFile);
+            const fileId = await writer.add(
+                "widely replicated root",
+                largeFile
+            );
             const indexedRoot = await writer.files.index.get(fileId, {
                 resolve: false,
                 local: true,
                 remote: false,
             } as any);
             const rootHead = (indexedRoot as any).__context.head;
-            const shallowEntry =
-                await writer.files.log.log.getShallow(rootHead);
-            const originalGet = reader.files.log.log.get.bind(
-                reader.files.log.log
-            );
+            const shallowRoot = await writer.files.log.log.getShallow(rootHead);
+            const indexedChunk = await writer.files.index.get(`${fileId}:0`, {
+                resolve: false,
+                local: true,
+                remote: false,
+            } as any);
+            const chunkHead = (indexedChunk as any).__context.head;
+            const shallowChunk =
+                await writer.files.log.log.getShallow(chunkHead);
 
-            (reader.files.log.log as any).get = async () => {
-                throw new Error("full root payload should not be required");
-            };
-
-            try {
-                expect(await (reader as any).shouldKeepFileEntry(shallowEntry))
-                    .to.be.true;
-            } finally {
-                (reader.files.log.log as any).get = originalGet;
-            }
+            expect(
+                decodeReplicas(shallowRoot!).getValue(writer.files.log)
+            ).to.eq(100);
+            expect(
+                decodeReplicas(shallowChunk!).getValue(writer.files.log)
+            ).to.be.lessThan(100);
         });
 
         it("keeps ready root manifests during adaptive pruning", async () => {
@@ -515,7 +523,10 @@ describe("index", () => {
                     );
                     await delay(25);
                     inflightChunkGets--;
-                    if (getOptions.remote === false && !resolvedChunks.has(id)) {
+                    if (
+                        getOptions.remote === false &&
+                        !resolvedChunks.has(id)
+                    ) {
                         return undefined;
                     }
                 }
@@ -1631,7 +1642,9 @@ describe("index", () => {
             expect(directChunkGets).to.be.greaterThan(4);
             expect(preciseChunkSearches).to.be.greaterThan(0);
             expect(nonReplicatingReads).to.be.greaterThan(0);
-            expect(hintedDirectGetsAfterNonReplicatingRead).to.be.greaterThan(0);
+            expect(hintedDirectGetsAfterNonReplicatingRead).to.be.greaterThan(
+                0
+            );
             expect(unhintedDirectGetsAfterNonReplicatingRead).to.eq(0);
             expect(
                 filestoreReader.lastReadDiagnostics?.initialReadPeerHints

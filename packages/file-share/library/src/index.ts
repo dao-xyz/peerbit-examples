@@ -1,11 +1,4 @@
-import {
-    deserialize,
-    field,
-    option,
-    serialize,
-    variant,
-    vec,
-} from "@dao-xyz/borsh";
+import { field, option, variant, vec } from "@dao-xyz/borsh";
 import { Program, ProgramHandler } from "@peerbit/program";
 import {
     Documents,
@@ -26,7 +19,11 @@ import {
 import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
-import { ReplicationOptions, SharedLog } from "@peerbit/shared-log";
+import {
+    ReplicationOptions,
+    SharedLog,
+    type SharedAppendOptions,
+} from "@peerbit/shared-log";
 import { SHA256 } from "@stablelib/sha256";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -304,16 +301,6 @@ export class IndexableFile {
     }
 }
 
-@variant("files_entry_metadata")
-class FileEntryMetadata {
-    @field({ type: "string" })
-    id: string;
-
-    constructor(properties?: { id: string }) {
-        this.id = properties?.id ?? "";
-    }
-}
-
 const TINY_FILE_SIZE_LIMIT = 5 * 1e6; // 6mb
 const LARGE_FILE_SEGMENT_SIZE = TINY_FILE_SIZE_LIMIT / 10;
 const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
@@ -330,6 +317,12 @@ const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_OVERHEAD_MS = 5_000;
 const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_SCALE_MIN_BYTES = 1 * 1024 * 1024;
 const LARGE_FILE_REMOTE_CHUNK_MIN_BYTES_PER_SECOND = 128 * 1024;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
+const ROOT_FILE_REPLICAS = 100;
+type FilePutOptions = SharedAppendOptions<Operation> & {
+    unique?: boolean;
+    replicate?: boolean;
+    checkRemote?: boolean;
+};
 
 const roundUpTo = (value: number, multiple: number) =>
     Math.ceil(value / multiple) * multiple;
@@ -402,17 +395,6 @@ const getEntrySignatures = (entry: unknown) => {
           }[])
         : undefined;
 };
-const getEntryMetadata = (entry: unknown) => {
-    const data = (entry as { meta?: { data?: unknown } })?.meta?.data;
-    if (!(data instanceof Uint8Array)) {
-        return undefined;
-    }
-    try {
-        return deserialize(data, FileEntryMetadata);
-    } catch {
-        return undefined;
-    }
-};
 const getContextHead = (value: unknown) =>
     typeof (value as { __context?: { head?: unknown } })?.__context?.head ===
     "string"
@@ -484,10 +466,16 @@ const readBlobSequentialChunks = async function* (
         reader.releaseLock();
     }
 };
-const getEntryMetadataForFile = (file: AbstractFile) =>
-    file.parentId != null
-        ? serialize(new FileEntryMetadata({ id: file.id }))
-        : undefined;
+const getFilePutOptions = (
+    file: AbstractFile,
+    options?: FilePutOptions
+): FilePutOptions | undefined =>
+    file.parentId == null
+        ? {
+              ...options,
+              replicas: ROOT_FILE_REPLICAS,
+          }
+        : options;
 const ensureSourceSize = (actual: bigint, expected: bigint) => {
     if (actual !== expected) {
         throw new Error(
@@ -962,8 +950,8 @@ export class LargeFile extends AbstractFile {
                 }
                 properties?.debug &&
                     ((properties.debug.chunkGetMisses ||= {})[index] =
-                        ((properties.debug.chunkGetMisses ||= {})[index] ??
-                            0) + 1);
+                        ((properties.debug.chunkGetMisses ||= {})[index] ?? 0) +
+                        1);
                 directMisses += 1;
             } catch (error) {
                 if (!isRetryableChunkLookupError(error)) {
@@ -1761,14 +1749,6 @@ export class Files extends Program<Args> {
             return true;
         }
 
-        const metadata = getEntryMetadata(entryLike);
-        if (metadata && this.retainedChunkIds.has(metadata.id)) {
-            if (hash) {
-                this.retainedChunkEntryHeads.add(hash);
-            }
-            return true;
-        }
-
         const isSignedBySelf = (
             signatures:
                 | { publicKey?: { equals?: (key: unknown) => boolean } }[]
@@ -1803,7 +1783,7 @@ export class Files extends Program<Args> {
                       ? ((await this.files.log.log.get(hash)) as typeof entry)
                       : undefined;
         } catch {
-            return hash != null;
+            return false;
         }
 
         if (isSignedBySelf(getEntrySignatures(entry))) {
@@ -1814,27 +1794,8 @@ export class Files extends Program<Args> {
             return true;
         }
 
-        const resolvedMetadata = getEntryMetadata(entry);
-        if (
-            resolvedMetadata &&
-            this.retainedChunkIds.has(resolvedMetadata.id)
-        ) {
-            const entryHash = hash ?? getEntryHash(entry);
-            if (entryHash) {
-                this.retainedChunkEntryHeads.add(entryHash);
-            }
-            return true;
-        }
-        if (resolvedMetadata && !resolvedMetadata.id.includes(":")) {
-            const entryHash = hash ?? getEntryHash(entry);
-            if (entryHash) {
-                this.retainedChunkEntryHeads.add(entryHash);
-            }
-            return true;
-        }
-
         if (!entry) {
-            return hash != null;
+            return false;
         }
 
         if (!this.persistChunkReads) {
@@ -1882,7 +1843,7 @@ export class Files extends Program<Args> {
         progress?.(0);
         if (BigInt(file.byteLength) <= TINY_FILE_SIZE_LIMIT_BIGINT) {
             const tinyFile = new TinyFile({ name, file, parentId });
-            await this.files.put(tinyFile);
+            await this.files.put(tinyFile, getFilePutOptions(tinyFile));
             progress?.(1);
             return tinyFile.id;
         }
@@ -1917,7 +1878,7 @@ export class Files extends Program<Args> {
                 file: new Uint8Array(await file.arrayBuffer()),
                 parentId,
             });
-            await this.files.put(tinyFile);
+            await this.files.put(tinyFile, getFilePutOptions(tinyFile));
             progress?.(1);
             return tinyFile.id;
         }
@@ -1954,7 +1915,7 @@ export class Files extends Program<Args> {
                 file: chunks.length === 0 ? new Uint8Array(0) : concat(chunks),
                 parentId,
             });
-            await this.files.put(tinyFile);
+            await this.files.put(tinyFile, getFilePutOptions(tinyFile));
             progress?.(1);
             return tinyFile.id;
         }
@@ -2002,7 +1963,10 @@ export class Files extends Program<Args> {
         });
 
         diagnostics.manifestStartedAt = Date.now();
-        const pendingManifest = await this.files.put(manifest);
+        const pendingManifest = await this.files.put(
+            manifest,
+            getFilePutOptions(manifest)
+        );
         diagnostics.manifestFinishedAt = Date.now();
         const hasher = new SHA256();
         try {
@@ -2020,9 +1984,10 @@ export class Files extends Program<Args> {
                     index: chunkCount,
                 });
                 this.retainAuthoredChunk(chunk);
-                const appended = await this.files.put(chunk, {
-                    meta: { data: getEntryMetadataForFile(chunk) },
-                });
+                const appended = await this.files.put(
+                    chunk,
+                    getFilePutOptions(chunk)
+                );
                 this.retainAuthoredChunk(chunk, appended.entry.hash);
                 chunkEntryHeads[chunkCount] = appended.entry.hash;
                 const putFinishedAt = Date.now();
@@ -2048,17 +2013,20 @@ export class Files extends Program<Args> {
             }
             ensureSourceSize(uploadedBytes, source.size);
             diagnostics.readyManifestStartedAt = Date.now();
+            const readyManifest = new LargeFileWithChunkHeads({
+                id: uploadId,
+                name,
+                size,
+                chunkCount,
+                ready: true,
+                finalHash: toBase64(hasher.digest()),
+                chunkEntryHeads,
+            });
             await this.files.put(
-                new LargeFileWithChunkHeads({
-                    id: uploadId,
-                    name,
-                    size,
-                    chunkCount,
-                    ready: true,
-                    finalHash: toBase64(hasher.digest()),
-                    chunkEntryHeads,
-                }),
-                { meta: { next: [pendingManifest.entry] } }
+                readyManifest,
+                getFilePutOptions(readyManifest, {
+                    meta: { next: [pendingManifest.entry] },
+                })
             );
             diagnostics.readyManifestFinishedAt = Date.now();
             diagnostics.chunkCount = chunkCount;
@@ -2139,7 +2107,10 @@ export class Files extends Program<Args> {
         });
 
         diagnostics.manifestStartedAt = Date.now();
-        const pendingManifest = await this.files.put(manifest);
+        const pendingManifest = await this.files.put(
+            manifest,
+            getFilePutOptions(manifest)
+        );
         diagnostics.manifestFinishedAt = Date.now();
         const hasher = new SHA256();
         try {
@@ -2164,9 +2135,10 @@ export class Files extends Program<Args> {
                     index: i,
                 });
                 this.retainAuthoredChunk(chunk);
-                const appended = await this.files.put(chunk, {
-                    meta: { data: getEntryMetadataForFile(chunk) },
-                });
+                const appended = await this.files.put(
+                    chunk,
+                    getFilePutOptions(chunk)
+                );
                 this.retainAuthoredChunk(chunk, appended.entry.hash);
                 chunkEntryHeads[i] = appended.entry.hash;
                 const putFinishedAt = Date.now();
@@ -2190,17 +2162,20 @@ export class Files extends Program<Args> {
                 progress?.(uploadedBytes / Math.max(Number(size), 1));
             }
             diagnostics.readyManifestStartedAt = Date.now();
+            const readyManifest = new LargeFileWithChunkHeads({
+                id: uploadId,
+                name,
+                size,
+                chunkCount,
+                ready: true,
+                finalHash: toBase64(hasher.digest()),
+                chunkEntryHeads,
+            });
             await this.files.put(
-                new LargeFileWithChunkHeads({
-                    id: uploadId,
-                    name,
-                    size,
-                    chunkCount,
-                    ready: true,
-                    finalHash: toBase64(hasher.digest()),
-                    chunkEntryHeads,
-                }),
-                { meta: { next: [pendingManifest.entry] } }
+                readyManifest,
+                getFilePutOptions(readyManifest, {
+                    meta: { next: [pendingManifest.entry] },
+                })
             );
             diagnostics.readyManifestFinishedAt = Date.now();
         } catch (error) {
