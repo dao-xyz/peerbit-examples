@@ -289,6 +289,9 @@ describe("index", () => {
                 ).to.be.true;
                 expect(listedFile).to.be.instanceOf(LargeFile);
                 expect((listedFile as LargeFile).ready).to.be.true;
+                expect(
+                    filestore.lastUploadDiagnostics?.readyManifestFinishedAt
+                ).to.be.a("number");
             } finally {
                 (filestore.files as any).put = originalPut;
             }
@@ -1594,6 +1597,86 @@ describe("index", () => {
             ).to.eq("complete-chunks");
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("streams a pending manifest when remote boundary chunks prove the upload is complete", async () => {
+            const filestore = await peer.open(new Files());
+            const filestoreReader = await peer2.open<Files>(filestore.address, {
+                args: {
+                    replicate: { limits: { cpu: { max: 1 } } },
+                },
+            });
+            await filestoreReader.files.log.waitForReplicator(
+                peer.identity.publicKey
+            );
+
+            const fileId = "pending-boundary-chunks";
+            const fileName = "pending-boundary-chunks.bin";
+            const chunks = [
+                new Uint8Array([1, 2, 3]),
+                new Uint8Array([4, 5, 6]),
+                new Uint8Array([7, 8, 9]),
+                new Uint8Array([10, 11, 12]),
+            ];
+            const expected = concat(chunks);
+            await filestore.files.put(
+                new LargeFile({
+                    id: fileId,
+                    name: fileName,
+                    size: BigInt(expected.byteLength),
+                    chunkCount: chunks.length,
+                    ready: false,
+                })
+            );
+            for (let index = 0; index < chunks.length; index++) {
+                await filestore.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: chunks[index],
+                        parentId: fileId,
+                        index,
+                    })
+                );
+            }
+
+            let pendingFile: LargeFile | undefined;
+            await waitForResolved(
+                async () => {
+                    const match = await filestoreReader.resolveById(fileId, {
+                        replicate: true,
+                        timeout: 1_000,
+                    });
+                    expect(match).to.be.instanceOf(LargeFile);
+                    expect((match as LargeFile).ready).to.be.false;
+                    pendingFile = match as LargeFile;
+                },
+                { timeout: 30_000, delayInterval: 200 }
+            );
+
+            const originalCountLocalChunks =
+                filestoreReader.countLocalChunks.bind(filestoreReader);
+            (filestoreReader as any).countLocalChunks = async () => 0;
+            const streamedChunks: Uint8Array[] = [];
+            try {
+                await pendingFile!.writeFile(
+                    filestoreReader,
+                    {
+                        write: async (chunk) => {
+                            streamedChunks.push(chunk);
+                        },
+                    },
+                    { timeout: 20_000 }
+                );
+            } finally {
+                (filestoreReader as any).countLocalChunks =
+                    originalCountLocalChunks;
+            }
+
+            expect(
+                filestoreReader.lastReadDiagnostics?.waitUntilReadyResolvedBy
+            ).to.eq("pending-manifest-boundary-chunks");
+            expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
         it("checks local complete chunks while read peer hints are present", async () => {

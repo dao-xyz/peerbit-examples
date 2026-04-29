@@ -315,6 +315,103 @@ const parseEventBody = (body) => {
     }
 };
 
+const countObjectKeys = (value) =>
+    value && typeof value === "object" && !Array.isArray(value)
+        ? Object.keys(value).length
+        : undefined;
+
+const tail = (value, count = 5) =>
+    Array.isArray(value)
+        ? value.slice(Math.max(0, value.length - count))
+        : value;
+
+const compactReadDiagnostics = (diagnostics = {}) => ({
+    waitUntilReadyResolvedBy: diagnostics.waitUntilReadyResolvedBy,
+    waitUntilReadyResolvedReady: diagnostics.waitUntilReadyResolvedReady,
+    waitUntilReadyAttempts: diagnostics.waitUntilReadyAttempts,
+    lastReadyProbe: diagnostics.lastReadyProbe,
+    chunkAttemptTimeoutMs: diagnostics.chunkAttemptTimeoutMs,
+    readAhead: diagnostics.readAhead,
+    prefetchedChunkCount: diagnostics.prefetchedChunkCount,
+    chunkAttemptsCount: countObjectKeys(diagnostics.chunkAttempts),
+    chunkResolvedCount: countObjectKeys(diagnostics.chunkResolved),
+    chunkManifestHeadsCount: countObjectKeys(diagnostics.chunkManifestHeads),
+    chunkIndexedHeadsCount: countObjectKeys(diagnostics.chunkIndexedHeads),
+    chunkHeadGetsCount: countObjectKeys(diagnostics.chunkHeadGets),
+    readyRemoteGetHeadsCount: diagnostics.readyRemoteGetHeads?.length,
+    readyRemoteGetHeads: tail(diagnostics.readyRemoteGetHeads),
+    readyRemoteDecodeFallbacks: tail(diagnostics.readyRemoteDecodeFallbacks),
+    chunkFailure: diagnostics.chunkFailure,
+    finishedAt: diagnostics.finishedAt,
+});
+
+const compactDiagnostics = (diagnostics) => {
+    if (!diagnostics || typeof diagnostics !== "object") {
+        return diagnostics;
+    }
+    return {
+        programAddress: diagnostics.programAddress,
+        programClosed: diagnostics.programClosed,
+        persistChunkReads: diagnostics.persistChunkReads,
+        peerHash: diagnostics.peerHash,
+        peerStatus: diagnostics.peerStatus,
+        connectionCount: diagnostics.connectionCount,
+        connectionPeers: tail(diagnostics.connectionPeers),
+        replicatorCount: diagnostics.replicatorCount,
+        listCount: diagnostics.listCount,
+        listedFiles: diagnostics.listedFiles,
+        replicationSetSize: diagnostics.replicationSetSize,
+        lastUploadDiagnostics: diagnostics.lastUploadDiagnostics,
+        lastReadDiagnostics: compactReadDiagnostics(
+            diagnostics.lastReadDiagnostics
+        ),
+        benchmarkStats: diagnostics.benchmarkStats
+            ? {
+                  updateListCalls: tail(
+                      diagnostics.benchmarkStats.updateListCalls
+                  ),
+              }
+            : diagnostics.benchmarkStats,
+        timings: diagnostics.timings,
+    };
+};
+
+const compactCoordinationPayload = (payload) => {
+    if (!payload || typeof payload !== "object") {
+        return payload;
+    }
+    return {
+        ...payload,
+        writerDiagnostics: compactDiagnostics(payload.writerDiagnostics),
+        readerDiagnostics: compactDiagnostics(payload.readerDiagnostics),
+        reader: compactCoordinationPayload(payload.reader),
+    };
+};
+
+const minimalCoordinationPayload = (payload) => {
+    if (!payload || typeof payload !== "object") {
+        return payload;
+    }
+    return {
+        status: payload.status,
+        role: payload.role,
+        readerRole: payload.readerRole,
+        scenario: payload.scenario,
+        baseURL: payload.baseURL,
+        shareUrl: payload.shareUrl,
+        address: payload.address,
+        fileName: payload.fileName,
+        fileSizeMb: payload.fileSizeMb,
+        sizeBytes: payload.sizeBytes,
+        uploadDurationMs: payload.uploadDurationMs,
+        uploadMbps: payload.uploadMbps,
+        downloadDurationMs: payload.downloadDurationMs,
+        downloadMbps: payload.downloadMbps,
+        listingWaitMs: payload.listingWaitMs,
+        failure: payload.failure,
+    };
+};
+
 const createFileCoordinator = (filePath) => ({
     async publish(kind, payload) {
         await mkdir(path.dirname(filePath), { recursive: true });
@@ -376,13 +473,17 @@ const githubRequest = async (url, init = {}) => {
 
 const createGithubCoordinator = () => {
     const issueUrl = `https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${COORDINATION_ISSUE}/comments?per_page=100`;
+    const makeBody = (kind, payload) =>
+        `${marker(kind)}\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
     return {
         async publish(kind, payload) {
-            const body = `${marker(kind)}\n\`\`\`json\n${JSON.stringify(
-                payload,
-                null,
-                2
-            )}\n\`\`\``;
+            let body = makeBody(kind, payload);
+            if (body.length > 60_000) {
+                body = makeBody(kind, compactCoordinationPayload(payload));
+            }
+            if (body.length > 60_000) {
+                body = makeBody(kind, minimalCoordinationPayload(payload));
+            }
             await githubRequest(issueUrl, {
                 method: "POST",
                 body: JSON.stringify({ body }),

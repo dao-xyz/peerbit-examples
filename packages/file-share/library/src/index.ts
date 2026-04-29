@@ -1568,6 +1568,47 @@ export class LargeFile extends AbstractFile {
                 (file as any).chunkEntryHeads.some(
                     (head: unknown) => typeof head === "string"
                 );
+            const hasIndexedChunk = (
+                candidate: unknown,
+                file: LargeFile,
+                index: number
+            ) => {
+                const chunk = candidate as Partial<TinyFile> &
+                    Partial<IndexableFile>;
+                const chunkId = getChunkId(file.id, index);
+                return candidate instanceof TinyFile ||
+                    candidate instanceof IndexableFile ||
+                    (candidate != null && typeof candidate === "object")
+                    ? chunk.parentId === file.id &&
+                          chunk.id === chunkId &&
+                          (chunk.index === index ||
+                              chunk.name === `${file.name}/${index}`)
+                    : false;
+            };
+            const hasBoundaryChunks = async (file: LargeFile) => {
+                const indexes =
+                    file.chunkCount <= 1 ? [0] : [0, file.chunkCount - 1];
+                for (const index of indexes) {
+                    const chunkId = getChunkId(file.id, index);
+                    const chunk = await files.files.index.get(chunkId, {
+                        resolve: false,
+                        local: true,
+                        remote: {
+                            timeout: attemptTimeout,
+                            strategy: "always" as any,
+                            throwOnMissing: false,
+                            retryMissingResponses: true,
+                            replicate: files.persistChunkReads,
+                            from: remoteFrom,
+                        },
+                    });
+                    if (!hasIndexedChunk(chunk, file, index)) {
+                        return false;
+                    }
+                    files.retainResolvedChunk(chunk);
+                }
+                return true;
+            };
             const localMatches = await files.files.index.search(request, {
                 local: true,
                 remote: false,
@@ -1804,6 +1845,25 @@ export class LargeFile extends AbstractFile {
                     debug.waitUntilReadyResolvedBy = "pending-manifest";
                 }
                 return readinessCandidate;
+            }
+            if (
+                files.persistChunkReads &&
+                countCandidate.chunkCount > 0 &&
+                !countCandidate.ready &&
+                (await hasBoundaryChunks(countCandidate).catch((error) => {
+                    if (debug) {
+                        (debug.readyBoundaryChunkErrors ||= []).push(
+                            getErrorMessage(error)
+                        );
+                    }
+                    return false;
+                }))
+            ) {
+                if (debug) {
+                    debug.waitUntilReadyResolvedBy =
+                        "pending-manifest-boundary-chunks";
+                }
+                return countCandidate;
             }
 
             await sleep(250);
@@ -2476,15 +2536,44 @@ export class Files extends Program<Args> {
         const size = source.size;
         const chunkSize = getLargeFileSegmentSize(size);
         const uploadId = createUploadId();
+        const expectedChunkCount = getChunkCount(size, chunkSize);
+        const diagnostics: UploadDiagnostics = {
+            uploadId,
+            fileName: name,
+            sizeBytes: Number(size),
+            chunkSize,
+            chunkCount: expectedChunkCount,
+            startedAt: Date.now(),
+            manifestStartedAt: null,
+            manifestFinishedAt: null,
+            firstChunkStartedAt: null,
+            firstChunkFinishedAt: null,
+            lastChunkFinishedAt: null,
+            chunkPutCount: 0,
+            chunkReadTotalMs: 0,
+            chunkReadMaxMs: 0,
+            chunkPutTotalMs: 0,
+            chunkPutMaxMs: 0,
+            slowestChunkIndex: null,
+            slowestChunkPutMs: null,
+            readyManifestStartedAt: null,
+            readyManifestFinishedAt: null,
+            finishedAt: null,
+            failureAt: null,
+            failureMessage: null,
+        };
+        this.lastUploadDiagnostics = diagnostics;
         const manifest = new LargeFile({
             id: uploadId,
             name,
             size,
-            chunkCount: getChunkCount(size, chunkSize),
+            chunkCount: expectedChunkCount,
             ready: false,
         });
 
+        diagnostics.manifestStartedAt = Date.now();
         const pendingManifest = await this.files.put(manifest);
+        diagnostics.manifestFinishedAt = Date.now();
         const hasher = new SHA256();
         try {
             let uploadedBytes = 0n;
@@ -2492,6 +2581,8 @@ export class Files extends Program<Args> {
             const chunkEntryHeads: string[] = [];
             for await (const chunkBytes of source.readChunks(chunkSize)) {
                 hasher.update(chunkBytes);
+                const putStartedAt = Date.now();
+                diagnostics.firstChunkStartedAt ??= putStartedAt;
                 const chunk = new TinyFile({
                     name: name + "/" + chunkCount,
                     file: chunkBytes,
@@ -2504,11 +2595,29 @@ export class Files extends Program<Args> {
                 });
                 this.retainAuthoredChunk(chunk, appended.entry.hash);
                 chunkEntryHeads[chunkCount] = appended.entry.hash;
+                const putFinishedAt = Date.now();
+                const putDurationMs = putFinishedAt - putStartedAt;
+                diagnostics.firstChunkFinishedAt ??= putFinishedAt;
+                diagnostics.lastChunkFinishedAt = putFinishedAt;
+                diagnostics.chunkPutCount += 1;
+                diagnostics.chunkPutTotalMs += putDurationMs;
+                diagnostics.chunkPutMaxMs = Math.max(
+                    diagnostics.chunkPutMaxMs,
+                    putDurationMs
+                );
+                if (
+                    diagnostics.slowestChunkPutMs == null ||
+                    putDurationMs > diagnostics.slowestChunkPutMs
+                ) {
+                    diagnostics.slowestChunkPutMs = putDurationMs;
+                    diagnostics.slowestChunkIndex = chunkCount;
+                }
                 uploadedBytes += BigInt(chunkBytes.byteLength);
                 chunkCount++;
                 progress?.(Number(uploadedBytes) / Math.max(Number(size), 1));
             }
             ensureSourceSize(uploadedBytes, source.size);
+            diagnostics.readyManifestStartedAt = Date.now();
             await this.files.put(
                 new LargeFileWithChunkHeads({
                     id: uploadId,
@@ -2521,12 +2630,18 @@ export class Files extends Program<Args> {
                 }),
                 { meta: { next: [pendingManifest.entry] } }
             );
+            diagnostics.readyManifestFinishedAt = Date.now();
+            diagnostics.chunkCount = chunkCount;
         } catch (error) {
+            diagnostics.failureAt = Date.now();
+            diagnostics.failureMessage =
+                error instanceof Error ? error.message : String(error);
             await this.cleanupChunkedUpload(uploadId).catch(() => {});
             await this.files.del(uploadId).catch(() => {});
             throw error;
         }
 
+        diagnostics.finishedAt = Date.now();
         progress?.(1);
         return uploadId;
     }
