@@ -68,6 +68,11 @@ type ListingDiagnostics = {
     lastAdaptiveRefreshStartedAt: number | null;
     lastAdaptiveRefreshFinishedAt: number | null;
     lastAdaptiveRefreshError: string | null;
+    fileChangeEventCount: number;
+    rootFileChangeEventCount: number;
+    skippedChildFileChangeEventCount: number;
+    activeTransferCount: number;
+    skippedActiveTransferRefreshCount: number;
 };
 
 type SaveFilePickerWindow = Window & {
@@ -107,6 +112,25 @@ const getReadyLargeFileSignature = (files: AbstractFile[]) => {
     return readyFiles.length > 0 ? readyFiles.join("|") : null;
 };
 
+type FileChangeDetail = {
+    added?: Array<Pick<AbstractFile, "parentId">>;
+    removed?: Array<Pick<AbstractFile, "parentId">>;
+};
+
+export const shouldRefreshRootListForFileChange = (event: Event) => {
+    const detail = (event as CustomEvent<FileChangeDetail>).detail;
+    if (!detail) {
+        return true;
+    }
+
+    const changed = [...(detail.added ?? []), ...(detail.removed ?? [])];
+    if (changed.length === 0) {
+        return false;
+    }
+
+    return changed.some((file) => file?.parentId == null);
+};
+
 const createListingDiagnostics = (
     shareAddress: string | undefined,
     storedRole: ReplicationOptions | undefined
@@ -142,6 +166,11 @@ const createListingDiagnostics = (
     lastAdaptiveRefreshStartedAt: null,
     lastAdaptiveRefreshFinishedAt: null,
     lastAdaptiveRefreshError: null,
+    fileChangeEventCount: 0,
+    rootFileChangeEventCount: 0,
+    skippedChildFileChangeEventCount: 0,
+    activeTransferCount: 0,
+    skippedActiveTransferRefreshCount: 0,
 });
 
 export const useDebouncedEffect = (effect, deps, delay) => {
@@ -245,6 +274,22 @@ export const Drop = () => {
     );
     const [limitCPU, setLimitCPU] = useState<number | undefined>(1);
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+    const activeTransferCountRef = useRef(0);
+
+    const startActiveTransfer = () => {
+        activeTransferCountRef.current += 1;
+        diagnosticsRef.current.activeTransferCount =
+            activeTransferCountRef.current;
+    };
+
+    const finishActiveTransfer = () => {
+        activeTransferCountRef.current = Math.max(
+            0,
+            activeTransferCountRef.current - 1
+        );
+        diagnosticsRef.current.activeTransferCount =
+            activeTransferCountRef.current;
+    };
 
     // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
     const updateRole = async (roleOptions?: ReplicationOptions) => {
@@ -480,6 +525,10 @@ export const Drop = () => {
 
         const updateListDebounced = callEvenInterval(updateList, 500);
         const refresh = setInterval(() => {
+            if (activeTransferCountRef.current > 0) {
+                diagnosticsRef.current.skippedActiveTransferRefreshCount += 1;
+                return;
+            }
             updateListDebounced();
         }, 5000);
         files.program.files.log.events.addEventListener("join", updateList);
@@ -487,9 +536,20 @@ export const Drop = () => {
             "leave",
             updateListDebounced
         );
+        const filesChangeListener = (event: Event) => {
+            diagnosticsRef.current.fileChangeEventCount += 1;
+            if (!shouldRefreshRootListForFileChange(event)) {
+                diagnosticsRef.current.skippedChildFileChangeEventCount += 1;
+                return;
+            }
+
+            diagnosticsRef.current.rootFileChangeEventCount += 1;
+            updateListDebounced(event);
+        };
+
         files.program.files.events.addEventListener(
             "change",
-            updateListDebounced
+            filesChangeListener
         );
 
         const replicatorsChangeListener = async () => {
@@ -577,7 +637,7 @@ export const Drop = () => {
             );
             files.program.files.events.removeEventListener(
                 "change",
-                updateListDebounced
+                filesChangeListener
             );
             files.program.files.log.events.removeEventListener(
                 "replication:change",
@@ -640,7 +700,10 @@ export const Drop = () => {
                 try {
                     const metadataStartedAt = performance.now();
                     const [allFiles, replicators] = await Promise.all([
-                        files.program.files.index.search(new SearchRequest({})),
+                        files.program.files.index.search(
+                            new SearchRequest({}),
+                            { local: true, remote: false }
+                        ),
                         files.program.files.log.getReplicators(),
                     ]);
                     updateListStats.metadataMs =
@@ -688,6 +751,7 @@ export const Drop = () => {
             file instanceof LargeFile
                 ? Math.max(60_000, Math.ceil(Number(file.size) / 1e6) * 1_000)
                 : 10_000;
+        startActiveTransfer();
         try {
             if (file instanceof LargeFile) {
                 files.program?.retainFileRead(file);
@@ -737,6 +801,7 @@ export const Drop = () => {
                 window.URL.revokeObjectURL(url);
             }, 60_000);
         } finally {
+            finishActiveTransfer();
             progress(null);
         }
     };
@@ -778,6 +843,10 @@ export const Drop = () => {
     const addFile = (filesToAdd: FileList | File[], endProgress = true) => {
         return new Promise<void>((resolve, reject) => {
             let promises: Promise<any>[] = [];
+            const transferStarted = filesToAdd.length > 0;
+            if (transferStarted) {
+                startActiveTransfer();
+            }
 
             // there will just by one file here in practice
             for (const file of filesToAdd) {
@@ -809,6 +878,11 @@ export const Drop = () => {
                     })
                     .catch((e) => {
                         reject(e);
+                    })
+                    .finally(() => {
+                        if (transferStarted) {
+                            finishActiveTransfer();
+                        }
                     });
             }
         });
