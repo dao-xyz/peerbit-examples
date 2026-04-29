@@ -476,6 +476,52 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
+        it("scales chunk lookup attempt timeouts for large persisted chunks", async () => {
+            const filestore = await peer.open(new Files());
+            const file = new LargeFile({
+                id: "large-timeout-scale",
+                name: "large timeout scale",
+                size: BigInt(512 * 1024 * 1024),
+                chunkCount: 256,
+                ready: true,
+            });
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
+            );
+
+            (filestore.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id.startsWith(`${file.id}:`)) {
+                    throw new Error("stop after timeout diagnostic");
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            try {
+                await file.writeFile(
+                    filestore,
+                    { write: async () => {} },
+                    { timeout: 60_000 }
+                );
+                expect.fail("expected chunk resolution to fail");
+            } catch (error) {
+                expect((error as Error).message).to.contain(
+                    "stop after timeout diagnostic"
+                );
+            } finally {
+                (filestore.files.index as any).get = originalGet;
+            }
+
+            expect(
+                filestore.lastReadDiagnostics?.chunkAttemptTimeoutMs
+            ).to.be.greaterThan(5_000);
+            expect(
+                filestore.lastReadDiagnostics?.chunkAttemptTimeoutMs
+            ).to.be.lessThanOrEqual(45_000);
+        });
+
         it("falls back to indexed chunk search when direct chunk lookup misses", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
