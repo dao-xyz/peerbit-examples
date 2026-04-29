@@ -32,11 +32,11 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.23",
-        "peerbit": "^5.2.8",
+        "@peerbit/test-utils": "^3.0.24",
+        "peerbit": "^5.2.9",
         "typescript": "^5.6.3"
     },
     "peerDependencies": {
-        "peerbit": "^5.2.8"
+        "peerbit": "^5.2.9"
     }
 }
