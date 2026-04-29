@@ -1,10 +1,16 @@
-import { defineConfig, loadEnv } from "vite";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import fs from "fs";
 
 import peerbit from "@peerbit/vite";
 // @ts-ignore
 import tailwindcss from "@tailwindcss/vite";
+
+const workspaceRoot = fileURLToPath(new URL("../../..", import.meta.url));
+const workspaceModule = (specifier: string) =>
+    path.join(workspaceRoot, "node_modules", ...specifier.split("/"));
 
 // https://vitejs.dev/config/
 export default defineConfig({
@@ -13,7 +19,16 @@ export default defineConfig({
         keepNames: true,
     },
     resolve: {
+        /* peerbit-benchmark-vite */
+        alias: {
+            react: workspaceModule("react"),
+            "react-dom": workspaceModule("react-dom"),
+            "@dao-xyz/borsh": workspaceModule("@dao-xyz/borsh"),
+        },
         dedupe: [
+            "react",
+            "react-dom",
+            "@dao-xyz/borsh",
             "peerbit",
             "@peerbit/crypto",
             "@peerbit/document",
