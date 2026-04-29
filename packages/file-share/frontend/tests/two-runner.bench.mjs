@@ -645,6 +645,20 @@ const runReader = async (coordinator) => {
         COORDINATION_TIMEOUT_MS
     );
     if (readyEvent.kind === "writer-failed") {
+        const failure = createFailure(
+            new Error(
+                `Writer failed before reader started: ${readyEvent.payload?.message || "unknown error"}`
+            )
+        );
+        await persistResult({
+            status: "failed",
+            role: "reader",
+            readerRole: READER_ROLE,
+            scenario: "prod",
+            fileSizeMb: FILE_SIZE_MB,
+            failure,
+            writerFailure: readyEvent.payload,
+        });
         throw new Error(
             `Writer failed before reader started: ${readyEvent.payload?.message || "unknown error"}`
         );

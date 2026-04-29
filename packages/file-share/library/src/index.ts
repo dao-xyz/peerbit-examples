@@ -1568,47 +1568,6 @@ export class LargeFile extends AbstractFile {
                 (file as any).chunkEntryHeads.some(
                     (head: unknown) => typeof head === "string"
                 );
-            const hasIndexedChunk = (
-                candidate: unknown,
-                file: LargeFile,
-                index: number
-            ) => {
-                const chunk = candidate as Partial<TinyFile> &
-                    Partial<IndexableFile>;
-                const chunkId = getChunkId(file.id, index);
-                return candidate instanceof TinyFile ||
-                    candidate instanceof IndexableFile ||
-                    (candidate != null && typeof candidate === "object")
-                    ? chunk.parentId === file.id &&
-                          chunk.id === chunkId &&
-                          (chunk.index === index ||
-                              chunk.name === `${file.name}/${index}`)
-                    : false;
-            };
-            const hasBoundaryChunks = async (file: LargeFile) => {
-                const indexes =
-                    file.chunkCount <= 1 ? [0] : [0, file.chunkCount - 1];
-                for (const index of indexes) {
-                    const chunkId = getChunkId(file.id, index);
-                    const chunk = await files.files.index.get(chunkId, {
-                        resolve: false,
-                        local: true,
-                        remote: {
-                            timeout: attemptTimeout,
-                            strategy: "always" as any,
-                            throwOnMissing: false,
-                            retryMissingResponses: true,
-                            replicate: files.persistChunkReads,
-                            from: remoteFrom,
-                        },
-                    });
-                    if (!hasIndexedChunk(chunk, file, index)) {
-                        return false;
-                    }
-                    files.retainResolvedChunk(chunk);
-                }
-                return true;
-            };
             const localMatches = await files.files.index.search(request, {
                 local: true,
                 remote: false,
@@ -1679,26 +1638,9 @@ export class LargeFile extends AbstractFile {
                     return decodeLargeFileWithChunkHeads(operation.data);
                 }
             };
-            let remoteMatches: AbstractFile[] = [];
-            let remoteSearchFailed = false;
-            try {
-                remoteMatches = await files.files.index.search(request, {
-                    local: false,
-                    remote: {
-                        timeout: attemptTimeout,
-                        throwOnMissing: false,
-                        retryMissingResponses: true,
-                        replicate: files.persistChunkReads,
-                        from: remoteFrom,
-                    },
-                } as any);
-            } catch (error) {
-                remoteSearchFailed = true;
-                if (debug) {
-                    (debug.readyRemoteSearchErrors ||= []).push(
-                        getErrorMessage(error)
-                    );
-                }
+            const searchReadyManifestEntryHeads = async (): Promise<
+                LargeFile[]
+            > => {
                 try {
                     const indexedMatches = await files.files.index.search(
                         new SearchRequestIndexed({
@@ -1735,24 +1677,62 @@ export class LargeFile extends AbstractFile {
                             }
                         }
                     }
-                    const indexedReady = materializedMatches.find(
-                        (match) => match.ready
-                    );
-                    if (indexedReady) {
-                        if (debug) {
-                            debug.waitUntilReadyResolvedBy =
-                                "ready-manifest-head-search";
-                        }
-                        return indexedReady;
-                    }
-                    remoteMatches = materializedMatches as AbstractFile[];
+                    return materializedMatches;
                 } catch (indexedError) {
                     if (debug) {
                         (debug.readyRemoteIndexedSearchErrors ||= []).push(
                             getErrorMessage(indexedError)
                         );
                     }
+                    return [];
                 }
+            };
+            const resolveReadyManifestEntryHeads = async (
+                source: string
+            ): Promise<LargeFile | undefined> => {
+                const matches = await searchReadyManifestEntryHeads();
+                const latest = toReadableLargeFile(
+                    pickLatest(matches as AbstractFile[])
+                );
+                if (latest?.ready) {
+                    if (debug) {
+                        debug.waitUntilReadyResolvedBy = source;
+                    }
+                    return latest;
+                }
+            };
+            let remoteMatches: AbstractFile[] = [];
+            let remoteSearchFailed = false;
+            try {
+                remoteMatches = await files.files.index.search(request, {
+                    local: false,
+                    remote: {
+                        timeout: attemptTimeout,
+                        throwOnMissing: false,
+                        retryMissingResponses: true,
+                        replicate: files.persistChunkReads,
+                        from: remoteFrom,
+                    },
+                } as any);
+            } catch (error) {
+                remoteSearchFailed = true;
+                if (debug) {
+                    (debug.readyRemoteSearchErrors ||= []).push(
+                        getErrorMessage(error)
+                    );
+                }
+                const indexedMatches = await searchReadyManifestEntryHeads();
+                const indexedReady = toReadableLargeFile(
+                    pickLatest(indexedMatches as AbstractFile[])
+                );
+                if (indexedReady?.ready) {
+                    if (debug) {
+                        debug.waitUntilReadyResolvedBy =
+                            "ready-manifest-head-search";
+                    }
+                    return indexedReady;
+                }
+                remoteMatches = indexedMatches as AbstractFile[];
             }
             const remoteLatest = pickLatest(remoteMatches);
             let remoteReady = toReadableLargeFile(remoteLatest);
@@ -1814,6 +1794,14 @@ export class LargeFile extends AbstractFile {
                     );
                 }
             }
+            if (!remoteReady?.ready) {
+                const indexedReady = await resolveReadyManifestEntryHeads(
+                    "ready-manifest-head-search"
+                );
+                if (indexedReady) {
+                    return indexedReady;
+                }
+            }
             const countCandidate =
                 remoteReady &&
                 (remoteReady.ready ||
@@ -1846,26 +1834,6 @@ export class LargeFile extends AbstractFile {
                 }
                 return readinessCandidate;
             }
-            if (
-                files.persistChunkReads &&
-                countCandidate.chunkCount > 0 &&
-                !countCandidate.ready &&
-                (await hasBoundaryChunks(countCandidate).catch((error) => {
-                    if (debug) {
-                        (debug.readyBoundaryChunkErrors ||= []).push(
-                            getErrorMessage(error)
-                        );
-                    }
-                    return false;
-                }))
-            ) {
-                if (debug) {
-                    debug.waitUntilReadyResolvedBy =
-                        "pending-manifest-boundary-chunks";
-                }
-                return countCandidate;
-            }
-
             await sleep(250);
         }
 
@@ -2380,7 +2348,7 @@ export class Files extends Program<Args> {
                       ? ((await this.files.log.log.get(hash)) as typeof entry)
                       : undefined;
         } catch {
-            return false;
+            return hash != null;
         }
 
         if (isSignedBySelf(getEntrySignatures(entry))) {
@@ -2402,9 +2370,16 @@ export class Files extends Program<Args> {
             }
             return true;
         }
+        if (resolvedMetadata && !resolvedMetadata.id.includes(":")) {
+            const entryHash = hash ?? getEntryHash(entry);
+            if (entryHash) {
+                this.retainedChunkEntryHeads.add(entryHash);
+            }
+            return true;
+        }
 
         if (!entry) {
-            return false;
+            return hash != null;
         }
 
         if (!this.persistChunkReads) {

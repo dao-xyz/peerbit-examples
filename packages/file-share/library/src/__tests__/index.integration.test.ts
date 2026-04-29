@@ -135,6 +135,35 @@ describe("index", () => {
             }
         });
 
+        it("keeps shallow root entries during adaptive pruning", async () => {
+            const writer = await peer.open(new Files());
+            const reader = await peer2.open<Files>(writer.address);
+            const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
+            const fileId = await writer.add("metadata retained root", largeFile);
+            const indexedRoot = await writer.files.index.get(fileId, {
+                resolve: false,
+                local: true,
+                remote: false,
+            } as any);
+            const rootHead = (indexedRoot as any).__context.head;
+            const shallowEntry =
+                await writer.files.log.log.getShallow(rootHead);
+            const originalGet = reader.files.log.log.get.bind(
+                reader.files.log.log
+            );
+
+            (reader.files.log.log as any).get = async () => {
+                throw new Error("full root payload should not be required");
+            };
+
+            try {
+                expect(await (reader as any).shouldKeepFileEntry(shallowEntry))
+                    .to.be.true;
+            } finally {
+                (reader.files.log.log as any).get = originalGet;
+            }
+        });
+
         it("keeps ready root manifests during adaptive pruning", async () => {
             const writer = await peer.open(new Files());
             const reader = await peer2.open<Files>(writer.address);
@@ -1599,84 +1628,92 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("streams a pending manifest when remote boundary chunks prove the upload is complete", async () => {
+        it("keeps pending adaptive manifests blocked without ready or complete local chunks", async () => {
             const filestore = await peer.open(new Files());
-            const filestoreReader = await peer2.open<Files>(filestore.address, {
-                args: {
-                    replicate: { limits: { cpu: { max: 1 } } },
-                },
+            const fileName = "pending manifest with arbitrary local chunks";
+            const fileId = "pending-manifest-arbitrary-local-chunks";
+            const pendingFile = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: 2n * 1024n * 1024n,
+                chunkCount: 4,
+                ready: false,
             });
-            await filestoreReader.files.log.waitForReplicator(
-                peer.identity.publicKey
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
             );
-
-            const fileId = "pending-boundary-chunks";
-            const fileName = "pending-boundary-chunks.bin";
-            const chunks = [
-                new Uint8Array([1, 2, 3]),
-                new Uint8Array([4, 5, 6]),
-                new Uint8Array([7, 8, 9]),
-                new Uint8Array([10, 11, 12]),
-            ];
-            const expected = concat(chunks);
-            await filestore.files.put(
-                new LargeFile({
-                    id: fileId,
-                    name: fileName,
-                    size: BigInt(expected.byteLength),
-                    chunkCount: chunks.length,
-                    ready: false,
-                })
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
             );
-            for (let index = 0; index < chunks.length; index++) {
-                await filestore.files.put(
-                    new TinyFile({
-                        id: `${fileId}:${index}`,
-                        name: `${fileName}/${index}`,
-                        file: chunks[index],
-                        parentId: fileId,
-                        index,
-                    })
-                );
-            }
-
-            let pendingFile: LargeFile | undefined;
-            await waitForResolved(
-                async () => {
-                    const match = await filestoreReader.resolveById(fileId, {
-                        replicate: true,
-                        timeout: 1_000,
-                    });
-                    expect(match).to.be.instanceOf(LargeFile);
-                    expect((match as LargeFile).ready).to.be.false;
-                    pendingFile = match as LargeFile;
-                },
-                { timeout: 30_000, delayInterval: 200 }
-            );
-
             const originalCountLocalChunks =
-                filestoreReader.countLocalChunks.bind(filestoreReader);
-            (filestoreReader as any).countLocalChunks = async () => 0;
-            const streamedChunks: Uint8Array[] = [];
-            try {
-                await pendingFile!.writeFile(
-                    filestoreReader,
-                    {
-                        write: async (chunk) => {
-                            streamedChunks.push(chunk);
-                        },
-                    },
-                    { timeout: 20_000 }
+                filestore.countLocalChunks.bind(filestore);
+            const originalGetReadPeerHints =
+                filestore.getReadPeerHints.bind(filestore);
+
+            (filestore as any).getReadPeerHints = async () => ["writer-peer"];
+            (filestore as any).countLocalChunks = async () => 1;
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasRootId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
                 );
+                if (hasRootId) {
+                    return [pendingFile];
+                }
+                return [];
+            };
+            (filestore.files.index as any).get = async (
+                id: unknown,
+                options: any
+            ) => {
+                if (
+                    id === fileId &&
+                    options?.remote &&
+                    options.remote !== false
+                ) {
+                    return pendingFile;
+                }
+                if (typeof id === "string" && id.startsWith(`${fileId}:`)) {
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            try {
+                await expect(
+                    pendingFile.writeFile(
+                        filestore,
+                        {
+                            write: async (chunk) => {
+                                streamedChunks.push(chunk);
+                            },
+                        },
+                        { timeout: 500 }
+                    )
+                ).rejects.toThrow(/still uploading/);
             } finally {
-                (filestoreReader as any).countLocalChunks =
-                    originalCountLocalChunks;
+                (filestore.files.index as any).search = originalSearch;
+                (filestore.files.index as any).get = originalGet;
+                (filestore as any).countLocalChunks = originalCountLocalChunks;
+                (filestore as any).getReadPeerHints = originalGetReadPeerHints;
             }
 
             expect(
-                filestoreReader.lastReadDiagnostics?.waitUntilReadyResolvedBy
-            ).to.eq("pending-manifest-boundary-chunks");
-            expect(equals(concat(streamedChunks), expected)).to.be.true;
+                filestore.lastReadDiagnostics?.waitUntilReadyResolvedBy
+            ).not.to.eq("pending-manifest-local-chunks");
+            expect(
+                filestore.lastReadDiagnostics?.lastReadyProbe?.localChunkCount
+            ).to.eq(1);
+            expect(streamedChunks).to.have.length(0);
         });
 
         it("checks local complete chunks while read peer hints are present", async () => {
@@ -1917,6 +1954,158 @@ describe("index", () => {
             expect(filestore.lastReadDiagnostics?.chunkResolved?.[1]).to.eq(
                 "manifest-head-get"
             );
+            expect(equals(concat(streamedChunks), expected)).to.be.true;
+        });
+
+        it("uses indexed ready manifest heads when resolved ready search returns pending", async () => {
+            const filestore = await peer.open(new Files());
+            const fileName = "ready manifest stale resolved search fallback";
+            const fileId = "ready-manifest-stale-resolved-search-fallback";
+            const chunkCount = 4;
+            const expected = new Uint8Array(chunkCount);
+            const chunkEntryHeads: string[] = [];
+            for (let index = 0; index < chunkCount; index++) {
+                expected[index] = index % 256;
+                const appended = await filestore.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: new Uint8Array([expected[index]]),
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = appended.entry.hash;
+            }
+            const pendingFile = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount,
+                ready: false,
+            });
+            const readyFile = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount,
+                ready: true,
+                finalHash: sha256Base64Sync(expected),
+                chunkEntryHeads,
+            });
+            const readyPut = await filestore.files.put(readyFile);
+            const readyHead = readyPut.entry.hash;
+            const readyIndexed = await filestore.files.index.get(fileId, {
+                resolve: false,
+                local: true,
+                remote: false,
+            } as any);
+            const readyEntry = await filestore.files.log.log.get(readyHead);
+            expect(readyIndexed).to.exist;
+            expect(readyEntry).to.exist;
+            (readyIndexed as any).__context ??= {};
+            (readyIndexed as any).__context.head = readyHead;
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
+            );
+            const originalLogGet = filestore.files.log.log.get.bind(
+                filestore.files.log.log
+            );
+            const originalCountLocalChunks =
+                filestore.countLocalChunks.bind(filestore);
+            const originalGetReadPeerHints =
+                filestore.getReadPeerHints.bind(filestore);
+            let staleRemoteSearches = 0;
+            let directReadyGets = 0;
+            let indexedReadySearches = 0;
+            let remoteReadyHeadGets = 0;
+
+            (filestore as any).getReadPeerHints = async () => [
+                "ready-manifest-peer",
+            ];
+            (filestore as any).countLocalChunks = async () => 0;
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasRootId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
+                );
+                if (hasRootId) {
+                    if ((options as any)?.local === true) {
+                        return [pendingFile];
+                    }
+                    if ((options as any)?.remote) {
+                        if ((options as any)?.resolve === false) {
+                            expect(request).to.be.instanceOf(
+                                SearchRequestIndexed
+                            );
+                            indexedReadySearches++;
+                            return [readyIndexed];
+                        }
+                        staleRemoteSearches++;
+                        return [pendingFile];
+                    }
+                    return [];
+                }
+                return originalSearch(request as never, options as never);
+            };
+            (filestore.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id === fileId && (options as any)?.remote) {
+                    directReadyGets++;
+                    return pendingFile;
+                }
+                return originalGet(id as never, options as never);
+            };
+            (filestore.files.log.log as any).get = async (
+                hash: string,
+                options: unknown
+            ) => {
+                if (hash === readyHead && (options as any)?.remote) {
+                    remoteReadyHeadGets++;
+                    return readyEntry;
+                }
+                return originalLogGet(hash as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            try {
+                await pendingFile.writeFile(
+                    filestore,
+                    {
+                        write: async (chunk) => {
+                            streamedChunks.push(chunk);
+                        },
+                    },
+                    { timeout: 20_000 }
+                );
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+                (filestore.files.index as any).get = originalGet;
+                (filestore.files.log.log as any).get = originalLogGet;
+                (filestore as any).countLocalChunks = originalCountLocalChunks;
+                (filestore as any).getReadPeerHints = originalGetReadPeerHints;
+            }
+
+            expect(staleRemoteSearches).to.be.greaterThan(0);
+            expect(directReadyGets).to.be.greaterThan(0);
+            expect(indexedReadySearches).to.be.greaterThan(0);
+            expect(remoteReadyHeadGets).to.be.greaterThan(0);
+            expect(
+                filestore.lastReadDiagnostics?.waitUntilReadyResolvedBy
+            ).to.eq("ready-manifest-head-search");
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
