@@ -325,6 +325,11 @@ const LARGE_FILE_PENDING_STREAM_MIN_CHUNKS = LARGE_FILE_TARGET_CHUNK_COUNT / 2;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 4;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
+const LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS = 5_000;
+const LARGE_FILE_MAX_CHUNK_ATTEMPT_TIMEOUT_MS = 45_000;
+const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_OVERHEAD_MS = 5_000;
+const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_SCALE_MIN_BYTES = 1 * 1024 * 1024;
+const LARGE_FILE_REMOTE_CHUNK_MIN_BYTES_PER_SECOND = 128 * 1024;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
 
 const roundUpTo = (value: number, multiple: number) =>
@@ -351,6 +356,39 @@ const getChunkCount = (
     size: number | bigint,
     chunkSize = LARGE_FILE_SEGMENT_SIZE
 ) => Math.ceil(Number(size) / chunkSize);
+const getChunkByteLength = (
+    size: number | bigint,
+    chunkCount: number,
+    index: number
+) => {
+    const total = Number(size);
+    const estimatedChunkSize = Math.ceil(total / Math.max(chunkCount, 1));
+    const start = index * estimatedChunkSize;
+    return Math.max(0, Math.min(estimatedChunkSize, total - start));
+};
+const getChunkLookupAttemptTimeout = (
+    size: number | bigint,
+    chunkCount: number,
+    index: number,
+    totalTimeout: number
+) => {
+    const chunkBytes = getChunkByteLength(size, chunkCount, index);
+    const scaledTimeout =
+        chunkBytes > LARGE_FILE_REMOTE_CHUNK_TIMEOUT_SCALE_MIN_BYTES
+            ? LARGE_FILE_REMOTE_CHUNK_TIMEOUT_OVERHEAD_MS +
+              Math.ceil(
+                  (chunkBytes / LARGE_FILE_REMOTE_CHUNK_MIN_BYTES_PER_SECOND) *
+                      1000
+              )
+            : LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS;
+    return Math.min(
+        totalTimeout,
+        Math.max(
+            LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS,
+            Math.min(scaledTimeout, LARGE_FILE_MAX_CHUNK_ATTEMPT_TIMEOUT_MS)
+        )
+    );
+};
 const getChunkId = (parentId: string, index: number) => `${parentId}:${index}`;
 const createUploadId = () => toBase64URL(randomBytes(16));
 const getEntryHash = (entry: unknown) =>
@@ -640,7 +678,12 @@ export class LargeFile extends AbstractFile {
         const totalTimeout =
             properties?.timeout ?? LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS;
         const deadline = Date.now() + totalTimeout;
-        const attemptTimeout = Math.min(totalTimeout, 5_000);
+        const attemptTimeout = getChunkLookupAttemptTimeout(
+            this.size,
+            this.chunkCount,
+            index,
+            totalTimeout
+        );
         if (properties?.debug) {
             properties.debug.chunkAttemptTimeoutMs = attemptTimeout;
         }

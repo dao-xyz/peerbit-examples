@@ -344,6 +344,9 @@ export const Drop = () => {
                 ) => Promise<void>;
                 getDiagnostics: () => Promise<Record<string, unknown>>;
             };
+            __peerbitFileShareBenchmarkStats?: {
+                updateListCalls?: Array<Record<string, unknown>>;
+            };
         };
         if (!files.program || files.program.closed) {
             delete testWindow.__peerbitFileShareTestHooks;
@@ -362,6 +365,12 @@ export const Drop = () => {
                 const replicators = await files.program.files.log
                     .getReplicators()
                     .catch(() => undefined);
+                const connections = (
+                    (peer as any)?.libp2p?.getConnections?.() ?? []
+                ).map(
+                    (connection) =>
+                        connection?.remotePeer?.toString?.() ?? "unknown"
+                );
                 const listedFiles = await Promise.all(
                     list.map(async (file) => ({
                         id: file.id,
@@ -398,6 +407,8 @@ export const Drop = () => {
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
                     peerStatus,
                     peerLoading,
+                    connectionCount: connections.length,
+                    connectionPeers: connections,
                     programOpenDiagnostics:
                         files.program?.openDiagnostics ?? null,
                     lastUploadDiagnostics:
@@ -413,6 +424,8 @@ export const Drop = () => {
                     replicationSetSize: replicationSet.size,
                     isHost: isHost ?? null,
                     left,
+                    benchmarkStats:
+                        testWindow.__peerbitFileShareBenchmarkStats ?? null,
                     timings: diagnosticsRef.current,
                 };
             },
@@ -575,6 +588,16 @@ export const Drop = () => {
 
         const source =
             typeof sourceOrEvent === "string" ? sourceOrEvent : "event";
+        const benchmarkWindow = window as Window & {
+            __peerbitFileShareBenchmarkStats?: {
+                updateListCalls?: Array<Record<string, unknown>>;
+            };
+        };
+        const updateListStartedAt = performance.now();
+        const updateListStats: Record<string, unknown> = {
+            source,
+            startedAt: Date.now(),
+        };
 
         // TODO don't reload the whole list, just add the new elements..
         try {
@@ -584,7 +607,10 @@ export const Drop = () => {
                 diagnosticsRef.current.firstListStartedAt = startedAt;
                 diagnosticsRef.current.firstListSource = source;
             }
+            const listStartedAt = performance.now();
             const list = await files.program.list();
+            updateListStats.listMs = performance.now() - listStartedAt;
+            updateListStats.listCount = list.length;
             const finishedAt = Date.now();
             if (diagnosticsRef.current.firstListFinishedAt == null) {
                 diagnosticsRef.current.firstListFinishedAt = finishedAt;
@@ -606,10 +632,24 @@ export const Drop = () => {
             forceUpdate();
             void (async () => {
                 try {
+                    const metadataStartedAt = performance.now();
                     const [allFiles, replicators] = await Promise.all([
                         files.program.files.index.search(new SearchRequest({})),
                         files.program.files.log.getReplicators(),
                     ]);
+                    updateListStats.metadataMs =
+                        performance.now() - metadataStartedAt;
+                    updateListStats.replicationSetSize = allFiles.length;
+                    updateListStats.replicatorCount = replicators.size;
+                    updateListStats.totalMs =
+                        performance.now() - updateListStartedAt;
+                    const updateListCalls =
+                        benchmarkWindow.__peerbitFileShareBenchmarkStats
+                            ?.updateListCalls ?? [];
+                    updateListCalls.push(updateListStats);
+                    benchmarkWindow.__peerbitFileShareBenchmarkStats = {
+                        updateListCalls,
+                    };
                     setReplicationSet(new Set(allFiles.map((x) => x.id)));
                     setReplicatorCount(replicators.size);
                     if (
