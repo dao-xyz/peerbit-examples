@@ -371,6 +371,11 @@ export const Drop = () => {
                     (connection) =>
                         connection?.remotePeer?.toString?.() ?? "unknown"
                 );
+                const peerAddresses = (
+                    peer?.getMultiaddrs?.() ??
+                    (peer as any)?.libp2p?.getMultiaddrs?.() ??
+                    []
+                ).map((address) => address?.toString?.() ?? String(address));
                 const listedFiles = await Promise.all(
                     list.map(async (file) => ({
                         id: file.id,
@@ -405,6 +410,7 @@ export const Drop = () => {
                         ).__peerbitFileShareRuntimeOpenProfiler?.samples ??
                         null,
                     peerHash: peer?.identity?.publicKey?.hashcode?.() ?? null,
+                    peerAddresses,
                     peerStatus,
                     peerLoading,
                     connectionCount: connections.length,

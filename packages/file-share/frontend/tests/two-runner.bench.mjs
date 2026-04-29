@@ -524,6 +524,21 @@ const createFailure = (error) => ({
     stack: typeof error?.stack === "string" ? error.stack : undefined,
 });
 
+const getWriterPeerAddresses = (writer) =>
+    (writer?.writerDiagnostics?.peerAddresses ?? []).filter(
+        (address) => typeof address === "string" && address.length > 0
+    );
+
+const withWriterPeerAddresses = (shareUrl, writer) => {
+    const addresses = getWriterPeerAddresses(writer);
+    if (addresses.length === 0) {
+        return shareUrl;
+    }
+    const url = new URL(shareUrl);
+    url.searchParams.set("peer", addresses.join(","));
+    return url.toString();
+};
+
 const runWriter = async (coordinator) => {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ acceptDownloads: true });
@@ -636,6 +651,7 @@ const runReader = async (coordinator) => {
     }
 
     const writer = readyEvent.payload;
+    const shareUrl = withWriterPeerAddresses(writer.shareUrl, writer);
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
@@ -650,7 +666,7 @@ const runReader = async (coordinator) => {
             await installMockSaveFilePicker(page);
         }
         await seedReplicationRole(page, writer.address, readerRoleOptions);
-        await page.goto(writer.shareUrl, { waitUntil: "domcontentloaded" });
+        await page.goto(shareUrl, { waitUntil: "domcontentloaded" });
         const readerReadyAt = Date.now();
         await waitForFileListed(page, writer.fileName, UPLOAD_TIMEOUT_MS);
         const listedAt = Date.now();
@@ -681,7 +697,8 @@ const runReader = async (coordinator) => {
             readerRole: READER_ROLE,
             scenario: "prod",
             baseURL: BASE_URL,
-            shareUrl: writer.shareUrl,
+            shareUrl,
+            writerPeerAddressCount: getWriterPeerAddresses(writer).length,
             fileName: writer.fileName,
             fileSizeMb: FILE_SIZE_MB,
             downloadMode: usesStreamingDownload
