@@ -335,12 +335,6 @@ const compactReadDiagnostics = (diagnostics = {}) => ({
     prefetchedChunkCount: diagnostics.prefetchedChunkCount,
     chunkAttemptsCount: countObjectKeys(diagnostics.chunkAttempts),
     chunkResolvedCount: countObjectKeys(diagnostics.chunkResolved),
-    chunkManifestHeadsCount: countObjectKeys(diagnostics.chunkManifestHeads),
-    chunkIndexedHeadsCount: countObjectKeys(diagnostics.chunkIndexedHeads),
-    chunkHeadGetsCount: countObjectKeys(diagnostics.chunkHeadGets),
-    readyRemoteGetHeadsCount: diagnostics.readyRemoteGetHeads?.length,
-    readyRemoteGetHeads: tail(diagnostics.readyRemoteGetHeads),
-    readyRemoteDecodeFallbacks: tail(diagnostics.readyRemoteDecodeFallbacks),
     chunkFailure: diagnostics.chunkFailure,
     finishedAt: diagnostics.finishedAt,
 });

@@ -10,7 +10,6 @@ import { Program, ProgramHandler } from "@peerbit/program";
 import {
     Documents,
     SearchRequest,
-    SearchRequestIndexed,
     StringMatch,
     StringMatchMethod,
     IsNull,
@@ -695,7 +694,6 @@ export class LargeFile extends AbstractFile {
         let directMisses = 0;
         let retryableFailures = 0;
         let nextNonReplicatingReadAfterFailures = 3;
-        const indexedChunkPending = Symbol("indexed-chunk-pending");
         const materializeLocalChunk = async (
             resolvedBy: string
         ): Promise<TinyFile | undefined> => {
@@ -716,222 +714,6 @@ export class LargeFile extends AbstractFile {
                 return chunk;
             }
         };
-        const rememberChunkEntryHead = (head: string | undefined) => {
-            if (!head) {
-                return;
-            }
-            files.retainChunkEntryHead(head);
-            properties?.debug &&
-                ((properties.debug.chunkIndexedHeads ||= {})[index] = head);
-        };
-        const matchesChunkIndex = (candidate: unknown) =>
-            candidate instanceof IndexableFile &&
-            candidate.id === chunkId &&
-            candidate.parentId === this.id &&
-            candidate.name === `${this.name}/${index}`;
-        const materializeChunkEntryHead = async (
-            head: string | undefined,
-            remoteFrom: string[] | undefined,
-            resolvedBy: string,
-            replicate = files.persistChunkReads
-        ): Promise<TinyFile | undefined> => {
-            if (!head) {
-                return;
-            }
-            rememberChunkEntryHead(head);
-            properties?.debug &&
-                ((properties.debug.chunkHeadGets ||= {})[index] =
-                    ((properties.debug.chunkHeadGets ||= {})[index] ?? 0) + 1);
-            const entry = await files.files.log.log.get(head, {
-                remote: {
-                    timeout: attemptTimeout,
-                    throwOnMissing: false,
-                    retryMissingResponses: true,
-                    replicate,
-                    from: remoteFrom,
-                } as any,
-            });
-            if (!entry) {
-                return;
-            }
-            files.retainChunkEntryHead(head);
-            const operation = await entry.getPayloadValue();
-            if (!isPutOperation(operation)) {
-                return;
-            }
-            const chunk = files.files.index.valueEncoding.decoder(
-                operation.data
-            );
-            if (
-                chunk instanceof TinyFile &&
-                chunk.parentId === this.id &&
-                chunk.index === index
-            ) {
-                knownChunks.set(index, chunk);
-                files.retainChunkRead(chunk.id);
-                if (replicate) {
-                    try {
-                        await files.files.log.join([entry], {
-                            replicate: { assumeSynced: true },
-                        });
-                    } catch (error) {
-                        properties?.debug &&
-                            ((properties.debug.chunkHeadJoinErrors ||= {})[
-                                index
-                            ] = getErrorMessage(error));
-                    }
-                }
-                properties?.debug &&
-                    ((properties.debug.chunkResolved ||= {})[index] =
-                        resolvedBy);
-                return chunk;
-            }
-        };
-        const scanLocalChunkEntryHeads = async () => {
-            properties?.debug &&
-                ((properties.debug.chunkLocalEntryScans ||= {})[index] =
-                    ((properties.debug.chunkLocalEntryScans ||= {})[index] ??
-                        0) + 1);
-            const heads = new Map<string, string>();
-            const candidateHeads: string[] = [];
-            const iterator = files.files.log.log.entryIndex.iterate(
-                [],
-                undefined,
-                false
-            );
-            try {
-                while (!iterator.done()) {
-                    const entries = await iterator.next(128);
-                    for (const entry of entries) {
-                        const metadata = getEntryMetadata(entry);
-                        if (metadata?.id && !heads.has(metadata.id)) {
-                            heads.set(metadata.id, entry.hash);
-                        }
-                        candidateHeads.push(entry.hash);
-                    }
-                }
-            } finally {
-                await iterator.close();
-            }
-
-            if (!heads.has(chunkId)) {
-                for (const head of candidateHeads) {
-                    const entry = await files.files.log.log.get(head);
-                    if (!entry) {
-                        continue;
-                    }
-                    try {
-                        const operation = await entry.getPayloadValue();
-                        if (!isPutOperation(operation)) {
-                            continue;
-                        }
-                        const file = files.files.index.valueEncoding.decoder(
-                            operation.data
-                        );
-                        if (
-                            file instanceof TinyFile &&
-                            file.parentId === this.id &&
-                            !heads.has(file.id)
-                        ) {
-                            heads.set(file.id, head);
-                        }
-                    } catch {
-                        continue;
-                    }
-                }
-            }
-
-            readContext.localChunkEntryHeads = heads;
-            return heads;
-        };
-        const getLocalChunkEntryHeads = async (refresh = false) => {
-            if (readContext.localChunkEntryHeadsScan) {
-                return readContext.localChunkEntryHeadsScan;
-            }
-            if (!refresh && readContext.localChunkEntryHeads) {
-                return readContext.localChunkEntryHeads;
-            }
-            const scan = scanLocalChunkEntryHeads().finally(() => {
-                if (readContext.localChunkEntryHeadsScan === scan) {
-                    readContext.localChunkEntryHeadsScan = undefined;
-                }
-            });
-            readContext.localChunkEntryHeadsScan = scan;
-            return scan;
-        };
-        const resolveChunkByLocalEntryMetadata = async (
-            remoteFrom: string[] | undefined,
-            refresh = false
-        ): Promise<TinyFile | undefined> => {
-            const localHead = (await getLocalChunkEntryHeads(refresh)).get(
-                chunkId
-            );
-            if (!localHead) {
-                return;
-            }
-            properties?.debug &&
-                ((properties.debug.chunkLocalEntryHeads ||= {})[index] =
-                    localHead);
-            return materializeChunkEntryHead(
-                localHead,
-                remoteFrom,
-                "local-entry-head",
-                files.persistChunkReads
-            );
-        };
-        const resolveChunkByManifestEntryHead = async (
-            remoteFrom: string[] | undefined
-        ): Promise<TinyFile | undefined> => {
-            const heads = (this as { chunkEntryHeads?: unknown })
-                .chunkEntryHeads;
-            const head = Array.isArray(heads) ? heads[index] : undefined;
-            if (typeof head !== "string") {
-                return;
-            }
-            properties?.debug &&
-                ((properties.debug.chunkManifestHeads ||= {})[index] = head);
-            return materializeChunkEntryHead(
-                head,
-                remoteFrom,
-                "manifest-head-get",
-                files.persistChunkReads
-            );
-        };
-        const syncChunkByExactIndex = async (
-            remoteFrom: string[] | undefined
-        ): Promise<TinyFile | typeof indexedChunkPending | undefined> => {
-            properties?.debug &&
-                ((properties.debug.chunkIndexedGets ||= {})[index] =
-                    ((properties.debug.chunkIndexedGets ||= {})[index] ?? 0) +
-                    1);
-            const indexed = await files.files.index.get(chunkId, {
-                resolve: false,
-                local: false,
-                remote: {
-                    timeout: attemptTimeout,
-                    strategy: "always" as any,
-                    throwOnMissing: false,
-                    retryMissingResponses: true,
-                    replicate: true,
-                    from: remoteFrom,
-                },
-            });
-            if (matchesChunkIndex(indexed)) {
-                files.retainResolvedChunk(indexed);
-                const indexedHead = getContextHead(indexed);
-                rememberChunkEntryHead(indexedHead);
-                return (
-                    (await materializeLocalChunk("indexed-get")) ??
-                    (await materializeChunkEntryHead(
-                        indexedHead,
-                        remoteFrom,
-                        "indexed-head-get",
-                        true
-                    )) ??
-                    indexedChunkPending
-                );
-            }
-        };
         const resolveChunkByIndexedFields = async (
             remoteFrom: string[] | undefined
         ): Promise<TinyFile | undefined> => {
@@ -939,54 +721,6 @@ export class LargeFile extends AbstractFile {
                 ((properties.debug.chunkIndexedSearches ||= {})[index] =
                     ((properties.debug.chunkIndexedSearches ||= {})[index] ??
                         0) + 1);
-            if (files.persistChunkReads) {
-                const chunks = await files.files.index.search(
-                    new SearchRequestIndexed({
-                        query: [
-                            new StringMatch({
-                                key: "parentId",
-                                value: this.id,
-                                caseInsensitive: false,
-                                method: StringMatchMethod.exact,
-                            }),
-                            new StringMatch({
-                                key: "name",
-                                value: `${this.name}/${index}`,
-                                caseInsensitive: false,
-                                method: StringMatchMethod.exact,
-                            }),
-                        ],
-                        fetch: 1,
-                    }),
-                    {
-                        resolve: false,
-                        local: false,
-                        remote: {
-                            timeout: attemptTimeout,
-                            throwOnMissing: false,
-                            retryMissingResponses: true,
-                            replicate: true,
-                            from: remoteFrom,
-                        },
-                    } as any
-                );
-                const indexed = chunks.find(matchesChunkIndex);
-                if (indexed) {
-                    files.retainResolvedChunk(indexed);
-                    const indexedHead = getContextHead(indexed);
-                    rememberChunkEntryHead(indexedHead);
-                    return (
-                        (await materializeLocalChunk("indexed-search")) ??
-                        (await materializeChunkEntryHead(
-                            indexedHead,
-                            remoteFrom,
-                            "indexed-search-head-get",
-                            true
-                        ))
-                    );
-                }
-                return;
-            }
             const chunks = await files.files.index.search(
                 new SearchRequest({
                     query: [
@@ -1219,57 +953,18 @@ export class LargeFile extends AbstractFile {
             }
 
             try {
-                const chunk = await resolveChunkByManifestEntryHead(remoteFrom);
-                if (chunk) {
-                    return chunk;
-                }
-            } catch (error) {
-                if (!isRetryableChunkLookupError(error)) {
-                    properties?.debug &&
-                        (properties.debug.chunkFailure = {
-                            index,
-                            type: "non-retryable-manifest-head",
-                            message: getErrorMessage(error),
-                        });
-                    throw error;
-                }
-                if (remoteFrom && shouldRetryChunkLookupWithoutHints(error)) {
-                    hintedDeliveryFailures += 1;
-                }
-                retryableFailures += 1;
-                properties?.debug &&
-                    ((properties.debug.chunkRetryableManifestHeadErrors ||= {})[
-                        index
-                    ] = getErrorMessage(error));
-            }
-
-            try {
-                const chunk = files.persistChunkReads
-                    ? await syncChunkByExactIndex(remoteFrom)
-                    : await resolveChunkByDirectGet(remoteFrom, false);
+                const chunk = await resolveChunkByDirectGet(
+                    remoteFrom,
+                    files.persistChunkReads
+                );
                 if (chunk instanceof TinyFile) {
                     return chunk;
                 }
-                if (chunk === indexedChunkPending) {
-                    properties?.debug &&
-                        ((properties.debug.chunkGetMisses ||= {})[index] =
-                            ((properties.debug.chunkGetMisses ||= {})[index] ??
-                                0) + 1);
-                    directMisses += 1;
-                    if (
-                        directMisses + retryableFailures <
-                        nextNonReplicatingReadAfterFailures
-                    ) {
-                        await sleep(250);
-                        continue;
-                    }
-                } else {
-                    properties?.debug &&
-                        ((properties.debug.chunkGetMisses ||= {})[index] =
-                            ((properties.debug.chunkGetMisses ||= {})[index] ??
-                                0) + 1);
-                    directMisses += 1;
-                }
+                properties?.debug &&
+                    ((properties.debug.chunkGetMisses ||= {})[index] =
+                        ((properties.debug.chunkGetMisses ||= {})[index] ??
+                            0) + 1);
+                directMisses += 1;
             } catch (error) {
                 if (!isRetryableChunkLookupError(error)) {
                     properties?.debug &&
@@ -1320,18 +1015,18 @@ export class LargeFile extends AbstractFile {
             ) {
                 // A miss is not evidence that a peer hint is stale. Keep using
                 // the known writer/replicator hint for direct reads unless a
-                // delivery error specifically tells us to fall back without it.
-                const fallbackHints =
+                // delivery error specifically tells us to try without it.
+                const sourceHints =
                     remoteFrom ??
                     readContext.lastReadPeerHints ??
                     (await files.getReadPeerHints());
-                const fallbackSources = fallbackHints
-                    ? [undefined, fallbackHints]
+                const remoteSources = sourceHints
+                    ? [undefined, sourceHints]
                     : [undefined];
-                for (const fallbackFrom of fallbackSources) {
+                for (const sourceFrom of remoteSources) {
                     try {
                         const chunk =
-                            await resolveChunkWithoutPersisting(fallbackFrom);
+                            await resolveChunkWithoutPersisting(sourceFrom);
                         if (chunk) {
                             return chunk;
                         }
@@ -1346,7 +1041,7 @@ export class LargeFile extends AbstractFile {
                             throw error;
                         }
                         if (
-                            fallbackFrom &&
+                            sourceFrom &&
                             shouldRetryChunkLookupWithoutHints(error)
                         ) {
                             hintedDeliveryFailures += 1;
@@ -1357,10 +1052,10 @@ export class LargeFile extends AbstractFile {
                                 {})[index] = getErrorMessage(error));
                     }
                 }
-                for (const fallbackFrom of fallbackSources) {
+                for (const sourceFrom of remoteSources) {
                     try {
                         const chunk =
-                            await resolveChunkByResolvedFields(fallbackFrom);
+                            await resolveChunkByResolvedFields(sourceFrom);
                         if (chunk) {
                             return chunk;
                         }
@@ -1375,7 +1070,7 @@ export class LargeFile extends AbstractFile {
                             throw error;
                         }
                         if (
-                            fallbackFrom &&
+                            sourceFrom &&
                             shouldRetryChunkLookupWithoutHints(error)
                         ) {
                             hintedDeliveryFailures += 1;
@@ -1386,10 +1081,10 @@ export class LargeFile extends AbstractFile {
                                 {})[index] = getErrorMessage(error));
                     }
                 }
-                for (const fallbackFrom of fallbackSources) {
+                for (const sourceFrom of remoteSources) {
                     try {
                         const chunk =
-                            await resolveChunksByParentSearch(fallbackFrom);
+                            await resolveChunksByParentSearch(sourceFrom);
                         if (chunk) {
                             return chunk;
                         }
@@ -1404,7 +1099,7 @@ export class LargeFile extends AbstractFile {
                             throw error;
                         }
                         if (
-                            fallbackFrom &&
+                            sourceFrom &&
                             shouldRetryChunkLookupWithoutHints(error)
                         ) {
                             hintedDeliveryFailures += 1;
@@ -1416,10 +1111,10 @@ export class LargeFile extends AbstractFile {
                     }
                 }
                 if (files.persistChunkReads) {
-                    for (const fallbackFrom of fallbackSources) {
+                    for (const sourceFrom of remoteSources) {
                         try {
                             const chunk = await resolveChunksByParentSearch(
-                                fallbackFrom,
+                                sourceFrom,
                                 {
                                     replicate: false,
                                     resolvedBy: "non-replicating-parent-search",
@@ -1439,7 +1134,7 @@ export class LargeFile extends AbstractFile {
                                 throw error;
                             }
                             if (
-                                fallbackFrom &&
+                                sourceFrom &&
                                 shouldRetryChunkLookupWithoutHints(error)
                             ) {
                                 hintedDeliveryFailures += 1;
@@ -1449,66 +1144,6 @@ export class LargeFile extends AbstractFile {
                                 ((properties.debug.chunkRetryableNonReplicatingParentSearchErrors ||=
                                     {})[index] = getErrorMessage(error));
                         }
-                    }
-                }
-                for (const fallbackFrom of fallbackSources) {
-                    try {
-                        const chunk =
-                            await resolveChunkByManifestEntryHead(fallbackFrom);
-                        if (chunk) {
-                            return chunk;
-                        }
-                    } catch (error) {
-                        if (!isRetryableChunkLookupError(error)) {
-                            properties?.debug &&
-                                (properties.debug.chunkFailure = {
-                                    index,
-                                    type: "non-retryable-manifest-head",
-                                    message: getErrorMessage(error),
-                                });
-                            throw error;
-                        }
-                        if (
-                            fallbackFrom &&
-                            shouldRetryChunkLookupWithoutHints(error)
-                        ) {
-                            hintedDeliveryFailures += 1;
-                        }
-                        retryableFailures += 1;
-                        properties?.debug &&
-                            ((properties.debug.chunkRetryableManifestHeadErrors ||=
-                                {})[index] = getErrorMessage(error));
-                    }
-                }
-                for (const fallbackFrom of fallbackSources) {
-                    try {
-                        const chunk = await resolveChunkByLocalEntryMetadata(
-                            fallbackFrom,
-                            true
-                        );
-                        if (chunk) {
-                            return chunk;
-                        }
-                    } catch (error) {
-                        if (!isRetryableChunkLookupError(error)) {
-                            properties?.debug &&
-                                (properties.debug.chunkFailure = {
-                                    index,
-                                    type: "non-retryable-local-metadata-head",
-                                    message: getErrorMessage(error),
-                                });
-                            throw error;
-                        }
-                        if (
-                            fallbackFrom &&
-                            shouldRetryChunkLookupWithoutHints(error)
-                        ) {
-                            hintedDeliveryFailures += 1;
-                        }
-                        retryableFailures += 1;
-                        properties?.debug &&
-                            ((properties.debug.chunkRetryableLocalMetadataErrors ||=
-                                {})[index] = getErrorMessage(error));
                     }
                 }
                 nextNonReplicatingReadAfterFailures *= 2;
@@ -1598,109 +1233,6 @@ export class LargeFile extends AbstractFile {
                 }
                 return localReady;
             }
-            const materializeReadyManifestHead = async (
-                head: string | undefined
-            ): Promise<LargeFile | undefined> => {
-                if (!head) {
-                    return;
-                }
-                files.retainChunkEntryHead(head);
-                if (debug) {
-                    (debug.readyRemoteGetHeads ||= []).push(head);
-                }
-                const entry = await files.files.log.log.get(head, {
-                    remote: {
-                        timeout: attemptTimeout,
-                        throwOnMissing: false,
-                        retryMissingResponses: true,
-                        replicate: files.persistChunkReads,
-                        from: remoteFrom,
-                    } as any,
-                });
-                if (!entry) {
-                    return;
-                }
-                files.retainChunkEntryHead(head);
-                const operation = await entry.getPayloadValue();
-                if (!isPutOperation(operation)) {
-                    return;
-                }
-                try {
-                    return toReadableLargeFile(
-                        files.files.index.valueEncoding.decoder(operation.data)
-                    );
-                } catch (error) {
-                    if (debug) {
-                        (debug.readyRemoteDecodeFallbacks ||= []).push(
-                            getErrorMessage(error)
-                        );
-                    }
-                    return decodeLargeFileWithChunkHeads(operation.data);
-                }
-            };
-            const searchReadyManifestEntryHeads = async (): Promise<
-                LargeFile[]
-            > => {
-                try {
-                    const indexedMatches = await files.files.index.search(
-                        new SearchRequestIndexed({
-                            query: request.query,
-                            fetch: request.fetch,
-                            sort: request.sort,
-                        }),
-                        {
-                            resolve: false,
-                            local: false,
-                            remote: {
-                                timeout: attemptTimeout,
-                                throwOnMissing: false,
-                                retryMissingResponses: true,
-                                replicate: files.persistChunkReads,
-                                from: remoteFrom,
-                            },
-                        } as any
-                    );
-                    const materializedMatches: LargeFile[] = [];
-                    for (const indexedMatch of indexedMatches) {
-                        try {
-                            const materialized =
-                                await materializeReadyManifestHead(
-                                    getContextHead(indexedMatch)
-                                );
-                            if (materialized) {
-                                materializedMatches.push(materialized);
-                            }
-                        } catch (headError) {
-                            if (debug) {
-                                (debug.readyRemoteIndexedHeadErrors ||=
-                                    []).push(getErrorMessage(headError));
-                            }
-                        }
-                    }
-                    return materializedMatches;
-                } catch (indexedError) {
-                    if (debug) {
-                        (debug.readyRemoteIndexedSearchErrors ||= []).push(
-                            getErrorMessage(indexedError)
-                        );
-                    }
-                    return [];
-                }
-            };
-            const resolveReadyManifestEntryHeads = async (
-                source: string
-            ): Promise<LargeFile | undefined> => {
-                const matches = await searchReadyManifestEntryHeads();
-                const latest = toReadableLargeFile(
-                    pickLatest(matches as AbstractFile[])
-                );
-                if (latest?.ready) {
-                    if (debug) {
-                        debug.waitUntilReadyResolvedBy = source;
-                    }
-                    return latest;
-                }
-            };
             let remoteMatches: AbstractFile[] = [];
             let remoteSearchFailed = false;
             try {
@@ -1721,18 +1253,6 @@ export class LargeFile extends AbstractFile {
                         getErrorMessage(error)
                     );
                 }
-                const indexedMatches = await searchReadyManifestEntryHeads();
-                const indexedReady = toReadableLargeFile(
-                    pickLatest(indexedMatches as AbstractFile[])
-                );
-                if (indexedReady?.ready) {
-                    if (debug) {
-                        debug.waitUntilReadyResolvedBy =
-                            "ready-manifest-head-search";
-                    }
-                    return indexedReady;
-                }
-                remoteMatches = indexedMatches as AbstractFile[];
             }
             const remoteLatest = pickLatest(remoteMatches);
             let remoteReady = toReadableLargeFile(remoteLatest);
@@ -1748,7 +1268,6 @@ export class LargeFile extends AbstractFile {
             }
             try {
                 const directRemote = await files.files.index.get(this.id, {
-                    resolve: false,
                     local: false,
                     remote: {
                         timeout: attemptTimeout,
@@ -1761,12 +1280,6 @@ export class LargeFile extends AbstractFile {
                 });
                 let directReady = toReadableLargeFile(directRemote);
                 let directReadySource = "ready-manifest-get";
-                if (!directReady) {
-                    directReady = await materializeReadyManifestHead(
-                        getContextHead(directRemote)
-                    );
-                    directReadySource = "ready-manifest-head-get";
-                }
                 if (debug?.lastReadyProbe && isLargeFileLike(directRemote)) {
                     debug.lastReadyProbe.ready = directRemote.ready;
                 }
@@ -1792,14 +1305,6 @@ export class LargeFile extends AbstractFile {
                     (debug.readyRemoteGetErrors ||= []).push(
                         getErrorMessage(error)
                     );
-                }
-            }
-            if (!remoteReady?.ready) {
-                const indexedReady = await resolveReadyManifestEntryHeads(
-                    "ready-manifest-head-search"
-                );
-                if (indexedReady) {
-                    return indexedReady;
                 }
             }
             const countCandidate =
@@ -2097,56 +1602,6 @@ const toReadableLargeFile = (value: unknown): LargeFile | undefined => {
         ready: value.ready,
         finalHash: value.finalHash,
     });
-};
-
-const readBorshStringVector = (data: Uint8Array, offset: number) => {
-    const view = new DataView(data.buffer, data.byteOffset, data.byteLength);
-    if (offset + 4 > data.byteLength) {
-        return [];
-    }
-    const decoder = new TextDecoder();
-    const count = view.getUint32(offset, true);
-    offset += 4;
-    const values: string[] = [];
-    for (let i = 0; i < count; i++) {
-        if (offset + 4 > data.byteLength) {
-            throw new Error("Malformed chunk head vector");
-        }
-        const byteLength = view.getUint32(offset, true);
-        offset += 4;
-        if (offset + byteLength > data.byteLength) {
-            throw new Error("Malformed chunk head string");
-        }
-        values.push(decoder.decode(data.subarray(offset, offset + byteLength)));
-        offset += byteLength;
-    }
-    return values;
-};
-
-const decodeLargeFileWithChunkHeads = (data: Uint8Array) => {
-    const base = deserialize(data, LargeFile, { unchecked: true });
-    const baseBytes = serialize(
-        new LargeFile({
-            id: base.id,
-            name: base.name,
-            size: base.size,
-            chunkCount: base.chunkCount,
-            ready: base.ready,
-            finalHash: base.finalHash,
-        })
-    );
-    return new LargeFileWithChunkHeads({
-        id: base.id,
-        name: base.name,
-        size: base.size,
-        chunkCount: base.chunkCount,
-        ready: base.ready,
-        finalHash: base.finalHash,
-        chunkEntryHeads:
-            baseBytes.byteLength < data.byteLength
-                ? readBorshStringVector(data, baseBytes.byteLength)
-                : [],
-    }) as unknown as LargeFile;
 };
 
 const preferListCandidate = (
