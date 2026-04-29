@@ -325,19 +325,27 @@ const tail = (value, count = 5) =>
         ? value.slice(Math.max(0, value.length - count))
         : value;
 
-const compactReadDiagnostics = (diagnostics = {}) => ({
-    waitUntilReadyResolvedBy: diagnostics.waitUntilReadyResolvedBy,
-    waitUntilReadyResolvedReady: diagnostics.waitUntilReadyResolvedReady,
-    waitUntilReadyAttempts: diagnostics.waitUntilReadyAttempts,
-    lastReadyProbe: diagnostics.lastReadyProbe,
-    chunkAttemptTimeoutMs: diagnostics.chunkAttemptTimeoutMs,
-    readAhead: diagnostics.readAhead,
-    prefetchedChunkCount: diagnostics.prefetchedChunkCount,
-    chunkAttemptsCount: countObjectKeys(diagnostics.chunkAttempts),
-    chunkResolvedCount: countObjectKeys(diagnostics.chunkResolved),
-    chunkFailure: diagnostics.chunkFailure,
-    finishedAt: diagnostics.finishedAt,
-});
+const compactReadDiagnostics = (diagnostics) => {
+    if (diagnostics === undefined) {
+        return {};
+    }
+    if (!diagnostics || typeof diagnostics !== "object") {
+        return diagnostics;
+    }
+    return {
+        waitUntilReadyResolvedBy: diagnostics.waitUntilReadyResolvedBy,
+        waitUntilReadyResolvedReady: diagnostics.waitUntilReadyResolvedReady,
+        waitUntilReadyAttempts: diagnostics.waitUntilReadyAttempts,
+        lastReadyProbe: diagnostics.lastReadyProbe,
+        chunkAttemptTimeoutMs: diagnostics.chunkAttemptTimeoutMs,
+        readAhead: diagnostics.readAhead,
+        prefetchedChunkCount: diagnostics.prefetchedChunkCount,
+        chunkAttemptsCount: countObjectKeys(diagnostics.chunkAttempts),
+        chunkResolvedCount: countObjectKeys(diagnostics.chunkResolved),
+        chunkFailure: diagnostics.chunkFailure,
+        finishedAt: diagnostics.finishedAt,
+    };
+};
 
 const compactDiagnostics = (diagnostics) => {
     if (!diagnostics || typeof diagnostics !== "object") {
@@ -378,6 +386,9 @@ const compactCoordinationPayload = (payload) => {
         ...payload,
         writerDiagnostics: compactDiagnostics(payload.writerDiagnostics),
         readerDiagnostics: compactDiagnostics(payload.readerDiagnostics),
+        readerDiagnosticsAfterDownload: compactDiagnostics(
+            payload.readerDiagnosticsAfterDownload
+        ),
         reader: compactCoordinationPayload(payload.reader),
     };
 };
@@ -765,11 +776,60 @@ const runSmoke = async (coordinator) => {
     });
 };
 
-const main = async () => {
-    if (!["writer", "reader", "smoke"].includes(MODE)) {
+const runSelfTest = async () => {
+    const payload = {
+        status: "passed",
+        role: "reader",
+        readerDiagnostics: {
+            lastReadDiagnostics: null,
+            benchmarkStats: {
+                updateListCalls: Array.from({ length: 10 }, (_, index) => ({
+                    index,
+                })),
+            },
+        },
+        readerDiagnosticsAfterDownload: {
+            lastReadDiagnostics: null,
+        },
+        reader: {
+            status: "passed",
+            readerDiagnostics: {
+                lastReadDiagnostics: null,
+            },
+        },
+    };
+    const compacted = compactCoordinationPayload(payload);
+    if (compacted.readerDiagnostics.lastReadDiagnostics !== null) {
+        throw new Error("Expected null reader lastReadDiagnostics to survive");
+    }
+    if (compacted.readerDiagnosticsAfterDownload.lastReadDiagnostics !== null) {
         throw new Error(
-            `Usage: node tests/two-runner.bench.mjs <writer|reader|smoke>`
+            "Expected null post-download lastReadDiagnostics to survive"
         );
+    }
+    if (compacted.reader.readerDiagnostics.lastReadDiagnostics !== null) {
+        throw new Error(
+            "Expected nested null reader lastReadDiagnostics to survive"
+        );
+    }
+    if (compactReadDiagnostics(undefined) === undefined) {
+        throw new Error("Expected undefined diagnostics to compact to object");
+    }
+    await persistResult({
+        status: "passed",
+        role: "self-test",
+    });
+};
+
+const main = async () => {
+    if (!["writer", "reader", "smoke", "self-test"].includes(MODE)) {
+        throw new Error(
+            `Usage: node tests/two-runner.bench.mjs <writer|reader|smoke|self-test>`
+        );
+    }
+    if (MODE === "self-test") {
+        await runSelfTest();
+        return;
     }
     const coordinator = createCoordinator();
     if (MODE === "writer") {
