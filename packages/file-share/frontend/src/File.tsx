@@ -8,6 +8,17 @@ import { DocumentsChange } from "@peerbit/document";
 const formatFileSize = (size: number | bigint) =>
     `${Math.round(Number(size) / 1000)} kb`;
 
+export const shouldDisableFileDownload = (properties: {
+    progress: number | null;
+    largeFileReady?: boolean;
+    replicated: boolean;
+    replicatedChunksRatio: number;
+}) =>
+    properties.progress != null ||
+    (properties.largeFileReady === false &&
+        properties.replicated &&
+        properties.replicatedChunksRatio < 100);
+
 export const File = (properties: {
     files: Files;
     isHost: boolean;
@@ -22,7 +33,12 @@ export const File = (properties: {
     const largeFile =
         properties.file instanceof LargeFile ? properties.file : undefined;
     const chunkCount = largeFile?.chunkCount ?? 0;
-    const downloadDisabled = progress != null;
+    const downloadDisabled = shouldDisableFileDownload({
+        progress,
+        largeFileReady: largeFile?.ready,
+        replicated: properties.replicated,
+        replicatedChunksRatio,
+    });
 
     useEffect(() => {
         if (!properties.files) {
