@@ -10,20 +10,12 @@ const formatFileSize = (size: number | bigint) =>
 
 export const shouldDisableFileDownload = (properties: {
     progress: number | null;
-    largeFileReady?: boolean;
-    waitForLocalChunksBeforeDownload: boolean;
-    replicatedChunksRatio: number;
-}) =>
-    properties.progress != null ||
-    (properties.largeFileReady === false &&
-        properties.waitForLocalChunksBeforeDownload &&
-        properties.replicatedChunksRatio < 100);
+}) => properties.progress != null;
 
 export const File = (properties: {
     files: Files;
     isHost: boolean;
     replicated: boolean;
-    waitForLocalChunksBeforeDownload: boolean;
     file: AbstractFile;
     delete: () => void;
     download: (progress: (progress: number | null) => void) => Promise<void>;
@@ -36,10 +28,6 @@ export const File = (properties: {
     const chunkCount = largeFile?.chunkCount ?? 0;
     const downloadDisabled = shouldDisableFileDownload({
         progress,
-        largeFileReady: largeFile?.ready,
-        waitForLocalChunksBeforeDownload:
-            properties.waitForLocalChunksBeforeDownload,
-        replicatedChunksRatio,
     });
 
     useEffect(() => {

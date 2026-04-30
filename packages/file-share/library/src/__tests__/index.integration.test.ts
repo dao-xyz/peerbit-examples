@@ -1262,6 +1262,95 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
+        it("streams pending manifests with partial local chunks while ready search is still pending", async () => {
+            const filestore = await peer.open(new Files());
+            const fileName = "pending manifest with partial local chunks";
+            const fileId = "pending-ready-search-pending";
+            const chunkCount = 100;
+            const expected = new Uint8Array(chunkCount);
+            for (let index = 0; index < chunkCount; index++) {
+                expected[index] = index % 256;
+                await filestore.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: new Uint8Array([expected[index]]),
+                        parentId: fileId,
+                        index,
+                    })
+                );
+            }
+            const pendingFile = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount,
+                ready: false,
+            });
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const originalCountLocalChunks =
+                filestore.countLocalChunks.bind(filestore);
+            const originalGetReadPeerHints =
+                filestore.getReadPeerHints.bind(filestore);
+            let countCalls = 0;
+            let remoteReadySearches = 0;
+
+            (filestore as any).getReadPeerHints = async () => ["writer-peer"];
+            (filestore as any).countLocalChunks = async (parent: LargeFile) => {
+                countCalls++;
+                if (countCalls === 1) {
+                    return Math.ceil(parent.chunkCount / 2);
+                }
+                return originalCountLocalChunks(parent);
+            };
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasRootId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
+                );
+                if (hasRootId) {
+                    if ((options as any)?.remote) {
+                        remoteReadySearches++;
+                    }
+                    return [pendingFile];
+                }
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            try {
+                await pendingFile.writeFile(
+                    filestore,
+                    {
+                        write: async (chunk) => {
+                            streamedChunks.push(chunk);
+                        },
+                    },
+                    { timeout: 20_000 }
+                );
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+                (filestore as any).countLocalChunks = originalCountLocalChunks;
+                (filestore as any).getReadPeerHints = originalGetReadPeerHints;
+            }
+
+            expect(remoteReadySearches).to.be.greaterThan(0);
+            expect(
+                filestore.lastReadDiagnostics?.waitUntilReadyResolvedBy
+            ).to.eq("pending-manifest");
+            expect(equals(concat(streamedChunks), expected)).to.be.true;
+        });
+
         it("uses non-replicating parent search when adaptive exact routes miss", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
