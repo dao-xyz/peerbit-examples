@@ -107,6 +107,14 @@ const enableOpenProfiler = async (page) => {
     });
 };
 
+const waitForShareUrlPeerHints = async (page, timeout = 180_000) => {
+    await page.waitForFunction(
+        () => new URL(window.location.href).searchParams.has("peer"),
+        undefined,
+        { timeout }
+    );
+};
+
 const getDiagnostics = async (page) => {
     return await page.evaluate(async () => {
         const hooks = window.__peerbitFileShareTestHooks;
@@ -564,10 +572,12 @@ const runWriter = async (coordinator) => {
             page,
             `file-share-two-runner-${Date.now()}`
         );
-        const shareUrl = new URL(entryUrl);
+        let shareUrl = new URL(entryUrl);
         shareUrl.hash = `/s/${address}`;
 
         await page.goto(shareUrl.toString(), { waitUntil: "domcontentloaded" });
+        await waitForShareUrlPeerHints(page);
+        shareUrl = new URL(page.url());
         await page.locator("#imgupload").waitFor({
             state: "attached",
             timeout: 60_000,

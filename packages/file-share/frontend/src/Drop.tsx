@@ -23,6 +23,7 @@ import {
     shouldRefreshRootListForFileChange,
     sortRootFilesForDisplay,
 } from "./root-list";
+import { getPeerDialAddresses, withSharePeerHints } from "./share-url";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -82,6 +83,8 @@ type ListingDiagnostics = {
     skippedChildFileChangeEventCount: number;
     activeTransferCount: number;
     skippedActiveTransferRefreshCount: number;
+    sharePeerAddressCount: number;
+    lastShareUrlWithPeerHintsAt: number | null;
 };
 
 type SaveFilePickerWindow = Window & {
@@ -149,6 +152,8 @@ const createListingDiagnostics = (
     skippedChildFileChangeEventCount: 0,
     activeTransferCount: 0,
     skippedActiveTransferRefreshCount: 0,
+    sharePeerAddressCount: 0,
+    lastShareUrlWithPeerHintsAt: null,
 });
 
 export const useDebouncedEffect = (effect, deps, delay) => {
@@ -400,11 +405,7 @@ export const Drop = () => {
                     (connection) =>
                         connection?.remotePeer?.toString?.() ?? "unknown"
                 );
-                const peerAddresses = (
-                    peer?.getMultiaddrs?.() ??
-                    (peer as any)?.libp2p?.getMultiaddrs?.() ??
-                    []
-                ).map((address) => address?.toString?.() ?? String(address));
+                const peerAddresses = getPeerDialAddresses(peer);
                 const listedFiles = await Promise.all(
                     list.map(async (file) => ({
                         id: file.id,
@@ -428,6 +429,7 @@ export const Drop = () => {
                 return {
                     programAddress: files.program?.address ?? null,
                     programClosed: files.program?.closed ?? null,
+                    shareUrl: window.location.href,
                     persistChunkReads: files.program?.persistChunkReads ?? null,
                     runtimeOpenProfileSamples:
                         (
@@ -477,6 +479,50 @@ export const Drop = () => {
         peer?.identity?.publicKey,
         replicationSet.size,
     ]);
+
+    useEffect(() => {
+        if (!isHost || !shareAddress || !peer || left) {
+            return;
+        }
+
+        let stopped = false;
+        let interval: ReturnType<typeof setInterval> | undefined;
+        let stopTimer: ReturnType<typeof setTimeout> | undefined;
+        const syncShareUrlPeerHints = () => {
+            if (stopped) {
+                return;
+            }
+            const peerAddresses = getPeerDialAddresses(peer);
+            diagnosticsRef.current.sharePeerAddressCount = peerAddresses.length;
+            const nextHref = withSharePeerHints(
+                window.location.href,
+                peerAddresses,
+                { skipWhenBootstrapPresent: true }
+            );
+            if (nextHref !== window.location.href) {
+                window.history.replaceState(window.history.state, "", nextHref);
+                diagnosticsRef.current.lastShareUrlWithPeerHintsAt = Date.now();
+            }
+        };
+
+        syncShareUrlPeerHints();
+        interval = setInterval(syncShareUrlPeerHints, 2000);
+        stopTimer = setTimeout(() => {
+            if (interval) {
+                clearInterval(interval);
+            }
+        }, 30_000);
+
+        return () => {
+            stopped = true;
+            if (interval) {
+                clearInterval(interval);
+            }
+            if (stopTimer) {
+                clearTimeout(stopTimer);
+            }
+        };
+    }, [isHost, left, peer, shareAddress]);
 
     useDebouncedEffect(
         () => {
