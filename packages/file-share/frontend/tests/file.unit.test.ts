@@ -6,7 +6,7 @@ describe("file download controls", () => {
         expect(
             shouldDisableFileDownload({
                 progress: 0,
-                replicated: false,
+                waitForLocalChunksBeforeDownload: false,
                 replicatedChunksRatio: 0,
                 largeFileReady: true,
             })
@@ -17,7 +17,7 @@ describe("file download controls", () => {
         expect(
             shouldDisableFileDownload({
                 progress: null,
-                replicated: true,
+                waitForLocalChunksBeforeDownload: true,
                 replicatedChunksRatio: 99,
                 largeFileReady: false,
             })
@@ -26,18 +26,18 @@ describe("file download controls", () => {
         expect(
             shouldDisableFileDownload({
                 progress: null,
-                replicated: true,
+                waitForLocalChunksBeforeDownload: true,
                 replicatedChunksRatio: 100,
                 largeFileReady: false,
             })
         ).to.equal(false);
     });
 
-    it("keeps non-replicated pending large files downloadable for remote reads", () => {
+    it("keeps observer pending large files downloadable for remote reads", () => {
         expect(
             shouldDisableFileDownload({
                 progress: null,
-                replicated: false,
+                waitForLocalChunksBeforeDownload: false,
                 replicatedChunksRatio: 0,
                 largeFileReady: false,
             })
@@ -48,7 +48,7 @@ describe("file download controls", () => {
         expect(
             shouldDisableFileDownload({
                 progress: null,
-                replicated: true,
+                waitForLocalChunksBeforeDownload: true,
                 replicatedChunksRatio: 0,
                 largeFileReady: true,
             })

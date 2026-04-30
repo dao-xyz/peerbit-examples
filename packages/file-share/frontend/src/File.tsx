@@ -11,18 +11,19 @@ const formatFileSize = (size: number | bigint) =>
 export const shouldDisableFileDownload = (properties: {
     progress: number | null;
     largeFileReady?: boolean;
-    replicated: boolean;
+    waitForLocalChunksBeforeDownload: boolean;
     replicatedChunksRatio: number;
 }) =>
     properties.progress != null ||
     (properties.largeFileReady === false &&
-        properties.replicated &&
+        properties.waitForLocalChunksBeforeDownload &&
         properties.replicatedChunksRatio < 100);
 
 export const File = (properties: {
     files: Files;
     isHost: boolean;
     replicated: boolean;
+    waitForLocalChunksBeforeDownload: boolean;
     file: AbstractFile;
     delete: () => void;
     download: (progress: (progress: number | null) => void) => Promise<void>;
@@ -36,7 +37,8 @@ export const File = (properties: {
     const downloadDisabled = shouldDisableFileDownload({
         progress,
         largeFileReady: largeFile?.ready,
-        replicated: properties.replicated,
+        waitForLocalChunksBeforeDownload:
+            properties.waitForLocalChunksBeforeDownload,
         replicatedChunksRatio,
     });
 
