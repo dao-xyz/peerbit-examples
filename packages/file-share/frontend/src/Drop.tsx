@@ -16,6 +16,13 @@ import { useNetworkUsage } from "./NetworkUsage";
 import { GraphExplorer } from "./Graphs";
 import * as Progress from "@radix-ui/react-progress";
 import { ReplicationOptions } from "@peerbit/shared-log";
+import {
+    applyRootFileChangeToList,
+    getReadyLargeFileSignature,
+    getRootFileChange,
+    shouldRefreshRootListForFileChange,
+    sortRootFilesForDisplay,
+} from "./root-list";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -70,6 +77,8 @@ type ListingDiagnostics = {
     lastAdaptiveRefreshError: string | null;
     fileChangeEventCount: number;
     rootFileChangeEventCount: number;
+    rootChangeDirectAddCount: number;
+    rootChangeDirectRemoveCount: number;
     skippedChildFileChangeEventCount: number;
     activeTransferCount: number;
     skippedActiveTransferRefreshCount: number;
@@ -97,39 +106,6 @@ const getStreamingDownloadThresholdBytes = () => {
 
 const getFileSizeBigInt = (file: AbstractFile) =>
     typeof file.size === "bigint" ? file.size : BigInt(file.size);
-
-const getReadyLargeFileSignature = (files: AbstractFile[]) => {
-    const readyFiles = files
-        .filter(
-            (file): file is LargeFile =>
-                file instanceof LargeFile && file.ready && !!file.finalHash
-        )
-        .map(
-            (file) =>
-                `${file.id}:${file.size.toString()}:${file.chunkCount}:${file.finalHash}`
-        )
-        .sort();
-    return readyFiles.length > 0 ? readyFiles.join("|") : null;
-};
-
-type FileChangeDetail = {
-    added?: Array<Pick<AbstractFile, "parentId">>;
-    removed?: Array<Pick<AbstractFile, "parentId">>;
-};
-
-export const shouldRefreshRootListForFileChange = (event: Event) => {
-    const detail = (event as CustomEvent<FileChangeDetail>).detail;
-    if (!detail) {
-        return true;
-    }
-
-    const changed = [...(detail.added ?? []), ...(detail.removed ?? [])];
-    if (changed.length === 0) {
-        return false;
-    }
-
-    return changed.some((file) => file?.parentId == null);
-};
 
 const createListingDiagnostics = (
     shareAddress: string | undefined,
@@ -168,6 +144,8 @@ const createListingDiagnostics = (
     lastAdaptiveRefreshError: null,
     fileChangeEventCount: 0,
     rootFileChangeEventCount: 0,
+    rootChangeDirectAddCount: 0,
+    rootChangeDirectRemoveCount: 0,
     skippedChildFileChangeEventCount: 0,
     activeTransferCount: 0,
     skippedActiveTransferRefreshCount: 0,
@@ -205,7 +183,12 @@ export const Drop = () => {
 
     const [_, forceUpdate] = useReducer((x) => x + 1, 0);
     const params = useParams();
-    const [list, setList] = useState<AbstractFile[]>([]);
+    const [list, setListState] = useState<AbstractFile[]>([]);
+    const listRef = useRef<AbstractFile[]>([]);
+    const setRootList = (rootFiles: AbstractFile[]) => {
+        listRef.current = rootFiles;
+        setListState(rootFiles);
+    };
 
     const [replicationSet, setReplicationSet] = useState<Set<string>>(
         new Set()
@@ -233,6 +216,7 @@ export const Drop = () => {
             shareAddress,
             storedRole
         );
+        setRootList([]);
         adaptiveRefreshRef.current = null;
         adaptiveRefreshSignatureRef.current = null;
         // Reset diagnostics only when we enter a different share. Role changes
@@ -489,7 +473,7 @@ export const Drop = () => {
         files.program?.closed,
         isHost,
         left,
-        list.length,
+        list,
         peer?.identity?.publicKey,
         replicationSet.size,
     ]);
@@ -544,6 +528,27 @@ export const Drop = () => {
             }
 
             diagnosticsRef.current.rootFileChangeEventCount += 1;
+            const rootChange = getRootFileChange(event);
+            if (rootChange.added.length > 0 || rootChange.removed.length > 0) {
+                diagnosticsRef.current.rootChangeDirectAddCount +=
+                    rootChange.added.length;
+                diagnosticsRef.current.rootChangeDirectRemoveCount +=
+                    rootChange.removed.length;
+                const nextList = applyRootFileChangeToList(
+                    listRef.current,
+                    rootChange
+                );
+                setRootList(nextList);
+                const readyLargeFileSignature =
+                    getReadyLargeFileSignature(nextList);
+                if (readyLargeFileSignature) {
+                    scheduleAdaptiveRefresh(
+                        "ready-change:event",
+                        readyLargeFileSignature
+                    );
+                }
+                forceUpdate();
+            }
             updateListDebounced(event);
         };
 
@@ -683,12 +688,17 @@ export const Drop = () => {
                 diagnosticsRef.current.firstListDurationMs =
                     finishedAt - startedAt;
             }
-            const rootFiles = list
-                .filter((x) => !x.parentId)
-                .sort((a, b) => a.name.localeCompare(b.name));
-            setList(rootFiles);
+            const rootFiles = sortRootFilesForDisplay(
+                list.filter((x) => !x.parentId)
+            );
+            const displayRootFiles = applyRootFileChangeToList(
+                listRef.current,
+                { added: rootFiles, removed: [] }
+            );
+            updateListStats.displayListCount = displayRootFiles.length;
+            setRootList(displayRootFiles);
             const readyLargeFileSignature =
-                getReadyLargeFileSignature(rootFiles);
+                getReadyLargeFileSignature(displayRootFiles);
             if (readyLargeFileSignature) {
                 scheduleAdaptiveRefresh(
                     `ready-list:${source}`,
