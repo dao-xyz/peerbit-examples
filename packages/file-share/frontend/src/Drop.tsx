@@ -1278,9 +1278,6 @@ export const Drop = () => {
                                                         role === "replicator" &&
                                                         replicationSet.has(x.id)
                                                     }
-                                                    waitForLocalChunksBeforeDownload={
-                                                        role === "replicator"
-                                                    }
                                                 />
                                             </li>
                                         );

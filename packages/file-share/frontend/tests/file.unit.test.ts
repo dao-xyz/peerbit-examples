@@ -6,51 +6,14 @@ describe("file download controls", () => {
         expect(
             shouldDisableFileDownload({
                 progress: 0,
-                waitForLocalChunksBeforeDownload: false,
-                replicatedChunksRatio: 0,
-                largeFileReady: true,
             })
         ).to.equal(true);
     });
 
-    it("waits for replicated pending large files to materialize locally", () => {
+    it("does not block pending large files before the read starts", () => {
         expect(
             shouldDisableFileDownload({
                 progress: null,
-                waitForLocalChunksBeforeDownload: true,
-                replicatedChunksRatio: 99,
-                largeFileReady: false,
-            })
-        ).to.equal(true);
-
-        expect(
-            shouldDisableFileDownload({
-                progress: null,
-                waitForLocalChunksBeforeDownload: true,
-                replicatedChunksRatio: 100,
-                largeFileReady: false,
-            })
-        ).to.equal(false);
-    });
-
-    it("keeps observer pending large files downloadable for remote reads", () => {
-        expect(
-            shouldDisableFileDownload({
-                progress: null,
-                waitForLocalChunksBeforeDownload: false,
-                replicatedChunksRatio: 0,
-                largeFileReady: false,
-            })
-        ).to.equal(false);
-    });
-
-    it("enables ready large files even before local chunk badges update", () => {
-        expect(
-            shouldDisableFileDownload({
-                progress: null,
-                waitForLocalChunksBeforeDownload: true,
-                replicatedChunksRatio: 0,
-                largeFileReady: true,
             })
         ).to.equal(false);
     });

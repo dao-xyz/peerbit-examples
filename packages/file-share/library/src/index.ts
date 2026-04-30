@@ -303,7 +303,6 @@ const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = 512 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
-const LARGE_FILE_PENDING_STREAM_MIN_CHUNKS = LARGE_FILE_TARGET_CHUNK_COUNT / 2;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 4;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
@@ -1202,7 +1201,6 @@ export class LargeFile extends AbstractFile {
                 return localReady;
             }
             let remoteMatches: AbstractFile[] = [];
-            let remoteSearchFailed = false;
             try {
                 remoteMatches = await files.files.index.search(request, {
                     local: false,
@@ -1215,7 +1213,6 @@ export class LargeFile extends AbstractFile {
                     },
                 } as any);
             } catch (error) {
-                remoteSearchFailed = true;
                 if (debug) {
                     (debug.readyRemoteSearchErrors ||= []).push(
                         getErrorMessage(error)
@@ -1295,10 +1292,7 @@ export class LargeFile extends AbstractFile {
                 return countCandidate;
             }
             if (
-                remoteSearchFailed &&
                 files.persistChunkReads &&
-                readinessCandidate.chunkCount >=
-                    LARGE_FILE_PENDING_STREAM_MIN_CHUNKS &&
                 localChunkCount >=
                     Math.max(1, Math.ceil(readinessCandidate.chunkCount / 2))
             ) {
