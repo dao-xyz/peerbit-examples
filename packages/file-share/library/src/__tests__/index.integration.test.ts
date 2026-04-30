@@ -174,6 +174,18 @@ describe("index", () => {
             expect(chunkReplicas).to.eq(rootReplicas);
         });
 
+        it("prioritizes newer heads during adaptive sync", async () => {
+            const filestore = await peer.open(new Files());
+            const syncOptions =
+                (filestore.files.log as any).syncronizer?.properties?.sync ??
+                (filestore.files.log as any).syncronizer?.syncOptions;
+
+            expect(syncOptions?.maxSimpleEntries).to.eq(128);
+            expect(syncOptions?.priority?.({ wallTime: 20n })).to.be.greaterThan(
+                syncOptions?.priority?.({ wallTime: 10n })
+            );
+        });
+
         it("keeps ready root manifests during adaptive pruning", async () => {
             const writer = await peer.open(new Files());
             const reader = await peer2.open<Files>(writer.address);

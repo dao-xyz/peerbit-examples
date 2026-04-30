@@ -312,6 +312,12 @@ const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_OVERHEAD_MS = 5_000;
 const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_SCALE_MIN_BYTES = 1 * 1024 * 1024;
 const LARGE_FILE_REMOTE_CHUNK_MIN_BYTES_PER_SECOND = 128 * 1024;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
+const ADAPTIVE_SYNC_SIMPLE_ENTRY_BUDGET = 128;
+
+const getAdaptiveSyncPriority = (entry: { wallTime?: bigint | number }) => {
+    const wallTime = Number(entry.wallTime);
+    return Number.isFinite(wallTime) ? wallTime : 0;
+};
 
 const roundUpTo = (value: number, multiple: number) =>
     Math.ceil(value / multiple) * multiple;
@@ -2439,6 +2445,10 @@ export class Files extends Program<Args> {
             // TODO add ACL
             replicate: args?.replicate,
             replicas: { min: 3 },
+            sync: {
+                priority: getAdaptiveSyncPriority,
+                maxSimpleEntries: ADAPTIVE_SYNC_SIMPLE_ENTRY_BUDGET,
+            },
             keep: (entry) => this.shouldKeepFileEntry(entry),
             canPerform: async (operation) => {
                 if (!this.trustGraph) {
