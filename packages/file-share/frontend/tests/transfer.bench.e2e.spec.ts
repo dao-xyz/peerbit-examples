@@ -19,9 +19,7 @@ const READER_ROLE = process.env.PW_READER_ROLE || "adaptive";
 const ADAPTIVE_REPLICATION_ROLE = { limits: { cpu: { max: 1 } } };
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "1024");
 const RESULT_FILE = process.env.PW_RESULT_FILE;
-const UPLOAD_TIMEOUT_MS = Number(
-    process.env.PW_UPLOAD_TIMEOUT_MS || "1800000"
-);
+const UPLOAD_TIMEOUT_MS = Number(process.env.PW_UPLOAD_TIMEOUT_MS || "1800000");
 const DOWNLOAD_TIMEOUT_MS = Number(
     process.env.PW_DOWNLOAD_TIMEOUT_MS || "1800000"
 );
@@ -77,7 +75,9 @@ const getDiagnostics = async (page: Page) => {
     return await page.evaluate(async () => {
         const hooks = (window as any).__peerbitFileShareTestHooks;
         if (!hooks?.getDiagnostics) {
-            throw new Error("Missing __peerbitFileShareTestHooks.getDiagnostics");
+            throw new Error(
+                "Missing __peerbitFileShareTestHooks.getDiagnostics"
+            );
         }
         return await hooks.getDiagnostics();
     });
@@ -108,6 +108,14 @@ const enableOpenProfiler = async (page: Page) => {
             writable: true,
         });
     });
+};
+
+const waitForShareUrlPeerHints = async (page: Page, timeout = 180_000) => {
+    await page.waitForFunction(
+        () => new URL(window.location.href).searchParams.has("peer"),
+        undefined,
+        { timeout }
+    );
 };
 
 const toMiBPerSecond = (bytes: number, durationMs: number) =>
@@ -175,7 +183,7 @@ test.describe("file-share transfer benchmark", () => {
                 writer,
                 `file-share-transfer-bench-${Date.now()}`
             );
-            const shareUrl = new URL(entryUrl);
+            let shareUrl = new URL(entryUrl);
             shareUrl.hash = `/s/${address}`;
             logStage("seed-reader-role");
             await seedReplicationRole(
@@ -186,9 +194,18 @@ test.describe("file-share transfer benchmark", () => {
 
             logStage("open-reader", { shareUrl: shareUrl.toString() });
             logStage("open-writer-page");
-            await writer.goto(shareUrl.toString(), { waitUntil: "domcontentloaded" });
+            await writer.goto(shareUrl.toString(), {
+                waitUntil: "domcontentloaded",
+            });
             logStage("writer-page-ready");
-            await reader.goto(shareUrl.toString(), { waitUntil: "domcontentloaded" });
+            if (!usesLocalBootstrap) {
+                logStage("wait-for-share-peer-hints");
+                await waitForShareUrlPeerHints(writer);
+            }
+            shareUrl = new URL(writer.url());
+            await reader.goto(shareUrl.toString(), {
+                waitUntil: "domcontentloaded",
+            });
             logStage("reader-page-ready");
 
             logStage("wait-for-input");
@@ -199,7 +216,9 @@ test.describe("file-share transfer benchmark", () => {
 
             logStage("upload");
             const uploadStartedAt = Date.now();
-            await writer.locator("#imgupload").setInputFiles(preparedFile.filePath);
+            await writer
+                .locator("#imgupload")
+                .setInputFiles(preparedFile.filePath);
             logStage("wait-for-writer-listing");
             await waitForFileListed(writer, fileName, UPLOAD_TIMEOUT_MS);
             logStage("wait-for-upload-complete");
@@ -297,13 +316,17 @@ test.describe("file-share transfer benchmark", () => {
                             ? error.message
                             : String(error),
                     stack:
-                        typeof error?.stack === "string" ? error.stack : undefined,
+                        typeof error?.stack === "string"
+                            ? error.stack
+                            : undefined,
                 },
                 writerDiagnostics: failureWriterDiagnostics,
                 readerDiagnostics: failureReaderDiagnostics,
             };
             await persistResult(result);
-            console.error(`FILE_SHARE_TRANSFER_BENCH ${JSON.stringify(result)}`);
+            console.error(
+                `FILE_SHARE_TRANSFER_BENCH ${JSON.stringify(result)}`
+            );
             throw error;
         } finally {
             await writerContext.close().catch(() => {});
