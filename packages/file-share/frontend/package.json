@@ -12,6 +12,7 @@
         "build": "tsc && vite build",
         "preview": "vite preview",
         "deploy": "pnpm run build && NODE_DEBUG=gh-pages gh-pages -d dist",
+        "test:unit": "vitest run -c vitest.config.ts",
         "test:e2e": "playwright test -c playwright.config.ts",
         "test:e2e:headed": "playwright test -c playwright.config.ts --headed"
     },
