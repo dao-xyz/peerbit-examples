@@ -560,7 +560,8 @@ describe("index", () => {
             expect(directChunkGets).to.be.greaterThan(1);
             expect(maxInflightChunkGets).to.be.greaterThan(1);
             const readAhead = filestoreReader.lastReadDiagnostics?.readAhead;
-            expect(readAhead).to.eq(4);
+            expect(readAhead).to.be.greaterThan(4);
+            expect(readAhead).to.be.lessThanOrEqual(file!.chunkCount);
             expect(
                 filestoreReader.lastReadDiagnostics?.chunkAttemptTimeoutMs
             ).to.eq(5_000);

@@ -303,7 +303,7 @@ const LARGE_FILE_TARGET_CHUNK_COUNT = 256;
 const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = 512 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
-const LARGE_FILE_PERSISTED_READ_AHEAD = 4;
+const LARGE_FILE_PERSISTED_READ_AHEAD = 32;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
 const LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS = 5_000;
@@ -1414,9 +1414,10 @@ export class LargeFile extends AbstractFile {
             return pending;
         };
 
-        const readAhead = files.persistChunkReads
+        const configuredReadAhead = files.persistChunkReads
             ? LARGE_FILE_PERSISTED_READ_AHEAD
             : LARGE_FILE_OBSERVER_READ_AHEAD;
+        const readAhead = Math.min(resolvedFile.chunkCount, configuredReadAhead);
         debug.readAhead = readAhead;
 
         for (
