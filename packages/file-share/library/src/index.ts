@@ -19,11 +19,7 @@ import {
 import { concat } from "uint8arrays";
 import { sha256Sync } from "@peerbit/crypto";
 import { TrustedNetwork } from "@peerbit/trusted-network";
-import {
-    ReplicationOptions,
-    SharedLog,
-    type SharedAppendOptions,
-} from "@peerbit/shared-log";
+import { ReplicationOptions, SharedLog } from "@peerbit/shared-log";
 import { SHA256 } from "@stablelib/sha256";
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -317,12 +313,6 @@ const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_OVERHEAD_MS = 5_000;
 const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_SCALE_MIN_BYTES = 1 * 1024 * 1024;
 const LARGE_FILE_REMOTE_CHUNK_MIN_BYTES_PER_SECOND = 128 * 1024;
 const TINY_FILE_SIZE_LIMIT_BIGINT = BigInt(TINY_FILE_SIZE_LIMIT);
-const ROOT_FILE_REPLICAS = 100;
-type FilePutOptions = SharedAppendOptions<Operation> & {
-    unique?: boolean;
-    replicate?: boolean;
-    checkRemote?: boolean;
-};
 
 const roundUpTo = (value: number, multiple: number) =>
     Math.ceil(value / multiple) * multiple;
@@ -466,16 +456,6 @@ const readBlobSequentialChunks = async function* (
         reader.releaseLock();
     }
 };
-const getFilePutOptions = (
-    file: AbstractFile,
-    options?: FilePutOptions
-): FilePutOptions | undefined =>
-    file.parentId == null
-        ? {
-              ...options,
-              replicas: ROOT_FILE_REPLICAS,
-          }
-        : options;
 const ensureSourceSize = (actual: bigint, expected: bigint) => {
     if (actual !== expected) {
         throw new Error(
@@ -1843,7 +1823,7 @@ export class Files extends Program<Args> {
         progress?.(0);
         if (BigInt(file.byteLength) <= TINY_FILE_SIZE_LIMIT_BIGINT) {
             const tinyFile = new TinyFile({ name, file, parentId });
-            await this.files.put(tinyFile, getFilePutOptions(tinyFile));
+            await this.files.put(tinyFile);
             progress?.(1);
             return tinyFile.id;
         }
@@ -1878,7 +1858,7 @@ export class Files extends Program<Args> {
                 file: new Uint8Array(await file.arrayBuffer()),
                 parentId,
             });
-            await this.files.put(tinyFile, getFilePutOptions(tinyFile));
+            await this.files.put(tinyFile);
             progress?.(1);
             return tinyFile.id;
         }
@@ -1915,7 +1895,7 @@ export class Files extends Program<Args> {
                 file: chunks.length === 0 ? new Uint8Array(0) : concat(chunks),
                 parentId,
             });
-            await this.files.put(tinyFile, getFilePutOptions(tinyFile));
+            await this.files.put(tinyFile);
             progress?.(1);
             return tinyFile.id;
         }
@@ -1963,10 +1943,7 @@ export class Files extends Program<Args> {
         });
 
         diagnostics.manifestStartedAt = Date.now();
-        const pendingManifest = await this.files.put(
-            manifest,
-            getFilePutOptions(manifest)
-        );
+        const pendingManifest = await this.files.put(manifest);
         diagnostics.manifestFinishedAt = Date.now();
         const hasher = new SHA256();
         try {
@@ -1984,10 +1961,7 @@ export class Files extends Program<Args> {
                     index: chunkCount,
                 });
                 this.retainAuthoredChunk(chunk);
-                const appended = await this.files.put(
-                    chunk,
-                    getFilePutOptions(chunk)
-                );
+                const appended = await this.files.put(chunk);
                 this.retainAuthoredChunk(chunk, appended.entry.hash);
                 chunkEntryHeads[chunkCount] = appended.entry.hash;
                 const putFinishedAt = Date.now();
@@ -2024,9 +1998,7 @@ export class Files extends Program<Args> {
             });
             await this.files.put(
                 readyManifest,
-                getFilePutOptions(readyManifest, {
-                    meta: { next: [pendingManifest.entry] },
-                })
+                { meta: { next: [pendingManifest.entry] } }
             );
             diagnostics.readyManifestFinishedAt = Date.now();
             diagnostics.chunkCount = chunkCount;
@@ -2107,10 +2079,7 @@ export class Files extends Program<Args> {
         });
 
         diagnostics.manifestStartedAt = Date.now();
-        const pendingManifest = await this.files.put(
-            manifest,
-            getFilePutOptions(manifest)
-        );
+        const pendingManifest = await this.files.put(manifest);
         diagnostics.manifestFinishedAt = Date.now();
         const hasher = new SHA256();
         try {
@@ -2135,10 +2104,7 @@ export class Files extends Program<Args> {
                     index: i,
                 });
                 this.retainAuthoredChunk(chunk);
-                const appended = await this.files.put(
-                    chunk,
-                    getFilePutOptions(chunk)
-                );
+                const appended = await this.files.put(chunk);
                 this.retainAuthoredChunk(chunk, appended.entry.hash);
                 chunkEntryHeads[i] = appended.entry.hash;
                 const putFinishedAt = Date.now();
@@ -2173,9 +2139,7 @@ export class Files extends Program<Args> {
             });
             await this.files.put(
                 readyManifest,
-                getFilePutOptions(readyManifest, {
-                    meta: { next: [pendingManifest.entry] },
-                })
+                { meta: { next: [pendingManifest.entry] } }
             );
             diagnostics.readyManifestFinishedAt = Date.now();
         } catch (error) {

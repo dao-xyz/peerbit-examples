@@ -140,11 +140,11 @@ describe("index", () => {
             }
         });
 
-        it("replicates root manifests more widely than adaptive chunks", async () => {
+        it("uses adaptive replication settings for root manifests and chunks", async () => {
             const writer = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await writer.add(
-                "widely replicated root",
+                "adaptively replicated root",
                 largeFile
             );
             const indexedRoot = await writer.files.index.get(fileId, {
@@ -163,12 +163,15 @@ describe("index", () => {
             const shallowChunk =
                 await writer.files.log.log.getShallow(chunkHead);
 
-            expect(
-                decodeReplicas(shallowRoot!).getValue(writer.files.log)
-            ).to.eq(100);
-            expect(
-                decodeReplicas(shallowChunk!).getValue(writer.files.log)
-            ).to.be.lessThan(100);
+            const rootReplicas = decodeReplicas(shallowRoot!).getValue(
+                writer.files.log
+            );
+            const chunkReplicas = decodeReplicas(shallowChunk!).getValue(
+                writer.files.log
+            );
+
+            expect(rootReplicas).to.eq(3);
+            expect(chunkReplicas).to.eq(rootReplicas);
         });
 
         it("keeps ready root manifests during adaptive pruning", async () => {
