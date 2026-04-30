@@ -41,14 +41,14 @@
         "test-ai-dial": "DIAL_LOCAL=true npm run build && node ./lib/esm/__tests__/ai-node.js"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.26",
+        "@peerbit/test-utils": "^3.0.27",
         "typescript": "^5.6.3"
     },
     "dependencies": {
         "@giga-app/interface": "workspace:*",
-        "@peerbit/document": "13.0.32",
+        "@peerbit/document": "13.0.33",
         "ollama": "^0.5.14",
-        "peerbit": "^5.2.11",
+        "peerbit": "^5.2.12",
         "uuid": "^10.0.0"
     }
 }

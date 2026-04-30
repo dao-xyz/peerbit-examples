@@ -32,13 +32,13 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.26",
+        "@peerbit/test-utils": "^3.0.27",
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "13.0.32",
-        "@peerbit/trusted-network": "6.0.32",
-        "peerbit": "^5.2.11",
+        "@peerbit/document": "13.0.33",
+        "@peerbit/trusted-network": "6.0.33",
+        "peerbit": "^5.2.12",
         "uuid": "^10.0.0"
     }
 }
