@@ -364,6 +364,7 @@ const compactDiagnostics = (diagnostics) => {
         programClosed: diagnostics.programClosed,
         persistChunkReads: diagnostics.persistChunkReads,
         peerHash: diagnostics.peerHash,
+        peerAddresses: tail(diagnostics.peerAddresses),
         peerStatus: diagnostics.peerStatus,
         connectionCount: diagnostics.connectionCount,
         connectionPeers: tail(diagnostics.connectionPeers),
@@ -460,7 +461,7 @@ const createFileCoordinator = (filePath) => ({
     },
 });
 
-const githubRequest = async (url, init = {}) => {
+const githubRequestWithResponse = async (url, init = {}) => {
     if (!GITHUB_TOKEN || !GITHUB_REPOSITORY || !COORDINATION_ISSUE) {
         throw new Error("Missing GitHub coordination environment");
     }
@@ -479,21 +480,48 @@ const githubRequest = async (url, init = {}) => {
         );
     }
     if (response.status === 204) {
-        return null;
+        return { body: null, headers: response.headers };
     }
-    return await response.json();
+    return { body: await response.json(), headers: response.headers };
+};
+
+const githubRequest = async (url, init = {}) => {
+    const { body } = await githubRequestWithResponse(url, init);
+    return body;
+};
+
+const getLinkHeaderUrl = (linkHeader, rel) => {
+    if (!linkHeader) {
+        return undefined;
+    }
+    for (const part of linkHeader.split(",")) {
+        const match = part
+            .trim()
+            .match(/^<([^>]+)>;\s*rel="([^"]+)"$/);
+        if (match?.[2] === rel) {
+            return match[1];
+        }
+    }
+    return undefined;
+};
+
+const listRecentIssueComments = async (commentsUrl) => {
+    const firstPageUrl = `${commentsUrl}?per_page=100`;
+    const firstPage = await githubRequestWithResponse(firstPageUrl);
+    const lastPageUrl = getLinkHeaderUrl(firstPage.headers.get("link"), "last");
+    if (lastPageUrl && lastPageUrl !== firstPageUrl) {
+        return await githubRequest(lastPageUrl);
+    }
+    return firstPage.body ?? [];
 };
 
 const createGithubCoordinator = () => {
-    const issueUrl = `https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${COORDINATION_ISSUE}/comments?per_page=100`;
+    const issueUrl = `https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${COORDINATION_ISSUE}/comments`;
     const makeBody = (kind, payload) =>
         `${marker(kind)}\n\`\`\`json\n${JSON.stringify(payload, null, 2)}\n\`\`\``;
     return {
         async publish(kind, payload) {
-            let body = makeBody(kind, payload);
-            if (body.length > 60_000) {
-                body = makeBody(kind, compactCoordinationPayload(payload));
-            }
+            let body = makeBody(kind, compactCoordinationPayload(payload));
             if (body.length > 60_000) {
                 body = makeBody(kind, minimalCoordinationPayload(payload));
             }
@@ -505,7 +533,7 @@ const createGithubCoordinator = () => {
         async waitForAny(kinds, timeoutMs) {
             const deadline = Date.now() + timeoutMs;
             while (Date.now() < deadline) {
-                const comments = await githubRequest(issueUrl);
+                const comments = await listRecentIssueComments(issueUrl);
                 const parsed = comments
                     .map((comment) => parseEventBody(comment.body))
                     .filter(Boolean)
@@ -787,6 +815,14 @@ const runSmoke = async (coordinator) => {
 };
 
 const runSelfTest = async () => {
+    const linkHeader =
+        '<https://api.github.com/repos/o/r/issues/1/comments?per_page=100&page=2>; rel="next", <https://api.github.com/repos/o/r/issues/1/comments?per_page=100&page=5>; rel="last"';
+    if (
+        getLinkHeaderUrl(linkHeader, "last") !==
+        "https://api.github.com/repos/o/r/issues/1/comments?per_page=100&page=5"
+    ) {
+        throw new Error("Expected GitHub Link header last page to parse");
+    }
     const payload = {
         status: "passed",
         role: "reader",
