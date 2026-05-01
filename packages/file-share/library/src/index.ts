@@ -667,6 +667,7 @@ export class LargeFile extends AbstractFile {
         let directMisses = 0;
         let retryableFailures = 0;
         let nextNonReplicatingReadAfterFailures = 3;
+        let manifestHeadUnavailable = false;
         const materializeLocalChunk = async (
             resolvedBy: string
         ): Promise<TinyFile | undefined> => {
@@ -822,6 +823,61 @@ export class LargeFile extends AbstractFile {
                 return chunk;
             }
         };
+        const resolveChunkByManifestEntryHead = async (
+            remoteFrom: string[] | undefined
+        ): Promise<TinyFile | undefined> => {
+            if (manifestHeadUnavailable) {
+                return;
+            }
+            const heads = (this as { chunkEntryHeads?: unknown })
+                .chunkEntryHeads;
+            const head = Array.isArray(heads) ? heads[index] : undefined;
+            if (typeof head !== "string") {
+                return;
+            }
+            files.retainChunkEntryHead(head);
+            properties?.debug &&
+                ((properties.debug.chunkManifestHeads ||= {})[index] = head);
+
+            const entry = await files.files.log.log.get(head, {
+                remote: {
+                    timeout: attemptTimeout,
+                    throwOnMissing: false,
+                    retryMissingResponses: true,
+                    replicate: files.persistChunkReads,
+                    from: remoteFrom,
+                } as any,
+            });
+            if (!entry) {
+                manifestHeadUnavailable = true;
+                properties?.debug &&
+                    ((properties.debug.chunkManifestHeadMisses ||= {})[index] =
+                        ((properties.debug.chunkManifestHeadMisses ||= {})[
+                            index
+                        ] ?? 0) + 1);
+                return;
+            }
+
+            const operation = await entry.getPayloadValue();
+            if (!isPutOperation(operation)) {
+                return;
+            }
+            const chunk = files.files.index.valueEncoding.decoder(
+                operation.data
+            );
+            if (
+                chunk instanceof TinyFile &&
+                chunk.parentId === this.id &&
+                chunk.index === index
+            ) {
+                knownChunks.set(index, chunk);
+                files.retainResolvedChunk(chunk);
+                properties?.debug &&
+                    ((properties.debug.chunkResolved ||= {})[index] =
+                        "manifest-head-get");
+                return chunk;
+            }
+        };
         const resolveChunkWithoutPersisting = async (
             remoteFrom: string[] | undefined
         ): Promise<TinyFile | undefined> => {
@@ -896,6 +952,7 @@ export class LargeFile extends AbstractFile {
                     return localChunk;
                 }
             } catch (error) {
+                manifestHeadUnavailable = true;
                 if (!isRetryableChunkLookupError(error)) {
                     properties?.debug &&
                         (properties.debug.chunkFailure = {
@@ -923,6 +980,30 @@ export class LargeFile extends AbstractFile {
             if (properties?.debug) {
                 (properties.debug.chunkHints ||= {})[index] =
                     remoteFrom ?? null;
+            }
+
+            try {
+                const chunk = await resolveChunkByManifestEntryHead(remoteFrom);
+                if (chunk) {
+                    return chunk;
+                }
+            } catch (error) {
+                if (!isRetryableChunkLookupError(error)) {
+                    properties?.debug &&
+                        (properties.debug.chunkFailure = {
+                            index,
+                            type: "non-retryable-manifest-head-get",
+                            message: getErrorMessage(error),
+                        });
+                    throw error;
+                }
+                if (remoteFrom && shouldRetryChunkLookupWithoutHints(error)) {
+                    hintedDeliveryFailures += 1;
+                }
+                retryableFailures += 1;
+                properties?.debug &&
+                    ((properties.debug.chunkRetryableManifestHeadGetErrors ||=
+                        {})[index] = getErrorMessage(error));
             }
 
             try {
@@ -1407,7 +1488,10 @@ export class LargeFile extends AbstractFile {
         const configuredReadAhead = files.persistChunkReads
             ? LARGE_FILE_PERSISTED_READ_AHEAD
             : LARGE_FILE_OBSERVER_READ_AHEAD;
-        const readAhead = Math.min(resolvedFile.chunkCount, configuredReadAhead);
+        const readAhead = Math.min(
+            resolvedFile.chunkCount,
+            configuredReadAhead
+        );
         debug.readAhead = readAhead;
 
         for (
@@ -1502,23 +1586,40 @@ export class LargeFileWithChunkHeads extends AbstractFile {
     }
 
     streamFile(files: Files, properties?: FileReadOptions) {
-        return LargeFile.prototype.streamFile.call(
-            this as unknown as LargeFile,
-            files,
-            properties
-        );
+        return toLargeFileDelegate(this).streamFile(files, properties);
     }
 
     delete(files: Files) {
-        return LargeFile.prototype.delete.call(
-            this as unknown as LargeFile,
-            files
-        );
+        return toLargeFileDelegate(this).delete(files);
     }
 }
-Object.setPrototypeOf(LargeFileWithChunkHeads.prototype, LargeFile.prototype);
 
-const isLargeFileLike = (value: unknown): value is LargeFile => {
+const toLargeFileDelegate = (
+    value: LargeFile | LargeFileWithChunkHeads
+): LargeFile => {
+    const file = new LargeFile({
+        id: value.id,
+        name: value.name,
+        size: value.size,
+        chunkCount: value.chunkCount,
+        ready: value.ready,
+        finalHash: value.finalHash,
+    });
+    const chunkEntryHeads = (value as { chunkEntryHeads?: unknown })
+        .chunkEntryHeads;
+    if (Array.isArray(chunkEntryHeads)) {
+        (
+            file as LargeFile & {
+                chunkEntryHeads?: string[];
+            }
+        ).chunkEntryHeads = chunkEntryHeads.filter(
+            (head): head is string => typeof head === "string"
+        );
+    }
+    return file;
+};
+
+export const isLargeFileLike = (value: unknown): value is LargeFile => {
     const file = value as Partial<LargeFile> & {
         parentId?: unknown;
     };
@@ -1543,15 +1644,7 @@ const toReadableLargeFile = (value: unknown): LargeFile | undefined => {
         return value as LargeFile;
     }
     if (Array.isArray((value as any).chunkEntryHeads)) {
-        return new LargeFileWithChunkHeads({
-            id: value.id,
-            name: value.name,
-            size: value.size,
-            chunkCount: value.chunkCount,
-            ready: value.ready,
-            finalHash: value.finalHash,
-            chunkEntryHeads: (value as any).chunkEntryHeads,
-        }) as unknown as LargeFile;
+        return toLargeFileDelegate(value);
     }
     return new LargeFile({
         id: value.id,
@@ -1987,10 +2080,9 @@ export class Files extends Program<Args> {
                 finalHash: toBase64(hasher.digest()),
                 chunkEntryHeads,
             });
-            await this.files.put(
-                readyManifest,
-                { meta: { next: [pendingManifest.entry] } }
-            );
+            await this.files.put(readyManifest, {
+                meta: { next: [pendingManifest.entry] },
+            });
             diagnostics.readyManifestFinishedAt = Date.now();
             diagnostics.chunkCount = chunkCount;
         } catch (error) {
@@ -2128,10 +2220,9 @@ export class Files extends Program<Args> {
                 finalHash: toBase64(hasher.digest()),
                 chunkEntryHeads,
             });
-            await this.files.put(
-                readyManifest,
-                { meta: { next: [pendingManifest.entry] } }
-            );
+            await this.files.put(readyManifest, {
+                meta: { next: [pendingManifest.entry] },
+            });
             diagnostics.readyManifestFinishedAt = Date.now();
         } catch (error) {
             diagnostics.failureAt = Date.now();
