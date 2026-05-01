@@ -5,6 +5,7 @@ import {
     LargeFile,
     LargeFileWithChunkHeads,
     TinyFile,
+    isLargeFileLike,
 } from "../index.js";
 import { concat, equals } from "uint8arrays";
 import crypto from "crypto";
@@ -181,9 +182,9 @@ describe("index", () => {
                 (filestore.files.log as any).syncronizer?.syncOptions;
 
             expect(syncOptions?.maxSimpleEntries).to.eq(128);
-            expect(syncOptions?.priority?.({ wallTime: 20n })).to.be.greaterThan(
-                syncOptions?.priority?.({ wallTime: 10n })
-            );
+            expect(
+                syncOptions?.priority?.({ wallTime: 20n })
+            ).to.be.greaterThan(syncOptions?.priority?.({ wallTime: 10n }));
         });
 
         it("keeps ready root manifests during adaptive pruning", async () => {
@@ -282,7 +283,7 @@ describe("index", () => {
             );
 
             const added = await filestore.files.index.get(addedId);
-            expect(added).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(added)).to.be.true;
             expect((added as LargeFile).finalHash).to.eq(expectedId);
             expect(blob.streamCalls).to.eq(1);
             expect(addProgress.some((x) => x > 0 && x < 1)).to.be.true;
@@ -312,10 +313,10 @@ describe("index", () => {
                     entry as never,
                     options as never
                 );
-                if (entry instanceof LargeFile && entry.ready === false) {
+                if (isLargeFileLike(entry) && entry.ready === false) {
                     pendingHead = result.entry.hash;
                 }
-                if (entry instanceof LargeFile && entry.ready === true) {
+                if (isLargeFileLike(entry) && entry.ready === true) {
                     readyNext = result.entry.meta.next;
                 }
                 return result;
@@ -338,7 +339,7 @@ describe("index", () => {
                             : next?.hash === pendingHead
                     )
                 ).to.be.true;
-                expect(listedFile).to.be.instanceOf(LargeFile);
+                expect(isLargeFileLike(listedFile)).to.be.true;
                 expect((listedFile as LargeFile).ready).to.be.true;
                 expect(
                     filestore.lastUploadDiagnostics?.readyManifestFinishedAt
@@ -363,7 +364,7 @@ describe("index", () => {
             const file = await filestoreReader.files.index.get(fileId);
             const streamedChunks: Uint8Array[] = [];
 
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
 
             await file!.writeFile(filestoreReader, {
                 write: async (chunk) => {
@@ -445,7 +446,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -666,7 +667,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -741,7 +742,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -827,7 +828,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const writerHash = peer.identity.publicKey.hashcode();
@@ -1004,6 +1005,127 @@ describe("index", () => {
             ).to.eq("complete-chunks");
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("streams a pending manifest resolved by a ready manifest get", async () => {
+            const filestore = await peer.open(new Files());
+            const fileId = "pending-ready-manifest-get";
+            const fileName = "pending manifest resolved by get";
+            const chunks = [
+                new Uint8Array([1, 2]),
+                new Uint8Array([3]),
+                new Uint8Array([4, 5]),
+            ];
+            const expected = concat(chunks);
+            const chunkEntryHeads: string[] = [];
+
+            for (const [index, file] of chunks.entries()) {
+                const result = await filestore.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = result.entry.hash;
+            }
+
+            const pendingFile = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: false,
+            });
+            const readyManifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: true,
+                finalHash: sha256Base64Sync(expected),
+                chunkEntryHeads,
+            });
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
+            );
+            let readyManifestGets = 0;
+
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasRootId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
+                );
+                if (hasRootId) {
+                    if ((options as any)?.local === true) {
+                        return [pendingFile];
+                    }
+                    return [];
+                }
+                return originalSearch(request as never, options as never);
+            };
+            (filestore.files.index as any).get = async (
+                id: unknown,
+                options: any
+            ) => {
+                if (
+                    id === fileId &&
+                    options?.remote &&
+                    options.remote !== false
+                ) {
+                    readyManifestGets++;
+                    return readyManifest;
+                }
+                if (typeof id === "string" && id.startsWith(`${fileId}:`)) {
+                    if (options?.remote && options.remote !== false) {
+                        throw new Error(
+                            "chunk direct get should not be needed when the ready manifest has entry heads"
+                        );
+                    }
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            try {
+                await pendingFile.writeFile(
+                    filestore,
+                    {
+                        write: async (chunk) => {
+                            streamedChunks.push(chunk);
+                        },
+                    },
+                    { timeout: 20_000 }
+                );
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+                (filestore.files.index as any).get = originalGet;
+            }
+
+            expect(readyManifestGets).to.be.greaterThan(0);
+            expect(
+                filestore.lastReadDiagnostics?.waitUntilReadyResolvedBy
+            ).to.eq("ready-manifest-get");
+            expect(
+                Object.values(
+                    filestore.lastReadDiagnostics?.chunkResolved ?? {}
+                )
+            ).to.deep.eq(chunks.map(() => "manifest-head-get"));
+            expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
         it("keeps pending adaptive manifests blocked without ready or complete local chunks", async () => {
@@ -1457,7 +1579,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const writerHash = peer.identity.publicKey.hashcode();
@@ -1602,7 +1724,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const writerHash = peer.identity.publicKey.hashcode();
@@ -1701,7 +1823,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const writerHash = peer.identity.publicKey.hashcode();
@@ -1853,7 +1975,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -1942,7 +2064,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -2027,7 +2149,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -2105,7 +2227,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -2193,7 +2315,7 @@ describe("index", () => {
             );
 
             const file = await filestoreReader.files.index.get(fileId);
-            expect(file).to.be.instanceOf(LargeFile);
+            expect(isLargeFileLike(file)).to.be.true;
             stripChunkEntryHeads(file);
 
             const originalSearch = filestoreReader.files.index.search.bind(
@@ -2396,7 +2518,7 @@ describe("index", () => {
             let uploadId: string | undefined;
 
             (filestore.files as any).put = async (entry: unknown) => {
-                if (entry instanceof LargeFile && !entry.ready) {
+                if (isLargeFileLike(entry) && !entry.ready) {
                     uploadId = entry.id;
                 }
                 if (entry instanceof TinyFile && entry.parentId != null) {
@@ -2419,7 +2541,7 @@ describe("index", () => {
                         replicate: true,
                         timeout: 1_000,
                     });
-                    expect(match).to.be.instanceOf(LargeFile);
+                    expect(isLargeFileLike(match)).to.be.true;
                     expect((match as LargeFile).ready).to.be.false;
                     discoveredFile = match as LargeFile;
                 },
@@ -2468,7 +2590,7 @@ describe("index", () => {
             try {
                 const listed = await filestore.list();
                 expect(listed).to.have.length(1);
-                expect(listed[0]).to.be.instanceOf(LargeFile);
+                expect(isLargeFileLike(listed[0])).to.be.true;
                 expect((listed[0] as LargeFile).ready).to.be.true;
                 expect((listed[0] as LargeFile).finalHash).to.eq("ready-hash");
                 expect(searchCalls).to.eq(2);

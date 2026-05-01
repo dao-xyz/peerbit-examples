@@ -1,4 +1,4 @@
-import { AbstractFile, LargeFile } from "@peerbit/please-lib";
+import { AbstractFile, LargeFile, isLargeFileLike } from "@peerbit/please-lib";
 
 type FileChangeRoot = Pick<AbstractFile, "id" | "parentId">;
 
@@ -20,10 +20,10 @@ const hasChangedFiles = (detail: FileChangeDetail) =>
     (detail.added?.length ?? 0) > 0 || (detail.removed?.length ?? 0) > 0;
 
 const isReadyLargeFile = (file: AbstractFile): file is LargeFile =>
-    file instanceof LargeFile && file.ready;
+    isLargeFileLike(file) && file.ready;
 
 const hasFinalLargeFileHash = (file: AbstractFile) =>
-    file instanceof LargeFile && !!file.finalHash;
+    isLargeFileLike(file) && !!file.finalHash;
 
 const shouldPreferRootCandidate = (
     candidate: AbstractFile,
@@ -48,7 +48,7 @@ export const getReadyLargeFileSignature = (files: AbstractFile[]) => {
     const readyFiles = files
         .filter(
             (file): file is LargeFile =>
-                file instanceof LargeFile && file.ready && !!file.finalHash
+                isLargeFileLike(file) && file.ready && !!file.finalHash
         )
         .map(
             (file) =>

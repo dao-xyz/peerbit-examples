@@ -1,4 +1,9 @@
-import { IndexableFile, LargeFile, TinyFile } from "@peerbit/please-lib";
+import {
+    IndexableFile,
+    LargeFile,
+    TinyFile,
+    isLargeFileLike,
+} from "@peerbit/please-lib";
 import { Files, AbstractFile } from "@peerbit/please-lib";
 import { useEffect, useReducer, useState } from "react";
 import { FaSeedling } from "react-icons/fa";
@@ -23,8 +28,9 @@ export const File = (properties: {
     const [progress, setProgess] = useState<number | null>(null);
     const [failedDownload, setFailedDownload] = useState<boolean>(false);
     const [replicatedChunksRatio, setReplicatedChunksRatio] = useState(0);
-    const largeFile =
-        properties.file instanceof LargeFile ? properties.file : undefined;
+    const largeFile = isLargeFileLike(properties.file)
+        ? properties.file
+        : undefined;
     const chunkCount = largeFile?.chunkCount ?? 0;
     const downloadDisabled = shouldDisableFileDownload({
         progress,

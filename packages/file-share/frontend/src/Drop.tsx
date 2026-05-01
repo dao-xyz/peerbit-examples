@@ -1,7 +1,7 @@
 import { usePeer, useProgram } from "@peerbit/react";
 import { useNavigate, useParams } from "react-router";
 import { useEffect, useReducer, useRef, useState } from "react";
-import { Files, AbstractFile, LargeFile } from "@peerbit/please-lib";
+import { Files, AbstractFile, isLargeFileLike } from "@peerbit/please-lib";
 import * as Toggle from "@radix-ui/react-toggle";
 import { MdArrowBack, MdUploadFile, MdClose, MdSettings } from "react-icons/md";
 import { FaSeedling } from "react-icons/fa";
@@ -115,7 +115,7 @@ const LARGE_FILE_DOWNLOAD_MIN_TIMEOUT_MS = 5 * 60_000;
 const LARGE_FILE_DOWNLOAD_TIMEOUT_PER_MB_MS = 1_000;
 
 const getDownloadTimeout = (file: AbstractFile) =>
-    file instanceof LargeFile
+    isLargeFileLike(file)
         ? Math.max(
               LARGE_FILE_DOWNLOAD_MIN_TIMEOUT_MS,
               Math.ceil(Number(file.size) / 1e6) *
@@ -423,20 +423,17 @@ export const Drop = () => {
                     list.map(async (file) => ({
                         id: file.id,
                         name: file.name,
-                        type: file instanceof LargeFile ? "large" : "tiny",
+                        type: isLargeFileLike(file) ? "large" : "tiny",
                         size: file.size.toString(),
-                        ready:
-                            file instanceof LargeFile ? file.ready : undefined,
-                        chunkCount:
-                            file instanceof LargeFile
-                                ? file.chunkCount
-                                : undefined,
-                        localChunkCount:
-                            file instanceof LargeFile
-                                ? await files.program
-                                      ?.countLocalChunks(file)
-                                      .catch(() => null)
-                                : undefined,
+                        ready: isLargeFileLike(file) ? file.ready : undefined,
+                        chunkCount: isLargeFileLike(file)
+                            ? file.chunkCount
+                            : undefined,
+                        localChunkCount: isLargeFileLike(file)
+                            ? await files.program
+                                  ?.countLocalChunks(file)
+                                  .catch(() => null)
+                            : undefined,
                     }))
                 );
                 return {
@@ -819,7 +816,7 @@ export const Drop = () => {
         const timeout = getDownloadTimeout(file);
         startActiveTransfer();
         try {
-            if (file instanceof LargeFile) {
+            if (isLargeFileLike(file)) {
                 files.program?.retainFileRead(file);
             }
             scheduleAdaptiveRefresh("download-start");
