@@ -35,17 +35,17 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.27",
+        "@peerbit/test-utils": "^3",
         "typescript": "^5.6.3"
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/document": "13.0.34",
-        "@peerbit/program": "6.0.24",
-        "@peerbit/shared-log": "13.1.8",
-        "@peerbit/trusted-network": "6.0.34",
+        "@peerbit/document": "^13",
+        "@peerbit/program": "^6",
+        "@peerbit/shared-log": "^13",
+        "@peerbit/trusted-network": "^6",
         "@stablelib/sha256": "^2.0.1",
-        "peerbit": "^5.2.13",
+        "peerbit": "^5",
         "uint8arrays": "^5.1.0",
         "uuid": "^10.0.0"
     }

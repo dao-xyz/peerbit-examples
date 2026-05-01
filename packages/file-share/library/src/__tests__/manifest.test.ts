@@ -3,13 +3,6 @@ import path from "path";
 import { describe, expect, it } from "vitest";
 
 const repoRoot = path.resolve(import.meta.dirname, "../../../../..");
-const rootPackageJson = JSON.parse(
-    fs.readFileSync(path.join(repoRoot, "package.json"), "utf8")
-) as {
-    pnpm?: {
-        overrides?: Record<string, string>;
-    };
-};
 const libraryPackageJson = JSON.parse(
     fs.readFileSync(
         path.join(repoRoot, "packages/file-share/library/package.json"),
@@ -24,19 +17,15 @@ const syncedDependencies = [
     "@peerbit/document",
     "@peerbit/program",
     "@peerbit/shared-log",
+    "@peerbit/trusted-network",
 ] as const;
 
-const normalizeVersion = (version?: string) =>
-    version?.trim().replace(/^[~^]/, "");
-
 describe("package manifest", () => {
-    it("keeps published peerbit dependency pins aligned with repo overrides", () => {
+    it("keeps published peerbit dependency ranges major-compatible", () => {
         for (const dependency of syncedDependencies) {
-            expect(
-                normalizeVersion(libraryPackageJson.dependencies?.[dependency])
-            ).toBe(
-                normalizeVersion(rootPackageJson.pnpm?.overrides?.[dependency])
-            );
+            const version = libraryPackageJson.dependencies?.[dependency];
+            expect(version).toBeDefined();
+            expect(version).toMatch(/^\^\d+$/);
         }
     });
 });

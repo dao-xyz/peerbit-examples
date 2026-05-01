@@ -18,11 +18,11 @@
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
-        "@peerbit/document": "13.0.34",
+        "@peerbit/document": "^13",
         "@peerbit/please-lib": "workspace:*",
-        "@peerbit/react": "^1.1.16",
-        "@peerbit/shared-log": "13.1.8",
-        "@peerbit/stream": "^5.0.11",
+        "@peerbit/react": "^1",
+        "@peerbit/shared-log": "^13",
+        "@peerbit/stream": "^5",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",
         "@radix-ui/react-slider": "^1.1.2",
@@ -34,7 +34,7 @@
         "chartjs-chart-graph": "^4.2.7",
         "chartjs-plugin-datalabels": "^2.2.0",
         "fast-diff": "^1.3.0",
-        "peerbit": "^5.2.13",
+        "peerbit": "^5",
         "react": "^19.2.0",
         "react-dom": "^19.1.0",
         "react-icons": "^5.5.0",
@@ -42,7 +42,7 @@
         "react-use": "^17.6.0"
     },
     "devDependencies": {
-        "@peerbit/vite": "^2.0.6",
+        "@peerbit/vite": "^2",
         "@playwright/test": "^1.58.0",
         "@tailwindcss/postcss": "^4.0.14",
         "@types/react": "^19.1.8",

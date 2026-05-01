@@ -57,32 +57,9 @@
         "test:frontend:unit": "vitest run -c packages/social-media-app/frontend/vitest.config.ts",
         "prefetch:update": "pnpm --filter @giga-app/interface-frontend run prefetch:update"
     },
-    "pnpm": {
-        "overrides": {
-            "@peerbit/canonical-client": "1.1.27",
-            "@peerbit/canonical-host": "1.0.33",
-            "@peerbit/crypto": "3.1.1",
-            "@peerbit/document": "13.0.34",
-            "@peerbit/document-proxy": "2.0.34",
-            "@peerbit/document-react": "1.0.34",
-            "@peerbit/program": "6.0.24",
-            "@peerbit/program-react": "0.4.27",
-            "@peerbit/pubsub": "5.2.5",
-            "@peerbit/react": "1.1.16",
-            "@peerbit/rpc": "6.0.28",
-            "@peerbit/shared-log": "13.1.8",
-            "@peerbit/shared-log-proxy": "2.0.33",
-            "@peerbit/string": "5.1.56",
-            "@peerbit/stream-interface": "6.0.8",
-            "@peerbit/trusted-network": "6.0.34",
-            "peerbit": "5.2.13",
-            "libsodium": "0.7.15",
-            "libsodium-wrappers": "0.7.15"
-        }
-    },
     "devDependencies": {
         "@changesets/cli": "^2.29.7",
-        "@peerbit/stream-interface": "6.0.8",
+        "@peerbit/stream-interface": "^6",
         "@testing-library/dom": "10.4.1",
         "@testing-library/react": "16.3.0",
         "@types/chai": "^4.3.18",
