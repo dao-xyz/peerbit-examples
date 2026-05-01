@@ -110,6 +110,19 @@ const getStreamingDownloadThresholdBytes = () => {
 const getFileSizeBigInt = (file: AbstractFile) =>
     typeof file.size === "bigint" ? file.size : BigInt(file.size);
 
+const DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS = 10_000;
+const LARGE_FILE_DOWNLOAD_MIN_TIMEOUT_MS = 5 * 60_000;
+const LARGE_FILE_DOWNLOAD_TIMEOUT_PER_MB_MS = 1_000;
+
+const getDownloadTimeout = (file: AbstractFile) =>
+    file instanceof LargeFile
+        ? Math.max(
+              LARGE_FILE_DOWNLOAD_MIN_TIMEOUT_MS,
+              Math.ceil(Number(file.size) / 1e6) *
+                  LARGE_FILE_DOWNLOAD_TIMEOUT_PER_MB_MS
+          )
+        : DEFAULT_FILE_DOWNLOAD_TIMEOUT_MS;
+
 const createListingDiagnostics = (
     shareAddress: string | undefined,
     storedRole: ReplicationOptions | undefined
@@ -803,10 +816,7 @@ export const Drop = () => {
         file: AbstractFile,
         progress: (progress: number | null) => void
     ) => {
-        const timeout =
-            file instanceof LargeFile
-                ? Math.max(60_000, Math.ceil(Number(file.size) / 1e6) * 1_000)
-                : 10_000;
+        const timeout = getDownloadTimeout(file);
         startActiveTransfer();
         try {
             if (file instanceof LargeFile) {
