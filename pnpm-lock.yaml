@@ -13,7 +13,7 @@ importers:
         version: 2.29.8(@types/node@20.19.30)
       '@peerbit/stream-interface':
         specifier: ^6
-        version: 6.0.8
+        version: 6.0.9
       '@testing-library/dom':
         specifier: 10.4.1
         version: 10.4.1
@@ -122,20 +122,20 @@ importers:
     dependencies:
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/trusted-network':
         specifier: ^6
-        version: 6.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 6.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uuid:
         specifier: ^10.0.0
         version: 10.0.0
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -153,11 +153,11 @@ importers:
         version: 4.22.1
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@types/express':
         specifier: ^4
         version: 4.17.25
@@ -175,10 +175,10 @@ importers:
         version: link:../../social-media-app/app-sdk
       '@peerbit/document-react':
         specifier: ^1
-        version: 1.0.36(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.0.37(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-popover':
         specifier: ^1.0.7
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -205,7 +205,7 @@ importers:
         version: 1.4.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -272,10 +272,10 @@ importers:
         version: 5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@tensorflow/tfjs':
         specifier: ^4.2.0
         version: 4.22.0(seedrandom@3.0.5)
@@ -284,7 +284,7 @@ importers:
         version: 3.3.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -327,14 +327,14 @@ importers:
         version: 5.6.2
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       yargs:
         specifier: ^17.7.2
         version: 17.7.2
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -346,19 +346,19 @@ importers:
         version: 6.0.1
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/please-lib':
         specifier: workspace:*
         version: link:../library
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/shared-log':
         specifier: ^13
-        version: 13.1.10(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.1.11(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/stream':
         specifier: ^5
-        version: 5.0.11
+        version: 5.0.12
       '@radix-ui/react-popover':
         specifier: ^1.0.7
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -394,7 +394,7 @@ importers:
         version: 1.3.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -452,22 +452,22 @@ importers:
         version: 6.0.1
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/program':
         specifier: ^6
-        version: 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/shared-log':
         specifier: ^13
-        version: 13.1.10(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.1.11(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/trusted-network':
         specifier: ^6
-        version: 6.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 6.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@stablelib/sha256':
         specifier: ^2.0.1
         version: 2.0.1
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uint8arrays:
         specifier: ^5.1.0
         version: 5.1.0
@@ -477,7 +477,7 @@ importers:
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -524,7 +524,7 @@ importers:
         version: 5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/example-many-chat-rooms':
         specifier: workspace:*
         version: link:../library
@@ -533,10 +533,10 @@ importers:
         version: link:../../name-service/library
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -573,10 +573,10 @@ importers:
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -588,10 +588,10 @@ importers:
         version: link:../../../social-media-app/app-sdk
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/document-react':
         specifier: ^1
-        version: 1.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../../streaming-utils
@@ -603,7 +603,7 @@ importers:
         version: link:../music-library-utils
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-dialog':
         specifier: ^1.1.2
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -630,7 +630,7 @@ importers:
         version: 8.1.1
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -697,20 +697,20 @@ importers:
     dependencies:
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../../streaming-utils
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uuid:
         specifier: ^10.0.0
         version: 10.0.0
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -719,20 +719,20 @@ importers:
     dependencies:
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../streaming-utils
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uuid:
         specifier: ^10.0.0
         version: 10.0.0
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -741,17 +741,17 @@ importers:
     dependencies:
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uuid:
         specifier: ^10.0.0
         version: 10.0.0
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -785,10 +785,10 @@ importers:
         version: link:../../../social-media-app/app-sdk
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/document-react':
         specifier: ^1
-        version: 1.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/media-streaming':
         specifier: workspace:*
         version: link:../../streaming-utils
@@ -797,7 +797,7 @@ importers:
         version: link:../../playback-utils
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-dialog':
         specifier: ^1.1.2
         version: 1.1.15(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -824,7 +824,7 @@ importers:
         version: 8.1.1
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -888,10 +888,10 @@ importers:
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -912,19 +912,19 @@ importers:
         version: 5.18.0(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@emotion/styled@11.14.1(@emotion/react@11.14.0(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react@19.2.4))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/peer-names':
         specifier: workspace:*
         version: link:../../name-service/library
       '@peerbit/program-react':
         specifier: ^0
-        version: 0.4.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 0.4.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -970,19 +970,19 @@ importers:
         version: 10.1.3
       '@peerbit/canonical-host':
         specifier: ^1
-        version: 1.0.33(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 1.0.34(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/document-proxy':
         specifier: ^2
-        version: 2.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 2.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/document-react':
         specifier: ^1
-        version: 1.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -1041,20 +1041,20 @@ importers:
         version: link:../../library
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       ollama:
         specifier: ^0.5.14
         version: 0.5.18
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uuid:
         specifier: ^10.0.0
         version: 10.0.0
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -1069,7 +1069,7 @@ importers:
         version: 5.5.8
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@types/react':
         specifier: ^19.1.8
         version: 19.2.10
@@ -1078,7 +1078,7 @@ importers:
         version: 19.2.3(@types/react@19.2.10)
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -1096,13 +1096,13 @@ importers:
     dependencies:
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       parse5:
         specifier: ^7.1.2
         version: 7.3.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uuid:
         specifier: ^10.0.0
         version: 10.0.0
@@ -1112,7 +1112,7 @@ importers:
         version: link:../library
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       typescript:
         specifier: ^5.6.3
         version: 5.9.3
@@ -1128,7 +1128,7 @@ importers:
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28
+        version: 3.0.29
       chai:
         specifier: ^6.2.0
         version: 6.2.2
@@ -1152,7 +1152,7 @@ importers:
         version: 2.5.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
     devDependencies:
       typescript:
         specifier: ^5.6.3
@@ -1182,7 +1182,7 @@ importers:
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28
+        version: 3.0.29
       chai:
         specifier: ^6.2.0
         version: 6.2.2
@@ -1206,7 +1206,7 @@ importers:
         version: 2.5.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
     devDependencies:
       typescript:
         specifier: ^5.6.3
@@ -1234,7 +1234,7 @@ importers:
         version: 2.2.9(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
       '@peerbit/document-react':
         specifier: ^1
-        version: 1.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/identity-supabase':
         specifier: workspace:*
         version: link:../../identity/supabase
@@ -1243,10 +1243,10 @@ importers:
         version: link:../../name-service/library
       '@peerbit/program-react':
         specifier: ^0
-        version: 0.4.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 0.4.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@radix-ui/react-radio-group':
         specifier: ^1.3.7
         version: 1.3.8(@types/react-dom@19.2.3(@types/react@19.2.10))(@types/react@19.2.10)(react-dom@19.2.4(react@19.2.4))(react@19.2.4)
@@ -1276,7 +1276,7 @@ importers:
         version: 4.0.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -1361,10 +1361,10 @@ importers:
     dependencies:
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       qrcode:
         specifier: ^1.5.4
         version: 1.5.4
@@ -1374,7 +1374,7 @@ importers:
     devDependencies:
       '@peerbit/test-utils':
         specifier: ^3
-        version: 3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@types/qrcode':
         specifier: ^1.5.5
         version: 1.5.6
@@ -1395,10 +1395,10 @@ importers:
     dependencies:
       '@peerbit/document':
         specifier: ^13
-        version: 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uuid:
         specifier: ^10
         version: 10.0.0
@@ -1432,16 +1432,16 @@ importers:
     dependencies:
       '@peerbit/react':
         specifier: ^1
-        version: 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+        version: 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       '@peerbit/string':
         specifier: ^5
-        version: 5.1.58(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.1.59(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       fast-diff:
         specifier: ^1.3.0
         version: 1.3.0
       peerbit:
         specifier: ^5
-        version: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+        version: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react:
         specifier: ^19.2.0
         version: 19.2.4
@@ -3119,12 +3119,12 @@ packages:
   '@peerbit/any-store@2.2.9':
     resolution: {integrity: sha512-uZR/aMm0CHZ7IQnYQ8cVBkG46nCJDuUwHpmc0mdeZ1wosjiCUvnj5RIFbEgm90kLe/ZzintyBYg13/GvuYJlgQ==}
 
-  '@peerbit/blocks-interface@2.0.10':
-    resolution: {integrity: sha512-KnJTuCpC3tDkmOEMDp8D5nn1FC4EtiY/CoK8velxMf0te5xeTJ0rGa8RbOwT3YgZR7DFtBSo4ea27QBU+4E+Gw==}
+  '@peerbit/blocks-interface@2.0.11':
+    resolution: {integrity: sha512-AFY6Yy49ArLRJpOw/ZbfJodJLK24dE0nFcwMwojywH+odFDzHhBOPwzrob2Ay6BLXeg2t2Tgx29kt5uqmoAXzg==}
     engines: {node: '>=16.15.1'}
 
-  '@peerbit/blocks@4.1.3':
-    resolution: {integrity: sha512-1M1eMPenIf8+NZyK1iKOoREPK5MT9xhzF3ISsnYAjcjhVSnMMczcEuofP85SG7uHtf6RJF30BF8xHc7U+xvrIw==}
+  '@peerbit/blocks@4.1.4':
+    resolution: {integrity: sha512-zQi2D8B9oY1jMlHvoutHTz85kwZ4i883YVqfGlkC7osaMgNSmhq+mIrrzpoUnbTPybk6VQFr0pH5pCFumZo4GQ==}
     engines: {node: '>=16.15.1'}
 
   '@peerbit/build-assets@1.1.0':
@@ -3133,12 +3133,12 @@ packages:
   '@peerbit/cache@3.0.0':
     resolution: {integrity: sha512-7FZHPhPxdeZwSp35ubEDycjFz4oQV6MHAyOn6c0p9K58SQ2lLlPb3IbkcRSoBSIikGSrpCSv8Nw2yMVe97ODjw==}
 
-  '@peerbit/canonical-client@1.1.27':
-    resolution: {integrity: sha512-E6otEbffd+MnxQ9c5w0CWQQsB5IpFZKq9hzSL7Ocj0rEc7vOKaCENxHp61fzUWSiRlRop4EhWvDT3NTj5z8sPw==}
+  '@peerbit/canonical-client@1.1.28':
+    resolution: {integrity: sha512-/wRtvctRr3LYgKPDScRgSQscuVkbtdwyodynGex6LZiUH5WLcvC0fch1zAbCaG8QIiWGNRjw07rQWdssP36QZA==}
     engines: {node: '>=18'}
 
-  '@peerbit/canonical-host@1.0.33':
-    resolution: {integrity: sha512-tBcyOrP0PXynBhA3qV5XuTSWYBXH0VbnWshnRy2Ie4j83I7qH8RaeEghistZvEtlJi/BfA47BjR0a+9tEfhp7g==}
+  '@peerbit/canonical-host@1.0.34':
+    resolution: {integrity: sha512-U2+ECqGhFff2m/39GYdw+nCZN6Uja0TdaoS8a6P6785uiI6r1/od16Max55jQGBh1jkQ04Nr88Lq/w8aZCKtiQ==}
     engines: {node: '>=18'}
 
   '@peerbit/canonical-transport@1.0.0':
@@ -3148,20 +3148,20 @@ packages:
   '@peerbit/crypto@3.1.1':
     resolution: {integrity: sha512-s8+PFvAJp0s7ZpR5qveTydapY9GFTYEQqXXYcEaG+DcIXiHcQpdRCWOmCW9kugfg0nuJxRy24NBVyQPgtWtl9A==}
 
-  '@peerbit/document-interface@3.2.35':
-    resolution: {integrity: sha512-36ifi5wh7twMNzF/xXCmw3ugct95xnYG457yOv23mwzw7fKpohy3eIWcMEDV4JsgQUt+fM1ABQuOfnR9LfcXFQ==}
+  '@peerbit/document-interface@3.2.36':
+    resolution: {integrity: sha512-ZvvyzH2ylAlJsFcwVsUZhbmFtxxviqLu+nsgzdB9Szz+tsNVXKO+4KR1cxmas0NcQ9ctC/cOBfI2d8MbnzSgIQ==}
 
-  '@peerbit/document-proxy@2.0.36':
-    resolution: {integrity: sha512-mY3486VwgFaCbvfStp8irGTaVOrXMWruovwjqAGk+SDKhXuQrWx0u+nNo7IMfXMQS/KktPFbYvLkF79E2DFIrA==}
+  '@peerbit/document-proxy@2.0.37':
+    resolution: {integrity: sha512-V4FKv2u0tDju/jh4o0UxHxoN7nZUvsTdzjyFPfuuhgIkJ/t0gAcNX1s5ln1txdUjtXiHj3QyNK4EYTfGJpFkjw==}
     engines: {node: '>=18'}
 
-  '@peerbit/document-react@1.0.36':
-    resolution: {integrity: sha512-Y8oHn5R+Tpfhreh6iPzwHwaEg/reSjZhxQ4kqKjAxwhm0pIjkCpIWQskoxtKZOq9eCVeZsXg/n+q9TR1JE55QA==}
+  '@peerbit/document-react@1.0.37':
+    resolution: {integrity: sha512-JaM9EM9NoZS7hwGMy5snHqBef68Fukyxqn6ZL9WBjzTwBq42lCWygYWTImMw1JCpXsv2fnmSI5TZKJLSFGzL/Q==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
 
-  '@peerbit/document@13.0.36':
-    resolution: {integrity: sha512-xkQH8HGGJD4edKDu+RJM3wyFPJ+FiayjHT3wqvGSDsBA8BKtONsvkjrtIrQpczG+elyBoYTEeecQlEXgYENbPA==}
+  '@peerbit/document@13.0.37':
+    resolution: {integrity: sha512-ydE41Pwbn2smcrNQ6YxMpGeintRpEhFkevZY20fyfHKli/XE/G+Dc6nLi9bvj+jnairkR9dRfUrmkw5Th/+rjg==}
 
   '@peerbit/indexer-cache@0.2.6':
     resolution: {integrity: sha512-53l26rXoqJPtGu27wUuzeyuYa+dXvLJWbt9qddErwV6E2uHps+j7OZShIhf95hypHJV7NdKtYx0AAoi6Cn6TEw==}
@@ -3182,67 +3182,67 @@ packages:
     resolution: {integrity: sha512-n0f6dyMOy8EjiUlbNFKLfjDie8PRhpN133pUFcbyyChzDlRmMm1j8EePc7v6xJ0upcl5FurE5YTvzbCifc1Jzg==}
     engines: {node: '>=16.15.1'}
 
-  '@peerbit/log@6.0.30':
-    resolution: {integrity: sha512-yPFb36A6+c5K7ysiF7+tHyiCnX9rXHgaSg8D6QTMJ7QEAuvRjxQ3iY2v/3PlcwhF0cKQuoQ7B5xl+HeuU3Jo/A==}
+  '@peerbit/log@6.0.31':
+    resolution: {integrity: sha512-iLVdW8XyPawZxE2Nv2Wwswv+P3YdA48wF/dm2vN2i/GPKK6QkJVk4bP1/PPsdHYSJP3rOSPZ75/lku9R4T8gEg==}
     engines: {node: '>=16.15.1'}
 
   '@peerbit/logger@2.0.1':
     resolution: {integrity: sha512-CRs8SbcdW4XXk/UPFgcx05AtrwxEP5bW5CVxTUlWhRTCQTFx1JWLRNet5rLEA7kawGfJ7bn8+edd9AJTfHGWOg==}
 
-  '@peerbit/program-react@0.4.27':
-    resolution: {integrity: sha512-Ga/VlzjOUICbKxEnFMRhgyfrpO08BTdYaPccKl6EhiKNmUOjVsDI/a15E22KikOx0fePGgJmoGbiSRNgQ9J/7Q==}
+  '@peerbit/program-react@0.4.28':
+    resolution: {integrity: sha512-FTiSq38X6DoNEDYGkJKrT3ZDymGZTO8RdzBuuWV8lZPBhgb2zuLH3Iv2ruWy6+Ap6ZgEULwyIHDYvdvx0Ck0cg==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
 
-  '@peerbit/program@6.0.24':
-    resolution: {integrity: sha512-8+YihoaPJcpUsljyHHNv73P3iMUsPe/P4oMlfirwdAzSl0k74pnspcEbWsTp29NzUkf9ga21nBUCOm+185+Wrg==}
+  '@peerbit/program@6.0.25':
+    resolution: {integrity: sha512-dy2LT2Qj9jUCatXeDp+J3KMca4IHBA2xGF2R3i/Bw4amIU3GlHNOnExfZNSBGkoKkgcmvcRHZN50X0u3z7vXPw==}
 
-  '@peerbit/pubsub-interface@5.1.2':
-    resolution: {integrity: sha512-nCflCzXlbxJe0tptDcNG729mGCqlSBflfssHJ83adj4ICN2BK5Nu1iBnY1XjxpPkWN7N7ZcOzBXaYsq3wS+BUQ==}
+  '@peerbit/pubsub-interface@5.1.3':
+    resolution: {integrity: sha512-kCH51V+SPZV8hc9w3CRh7GoAEDPFbL/Qc8ifQhkNO5qC9OorqKzD+RP0rHtIkvPgSVGELzsvC6PotUTyDKvF4A==}
     engines: {node: '>=16.15.1'}
 
-  '@peerbit/pubsub@5.2.5':
-    resolution: {integrity: sha512-METWVE9i8s5Ly8rYBK+MFr00/9x/DG+7E5kfih6gZKI+pkN2PdEkZnaxowka/c/IWu48w2rsURsFiZjvXWdWHQ==}
+  '@peerbit/pubsub@5.2.6':
+    resolution: {integrity: sha512-o+UvRjvbHC/HjavlDzaMxpbEzkK3HKYiHxm2/EY29XbGHG4nd6/FsKTQ6NDba9qn1Ov8GmLdW8lOf6WAkMhhGQ==}
     engines: {node: '>=16.15.1'}
 
-  '@peerbit/react@1.1.16':
-    resolution: {integrity: sha512-xqbBC6X/zxG2e4yk2+N0j95MWLsoyteQWhlBxx8ZTDpFTRbsegYQZfGDtAMfGPnNKnV0+6nymEJk0FiUGEERpw==}
+  '@peerbit/react@1.1.17':
+    resolution: {integrity: sha512-cqWOZPrrRg9Ri5+lQTQcLHAz2JmlVdMYv2KPp1mhqQFSHTsoYd8gUHWmzPqTIRwpUjufJqhnEIYX4P+/VINkPw==}
     peerDependencies:
       react: ^18.0.0 || ^19.0.0
 
   '@peerbit/riblt@1.2.0':
     resolution: {integrity: sha512-3zhmQ3tcVTs9aj+8UdTwNyySyoKzmZ2UvcG0fZZxkMltDmMLhJH+c16SYyYkSUM9BOCIZoFzw5L/tSCulrOl+g==}
 
-  '@peerbit/rpc@6.0.28':
-    resolution: {integrity: sha512-6pPDaHPhGdx3Zl9nbVGO7ebdcy9qAxvCN3H8CXvIOdsyqSr5B9fDNK7LEpb5igISL858rbVnHQySOMoJSyzH8A==}
+  '@peerbit/rpc@6.0.29':
+    resolution: {integrity: sha512-sQSVMiVQBwmRgHV1Kxdc80Dia9Qbj4J1UoGzYBFxlVaA4yRwUQFMFh2tpO48yTuFllr5vgrMDDP5f1RjzKkHyQ==}
 
-  '@peerbit/shared-log-proxy@2.0.35':
-    resolution: {integrity: sha512-Vj63XaCUwxJDOtkDzBxfwbiJAz0pzU87pybOx7lsdaHYA5j3b3vL1B6xAAwcmOCjmXBS+VjF3urK59t3zMC6/A==}
+  '@peerbit/shared-log-proxy@2.0.36':
+    resolution: {integrity: sha512-PSMaBtb7uMx9ur/WoMAOZWWoPJgjwPhiZqT6nEKUD6OaOiLaFm4t8lC998mxda7zMbdxW3tqYf/LSF+ZS1kotw==}
     engines: {node: '>=18'}
 
-  '@peerbit/shared-log@13.1.10':
-    resolution: {integrity: sha512-yZnsWsJQ4A//+eSaQ2PW0FfIogTZGfenmIov3PlXD5netNMnOnKoHXZoHFIC+xWO7WwSUoyCtiycCflKgdmHHA==}
+  '@peerbit/shared-log@13.1.11':
+    resolution: {integrity: sha512-C3FY9ut/xpATFQlZjNe1WbeV/+eOzjEmPXV3ibO5cYAaVf5Jz5+5BXs67gGR3fLWE0Z4SLTfnX5/zXknwE1eiA==}
 
-  '@peerbit/stream-interface@6.0.8':
-    resolution: {integrity: sha512-KGr30OPXdos8jbCc2+Y4BewV0qep7OQh2DL1uJqPsIOD5OXeB1Wrd/Pz9q3D160x1Gp9G1ymb6v1gKFO9aDJkg==}
+  '@peerbit/stream-interface@6.0.9':
+    resolution: {integrity: sha512-9x5zffxWhB9YVWjgWlHp19LRhDUroWU5ynOHnM5inQLVOOoRztQRZjGG2q/HpS30egWqQZIX6eNc+0zU3EXvaw==}
     engines: {node: '>=16.15.1'}
 
-  '@peerbit/stream@5.0.11':
-    resolution: {integrity: sha512-eRKjEZCSu2P+UbN+nPG2CGSOv2Xw6ia3fZsj+hNcIzko5LWaqDC87hTUeVGPHwoE2fgg1uAlHRRwcNsp+5eIrA==}
+  '@peerbit/stream@5.0.12':
+    resolution: {integrity: sha512-YJN6o5Ybw5QbWBjrbNvEngflaS+D+WLgiy+6QflduF3PTPp4cr9FxXebdQbDFkt5/cs6wO9TLSfpHPRt387Jlg==}
     engines: {node: '>=16.15.1'}
 
-  '@peerbit/string@5.1.58':
-    resolution: {integrity: sha512-Yd9DRBk/ZL/Gf2+uQ7p1qUDFu1hYtpZFdd7YqBfv9h62DizQKla5i9dAr9wVzMXk9u+5ucFOK8hl6LIZuNQBDQ==}
+  '@peerbit/string@5.1.59':
+    resolution: {integrity: sha512-ayciB8Gg1A2a0urM8b9hXe/lhRVtYHQphnjAJMNOUlAXPcV/VEFg6HBCqfEQEBeEatV2cAH5QmFGrM3UD3qyQQ==}
 
-  '@peerbit/test-utils@3.0.28':
-    resolution: {integrity: sha512-3rXdlbM+fMtPjs6fhaYHeMmU15dN5oT6g1mNe5bEtC1u0R7UlAw2AqsVQSgH8R9WZDFYycG6yXAwZOvZgsI8nA==}
+  '@peerbit/test-utils@3.0.29':
+    resolution: {integrity: sha512-6kYp3qdWnH0ztNS09cGfJB4soCpJSJnE9ZWRvYjaCmeSj+e9rEFHhC5DyDf+lc2SHUFqoy9c4/5OJJBci9OH6g==}
     engines: {node: '>=16.15.1'}
 
   '@peerbit/time@3.0.0':
     resolution: {integrity: sha512-UpFwxHkS9qTFFDPqZji5J1yHJdNEzlGObmZFj9yg1kl+4jEuxhjL7sjL+KYx5W9O1E45RMZUTw1mMvUEhCr18Q==}
 
-  '@peerbit/trusted-network@6.0.36':
-    resolution: {integrity: sha512-NiPCaUG1ygFgxKUhPAvKewZ/wf9/a66WyNAsYUEQ0FzLhUXlmLccL+b7FhMlFVac1NJ9HK1gUbq5+GsD/faVGw==}
+  '@peerbit/trusted-network@6.0.37':
+    resolution: {integrity: sha512-NFpaxFJ2uTDz4fbCDqYReO/f1D/gCg+OlWYcOWVgLmZDJ8jeAS6lWYMkJpM9eUBiPb40iniBYspjzPiuMfpZmg==}
 
   '@peerbit/vite@2.0.6':
     resolution: {integrity: sha512-56COnaQ12072fwpYMmeBy6Ryu0/Fus9IxDABlqsisIzDos0VM+0C3f86WsCwTbFCU+o38kstB0D4hIahr54x+w==}
@@ -7731,8 +7731,8 @@ packages:
     resolution: {integrity: sha512-//nshmD55c46FuFw26xV/xFAaB5HF9Xdap7HJBBnrKdAd6/GxDBaNA1870O79+9ueg61cZLSVc+OaFlfmObYVQ==}
     engines: {node: '>= 14.16'}
 
-  peerbit@5.2.13:
-    resolution: {integrity: sha512-+jfZZlm8nihofetWy+TpBi2KqH30V/2XtubmoA8fXQDdcgh3pJvp9HOOwx0psdAvdEuDHvVfcPe0DjIREFN6Tg==}
+  peerbit@5.2.14:
+    resolution: {integrity: sha512-+di0NxLZTrd+mcwLG8Ttx4/R8laBYDWGuguJxF3hQ8esdsV11ooW4gsB1qiasOu/sc7N5gPMkAP/Y3eeCfh98A==}
     engines: {node: '>=18'}
 
   picocolors@1.1.1:
@@ -11944,15 +11944,15 @@ snapshots:
       level: 10.0.0
       uuid: 10.0.0
 
-  '@peerbit/blocks-interface@2.0.10':
+  '@peerbit/blocks-interface@2.0.11':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@ipld/dag-cbor': 9.2.6
       '@peerbit/crypto': 3.1.1
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/stream-interface': 6.0.9
       multiformats: 13.4.2
 
-  '@peerbit/blocks@4.1.3':
+  '@peerbit/blocks@4.1.4':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@ipld/dag-cbor': 9.2.6
@@ -11961,12 +11961,12 @@ snapshots:
       '@libp2p/websockets': 10.1.11
       '@peerbit/any-store': 2.2.9
       '@peerbit/any-store-interface': 1.1.0
-      '@peerbit/blocks-interface': 2.0.10
+      '@peerbit/blocks-interface': 2.0.11
       '@peerbit/cache': 3.0.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/logger': 2.0.1
-      '@peerbit/stream': 5.0.11
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/stream': 5.0.12
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       multiformats: 13.4.2
       p-defer: 4.0.1
@@ -11982,7 +11982,7 @@ snapshots:
     dependencies:
       yallist: 5.0.0
 
-  '@peerbit/canonical-client@1.1.27(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/canonical-client@1.1.28(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
@@ -11990,14 +11990,14 @@ snapshots:
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/canonical-transport': 1.0.0
       '@peerbit/crypto': 3.1.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
     transitivePeerDependencies:
       - bufferutil
       - react-native
       - supports-color
       - utf-8-validate
 
-  '@peerbit/canonical-client@1.1.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/canonical-client@1.1.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
@@ -12005,20 +12005,20 @@ snapshots:
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/canonical-transport': 1.0.0
       '@peerbit/crypto': 3.1.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
     transitivePeerDependencies:
       - bufferutil
       - react-native
       - supports-color
       - utf-8-validate
 
-  '@peerbit/canonical-host@1.0.33(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/canonical-host@1.0.34(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/peer-id': 6.0.8
       '@peerbit/canonical-transport': 1.0.0
       '@peerbit/crypto': 3.1.1
-      peerbit: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      peerbit: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
     transitivePeerDependencies:
       - bufferutil
       - react-native
@@ -12045,40 +12045,40 @@ snapshots:
       js-sha3: 0.9.3
       libsodium-wrappers: 0.7.15
 
-  '@peerbit/document-interface@3.2.35':
+  '@peerbit/document-interface@3.2.36':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
-      '@peerbit/log': 6.0.30
+      '@peerbit/log': 6.0.31
     transitivePeerDependencies:
       - bufferutil
       - utf-8-validate
 
-  '@peerbit/document-proxy@2.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/document-proxy@2.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@dao-xyz/borsh-rpc': 2.0.5
-      '@peerbit/canonical-client': 1.1.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/canonical-host': 1.0.33(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/document': 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/document-interface': 3.2.35
+      '@peerbit/canonical-client': 1.1.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/canonical-host': 1.0.34(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/document': 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/document-interface': 3.2.36
       '@peerbit/indexer-interface': 3.0.3
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/shared-log-proxy': 2.0.35(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/shared-log-proxy': 2.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/stream-interface': 6.0.9
     transitivePeerDependencies:
       - bufferutil
       - react-native
       - supports-color
       - utf-8-validate
 
-  '@peerbit/document-react@1.0.36(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+  '@peerbit/document-react@1.0.37(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
     dependencies:
-      '@peerbit/document': 13.0.36(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/document': 13.0.37(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/logger': 2.0.1
-      '@peerbit/react': 1.1.16(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+      '@peerbit/react': 1.1.17(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       react: 19.2.4
       uuid: 10.0.0
     transitivePeerDependencies:
@@ -12087,12 +12087,12 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/document-react@1.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+  '@peerbit/document-react@1.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
     dependencies:
-      '@peerbit/document': 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/document': 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/logger': 2.0.1
-      '@peerbit/react': 1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+      '@peerbit/react': 1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       react: 19.2.4
       uuid: 10.0.0
     transitivePeerDependencies:
@@ -12101,7 +12101,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/document@13.0.36(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/document@13.0.37(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@chainsafe/libp2p-yamux': 8.0.1
       '@dao-xyz/borsh': 6.0.1
@@ -12110,18 +12110,18 @@ snapshots:
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/cache': 3.0.0
       '@peerbit/crypto': 3.1.1
-      '@peerbit/document-interface': 3.2.35
+      '@peerbit/document-interface': 3.2.36
       '@peerbit/indexer-cache': 0.2.6
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/indexer-simple': 1.2.6
       '@peerbit/indexer-sqlite3': 3.0.6
-      '@peerbit/log': 6.0.30
+      '@peerbit/log': 6.0.31
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/rpc': 6.0.28(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/shared-log': 13.1.10(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/rpc': 6.0.29(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/shared-log': 13.1.11(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/stream-interface': 6.0.9
       p-defer: 4.0.1
       uint8arrays: 5.1.1
     transitivePeerDependencies:
@@ -12130,7 +12130,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/document@13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/document@13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@chainsafe/libp2p-yamux': 8.0.1
       '@dao-xyz/borsh': 6.0.1
@@ -12139,18 +12139,18 @@ snapshots:
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/cache': 3.0.0
       '@peerbit/crypto': 3.1.1
-      '@peerbit/document-interface': 3.2.35
+      '@peerbit/document-interface': 3.2.36
       '@peerbit/indexer-cache': 0.2.6
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/indexer-simple': 1.2.6
       '@peerbit/indexer-sqlite3': 3.0.6
-      '@peerbit/log': 6.0.30
+      '@peerbit/log': 6.0.31
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/rpc': 6.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/shared-log': 13.1.10(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/rpc': 6.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/shared-log': 13.1.11(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/stream-interface': 6.0.9
       p-defer: 4.0.1
       uint8arrays: 5.1.1
     transitivePeerDependencies:
@@ -12264,12 +12264,12 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/log@6.0.30':
+  '@peerbit/log@6.0.31':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@peerbit/any-store': 2.2.9
-      '@peerbit/blocks': 4.1.3
-      '@peerbit/blocks-interface': 2.0.10
+      '@peerbit/blocks': 4.1.4
+      '@peerbit/blocks-interface': 2.0.11
       '@peerbit/cache': 3.0.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
@@ -12277,8 +12277,8 @@ snapshots:
       '@peerbit/indexer-sqlite3': 3.0.6
       '@peerbit/keychain': 1.2.9
       '@peerbit/logger': 2.0.1
-      '@peerbit/pubsub-interface': 5.1.2
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/pubsub-interface': 5.1.3
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       libp2p: 3.2.3
       libsodium-wrappers: 0.7.15
@@ -12296,10 +12296,10 @@ snapshots:
     dependencies:
       '@libp2p/logger': 6.2.6
 
-  '@peerbit/program-react@0.4.27(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+  '@peerbit/program-react@0.4.28(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
     dependencies:
       '@peerbit/crypto': 3.1.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
       react: 19.2.4
     transitivePeerDependencies:
       - bufferutil
@@ -12307,10 +12307,10 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/program-react@0.4.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+  '@peerbit/program-react@0.4.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
     dependencies:
       '@peerbit/crypto': 3.1.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react: 19.2.4
     transitivePeerDependencies:
       - bufferutil
@@ -12318,22 +12318,22 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/program@6.0.24':
+  '@peerbit/program@6.0.25':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store-interface': 1.1.0
-      '@peerbit/blocks': 4.1.3
-      '@peerbit/blocks-interface': 2.0.10
+      '@peerbit/blocks': 4.1.4
+      '@peerbit/blocks-interface': 2.0.11
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/keychain': 1.2.9
       '@peerbit/libp2p-test-utils': 3.0.5
       '@peerbit/logger': 2.0.1
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/pubsub-interface': 5.1.2
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/pubsub-interface': 5.1.3
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       multiformats: 13.4.2
       p-queue: 8.1.1
@@ -12343,22 +12343,22 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/program@6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/program@6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store-interface': 1.1.0
-      '@peerbit/blocks': 4.1.3
-      '@peerbit/blocks-interface': 2.0.10
+      '@peerbit/blocks': 4.1.4
+      '@peerbit/blocks-interface': 2.0.11
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/keychain': 1.2.9
       '@peerbit/libp2p-test-utils': 3.0.5(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/logger': 2.0.1
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/pubsub-interface': 5.1.2
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/pubsub-interface': 5.1.3
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       multiformats: 13.4.2
       p-queue: 8.1.1
@@ -12368,22 +12368,22 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/program@6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/program@6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store-interface': 1.1.0
-      '@peerbit/blocks': 4.1.3
-      '@peerbit/blocks-interface': 2.0.10
+      '@peerbit/blocks': 4.1.4
+      '@peerbit/blocks-interface': 2.0.11
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/keychain': 1.2.9
       '@peerbit/libp2p-test-utils': 3.0.5(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/logger': 2.0.1
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/pubsub-interface': 5.1.2
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/pubsub-interface': 5.1.3
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       multiformats: 13.4.2
       p-queue: 8.1.1
@@ -12393,15 +12393,15 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/pubsub-interface@5.1.2':
+  '@peerbit/pubsub-interface@5.1.3':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
       '@peerbit/crypto': 3.1.1
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/stream-interface': 6.0.9
       uint8arraylist: 2.4.9
 
-  '@peerbit/pubsub@5.2.5':
+  '@peerbit/pubsub@5.2.6':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/circuit-relay-v2': 4.2.3
@@ -12414,9 +12414,9 @@ snapshots:
       '@peerbit/any-store-interface': 1.1.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/logger': 2.0.1
-      '@peerbit/pubsub-interface': 5.1.2
-      '@peerbit/stream': 5.0.11
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/pubsub-interface': 5.1.3
+      '@peerbit/stream': 5.0.12
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       any-signal: 4.2.0
       it-length-prefixed: 10.0.1
@@ -12429,7 +12429,7 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@peerbit/react@1.1.16(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+  '@peerbit/react@1.1.17(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -12440,16 +12440,16 @@ snapshots:
       '@libp2p/webrtc': 6.0.20(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
       '@libp2p/websockets': 10.1.11
       '@multiformats/multiaddr': 13.0.1
-      '@peerbit/canonical-client': 1.1.27(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/canonical-client': 1.1.28(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/program-react': 0.4.27(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program-react': 0.4.28(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       debug: 4.4.3(supports-color@5.5.0)
       detectincognitojs: 1.6.2
       libsodium-wrappers: 0.7.15
-      peerbit: 5.2.13(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      peerbit: 5.2.14(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
       react: 19.2.4
       uuid: 10.0.0
     transitivePeerDependencies:
@@ -12458,7 +12458,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/react@1.1.16(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
+  '@peerbit/react@1.1.17(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)':
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -12469,16 +12469,16 @@ snapshots:
       '@libp2p/webrtc': 6.0.20(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@libp2p/websockets': 10.1.11
       '@multiformats/multiaddr': 13.0.1
-      '@peerbit/canonical-client': 1.1.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/canonical-client': 1.1.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/program-react': 0.4.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program-react': 0.4.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))(react@19.2.4)
       debug: 4.4.3(supports-color@5.5.0)
       detectincognitojs: 1.6.2
       libsodium-wrappers: 0.7.15
-      peerbit: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      peerbit: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       react: 19.2.4
       uuid: 10.0.0
     transitivePeerDependencies:
@@ -12489,15 +12489,15 @@ snapshots:
 
   '@peerbit/riblt@1.2.0': {}
 
-  '@peerbit/rpc@6.0.28(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/rpc@6.0.29(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@peerbit/crypto': 3.1.1
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/pubsub-interface': 5.1.2
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/pubsub-interface': 5.1.3
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       p-defer: 4.0.1
     transitivePeerDependencies:
@@ -12506,15 +12506,15 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/rpc@6.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/rpc@6.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@peerbit/crypto': 3.1.1
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/pubsub-interface': 5.1.2
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/pubsub-interface': 5.1.3
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       p-defer: 4.0.1
     transitivePeerDependencies:
@@ -12523,42 +12523,42 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/shared-log-proxy@2.0.35(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/shared-log-proxy@2.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@dao-xyz/borsh-rpc': 2.0.5
-      '@peerbit/canonical-client': 1.1.27(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/canonical-host': 1.0.33(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/canonical-client': 1.1.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/canonical-host': 1.0.34(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
-      '@peerbit/log': 6.0.30
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/shared-log': 13.1.10(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/log': 6.0.31
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/shared-log': 13.1.11(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
     transitivePeerDependencies:
       - bufferutil
       - react-native
       - supports-color
       - utf-8-validate
 
-  '@peerbit/shared-log@13.1.10(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/shared-log@13.1.11(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/crypto': 5.1.17
       '@peerbit/any-store': 2.2.9
-      '@peerbit/blocks': 4.1.3
-      '@peerbit/blocks-interface': 2.0.10
+      '@peerbit/blocks': 4.1.4
+      '@peerbit/blocks-interface': 2.0.11
       '@peerbit/cache': 3.0.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/indexer-sqlite3': 3.0.6
-      '@peerbit/log': 6.0.30
+      '@peerbit/log': 6.0.31
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/pubsub-interface': 5.1.2
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/pubsub-interface': 5.1.3
       '@peerbit/riblt': 1.2.0
-      '@peerbit/rpc': 6.0.28(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/rpc': 6.0.29(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       json-stringify-deterministic: 1.0.13
       p-defer: 4.0.1
@@ -12573,25 +12573,25 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/shared-log@13.1.10(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/shared-log@13.1.11(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/crypto': 5.1.17
       '@peerbit/any-store': 2.2.9
-      '@peerbit/blocks': 4.1.3
-      '@peerbit/blocks-interface': 2.0.10
+      '@peerbit/blocks': 4.1.4
+      '@peerbit/blocks-interface': 2.0.11
       '@peerbit/cache': 3.0.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/indexer-sqlite3': 3.0.6
-      '@peerbit/log': 6.0.30
+      '@peerbit/log': 6.0.31
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/pubsub-interface': 5.1.2
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/pubsub-interface': 5.1.3
       '@peerbit/riblt': 1.2.0
-      '@peerbit/rpc': 6.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/rpc': 6.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       json-stringify-deterministic: 1.0.13
       p-defer: 4.0.1
@@ -12606,14 +12606,14 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/stream-interface@6.0.8':
+  '@peerbit/stream-interface@6.0.9':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
       '@peerbit/crypto': 3.1.1
       uint8arraylist: 2.4.9
 
-  '@peerbit/stream@5.0.11':
+  '@peerbit/stream@5.0.12':
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -12627,7 +12627,7 @@ snapshots:
       '@peerbit/cache': 3.0.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/logger': 2.0.1
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       abortable-iterator: 5.1.0
       any-signal: 4.2.0
@@ -12646,15 +12646,15 @@ snapshots:
       - bufferutil
       - utf-8-validate
 
-  '@peerbit/string@5.1.58(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/string@5.1.59(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@peerbit/crypto': 3.1.1
-      '@peerbit/log': 6.0.30
+      '@peerbit/log': 6.0.31
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/rpc': 6.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/shared-log': 13.1.10(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/rpc': 6.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/shared-log': 13.1.11(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       '@peerbit/time': 3.0.0
       uint8arrays: 5.1.1
     transitivePeerDependencies:
@@ -12663,24 +12663,24 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/test-utils@3.0.28':
+  '@peerbit/test-utils@3.0.29':
     dependencies:
       '@chainsafe/libp2p-yamux': 8.0.1
       '@libp2p/interface': 3.2.2
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store': 2.2.9
-      '@peerbit/blocks': 4.1.3
+      '@peerbit/blocks': 4.1.4
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/keychain': 1.2.9
       '@peerbit/libp2p-test-utils': 3.0.5
-      '@peerbit/program': 6.0.24
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/stream': 5.0.11
+      '@peerbit/program': 6.0.25
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/stream': 5.0.12
       it-pushable: 3.2.3
       libp2p: 3.2.3
       libsodium-wrappers: 0.7.15
-      peerbit: 5.2.13
+      peerbit: 5.2.14
       tty-table: 4.2.3
     transitivePeerDependencies:
       - bufferutil
@@ -12688,24 +12688,24 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  '@peerbit/test-utils@3.0.28(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/test-utils@3.0.29(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@chainsafe/libp2p-yamux': 8.0.1
       '@libp2p/interface': 3.2.2
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store': 2.2.9
-      '@peerbit/blocks': 4.1.3
+      '@peerbit/blocks': 4.1.4
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
       '@peerbit/keychain': 1.2.9
       '@peerbit/libp2p-test-utils': 3.0.5(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/stream': 5.0.11
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/stream': 5.0.12
       it-pushable: 3.2.3
       libp2p: 3.2.3
       libsodium-wrappers: 0.7.15
-      peerbit: 5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      peerbit: 5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       tty-table: 4.2.3
     transitivePeerDependencies:
       - bufferutil
@@ -12715,15 +12715,15 @@ snapshots:
 
   '@peerbit/time@3.0.0': {}
 
-  '@peerbit/trusted-network@6.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
+  '@peerbit/trusted-network@6.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))':
     dependencies:
       '@dao-xyz/borsh': 6.0.1
       '@libp2p/interface': 3.2.2
       '@peerbit/crypto': 3.1.1
-      '@peerbit/document': 13.0.36(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/log': 6.0.30
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/shared-log': 13.1.10(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/document': 13.0.37(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/log': 6.0.31
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/shared-log': 13.1.11(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
       uint8arrays: 5.1.1
     transitivePeerDependencies:
       - bufferutil
@@ -17985,7 +17985,7 @@ snapshots:
 
   pathval@2.0.1: {}
 
-  peerbit@5.2.13:
+  peerbit@5.2.14:
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -18002,7 +18002,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store': 2.2.9
       '@peerbit/any-store-opfs': 1.1.7
-      '@peerbit/blocks': 4.1.3
+      '@peerbit/blocks': 4.1.4
       '@peerbit/build-assets': 1.1.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
@@ -18010,9 +18010,9 @@ snapshots:
       '@peerbit/indexer-sqlite3': 3.0.6
       '@peerbit/keychain': 1.2.9
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       '@sqlite.org/sqlite-wasm': 3.51.1-build2
       level: 10.0.0
@@ -18028,7 +18028,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  peerbit@5.2.13(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4)):
+  peerbit@5.2.14(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4)):
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -18045,7 +18045,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store': 2.2.9
       '@peerbit/any-store-opfs': 1.1.7
-      '@peerbit/blocks': 4.1.3
+      '@peerbit/blocks': 4.1.4
       '@peerbit/build-assets': 1.1.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
@@ -18053,9 +18053,9 @@ snapshots:
       '@peerbit/indexer-sqlite3': 3.0.6
       '@peerbit/keychain': 1.2.9
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.28.6)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       '@sqlite.org/sqlite-wasm': 3.51.1-build2
       level: 10.0.0
@@ -18071,7 +18071,7 @@ snapshots:
       - supports-color
       - utf-8-validate
 
-  peerbit@5.2.13(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4)):
+  peerbit@5.2.14(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4)):
     dependencies:
       '@chainsafe/libp2p-noise': 17.0.0
       '@chainsafe/libp2p-yamux': 8.0.1
@@ -18088,7 +18088,7 @@ snapshots:
       '@multiformats/multiaddr': 13.0.1
       '@peerbit/any-store': 2.2.9
       '@peerbit/any-store-opfs': 1.1.7
-      '@peerbit/blocks': 4.1.3
+      '@peerbit/blocks': 4.1.4
       '@peerbit/build-assets': 1.1.0
       '@peerbit/crypto': 3.1.1
       '@peerbit/indexer-interface': 3.0.3
@@ -18096,9 +18096,9 @@ snapshots:
       '@peerbit/indexer-sqlite3': 3.0.6
       '@peerbit/keychain': 1.2.9
       '@peerbit/logger': 2.0.1
-      '@peerbit/program': 6.0.24(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
-      '@peerbit/pubsub': 5.2.5
-      '@peerbit/stream-interface': 6.0.8
+      '@peerbit/program': 6.0.25(react-native@0.83.1(@babel/core@7.29.0)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/pubsub': 5.2.6
+      '@peerbit/stream-interface': 6.0.9
       '@peerbit/time': 3.0.0
       '@sqlite.org/sqlite-wasm': 3.51.1-build2
       level: 10.0.0
