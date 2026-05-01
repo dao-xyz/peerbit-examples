@@ -31,6 +31,11 @@ on:
                 required: true
                 type: number
                 default: 0
+            listing_timeout_ms:
+                description: Timeout for upload/listing waits in milliseconds
+                required: true
+                type: number
+                default: 1800000
 
 permissions:
     contents: read
@@ -137,6 +142,7 @@ jobs:
                   COORDINATION_ISSUE: ${{ needs.coordinator.outputs.issue_number }}
                   PW_BASE_URL: ${{ inputs.base_url }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
+                  PW_UPLOAD_TIMEOUT_MS: ${{ inputs.listing_timeout_ms }}
                   PW_RESULT_FILE: ${{ github.workspace }}/bench-results/writer.json
               run: |
                   mkdir -p "$GITHUB_WORKSPACE/bench-results"
@@ -187,6 +193,7 @@ jobs:
                   PW_BASE_URL: ${{ inputs.base_url }}
                   PW_FILE_MB: ${{ inputs.file_mb }}
                   PW_READER_ROLE: ${{ inputs.reader_role }}
+                  PW_UPLOAD_TIMEOUT_MS: ${{ inputs.listing_timeout_ms }}
                   PW_RESULT_FILE: ${{ github.workspace }}/bench-results/reader.json
               run: |
                   mkdir -p "$GITHUB_WORKSPACE/bench-results"

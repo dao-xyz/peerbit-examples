@@ -3,7 +3,7 @@ import { BaseRoutes } from "./routes";
 
 import { HashRouter } from "react-router";
 import { Footer } from "./Footer";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Spinner } from "./Spinner";
 /* import { enable } from "@libp2p/logger";
 enable("libp2p:*"); */
@@ -42,40 +42,139 @@ const getPeerAddresses = (): string[] | undefined => {
 
 document.documentElement.classList.add("dark");
 
+type AppDiagnostics = {
+    mountedAt: number;
+    peersProvided: boolean;
+    peerAddressCount: number;
+    peerAddresses: string[];
+    connectionState: "pending" | "ready" | "failed";
+    peerReadyAt: number | null;
+    dialStartedAt: number | null;
+    dialFinishedAt: number | null;
+    dialError: string | null;
+    dialResults: Array<{
+        address: string;
+        status: "pending" | "fulfilled" | "rejected";
+        startedAt: number;
+        finishedAt: number | null;
+        error?: string;
+    }>;
+};
+
+const createAppDiagnostics = (
+    peers: string[] | undefined,
+    connectionState: AppDiagnostics["connectionState"]
+): AppDiagnostics => ({
+    mountedAt: Date.now(),
+    peersProvided: peers !== undefined,
+    peerAddressCount: peers?.length ?? 0,
+    peerAddresses: peers ?? [],
+    connectionState,
+    peerReadyAt: null,
+    dialStartedAt: null,
+    dialFinishedAt: null,
+    dialError: null,
+    dialResults: [],
+});
+
+const getErrorMessage = (error: unknown) => {
+    if (error instanceof Error) {
+        return error.message;
+    }
+    if (
+        error &&
+        typeof error === "object" &&
+        "type" in error &&
+        typeof error.type === "string"
+    ) {
+        return `Event:${error.type}`;
+    }
+    return String(error);
+};
+
 const PeerOverride = ({
     peers,
     onReady,
     onError,
+    onDiagnostics,
 }: {
     peers?: string[];
     onReady: () => void;
     onError: (error: unknown) => void;
+    onDiagnostics: (diagnostics: Partial<AppDiagnostics>) => void;
 }) => {
     const { peer } = usePeer();
 
     useEffect(() => {
         if (!peer || peers == null || peers.length === 0) {
+            if (peer) {
+                onDiagnostics({ peerReadyAt: Date.now() });
+            }
             onReady();
             return;
         }
 
         let cancelled = false;
-        Promise.all(peers.map((address) => peer.dial(address)))
+        const startedAt = Date.now();
+        const dialResults: AppDiagnostics["dialResults"] = peers.map(
+            (address) => ({
+                address,
+                status: "pending",
+                startedAt,
+                finishedAt: null,
+            })
+        );
+        onDiagnostics({
+            peerReadyAt: startedAt,
+            dialStartedAt: startedAt,
+            dialFinishedAt: null,
+            dialError: null,
+            dialResults,
+        });
+        Promise.all(
+            peers.map((address, index) =>
+                peer
+                    .dial(address)
+                    .then(() => {
+                        dialResults[index] = {
+                            ...dialResults[index],
+                            status: "fulfilled",
+                            finishedAt: Date.now(),
+                        };
+                        onDiagnostics({ dialResults: [...dialResults] });
+                    })
+                    .catch((error) => {
+                        dialResults[index] = {
+                            ...dialResults[index],
+                            status: "rejected",
+                            finishedAt: Date.now(),
+                            error: getErrorMessage(error),
+                        };
+                        onDiagnostics({ dialResults: [...dialResults] });
+                        throw error;
+                    })
+            )
+        )
             .then(() => {
                 if (!cancelled) {
+                    onDiagnostics({ dialFinishedAt: Date.now() });
                     onReady();
                 }
             })
             .catch((error) => {
                 console.error("Failed to connect to peer:", error);
                 if (!cancelled) {
+                    onDiagnostics({
+                        dialFinishedAt: Date.now(),
+                        dialError: getErrorMessage(error),
+                    });
                     onError(error);
                 }
             });
         return () => {
             cancelled = true;
         };
-    }, [peer, peers?.join(","), onError, onReady]);
+    }, [peer, peers?.join(","), onDiagnostics, onError, onReady]);
 
     return null;
 };
@@ -87,6 +186,35 @@ export const App = () => {
     >(
         peers !== undefined && peers.length > 0 ? "pending" : "ready"
     );
+    const diagnosticsRef = useRef(
+        createAppDiagnostics(peers, connectionState)
+    );
+    diagnosticsRef.current.connectionState = connectionState;
+    const updateDiagnostics = useCallback(
+        (diagnostics: Partial<AppDiagnostics>) => {
+            diagnosticsRef.current = {
+                ...diagnosticsRef.current,
+                ...diagnostics,
+            };
+        },
+        []
+    );
+    const handleReady = useCallback(() => setConnectionState("ready"), []);
+    const handleError = useCallback(() => setConnectionState("failed"), []);
+    useEffect(() => {
+        const testWindow = window as Window & {
+            __peerbitFileShareAppDiagnostics?: () => AppDiagnostics;
+        };
+        testWindow.__peerbitFileShareAppDiagnostics = () => ({
+            ...diagnosticsRef.current,
+            dialResults: diagnosticsRef.current.dialResults.map((result) => ({
+                ...result,
+            })),
+        });
+        return () => {
+            delete testWindow.__peerbitFileShareAppDiagnostics;
+        };
+    }, []);
     const network =
         peers !== undefined
             ? { bootstrap: [] }
@@ -109,8 +237,9 @@ export const App = () => {
             <div className="h-screen">
                 <PeerOverride
                     peers={peers}
-                    onReady={() => setConnectionState("ready")}
-                    onError={() => setConnectionState("failed")}
+                    onReady={handleReady}
+                    onError={handleError}
+                    onDiagnostics={updateDiagnostics}
                 />
                 {connectionState === "ready" ? (
                     <HashRouter basename="/">

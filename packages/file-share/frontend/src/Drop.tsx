@@ -395,23 +395,24 @@ export const Drop = () => {
                 updateListCalls?: Array<Record<string, unknown>>;
             };
         };
-        if (!files.program || files.program.closed) {
-            delete testWindow.__peerbitFileShareTestHooks;
-            return;
-        }
+        const program = files.program;
         testWindow.__peerbitFileShareTestHooks = {
             setReplicationRole: async (roleOptions) => {
-                saveRoleLocalStorage(
-                    files.program,
-                    JSON.stringify(roleOptions)
-                );
+                if (!program || program.closed) {
+                    throw new Error("Program is not ready");
+                }
+                saveRoleLocalStorage(program, JSON.stringify(roleOptions));
                 setRole(roleOptions ? "replicator" : "observer");
                 await updateRole(roleOptions);
             },
             getDiagnostics: async () => {
-                const replicators = await files.program.files.log
-                    .getReplicators()
-                    .catch(() => undefined);
+                const activeProgram =
+                    program && !program.closed ? program : undefined;
+                const replicators = activeProgram
+                    ? await activeProgram.files.log
+                          .getReplicators()
+                          .catch(() => undefined)
+                    : undefined;
                 const connections = (
                     (peer as any)?.libp2p?.getConnections?.() ?? []
                 ).map(
@@ -429,18 +430,19 @@ export const Drop = () => {
                         chunkCount: isLargeFileLike(file)
                             ? file.chunkCount
                             : undefined,
-                        localChunkCount: isLargeFileLike(file)
-                            ? await files.program
-                                  ?.countLocalChunks(file)
-                                  .catch(() => null)
-                            : undefined,
+                        localChunkCount:
+                            activeProgram && isLargeFileLike(file)
+                                ? await activeProgram
+                                      .countLocalChunks(file)
+                                      .catch(() => null)
+                                : undefined,
                     }))
                 );
                 return {
-                    programAddress: files.program?.address ?? null,
-                    programClosed: files.program?.closed ?? null,
+                    programAddress: program?.address ?? null,
+                    programClosed: program?.closed ?? null,
                     shareUrl: window.location.href,
-                    persistChunkReads: files.program?.persistChunkReads ?? null,
+                    persistChunkReads: program?.persistChunkReads ?? null,
                     runtimeOpenProfileSamples:
                         (
                             window as Window & {
@@ -457,11 +459,11 @@ export const Drop = () => {
                     connectionCount: connections.length,
                     connectionPeers: connections,
                     programOpenDiagnostics:
-                        files.program?.openDiagnostics ?? null,
+                        program?.openDiagnostics ?? null,
                     lastUploadDiagnostics:
-                        files.program?.lastUploadDiagnostics ?? null,
+                        program?.lastUploadDiagnostics ?? null,
                     lastReadDiagnostics:
-                        files.program?.lastReadDiagnostics ?? null,
+                        program?.lastReadDiagnostics ?? null,
                     replicatorCount:
                         replicators && typeof replicators.size === "number"
                             ? replicators.size
@@ -481,12 +483,18 @@ export const Drop = () => {
             delete testWindow.__peerbitFileShareTestHooks;
         };
     }, [
+        files.program,
         files.program?.address,
         files.program?.closed,
+        files.loading,
+        files.status,
         isHost,
         left,
         list,
+        peer,
         peer?.identity?.publicKey,
+        peerLoading,
+        peerStatus,
         replicationSet.size,
     ]);
 

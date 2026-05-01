@@ -26,6 +26,11 @@ const COORDINATION_FILE = process.env.COORDINATION_FILE;
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_REPOSITORY = process.env.GITHUB_REPOSITORY;
 const COORDINATION_ISSUE = process.env.COORDINATION_ISSUE;
+const TEST_HOOK_TIMEOUT_MS = Number(
+    process.env.PW_TEST_HOOK_TIMEOUT_MS || "60000"
+);
+const MAX_RECORDED_PAGE_EVENTS = 50;
+const MAX_RECORDED_TEXT_LENGTH = 2_000;
 
 const rootUrl = (baseURL) => `${baseURL.replace(/\/$/, "")}/#/`;
 
@@ -125,6 +130,89 @@ const getDiagnostics = async (page) => {
         }
         return await hooks.getDiagnostics();
     });
+};
+
+const waitForTestHooks = async (page, timeout = TEST_HOOK_TIMEOUT_MS) => {
+    await page.waitForFunction(
+        () =>
+            Boolean(
+                window.__peerbitFileShareTestHooks &&
+                    window.__peerbitFileShareTestHooks.getDiagnostics
+            ),
+        undefined,
+        { timeout }
+    );
+};
+
+const getPageState = async (page) => {
+    return await page.evaluate((maxTextLength) => {
+        const hooks = window.__peerbitFileShareTestHooks;
+        const appDiagnostics =
+            typeof window.__peerbitFileShareAppDiagnostics === "function"
+                ? window.__peerbitFileShareAppDiagnostics()
+                : null;
+        return {
+            href: window.location.href,
+            pathname: window.location.pathname,
+            search: window.location.search,
+            hash: window.location.hash,
+            readyState: document.readyState,
+            title: document.title,
+            appDiagnostics,
+            hookPresent: Boolean(hooks),
+            hookKeys: hooks ? Object.keys(hooks) : [],
+            bodyText: document.body?.innerText?.slice(0, maxTextLength) ?? "",
+            listItems: Array.from(document.querySelectorAll("li"))
+                .slice(0, 20)
+                .map((item) => item.textContent?.trim() ?? ""),
+            uploadInputPresent: Boolean(document.querySelector("#imgupload")),
+            scriptSrcs: Array.from(document.scripts)
+                .map((script) => script.src)
+                .filter(Boolean)
+                .slice(-10),
+        };
+    }, MAX_RECORDED_TEXT_LENGTH);
+};
+
+const createPageEventRecorder = (page) => {
+    const events = [];
+    const push = (event) => {
+        events.push({ at: Date.now(), ...event });
+        if (events.length > MAX_RECORDED_PAGE_EVENTS) {
+            events.shift();
+        }
+    };
+    page.on("console", (message) => {
+        const type = message.type();
+        if (!["error", "warning"].includes(type)) {
+            return;
+        }
+        push({
+            type: `console:${type}`,
+            text: message.text().slice(0, MAX_RECORDED_TEXT_LENGTH),
+        });
+    });
+    page.on("pageerror", (error) => {
+        push({
+            type: "pageerror",
+            text:
+                error instanceof Error
+                    ? error.message.slice(0, MAX_RECORDED_TEXT_LENGTH)
+                    : String(error).slice(0, MAX_RECORDED_TEXT_LENGTH),
+        });
+    });
+    page.on("requestfailed", (request) => {
+        const failure = request.failure();
+        push({
+            type: "requestfailed",
+            url: request.url().slice(0, MAX_RECORDED_TEXT_LENGTH),
+            method: request.method(),
+            failure: failure?.errorText,
+        });
+    });
+    return {
+        getEvents: () => events.slice(),
+    };
 };
 
 const waitForFileListed = async (page, fileName, timeout = 180_000) => {
@@ -394,6 +482,9 @@ const compactCoordinationPayload = (payload) => {
     return {
         ...payload,
         writerDiagnostics: compactDiagnostics(payload.writerDiagnostics),
+        readerDiagnosticsBeforeListing: compactDiagnostics(
+            payload.readerDiagnosticsBeforeListing
+        ),
         readerDiagnostics: compactDiagnostics(payload.readerDiagnostics),
         readerDiagnosticsAfterDownload: compactDiagnostics(
             payload.readerDiagnosticsAfterDownload
@@ -422,6 +513,13 @@ const minimalCoordinationPayload = (payload) => {
         downloadDurationMs: payload.downloadDurationMs,
         downloadMbps: payload.downloadMbps,
         listingWaitMs: payload.listingWaitMs,
+        readerDiagnosticsBeforeListing: compactDiagnostics(
+            payload.readerDiagnosticsBeforeListing
+        ),
+        readerDiagnostics: compactDiagnostics(payload.readerDiagnostics),
+        readerPageStateBeforeListing: payload.readerPageStateBeforeListing,
+        readerPageStateAtFailure: payload.readerPageStateAtFailure,
+        readerPageEvents: payload.readerPageEvents,
         failure: payload.failure,
     };
 };
@@ -648,8 +746,10 @@ const runWriter = async (coordinator) => {
             COORDINATION_TIMEOUT_MS
         );
         if (readerEvent.kind === "reader-failed") {
+            const readerFailure =
+                readerEvent.payload?.failure ?? readerEvent.payload;
             throw new Error(
-                `Reader failed: ${readerEvent.payload?.message || "unknown error"}`
+                `Reader failed: ${readerFailure?.message || "unknown error"}`
             );
         }
         await persistResult({
@@ -712,11 +812,14 @@ const runReader = async (coordinator) => {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ acceptDownloads: true });
     const page = await context.newPage();
+    const pageEventRecorder = createPageEventRecorder(page);
     await enableOpenProfiler(page);
     const readerRoleOptions = getReaderRoleOptions();
     const usesStreamingDownload =
         FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
     let readerDiagnostics;
+    let readerDiagnosticsBeforeListing;
+    let readerPageStateBeforeListing;
 
     try {
         if (usesStreamingDownload) {
@@ -725,6 +828,13 @@ const runReader = async (coordinator) => {
         await seedReplicationRole(page, writer.address, readerRoleOptions);
         await page.goto(shareUrl, { waitUntil: "domcontentloaded" });
         const readerReadyAt = Date.now();
+        await waitForTestHooks(page).catch(() => undefined);
+        readerDiagnosticsBeforeListing = await getDiagnostics(page).catch(
+            () => undefined
+        );
+        readerPageStateBeforeListing = await getPageState(page).catch(
+            () => undefined
+        );
         await waitForFileListed(page, writer.fileName, UPLOAD_TIMEOUT_MS);
         const listedAt = Date.now();
         readerDiagnostics = await getDiagnostics(page);
@@ -773,7 +883,10 @@ const runReader = async (coordinator) => {
                 downloadFinishedAt - downloadStartedAt
             ),
             readerDiagnostics,
+            readerDiagnosticsBeforeListing,
             readerDiagnosticsAfterDownload,
+            readerPageStateBeforeListing,
+            readerPageEvents: pageEventRecorder.getEvents(),
             startedAt: readerReadyAt,
             finishedAt: downloadFinishedAt,
         };
@@ -785,17 +898,29 @@ const runReader = async (coordinator) => {
         const failureDiagnostics =
             (await getDiagnostics(page).catch(() => undefined)) ??
             readerDiagnostics;
-        await persistResult({
+        const failurePageState = await getPageState(page).catch(
+            () => undefined
+        );
+        const result = {
             status: "failed",
             role: "reader",
             readerRole: READER_ROLE,
             scenario: "prod",
+            baseURL: BASE_URL,
+            shareUrl,
+            writerPeerAddressCount: getWriterPeerAddresses(writer).length,
             fileName: writer.fileName,
             fileSizeMb: FILE_SIZE_MB,
+            readerDiagnosticsBeforeListing,
             readerDiagnostics: failureDiagnostics,
+            readerPageStateBeforeListing,
+            readerPageStateAtFailure: failurePageState,
+            readerPageEvents: pageEventRecorder.getEvents(),
+            message: failure.message,
             failure,
-        });
-        await coordinator.publish("reader-failed", failure).catch(() => {});
+        };
+        await persistResult(result);
+        await coordinator.publish("reader-failed", result).catch(() => {});
         throw error;
     } finally {
         await context.close().catch(() => {});
