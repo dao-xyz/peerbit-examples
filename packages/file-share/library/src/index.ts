@@ -719,7 +719,7 @@ export class LargeFile extends AbstractFile {
                     remote: {
                         timeout: attemptTimeout,
                         throwOnMissing: false,
-                        retryMissingResponses: true,
+                        retryMissingResponses: false,
                         replicate: files.persistChunkReads,
                         from: remoteFrom,
                     },
@@ -770,7 +770,7 @@ export class LargeFile extends AbstractFile {
                     remote: {
                         timeout: attemptTimeout,
                         throwOnMissing: false,
-                        retryMissingResponses: true,
+                        retryMissingResponses: false,
                         replicate: false,
                         from: remoteFrom,
                     },
@@ -804,7 +804,7 @@ export class LargeFile extends AbstractFile {
                     // longer materializable locally.
                     strategy: "always" as any,
                     throwOnMissing: false,
-                    retryMissingResponses: true,
+                    retryMissingResponses: false,
                     replicate,
                     from: remoteFrom,
                 },
@@ -844,7 +844,7 @@ export class LargeFile extends AbstractFile {
                 remote: {
                     timeout: attemptTimeout,
                     throwOnMissing: false,
-                    retryMissingResponses: true,
+                    retryMissingResponses: false,
                     replicate: files.persistChunkReads,
                     from: remoteFrom,
                 } as any,
@@ -887,54 +887,6 @@ export class LargeFile extends AbstractFile {
                     ((properties.debug.chunkNonReplicatingGets ||= {})[index] ??
                         0) + 1);
             return resolveChunkByDirectGet(remoteFrom, false);
-        };
-        const resolveChunksByParentSearch = async (
-            remoteFrom: string[] | undefined,
-            options?: {
-                replicate?: boolean;
-                resolvedBy?: string;
-            }
-        ): Promise<TinyFile | undefined> => {
-            const replicate = options?.replicate ?? files.persistChunkReads;
-            if (properties?.debug) {
-                const counter = replicate
-                    ? (properties.debug.chunkParentSearches ||= {})
-                    : (properties.debug.chunkNonReplicatingParentSearches ||=
-                          {});
-                counter[index] = (counter[index] ?? 0) + 1;
-            }
-            const chunks = await files.files.index.search(
-                new SearchRequest({
-                    query: new StringMatch({
-                        key: "parentId",
-                        value: this.id,
-                    }),
-                    fetch: 0xffffffff,
-                }),
-                {
-                    local: true,
-                    remote: {
-                        timeout: attemptTimeout,
-                        throwOnMissing: false,
-                        retryMissingResponses: true,
-                        replicate,
-                        from: remoteFrom,
-                    },
-                } as any
-            );
-            for (const chunk of chunks) {
-                if (chunk instanceof TinyFile && chunk.parentId === this.id) {
-                    knownChunks.set(chunk.index || 0, chunk);
-                    files.retainResolvedChunk(chunk);
-                }
-            }
-            const chunk = knownChunks.get(index);
-            if (chunk) {
-                properties?.debug &&
-                    ((properties.debug.chunkResolved ||= {})[index] =
-                        options?.resolvedBy ?? "parent-search");
-                return chunk;
-            }
         };
 
         while (Date.now() < deadline) {
@@ -1134,71 +1086,6 @@ export class LargeFile extends AbstractFile {
                         properties?.debug &&
                             ((properties.debug.chunkRetryableResolvedSearchErrors ||=
                                 {})[index] = getErrorMessage(error));
-                    }
-                }
-                for (const sourceFrom of remoteSources) {
-                    try {
-                        const chunk =
-                            await resolveChunksByParentSearch(sourceFrom);
-                        if (chunk) {
-                            return chunk;
-                        }
-                    } catch (error) {
-                        if (!isRetryableChunkLookupError(error)) {
-                            properties?.debug &&
-                                (properties.debug.chunkFailure = {
-                                    index,
-                                    type: "non-retryable-parent-search",
-                                    message: getErrorMessage(error),
-                                });
-                            throw error;
-                        }
-                        if (
-                            sourceFrom &&
-                            shouldRetryChunkLookupWithoutHints(error)
-                        ) {
-                            hintedDeliveryFailures += 1;
-                        }
-                        retryableFailures += 1;
-                        properties?.debug &&
-                            ((properties.debug.chunkRetryableParentSearchErrors ||=
-                                {})[index] = getErrorMessage(error));
-                    }
-                }
-                if (files.persistChunkReads) {
-                    for (const sourceFrom of remoteSources) {
-                        try {
-                            const chunk = await resolveChunksByParentSearch(
-                                sourceFrom,
-                                {
-                                    replicate: false,
-                                    resolvedBy: "non-replicating-parent-search",
-                                }
-                            );
-                            if (chunk) {
-                                return chunk;
-                            }
-                        } catch (error) {
-                            if (!isRetryableChunkLookupError(error)) {
-                                properties?.debug &&
-                                    (properties.debug.chunkFailure = {
-                                        index,
-                                        type: "non-retryable-non-replicating-parent-search",
-                                        message: getErrorMessage(error),
-                                    });
-                                throw error;
-                            }
-                            if (
-                                sourceFrom &&
-                                shouldRetryChunkLookupWithoutHints(error)
-                            ) {
-                                hintedDeliveryFailures += 1;
-                            }
-                            retryableFailures += 1;
-                            properties?.debug &&
-                                ((properties.debug.chunkRetryableNonReplicatingParentSearchErrors ||=
-                                    {})[index] = getErrorMessage(error));
-                        }
                     }
                 }
                 nextNonReplicatingReadAfterFailures *= 2;

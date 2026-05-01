@@ -610,6 +610,96 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
+        it("bounds persisted chunk misses to exact lookups", async () => {
+            const filestore = await peer.open(new Files());
+            const fileName = "missing persisted exact chunk";
+            const fileId = "missing-persisted-exact-chunk";
+            const file = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: 1n,
+                chunkCount: 1,
+                ready: true,
+            });
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
+            );
+            const originalGetReadPeerHints =
+                filestore.getReadPeerHints.bind(filestore);
+            let exactSearches = 0;
+            let parentOnlySearches = 0;
+            const retryMissingValues: unknown[] = [];
+
+            (filestore as any).getReadPeerHints = async () => ["writer-peer"];
+            (filestore.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id === `${fileId}:0`) {
+                    const remote = (options as any)?.remote;
+                    if (remote && remote !== false) {
+                        retryMissingValues.push(remote.retryMissingResponses);
+                    }
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasParentId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
+                );
+                const hasChunkName = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "name" &&
+                        getQueryValue(query) === `${fileName}/0`
+                );
+                if (hasParentId && hasChunkName) {
+                    exactSearches++;
+                    const remote = (options as any)?.remote;
+                    if (remote && remote !== false) {
+                        retryMissingValues.push(remote.retryMissingResponses);
+                    }
+                    return [];
+                }
+                if (hasParentId) {
+                    parentOnlySearches++;
+                    return [];
+                }
+                return originalSearch(request as never, options as never);
+            };
+
+            try {
+                await expect(
+                    file.writeFile(
+                        filestore,
+                        { write: async () => {} },
+                        { timeout: 600 }
+                    )
+                ).rejects.toThrow(/Failed to resolve chunk/);
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+                (filestore.files.index as any).get = originalGet;
+                (filestore as any).getReadPeerHints = originalGetReadPeerHints;
+            }
+
+            expect(exactSearches).to.be.greaterThan(0);
+            expect(parentOnlySearches).to.eq(0);
+            expect(retryMissingValues.length).to.be.greaterThan(0);
+            expect(retryMissingValues.every((value) => value === false)).to.be
+                .true;
+        });
+
         it("scales chunk lookup attempt timeouts for large persisted chunks", async () => {
             const filestore = await peer.open(new Files());
             const file = new LargeFile({
@@ -1590,7 +1680,7 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
-        it("uses non-replicating parent search when adaptive exact routes miss", async () => {
+        it("uses non-replicating exact search when adaptive exact routes miss", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileName = "streamed download with parent search";
@@ -1620,8 +1710,7 @@ describe("index", () => {
             let exactNonReplicatingGets = 0;
             let replicatingPreciseSearches = 0;
             let resolvedPreciseSearches = 0;
-            let persistedParentSearches = 0;
-            let nonReplicatingParentSearches = 0;
+            let parentOnlySearches = 0;
 
             (filestoreReader.files.index as any).get = async (
                 id: string,
@@ -1683,22 +1772,13 @@ describe("index", () => {
                     } else {
                         replicatingPreciseSearches++;
                     }
-                    return [];
+                    return resolvedPreciseSearches > 0
+                        ? originalSearch(request as never, options as never)
+                        : [];
                 }
 
                 if (hasParentId) {
-                    if (
-                        options?.remote &&
-                        options.remote !== false &&
-                        options.remote.replicate === false
-                    ) {
-                        nonReplicatingParentSearches++;
-                        return originalSearch(
-                            request as never,
-                            options as never
-                        );
-                    }
-                    persistedParentSearches++;
+                    parentOnlySearches++;
                     return [];
                 }
 
@@ -1726,11 +1806,10 @@ describe("index", () => {
             expect(replicatingPreciseSearches).to.be.greaterThan(0);
             expect(exactNonReplicatingGets).to.be.greaterThan(0);
             expect(resolvedPreciseSearches).to.be.greaterThan(0);
-            expect(persistedParentSearches).to.be.greaterThan(0);
-            expect(nonReplicatingParentSearches).to.be.greaterThan(0);
+            expect(parentOnlySearches).to.eq(0);
             expect(
                 filestoreReader.lastReadDiagnostics?.chunkResolved?.[1]
-            ).to.eq("non-replicating-parent-search");
+            ).to.eq("resolved-search");
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
@@ -1986,7 +2065,7 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("uses parent chunk search when exact chunk routes miss", async () => {
+        it("uses exact chunk search when direct chunk routes miss", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileName = "streamed download with parent search";
@@ -2008,6 +2087,10 @@ describe("index", () => {
                 filestoreReader.files.index
             );
             const missingDirectChunkId = `${fileId}:1`;
+            const missingDirectChunk = await filestore.files.index.get(
+                missingDirectChunkId,
+                { local: true, remote: false }
+            );
             let directChunkMisses = 0;
             let preciseChunkSearches = 0;
             let parentChunkSearches = 0;
@@ -2043,7 +2126,7 @@ describe("index", () => {
 
                 if (hasParentId && hasChunkName) {
                     preciseChunkSearches++;
-                    return [];
+                    return missingDirectChunk ? [missingDirectChunk] : [];
                 }
                 if (hasParentId) {
                     parentChunkSearches++;
@@ -2066,7 +2149,10 @@ describe("index", () => {
 
             expect(directChunkMisses).to.be.greaterThan(0);
             expect(preciseChunkSearches).to.be.greaterThan(0);
-            expect(parentChunkSearches).to.be.greaterThan(0);
+            expect(parentChunkSearches).to.eq(0);
+            expect(
+                filestoreReader.lastReadDiagnostics?.chunkResolved?.[1]
+            ).to.eq("indexed-search");
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
