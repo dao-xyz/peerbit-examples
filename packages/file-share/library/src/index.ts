@@ -304,6 +304,7 @@ const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = 512 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 32;
+const LARGE_FILE_REMOTE_PERSISTED_READ_AHEAD = 8;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
 const LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS = 5_000;
@@ -1403,6 +1404,8 @@ export class LargeFile extends AbstractFile {
             waitUntilReadyResolvedBy: null as string | null,
             prefetchedChunkCount: 0,
             readAhead: 0,
+            initialLocalChunkCount: null as number | null,
+            readAheadSource: null as string | null,
             initialReadPeerHints: null as string[] | null,
             chunkAttemptTimeoutMs: 0,
             finishedAt: null as number | null,
@@ -1458,6 +1461,11 @@ export class LargeFile extends AbstractFile {
             }
             debug.prefetchedChunkCount = knownChunks.size;
         }
+        if (files.persistChunkReads) {
+            debug.initialLocalChunkCount = await files
+                .countLocalChunks(resolvedFile)
+                .catch(() => null);
+        }
         const inFlightChunks = new Map<number, Promise<TinyFile>>();
         const resolveChunkWithReadAhead = (index: number) => {
             const cached = inFlightChunks.get(index);
@@ -1486,13 +1494,21 @@ export class LargeFile extends AbstractFile {
         };
 
         const configuredReadAhead = files.persistChunkReads
-            ? LARGE_FILE_PERSISTED_READ_AHEAD
+            ? debug.initialLocalChunkCount != null &&
+              debug.initialLocalChunkCount < resolvedFile.chunkCount
+                ? LARGE_FILE_REMOTE_PERSISTED_READ_AHEAD
+                : LARGE_FILE_PERSISTED_READ_AHEAD
             : LARGE_FILE_OBSERVER_READ_AHEAD;
         const readAhead = Math.min(
             resolvedFile.chunkCount,
             configuredReadAhead
         );
         debug.readAhead = readAhead;
+        debug.readAheadSource = files.persistChunkReads
+            ? readAhead === LARGE_FILE_PERSISTED_READ_AHEAD
+                ? "persisted-local"
+                : "persisted-remote"
+            : "observer";
 
         for (
             let index = 0;
