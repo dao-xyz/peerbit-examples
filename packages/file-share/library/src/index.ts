@@ -1297,16 +1297,6 @@ export class LargeFile extends AbstractFile {
                 }
                 return countCandidate;
             }
-            if (
-                files.persistChunkReads &&
-                localChunkCount >=
-                    Math.max(1, Math.ceil(readinessCandidate.chunkCount / 2))
-            ) {
-                if (debug) {
-                    debug.waitUntilReadyResolvedBy = "pending-manifest";
-                }
-                return readinessCandidate;
-            }
             await sleep(250);
         }
 
