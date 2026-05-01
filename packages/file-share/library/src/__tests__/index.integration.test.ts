@@ -455,6 +455,8 @@ describe("index", () => {
             const originalGet = filestoreReader.files.index.get.bind(
                 filestoreReader.files.index
             );
+            const originalCountLocalChunks =
+                filestoreReader.countLocalChunks.bind(filestoreReader);
             let parentIdSearches = 0;
             let directChunkGets = 0;
             let inflightChunkGets = 0;
@@ -548,21 +550,42 @@ describe("index", () => {
                 }
                 return originalGet(id as never, options as never);
             };
+            (filestoreReader as any).countLocalChunks = async (
+                parent: LargeFile
+            ) => {
+                if (parent.id === fileId) {
+                    return 0;
+                }
+                return originalCountLocalChunks(parent);
+            };
 
             const streamedChunks: Uint8Array[] = [];
 
-            await file!.writeFile(filestoreReader, {
-                write: async (chunk) => {
-                    streamedChunks.push(chunk);
-                },
-            });
+            try {
+                await file!.writeFile(filestoreReader, {
+                    write: async (chunk) => {
+                        streamedChunks.push(chunk);
+                    },
+                });
+            } finally {
+                (filestoreReader as any).countLocalChunks =
+                    originalCountLocalChunks;
+                (filestoreReader.files.index as any).search = originalSearch;
+                (filestoreReader.files.index as any).get = originalGet;
+            }
 
             expect(parentIdSearches).to.eq(0);
             expect(directChunkGets).to.be.greaterThan(1);
             expect(maxInflightChunkGets).to.be.greaterThan(1);
             const readAhead = filestoreReader.lastReadDiagnostics?.readAhead;
-            expect(readAhead).to.be.greaterThan(4);
+            expect(readAhead).to.eq(8);
             expect(readAhead).to.be.lessThanOrEqual(file!.chunkCount);
+            expect(filestoreReader.lastReadDiagnostics?.readAheadSource).to.eq(
+                "persisted-remote"
+            );
+            expect(
+                filestoreReader.lastReadDiagnostics?.initialLocalChunkCount
+            ).to.be.lessThan(file!.chunkCount);
             expect(
                 filestoreReader.lastReadDiagnostics?.chunkAttemptTimeoutMs
             ).to.eq(5_000);
