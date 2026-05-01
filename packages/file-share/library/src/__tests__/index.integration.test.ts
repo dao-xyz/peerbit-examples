@@ -1094,6 +1094,87 @@ describe("index", () => {
             expect(streamedChunks).to.have.length(0);
         });
 
+        it("keeps pending adaptive manifests blocked when only a majority of chunks are local", async () => {
+            const filestore = await peer.open(new Files());
+            const fileName = "pending manifest with majority local chunks";
+            const fileId = "pending-manifest-majority-local-chunks";
+            const chunkCount = 6;
+            const localChunkCount = 4;
+            const pendingFile = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: BigInt(chunkCount),
+                chunkCount,
+                ready: false,
+            });
+            for (let index = 0; index < localChunkCount; index++) {
+                await filestore.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: new Uint8Array([index]),
+                        parentId: fileId,
+                        index,
+                    })
+                );
+            }
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const originalCountLocalChunks =
+                filestore.countLocalChunks.bind(filestore);
+            const originalGetReadPeerHints =
+                filestore.getReadPeerHints.bind(filestore);
+
+            (filestore as any).getReadPeerHints = async () => ["writer-peer"];
+            (filestore as any).countLocalChunks = async () => localChunkCount;
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasRootId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
+                );
+                if (hasRootId) {
+                    return [pendingFile];
+                }
+                return originalSearch(request as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            try {
+                await expect(
+                    pendingFile.writeFile(
+                        filestore,
+                        {
+                            write: async (chunk) => {
+                                streamedChunks.push(chunk);
+                            },
+                        },
+                        { timeout: 500 }
+                    )
+                ).rejects.toThrow(/still uploading/);
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+                (filestore as any).countLocalChunks = originalCountLocalChunks;
+                (filestore as any).getReadPeerHints = originalGetReadPeerHints;
+            }
+
+            expect(
+                filestore.lastReadDiagnostics?.waitUntilReadyResolvedBy
+            ).not.to.eq("pending-manifest");
+            expect(
+                filestore.lastReadDiagnostics?.lastReadyProbe?.localChunkCount
+            ).to.eq(localChunkCount);
+            expect(streamedChunks).to.have.length(0);
+        });
+
         it("checks local complete chunks while read peer hints are present", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
@@ -1271,11 +1352,11 @@ describe("index", () => {
             ).to.eq("remote ready search failed");
             expect(
                 filestore.lastReadDiagnostics?.waitUntilReadyResolvedBy
-            ).to.eq("pending-manifest");
+            ).to.eq("complete-chunks");
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
-        it("streams pending manifests with partial local chunks while ready search is still pending", async () => {
+        it("waits for complete local chunks while ready search is still pending", async () => {
             const filestore = await peer.open(new Files());
             const fileName = "pending manifest with partial local chunks";
             const fileId = "pending-ready-search-pending";
@@ -1360,7 +1441,7 @@ describe("index", () => {
             expect(remoteReadySearches).to.be.greaterThan(0);
             expect(
                 filestore.lastReadDiagnostics?.waitUntilReadyResolvedBy
-            ).to.eq("pending-manifest");
+            ).to.eq("complete-chunks");
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
