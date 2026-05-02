@@ -15,7 +15,7 @@
     "dependencies": {
         "@giga-app/sdk": "workspace:*",
         "@peerbit/document-react": "^1",
-        "@peerbit/react": "^1",
+        "@peerbit/react": "^1.1.18",
         "@radix-ui/react-popover": "^1.0.7",
         "@radix-ui/react-progress": "^1.0.3",
         "@radix-ui/react-slider": "^1.1.2",
@@ -24,7 +24,7 @@
         "@radix-ui/react-toast": "^1.1.4",
         "@radix-ui/react-toggle": "^1.0.3",
         "chess.js": "^1.1.0",
-        "peerbit": "^5",
+        "peerbit": "^5.2.15",
         "react": "^19.2.0",
         "react-chessboard": "^4.7.2",
         "react-dom": "^19.1.0",
@@ -33,7 +33,7 @@
         "react-use": "^17.6.0"
     },
     "devDependencies": {
-        "@peerbit/vite": "^2",
+        "@peerbit/vite": "^2.0.6",
         "@tailwindcss/postcss": "^4.0.14",
         "@types/react": "^19.1.8",
         "@types/react-dom": "^19.1.6",

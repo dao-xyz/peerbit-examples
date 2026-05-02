@@ -14,15 +14,15 @@
         "@libp2p/circuit-relay-v2": "^4.1.0",
         "@libp2p/websockets": "^10.1.0",
         "@peerbit/canonical-host": "^1",
-        "@peerbit/document": "^13",
+        "@peerbit/document": "^13.0.38",
         "@peerbit/document-proxy": "^2",
         "@peerbit/document-react": "^1",
-        "@peerbit/react": "^1",
+        "@peerbit/react": "^1.1.18",
         "react": "^19.2.0",
         "react-dom": "^19.1.0"
     },
     "devDependencies": {
-        "@peerbit/vite": "^2",
+        "@peerbit/vite": "^2.0.6",
         "@types/react": "^19.1.8",
         "@types/react-dom": "^19.1.6",
         "@vitejs/plugin-react": "^5",
