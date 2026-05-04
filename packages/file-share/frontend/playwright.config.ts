@@ -46,6 +46,7 @@ const ignoreHTTPSErrors =
 
 export default defineConfig({
     testDir: "./tests",
+    testMatch: "**/*.e2e.spec.ts",
     timeout: 8 * 60 * 1000,
     expect: {
         timeout: 15_000,
