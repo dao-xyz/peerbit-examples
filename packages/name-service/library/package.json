@@ -29,8 +29,8 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.30",
-        "peerbit": "^5.2.15",
+        "@peerbit/test-utils": "^3.0.31",
+        "peerbit": "^5.2.16",
         "typescript": "^5.6.3"
     },
     "peerDependencies": {
