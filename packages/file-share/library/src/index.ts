@@ -199,6 +199,9 @@ type ChunkReadContext = {
     lastReadPeerHints?: string[];
     localChunkEntryHeads?: Map<string, string>;
     localChunkEntryHeadsScan?: Promise<Map<string, string>>;
+    manifestHeadAvailable?: boolean;
+    manifestHeadUnavailable?: boolean;
+    manifestHeadProbe?: Promise<void>;
 };
 
 export interface ReReadableChunkSource {
@@ -668,7 +671,7 @@ export class LargeFile extends AbstractFile {
         let directMisses = 0;
         let retryableFailures = 0;
         let nextNonReplicatingReadAfterFailures = 3;
-        let manifestHeadUnavailable = false;
+        let skipManifestHeadForChunk = false;
         const materializeLocalChunk = async (
             resolvedBy: string
         ): Promise<TinyFile | undefined> => {
@@ -827,8 +830,20 @@ export class LargeFile extends AbstractFile {
         const resolveChunkByManifestEntryHead = async (
             remoteFrom: string[] | undefined
         ): Promise<TinyFile | undefined> => {
-            if (manifestHeadUnavailable) {
+            if (
+                skipManifestHeadForChunk ||
+                readContext.manifestHeadUnavailable
+            ) {
                 return;
+            }
+            if (
+                readContext.manifestHeadAvailable !== true &&
+                readContext.manifestHeadProbe
+            ) {
+                await readContext.manifestHeadProbe.catch(() => undefined);
+                if (readContext.manifestHeadUnavailable) {
+                    return;
+                }
             }
             const heads = (this as { chunkEntryHeads?: unknown })
                 .chunkEntryHeads;
@@ -840,23 +855,41 @@ export class LargeFile extends AbstractFile {
             properties?.debug &&
                 ((properties.debug.chunkManifestHeads ||= {})[index] = head);
 
-            const entry = await files.files.log.log.get(head, {
-                remote: {
-                    timeout: attemptTimeout,
-                    throwOnMissing: false,
-                    retryMissingResponses: false,
-                    replicate: files.persistChunkReads,
-                    from: remoteFrom,
-                } as any,
+            let releaseProbe: (() => void) | undefined;
+            const manifestHeadProbe = new Promise<void>((resolve) => {
+                releaseProbe = resolve;
             });
-            if (!entry) {
-                manifestHeadUnavailable = true;
-                properties?.debug &&
-                    ((properties.debug.chunkManifestHeadMisses ||= {})[index] =
+            readContext.manifestHeadProbe = manifestHeadProbe;
+            let entry: Awaited<
+                ReturnType<typeof files.files.log.log.get>
+            > | null = null;
+            try {
+                entry = await files.files.log.log.get(head, {
+                    remote: {
+                        timeout: attemptTimeout,
+                        throwOnMissing: false,
+                        retryMissingResponses: false,
+                        replicate: files.persistChunkReads,
+                        from: remoteFrom,
+                    } as any,
+                });
+                if (!entry) {
+                    readContext.manifestHeadUnavailable = true;
+                    properties?.debug &&
                         ((properties.debug.chunkManifestHeadMisses ||= {})[
                             index
-                        ] ?? 0) + 1);
-                return;
+                        ] =
+                            ((properties.debug.chunkManifestHeadMisses ||= {})[
+                                index
+                            ] ?? 0) + 1);
+                    return;
+                }
+                readContext.manifestHeadAvailable = true;
+            } finally {
+                if (readContext.manifestHeadProbe === manifestHeadProbe) {
+                    readContext.manifestHeadProbe = undefined;
+                }
+                releaseProbe?.();
             }
 
             const operation = await entry.getPayloadValue();
@@ -905,7 +938,7 @@ export class LargeFile extends AbstractFile {
                     return localChunk;
                 }
             } catch (error) {
-                manifestHeadUnavailable = true;
+                skipManifestHeadForChunk = true;
                 if (!isRetryableChunkLookupError(error)) {
                     properties?.debug &&
                         (properties.debug.chunkFailure = {

@@ -1241,6 +1241,142 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
+        it("stops probing ready manifest chunk heads after a miss", async () => {
+            const filestore = await peer.open(new Files());
+            const fileId = "missing-ready-heads";
+            const fileName = "missing ready heads";
+            const chunks = [
+                new TinyFile({
+                    id: `${fileId}:0`,
+                    name: `${fileName}/0`,
+                    file: new Uint8Array([1]),
+                    parentId: fileId,
+                    index: 0,
+                }),
+                new TinyFile({
+                    id: `${fileId}:1`,
+                    name: `${fileName}/1`,
+                    file: new Uint8Array([2]),
+                    parentId: fileId,
+                    index: 1,
+                }),
+                new TinyFile({
+                    id: `${fileId}:2`,
+                    name: `${fileName}/2`,
+                    file: new Uint8Array([3]),
+                    parentId: fileId,
+                    index: 2,
+                }),
+            ];
+            const expected = concat(chunks.map((chunk) => chunk.file));
+            const chunkEntryHeads = chunks.map(
+                (_, index) => `missing-head-${index}`
+            );
+            const pendingFile = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: false,
+            });
+            const readyManifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: true,
+                finalHash: sha256Base64Sync(expected),
+                chunkEntryHeads,
+            });
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
+            );
+            const originalLogGet = filestore.files.log.log.get.bind(
+                filestore.files.log.log
+            );
+            let manifestHeadGets = 0;
+
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasRootId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
+                );
+                if (hasRootId) {
+                    return (options as any)?.local === true
+                        ? [pendingFile]
+                        : [];
+                }
+                return originalSearch(request as never, options as never);
+            };
+            (filestore.files.index as any).get = async (
+                id: unknown,
+                options: any
+            ) => {
+                if (
+                    id === fileId &&
+                    options?.remote &&
+                    options.remote !== false
+                ) {
+                    return readyManifest;
+                }
+                if (typeof id === "string" && id.startsWith(`${fileId}:`)) {
+                    if (options?.remote && options.remote !== false) {
+                        return chunks[Number(id.slice(`${fileId}:`.length))];
+                    }
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+            (filestore.files.log.log as any).get = async (
+                hash: string,
+                options: unknown
+            ) => {
+                if (chunkEntryHeads.includes(hash)) {
+                    manifestHeadGets++;
+                    await delay(25);
+                    return undefined;
+                }
+                return originalLogGet(hash as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            try {
+                await pendingFile.writeFile(filestore, {
+                    write: async (chunk) => {
+                        streamedChunks.push(chunk);
+                    },
+                });
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+                (filestore.files.index as any).get = originalGet;
+                (filestore.files.log.log as any).get = originalLogGet;
+            }
+
+            expect(manifestHeadGets).to.eq(1);
+            expect(
+                Object.keys(
+                    filestore.lastReadDiagnostics?.chunkManifestHeadMisses ?? {}
+                )
+            ).to.deep.eq(["0"]);
+            expect(
+                Object.values(
+                    filestore.lastReadDiagnostics?.chunkResolved ?? {}
+                )
+            ).to.deep.eq(chunks.map(() => "remote-get"));
+            expect(equals(concat(streamedChunks), expected)).to.be.true;
+        });
+
         it("keeps pending adaptive manifests blocked without ready or complete local chunks", async () => {
             const filestore = await peer.open(new Files());
             const fileName = "pending manifest with arbitrary local chunks";
