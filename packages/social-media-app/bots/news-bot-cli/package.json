@@ -42,6 +42,6 @@
         "@giga-app/news-bot": "workspace:*",
         "@inquirer/input": "^2",
         "@inquirer/select": "^2",
-        "peerbit": "^5.2.15"
+        "peerbit": "^5.2.16"
     }
 }
