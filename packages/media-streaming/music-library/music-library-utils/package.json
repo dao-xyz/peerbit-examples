@@ -37,13 +37,13 @@
         "test-replicator-remote": "npm run build && node ./lib/esm/__tests__/replicator-node-remote.js"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.32",
+        "@peerbit/test-utils": "^3.0.33",
         "typescript": "^5.6.3"
     },
     "dependencies": {
-        "@peerbit/document": "^13.0.41",
+        "@peerbit/document": "^13.0.42",
         "@peerbit/media-streaming": "workspace:*",
-        "peerbit": "^5.2.17",
+        "peerbit": "^5.2.18",
         "uuid": "^10.0.0"
     }
 }
