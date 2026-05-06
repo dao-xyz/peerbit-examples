@@ -578,7 +578,7 @@ describe("index", () => {
             expect(directChunkGets).to.be.greaterThan(1);
             expect(maxInflightChunkGets).to.be.greaterThan(1);
             const readAhead = filestoreReader.lastReadDiagnostics?.readAhead;
-            expect(readAhead).to.eq(8);
+            expect(readAhead).to.eq(2);
             expect(readAhead).to.be.lessThanOrEqual(file!.chunkCount);
             expect(filestoreReader.lastReadDiagnostics?.readAheadSource).to.eq(
                 "persisted-remote"
@@ -1241,7 +1241,7 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
-        it("stops probing ready manifest chunk heads after a miss", async () => {
+        it("falls back per chunk when ready manifest chunk heads are missing", async () => {
             const filestore = await peer.open(new Files());
             const fileId = "missing-ready-heads";
             const fileName = "missing ready heads";
@@ -1363,17 +1363,157 @@ describe("index", () => {
                 (filestore.files.log.log as any).get = originalLogGet;
             }
 
-            expect(manifestHeadGets).to.eq(1);
+            expect(manifestHeadGets).to.eq(chunks.length);
             expect(
                 Object.keys(
                     filestore.lastReadDiagnostics?.chunkManifestHeadMisses ?? {}
                 )
-            ).to.deep.eq(["0"]);
+            ).to.deep.eq(["0", "1", "2"]);
             expect(
                 Object.values(
                     filestore.lastReadDiagnostics?.chunkResolved ?? {}
                 )
             ).to.deep.eq(chunks.map(() => "remote-get"));
+            expect(equals(concat(streamedChunks), expected)).to.be.true;
+        });
+
+        it("retries transient ready manifest chunk head misses", async () => {
+            const filestore = await peer.open(new Files());
+            const fileId = "transient-ready-head-miss";
+            const fileName = "transient ready head miss";
+            const chunks = [
+                new Uint8Array([1]),
+                new Uint8Array([2]),
+                new Uint8Array([3]),
+            ];
+            const expected = concat(chunks);
+            const chunkEntryHeads: string[] = [];
+
+            for (const [index, file] of chunks.entries()) {
+                const result = await filestore.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = result.entry.hash;
+            }
+
+            const pendingFile = new LargeFile({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: false,
+            });
+            const readyManifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: true,
+                finalHash: sha256Base64Sync(expected),
+                chunkEntryHeads,
+            });
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
+            );
+            const originalLogGet = filestore.files.log.log.get.bind(
+                filestore.files.log.log
+            );
+            let firstHeadMissed = false;
+            let firstHeadGets = 0;
+
+            (filestore.files.index as any).search = async (
+                request: { query: unknown | unknown[] },
+                options: unknown
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const hasRootId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
+                );
+                if (hasRootId) {
+                    return (options as any)?.local === true
+                        ? [pendingFile]
+                        : [];
+                }
+                const hasParentId = queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "parentId" &&
+                        getQueryValue(query) === fileId
+                );
+                if (hasParentId) {
+                    return [];
+                }
+                return originalSearch(request as never, options as never);
+            };
+            (filestore.files.index as any).get = async (
+                id: unknown,
+                options: any
+            ) => {
+                if (
+                    id === fileId &&
+                    options?.remote &&
+                    options.remote !== false
+                ) {
+                    return readyManifest;
+                }
+                if (typeof id === "string" && id.startsWith(`${fileId}:`)) {
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+            (filestore.files.log.log as any).get = async (
+                hash: string,
+                options: unknown
+            ) => {
+                if (hash === chunkEntryHeads[0]) {
+                    firstHeadGets++;
+                    if (!firstHeadMissed) {
+                        firstHeadMissed = true;
+                        return undefined;
+                    }
+                }
+                return originalLogGet(hash as never, options as never);
+            };
+
+            const streamedChunks: Uint8Array[] = [];
+
+            try {
+                await pendingFile.writeFile(
+                    filestore,
+                    {
+                        write: async (chunk) => {
+                            streamedChunks.push(chunk);
+                        },
+                    },
+                    { timeout: 2_000 }
+                );
+            } finally {
+                (filestore.files.index as any).search = originalSearch;
+                (filestore.files.index as any).get = originalGet;
+                (filestore.files.log.log as any).get = originalLogGet;
+            }
+
+            expect(firstHeadGets).to.be.greaterThan(1);
+            expect(
+                filestore.lastReadDiagnostics?.chunkManifestHeadMisses?.[0]
+            ).to.eq(1);
+            expect(
+                Object.values(
+                    filestore.lastReadDiagnostics?.chunkResolved ?? {}
+                )
+            ).to.deep.eq(chunks.map(() => "manifest-head-get"));
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
