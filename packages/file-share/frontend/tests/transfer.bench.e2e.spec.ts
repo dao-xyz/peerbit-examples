@@ -183,8 +183,7 @@ test.describe("file-share transfer benchmark", () => {
                 writer,
                 `file-share-transfer-bench-${Date.now()}`
             );
-            let shareUrl = new URL(entryUrl);
-            shareUrl.hash = `/s/${address}`;
+            let shareUrl = new URL(writer.url());
             logStage("seed-reader-role");
             await seedReplicationRole(
                 reader,
@@ -193,10 +192,6 @@ test.describe("file-share transfer benchmark", () => {
             );
 
             logStage("open-reader", { shareUrl: shareUrl.toString() });
-            logStage("open-writer-page");
-            await writer.goto(shareUrl.toString(), {
-                waitUntil: "domcontentloaded",
-            });
             logStage("writer-page-ready");
             if (!usesLocalBootstrap) {
                 logStage("wait-for-share-peer-hints");
