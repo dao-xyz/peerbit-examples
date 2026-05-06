@@ -199,9 +199,6 @@ type ChunkReadContext = {
     lastReadPeerHints?: string[];
     localChunkEntryHeads?: Map<string, string>;
     localChunkEntryHeadsScan?: Promise<Map<string, string>>;
-    manifestHeadAvailable?: boolean;
-    manifestHeadUnavailable?: boolean;
-    manifestHeadProbe?: Promise<void>;
 };
 
 export interface ReReadableChunkSource {
@@ -307,7 +304,7 @@ const CHUNK_SIZE_GRANULARITY = 64 * 1024;
 const MAX_LARGE_FILE_SEGMENT_SIZE = 512 * 1024;
 const LARGE_FILE_CHUNK_LOOKUP_TIMEOUT_MS = 5 * 60 * 1000;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 32;
-const LARGE_FILE_REMOTE_PERSISTED_READ_AHEAD = 8;
+const LARGE_FILE_REMOTE_PERSISTED_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_OBSERVER_PREFETCH_TIMEOUT_MS = 5_000;
 const LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS = 5_000;
@@ -830,20 +827,8 @@ export class LargeFile extends AbstractFile {
         const resolveChunkByManifestEntryHead = async (
             remoteFrom: string[] | undefined
         ): Promise<TinyFile | undefined> => {
-            if (
-                skipManifestHeadForChunk ||
-                readContext.manifestHeadUnavailable
-            ) {
+            if (skipManifestHeadForChunk) {
                 return;
-            }
-            if (
-                readContext.manifestHeadAvailable !== true &&
-                readContext.manifestHeadProbe
-            ) {
-                await readContext.manifestHeadProbe.catch(() => undefined);
-                if (readContext.manifestHeadUnavailable) {
-                    return;
-                }
             }
             const heads = (this as { chunkEntryHeads?: unknown })
                 .chunkEntryHeads;
@@ -855,41 +840,24 @@ export class LargeFile extends AbstractFile {
             properties?.debug &&
                 ((properties.debug.chunkManifestHeads ||= {})[index] = head);
 
-            let releaseProbe: (() => void) | undefined;
-            const manifestHeadProbe = new Promise<void>((resolve) => {
-                releaseProbe = resolve;
+            const entry = await files.files.log.log.get(head, {
+                remote: {
+                    timeout: attemptTimeout,
+                    throwOnMissing: false,
+                    retryMissingResponses: false,
+                    replicate: files.persistChunkReads,
+                    from: remoteFrom,
+                } as any,
             });
-            readContext.manifestHeadProbe = manifestHeadProbe;
-            let entry: Awaited<
-                ReturnType<typeof files.files.log.log.get>
-            > | null = null;
-            try {
-                entry = await files.files.log.log.get(head, {
-                    remote: {
-                        timeout: attemptTimeout,
-                        throwOnMissing: false,
-                        retryMissingResponses: false,
-                        replicate: files.persistChunkReads,
-                        from: remoteFrom,
-                    } as any,
-                });
-                if (!entry) {
-                    readContext.manifestHeadUnavailable = true;
-                    properties?.debug &&
+            if (!entry) {
+                properties?.debug &&
+                    ((properties.debug.chunkManifestHeadMisses ||= {})[
+                        index
+                    ] =
                         ((properties.debug.chunkManifestHeadMisses ||= {})[
                             index
-                        ] =
-                            ((properties.debug.chunkManifestHeadMisses ||= {})[
-                                index
-                            ] ?? 0) + 1);
-                    return;
-                }
-                readContext.manifestHeadAvailable = true;
-            } finally {
-                if (readContext.manifestHeadProbe === manifestHeadProbe) {
-                    readContext.manifestHeadProbe = undefined;
-                }
-                releaseProbe?.();
+                        ] ?? 0) + 1);
+                return;
             }
 
             const operation = await entry.getPayloadValue();
