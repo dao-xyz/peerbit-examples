@@ -1,0 +1,49 @@
+{
+    "name": "@peerbit/shared-fs",
+    "version": "0.0.1",
+    "author": "dao.xyz",
+    "repository": "https://github.com/@dao-xyz/peerbit-examples",
+    "license": "Apache-2.0",
+    "type": "module",
+    "private": false,
+    "publishConfig": {
+        "access": "public"
+    },
+    "sideEffects": false,
+    "module": "lib/esm/index.js",
+    "types": "lib/esm/index.d.ts",
+    "exports": {
+        ".": {
+            "types": "./lib/esm/index.d.ts",
+            "import": "./lib/esm/index.js"
+        }
+    },
+    "files": [
+        "lib",
+        "src",
+        "!src/**/__tests__",
+        "!lib/**/__tests__",
+        "LICENSE"
+    ],
+    "engines": {
+        "node": ">=18"
+    },
+    "scripts": {
+        "clean": "shx rm -rf lib/*",
+        "build": "pnpm run clean && tsc -p tsconfig.json",
+        "test": "vitest run",
+        "test:watch": "vitest"
+    },
+    "devDependencies": {
+        "@peerbit/test-utils": "^3.0.33",
+        "typescript": "^5.6.3"
+    },
+    "dependencies": {
+        "@dao-xyz/borsh": "^6.0.0",
+        "@peerbit/crypto": "^3",
+        "@peerbit/document": "^13",
+        "@peerbit/program": "^6",
+        "peerbit": "^5",
+        "uint8arrays": "^5.1.0"
+    }
+}
