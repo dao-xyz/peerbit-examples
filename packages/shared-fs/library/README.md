@@ -34,11 +34,19 @@ peerbit-fs create
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
+peerbit-fs benchmark [address]
 peerbit-fs unmount <mountpoint>
 ```
 
 Mounted writes are buffered by the native adapter and committed as one signed
 Peerbit file version on `flush`, `fsync`, or `release`/close.
+
+## Benchmark Baseline
+
+`runSharedFsBenchmark(fs)` and `peerbit-fs benchmark` run a simple baseline
+workload: one large file upload/download plus a many-small-files write/list/read
+pass. This is meant to track regressions and guide future agent/code workspace
+work; v0 does not optimize the small-file workload yet.
 
 ## Native Mounts
 

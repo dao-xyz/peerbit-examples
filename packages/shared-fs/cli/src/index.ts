@@ -5,6 +5,7 @@ import {
     createSharedFsMountBackend,
     mountNativeSharedFs,
     openSharedFs,
+    runSharedFsBenchmark,
     unmountNativeMountpoint,
 } from "@peerbit/shared-fs";
 import { multiaddr } from "@multiformats/multiaddr";
@@ -110,6 +111,25 @@ const printNativeRequirements = () => {
     console.log("linux: libfuse/FUSE plus the optional fuse-native package");
     console.log("macOS: macFUSE plus the optional fuse-native package");
     console.log("windows: WinFsp adapter binary is required");
+};
+
+const printBenchmarkResult = (
+    result: Awaited<ReturnType<typeof runSharedFsBenchmark>>
+) => {
+    console.log(chalk.bold(`benchmark root: ${result.root}`));
+    console.log(
+        `large write: ${result.largeFile.writeMs}ms ${result.largeFile.writeMbps.toFixed(2)} Mbps`
+    );
+    console.log(
+        `large read:  ${result.largeFile.readMs}ms ${result.largeFile.readMbps.toFixed(2)} Mbps`
+    );
+    console.log(
+        `small write: ${result.smallFiles.writeMs}ms ${result.smallFiles.filesPerSecondWrite.toFixed(2)} files/s`
+    );
+    console.log(`small list:  ${result.smallFiles.listMs}ms`);
+    console.log(
+        `small read:  ${result.smallFiles.readMs}ms ${result.smallFiles.filesPerSecondRead.toFixed(2)} files/s`
+    );
 };
 
 const openCliFs = async (
@@ -298,6 +318,74 @@ export const runCli = async (args = hideBin(process.argv)) => {
                                 `  ${version.id} ${version.size} bytes ${version.machineLabel} ${version.authorKey}`
                             );
                         }
+                    }
+                } finally {
+                    await stopPeerbitForCli(peerbit);
+                }
+            }
+        )
+        .command(
+            "benchmark [address]",
+            "run a baseline large-file and many-small-files workload",
+            (command) =>
+                command
+                    .positional("address", {
+                        type: "string",
+                    })
+                    .option("large-size", {
+                        type: "number",
+                        default: 16 * 1024 * 1024,
+                        description: "Large file size in bytes.",
+                    })
+                    .option("small-files", {
+                        type: "number",
+                        default: 200,
+                        description: "Number of small files to write and read.",
+                    })
+                    .option("small-size", {
+                        type: "number",
+                        default: 1024,
+                        description: "Small file size in bytes.",
+                    })
+                    .option("root", {
+                        type: "string",
+                        description:
+                            "Benchmark root path inside the shared filesystem.",
+                    })
+                    .option("cleanup", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "Delete benchmark files after metrics are collected.",
+                    })
+                    .option("json", {
+                        type: "boolean",
+                        default: false,
+                        description: "Print machine-readable JSON.",
+                    }),
+            async (argv) => {
+                const directory = resolveDirectory(argv.directory);
+                const peerbit = await Peerbit.create({ directory });
+                try {
+                    if (argv.address) {
+                        await connectToNetwork(peerbit, argv.peer);
+                    }
+                    const fsHandle = await openCliFs(peerbit, {
+                        address: argv.address,
+                        machineLabel: argv.machine,
+                        replicate: argv.replicate,
+                    });
+                    const result = await runSharedFsBenchmark(fsHandle, {
+                        root: argv.root,
+                        largeFileSize: argv.largeSize,
+                        smallFileCount: argv.smallFiles,
+                        smallFileSize: argv.smallSize,
+                        cleanup: argv.cleanup,
+                    });
+                    if (argv.json) {
+                        console.log(JSON.stringify(result, null, 2));
+                    } else {
+                        printBenchmarkResult(result);
                     }
                 } finally {
                     await stopPeerbitForCli(peerbit);

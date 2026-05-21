@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     DEFAULT_FILE_CHUNK_SIZE,
     openSharedFs,
+    runSharedFsBenchmark,
     type SharedFsHandle,
 } from "../index.js";
 
@@ -16,6 +17,26 @@ const patternedBytes = (size: number) => {
         bytes[i] = i % 251;
     }
     return bytes;
+};
+
+const waitUntil = async (
+    assertion: () => Promise<void> | void,
+    options: { timeoutMs?: number; intervalMs?: number } = {}
+) => {
+    const timeoutMs = options.timeoutMs ?? 20_000;
+    const intervalMs = options.intervalMs ?? 100;
+    const deadline = Date.now() + timeoutMs;
+    let lastError: unknown;
+    while (Date.now() < deadline) {
+        try {
+            await assertion();
+            return;
+        } catch (error) {
+            lastError = error;
+            await new Promise((resolve) => setTimeout(resolve, intervalMs));
+        }
+    }
+    throw lastError;
 };
 
 describe("shared fs library", () => {
@@ -95,5 +116,110 @@ describe("shared fs library", () => {
         expect(decode(await fs.readVersion("/note.txt", right.id))).toBe(
             "right"
         );
+    });
+
+    it("runs the baseline benchmark workload", async () => {
+        const result = await runSharedFsBenchmark(fs, {
+            root: "/benchmark",
+            largeFileSize: 1024,
+            smallFileCount: 3,
+            smallFileSize: 16,
+            cleanup: true,
+        });
+
+        expect(result.largeFile.bytes).toBe(1024);
+        expect(result.smallFiles.count).toBe(3);
+        expect(result.smallFiles.bytesPerFile).toBe(16);
+    });
+});
+
+describe("shared fs replication", () => {
+    const peers: Peerbit[] = [];
+
+    const createPeer = async () => {
+        const peer = await Peerbit.create();
+        peers.push(peer);
+        return peer;
+    };
+
+    afterEach(async () => {
+        await Promise.all(peers.splice(0).map((peer) => peer.stop()));
+    });
+
+    it("syncs a local-first write after peers reconnect", async () => {
+        const writerPeer = await createPeer();
+        const readerPeer = await createPeer();
+        const writer = await openSharedFs({
+            peerbit: writerPeer,
+            machineLabel: "writer-machine",
+        });
+        await writer.writeFile("/offline.txt", "local-first");
+        expect(decode(await writer.readFile("/offline.txt"))).toBe(
+            "local-first"
+        );
+
+        await writerPeer.dial(readerPeer);
+        const reader = await openSharedFs({
+            peerbit: readerPeer,
+            address: writer.address,
+            machineLabel: "reader-machine",
+            replicate: false,
+        });
+
+        await waitUntil(async () => {
+            expect(decode(await reader.readFile("/offline.txt"))).toBe(
+                "local-first"
+            );
+        });
+    });
+
+    it("preserves signed conflict heads from two peers", async () => {
+        const peerA = await createPeer();
+        const peerB = await createPeer();
+        await peerA.dial(peerB);
+
+        const fsA = await openSharedFs({
+            peerbit: peerA,
+            machineLabel: "peer-a",
+        });
+        const fsB = await openSharedFs({
+            peerbit: peerB,
+            address: fsA.address,
+            machineLabel: "peer-b",
+        });
+
+        await fsA.writeFile("/shared.txt", "base");
+        await waitUntil(async () => {
+            expect(decode(await fsB.readFile("/shared.txt"))).toBe("base");
+        });
+
+        const base = (await fsA.versions("/shared.txt"))
+            .filter((version) => version.head)
+            .map((version) => version.id);
+        await fsA.writeFile("/shared.txt", "from-a", {
+            baseVersionIds: base,
+        });
+        await fsB.writeFile("/shared.txt", "from-b", {
+            baseVersionIds: base,
+        });
+
+        await waitUntil(async () => {
+            const conflicts = await fsA.conflicts("/shared.txt");
+            expect(conflicts).toHaveLength(1);
+            expect(
+                conflicts[0].versions
+                    .map((version) => version.machineLabel)
+                    .sort()
+            ).toEqual(["peer-a", "peer-b"]);
+        });
+        await waitUntil(async () => {
+            const conflicts = await fsB.conflicts("/shared.txt");
+            expect(conflicts).toHaveLength(1);
+            expect(
+                conflicts[0].versions
+                    .map((version) => version.machineLabel)
+                    .sort()
+            ).toEqual(["peer-a", "peer-b"]);
+        });
     });
 });

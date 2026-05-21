@@ -31,6 +31,7 @@ import {
 } from "./path.js";
 
 export * from "./model.js";
+export * from "./benchmark.js";
 export * from "./ipc.js";
 export * from "./mount-backend.js";
 export * from "./native-mount.js";

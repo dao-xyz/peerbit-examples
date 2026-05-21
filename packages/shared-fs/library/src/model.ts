@@ -42,28 +42,45 @@ export class IndexableSharedFsEntry {
     @field({ type: "bool" })
     deleted: boolean;
 
-    constructor(value: SharedFsEntry) {
+    constructor(value?: SharedFsEntry) {
+        if (!value) {
+            this.id = "";
+            this.kind = "";
+            this.deleted = false;
+            return;
+        }
         this.id = value.id;
-        this.kind = value.kind;
         this.deleted = false;
-        if (value instanceof DirectoryRecord || value instanceof FileRecord) {
+        if (value instanceof DirectoryRecord) {
+            this.kind = "directory";
+            this.nodeId = value.nodeId;
+            this.parentId = value.parentId;
+            this.name = value.name;
+            this.deleted = value.deleted;
+        } else if (value instanceof FileRecord) {
+            this.kind = "file";
             this.nodeId = value.nodeId;
             this.parentId = value.parentId;
             this.name = value.name;
             this.deleted = value.deleted;
         } else if (value instanceof FileVersion) {
+            this.kind = "file-version";
             this.nodeId = value.nodeId;
             this.parentId = value.parentId;
             this.name = value.name;
             this.versionId = value.id;
         } else if (value instanceof FileChunk) {
+            this.kind = "file-chunk";
             this.versionId = value.versionId;
         } else if (value instanceof DeleteMarker) {
+            this.kind = "delete-marker";
             this.nodeId = value.nodeId;
             this.parentId = value.parentId;
             this.name = value.name;
             this.versionId = value.id;
             this.deleted = true;
+        } else {
+            this.kind = value.kind;
         }
     }
 }
