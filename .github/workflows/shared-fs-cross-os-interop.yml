@@ -1,0 +1,177 @@
+name: Shared FS Cross-OS Interop
+
+on:
+    pull_request:
+        paths:
+            - ".github/workflows/shared-fs-cross-os-interop.yml"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "tsconfig.json"
+            - "vitest.config.ts"
+            - "vitest.setup.ts"
+            - "packages/shared-fs/**"
+    workflow_dispatch:
+        inputs:
+            timeout_minutes:
+                description: "How long each peer waits for all OS files"
+                required: true
+                type: number
+                default: 10
+
+permissions:
+    actions: read
+    contents: read
+
+env:
+    INTEROP_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.timeout_minutes || '10' }}
+
+jobs:
+    seed-linux:
+        name: Seed peer (linux)
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Start seed peer
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p shared-fs-address interop-logs
+                  timeout_ms=$((INTEROP_TIMEOUT_MINUTES * 60 * 1000))
+                  (
+                    node packages/shared-fs/cli/lib/esm/cross-os-interop.js \
+                      --role seed \
+                      --machine linux \
+                      --expected linux,macos,windows \
+                      --address-file shared-fs-address/address.txt \
+                      --timeout-ms "$timeout_ms" \
+                      --directory .peerbit-shared-fs-interop-linux \
+                      > interop-logs/linux-seed.log 2>&1
+                    echo "$?" > interop-logs/linux-seed.exit
+                  ) &
+                  echo "$!" > interop-logs/linux-seed.pid
+
+                  for _ in {1..120}; do
+                    if test -s shared-fs-address/address.txt; then
+                      cat shared-fs-address/address.txt
+                      exit 0
+                    fi
+                    if ! kill -0 "$(cat interop-logs/linux-seed.pid)" 2>/dev/null; then
+                      cat interop-logs/linux-seed.log
+                      exit 1
+                    fi
+                    sleep 2
+                  done
+
+                  cat interop-logs/linux-seed.log
+                  echo "Timed out waiting for seed address"
+                  exit 1
+
+            - name: Upload shared filesystem address
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-address
+                  path: shared-fs-address/address.txt
+                  if-no-files-found: error
+
+            - name: Wait for all OS peers
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  while ! test -f interop-logs/linux-seed.exit; do
+                    tail -n 40 interop-logs/linux-seed.log || true
+                    sleep 10
+                  done
+                  cat interop-logs/linux-seed.log
+                  exit "$(cat interop-logs/linux-seed.exit)"
+
+    join:
+        name: Join peer (${{ matrix.machine }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 20
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - os: macos-latest
+                      machine: macos
+                    - os: windows-latest
+                      machine: windows
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Use Bash for pnpm scripts on Windows
+              if: runner.os == 'Windows'
+              run: pnpm config set script-shell "C:\\Program Files\\Git\\bin\\bash.exe"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Download seed address
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p shared-fs-address
+                  for _ in {1..120}; do
+                    rm -f shared-fs-address/address.txt
+                    if gh run download "$GITHUB_RUN_ID" -n shared-fs-address -D shared-fs-address >/dev/null 2>&1 && test -s shared-fs-address/address.txt; then
+                      cat shared-fs-address/address.txt
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  echo "Timed out waiting for seed address artifact"
+                  exit 1
+
+            - name: Join shared filesystem
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  timeout_ms=$((INTEROP_TIMEOUT_MINUTES * 60 * 1000))
+                  node packages/shared-fs/cli/lib/esm/cross-os-interop.js \
+                    --role join \
+                    --machine "${{ matrix.machine }}" \
+                    --expected linux,macos,windows \
+                    --address-file shared-fs-address/address.txt \
+                    --timeout-ms "$timeout_ms" \
+                    --directory ".peerbit-shared-fs-interop-${{ matrix.machine }}"

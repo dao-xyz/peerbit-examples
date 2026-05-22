@@ -1,0 +1,52 @@
+name: Shared FS Native Smoke
+
+on:
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+jobs:
+    linux-fuse:
+        name: Linux FUSE native smoke
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install FUSE
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y fuse3 libfuse3-dev
+                  sudo modprobe fuse || true
+                  if test -e /dev/fuse; then
+                    sudo chmod 666 /dev/fuse
+                  fi
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Install optional native adapter
+              run: npm --prefix packages/shared-fs/library install --no-save --package-lock=false fuse-native@2.2.6
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Run native mount smoke
+              env:
+                  PEERBIT_SHARED_FS_NATIVE_SMOKE: "1"
+              run: pnpm --filter @peerbit/shared-fs exec vitest run src/__tests__/native-mount.smoke.test.ts
