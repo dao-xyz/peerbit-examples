@@ -232,6 +232,20 @@ export const createSharedFsMountBackend = (
         return conflicts.find((conflict) => conflict.path === path);
     };
 
+    const pendingWritableHandle = (path: string) => {
+        for (const handle of handles.values()) {
+            if (
+                handle.path === path &&
+                handle.write &&
+                !handle.readOnly &&
+                handle.dirty
+            ) {
+                return handle;
+            }
+        }
+        return undefined;
+    };
+
     const getattrConflict = async (path: string): Promise<SharedFsStat> => {
         const parsed = parseConflictPath(path);
         if (!parsed || parsed.kind === "invalid") {
@@ -303,6 +317,10 @@ export const createSharedFsMountBackend = (
             }
             const entry = await findEntry(target, normalized);
             if (!entry) {
+                const pending = pendingWritableHandle(normalized);
+                if (pending) {
+                    return fileStat(normalized, pending.buffer.byteLength);
+                }
                 throw notFound(normalized);
             }
             return entry.kind === "directory"
@@ -345,10 +363,29 @@ export const createSharedFsMountBackend = (
                         kind: "file" as const,
                     }));
             }
-            const entries = (await target.list(normalized)).map((entry) => ({
-                name: entry.name,
-                kind: entry.kind,
-            }));
+            const byName = new Map(
+                (await target.list(normalized)).map((entry) => [
+                    entry.name,
+                    {
+                        name: entry.name,
+                        kind: entry.kind,
+                    },
+                ])
+            );
+            for (const handle of handles.values()) {
+                if (
+                    handle.write &&
+                    !handle.readOnly &&
+                    handle.dirty &&
+                    dirname(handle.path) === normalized
+                ) {
+                    byName.set(basename(handle.path), {
+                        name: basename(handle.path),
+                        kind: "file" as const,
+                    });
+                }
+            }
+            const entries = [...byName.values()];
             if (normalized === "/") {
                 entries.push({ name: CONFLICTS_DIR, kind: "directory" });
             }
@@ -390,11 +427,14 @@ export const createSharedFsMountBackend = (
                 ? new Uint8Array(0)
                 : ((await target.readFile(normalized)) ?? new Uint8Array(0));
             const handle = nextHandle++;
+            const dirty =
+                parsedFlags.write &&
+                (parsedFlags.create || parsedFlags.truncate);
             handles.set(handle, {
                 path: normalized,
                 buffer: existing,
                 write: parsedFlags.write,
-                dirty: false,
+                dirty,
                 readOnly: false,
             });
             return handle;

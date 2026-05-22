@@ -39,7 +39,13 @@ describe("shared fs mount backend", () => {
             truncate: true,
         });
 
+        expect(
+            (await backend.readdir("/docs")).map((entry) => entry.name)
+        ).toContain("file.txt");
         await backend.write(handle, encode("hello"), 0);
+        expect((await backend.getattr("/docs/file.txt")).size).toBe(
+            "hello".length
+        );
         expect(await fs.readFile("/docs/file.txt")).toBeUndefined();
 
         await backend.release(handle);
