@@ -82,6 +82,9 @@ const packageAvailable = async (specifier: string) => {
     }
 };
 
+const errorMessage = (error: unknown) =>
+    error instanceof Error ? error.message : String(error);
+
 export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
     if (process.platform === "linux") {
         const hasFuseDevice = await pathExists("/dev/fuse");
@@ -185,10 +188,12 @@ const loadFuseNative = async () => {
         };
         return loaded.default ?? loaded;
     } catch (error) {
-        throw new NativeMountUnavailableError(
+        const requirement =
             process.platform === "darwin"
                 ? "macOS native mounts require macFUSE and the optional fuse-native package."
-                : "Linux native mounts require libfuse/FUSE and the optional fuse-native package."
+                : "Linux native mounts require libfuse/FUSE and the optional fuse-native package.";
+        throw new NativeMountUnavailableError(
+            `${requirement} Adapter import failed: ${errorMessage(error)}`
         );
     }
 };

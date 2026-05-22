@@ -32,6 +32,7 @@ jobs:
               run: |
                   sudo apt-get update
                   sudo apt-get install -y fuse3 libfuse3-dev
+                  sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
                   sudo modprobe fuse || true
                   if test -e /dev/fuse; then
                     sudo chmod 666 /dev/fuse
@@ -45,6 +46,11 @@ jobs:
 
             - name: Install optional native adapter
               run: npm --prefix packages/shared-fs/library install --no-save --package-lock=false fuse-native@2.2.6
+
+            - name: Verify optional native adapter import
+              working-directory: packages/shared-fs/library
+              run: |
+                  node -e "import('fuse-native').then(() => console.log('fuse-native import ok')).catch((error) => { console.error(error); process.exit(1); })"
 
             - name: Run native mount smoke
               env:
