@@ -257,6 +257,22 @@ export const mountNativeSharedFs = async (
                     (error) => callback(toErrno(error))
                 );
             },
+            create(
+                path: string,
+                _mode: number,
+                callback: (errno: number, fd?: number) => void
+            ) {
+                backend
+                    .open(path, {
+                        write: true,
+                        create: true,
+                        truncate: true,
+                    })
+                    .then(
+                        (handle) => callback(0, handle),
+                        (error) => callback(toErrno(error))
+                    );
+            },
             read(
                 _path: string,
                 fd: number,
