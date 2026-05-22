@@ -40,11 +40,11 @@ jobs:
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
 
-            - name: Install optional native adapter
-              run: npm --prefix packages/shared-fs/library install --no-save --package-lock=false fuse-native@2.2.6
-
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Install optional native adapter
+              run: npm --prefix packages/shared-fs/library install --no-save --package-lock=false fuse-native@2.2.6
 
             - name: Run native mount smoke
               env:
