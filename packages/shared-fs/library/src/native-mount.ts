@@ -46,11 +46,7 @@ const errno = {
 };
 
 const importOptional = async (specifier: string) => {
-    const dynamicImport = new Function(
-        "specifier",
-        "return import(specifier)"
-    ) as (specifier: string) => Promise<unknown>;
-    return dynamicImport(specifier);
+    return import(specifier);
 };
 
 const pathExists = async (path: string) => {
