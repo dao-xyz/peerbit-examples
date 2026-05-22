@@ -18,6 +18,14 @@ export type NativeMountSession = {
     unmount(): Promise<void>;
 };
 
+export type NativeMountSupport = {
+    platform: NodeJS.Platform;
+    adapter: "fuse-native" | "winfsp" | "unsupported";
+    available: boolean;
+    missing: string[];
+    notes: string[];
+};
+
 export class NativeMountUnavailableError extends Error {
     constructor(message: string) {
         super(message);
@@ -43,6 +51,108 @@ const importOptional = async (specifier: string) => {
         "return import(specifier)"
     ) as (specifier: string) => Promise<unknown>;
     return dynamicImport(specifier);
+};
+
+const pathExists = async (path: string) => {
+    const { access } = await import("node:fs/promises");
+    try {
+        await access(path);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+const commandExists = async (command: string) => {
+    const { execFile } = await import("node:child_process");
+    const executable = process.platform === "win32" ? "where" : "which";
+    return new Promise<boolean>((resolve) => {
+        execFile(executable, [command], (error) => {
+            resolve(!error);
+        });
+    });
+};
+
+const packageAvailable = async (specifier: string) => {
+    try {
+        await importOptional(specifier);
+        return true;
+    } catch {
+        return false;
+    }
+};
+
+export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
+    if (process.platform === "linux") {
+        const hasFuseDevice = await pathExists("/dev/fuse");
+        const hasFusermount =
+            (await commandExists("fusermount3")) ||
+            (await commandExists("fusermount"));
+        const hasFuseNative = await packageAvailable("fuse-native");
+        const missing = [
+            !hasFuseDevice ? "/dev/fuse" : undefined,
+            !hasFusermount ? "fusermount/fusermount3" : undefined,
+            !hasFuseNative ? "optional fuse-native package" : undefined,
+        ].filter((value): value is string => value != null);
+        return {
+            platform: process.platform,
+            adapter: "fuse-native",
+            available: missing.length === 0,
+            missing,
+            notes: ["Linux native mounts use FUSE/libfuse."],
+        };
+    }
+
+    if (process.platform === "darwin") {
+        const hasMacFuse =
+            (await pathExists("/Library/Filesystems/macfuse.fs")) ||
+            (await commandExists("mount_macfuse"));
+        const hasFuseNative = await packageAvailable("fuse-native");
+        const missing = [
+            !hasMacFuse ? "macFUSE" : undefined,
+            !hasFuseNative ? "optional fuse-native package" : undefined,
+        ].filter((value): value is string => value != null);
+        return {
+            platform: process.platform,
+            adapter: "fuse-native",
+            available: missing.length === 0,
+            missing,
+            notes: [
+                "macOS native mounts require macFUSE, which usually needs host-level installation and approval.",
+            ],
+        };
+    }
+
+    if (process.platform === "win32") {
+        const hasWinFsp =
+            (await pathExists(
+                "C:\\Program Files\\WinFsp\\bin\\winfsp-x64.dll"
+            )) ||
+            (await pathExists(
+                "C:\\Program Files (x86)\\WinFsp\\bin\\winfsp-x64.dll"
+            ));
+        const missing = [
+            !hasWinFsp ? "WinFsp runtime" : undefined,
+            "WinFsp adapter binary",
+        ].filter((value): value is string => value != null);
+        return {
+            platform: process.platform,
+            adapter: "winfsp",
+            available: false,
+            missing,
+            notes: [
+                "The shared IPC/backend contract is present, but this package does not bundle a WinFsp adapter binary yet.",
+            ],
+        };
+    }
+
+    return {
+        platform: process.platform,
+        adapter: "unsupported",
+        available: false,
+        missing: [`native mount adapter for ${process.platform}`],
+        notes: [],
+    };
 };
 
 const isBackend = (

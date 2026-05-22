@@ -3,6 +3,7 @@ import {
     createSharedFsIpcClient,
     createSharedFsIpcServer,
     createSharedFsMountBackend,
+    getNativeMountSupport,
     mountNativeSharedFs,
     openSharedFs,
     runSharedFsBenchmark,
@@ -106,7 +107,22 @@ const waitForTermination = async (stop: () => Promise<void>) => {
     });
 };
 
-const printNativeRequirements = () => {
+const printNativeRequirements = async () => {
+    const support = await getNativeMountSupport();
+    console.log(chalk.bold("Native mount status"));
+    console.log(`platform: ${support.platform}`);
+    console.log(`adapter: ${support.adapter}`);
+    console.log(`available: ${support.available ? "yes" : "no"}`);
+    if (support.missing.length > 0) {
+        console.log("missing:");
+        for (const item of support.missing) {
+            console.log(`  - ${item}`);
+        }
+    }
+    for (const note of support.notes) {
+        console.log(`note: ${note}`);
+    }
+    console.log("");
     console.log(chalk.bold("Native mount requirements"));
     console.log("linux: libfuse/FUSE plus the optional fuse-native package");
     console.log("macOS: macFUSE plus the optional fuse-native package");
@@ -249,7 +265,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     await stopPeerbitForCli(peerbit).catch(() => {});
                     if (error instanceof NativeMountUnavailableError) {
                         console.error(chalk.red(error.message));
-                        printNativeRequirements();
+                        await printNativeRequirements();
                         process.exitCode = 1;
                         return;
                     }
@@ -265,7 +281,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     type: "string",
                 }),
             async (argv) => {
-                printNativeRequirements();
+                await printNativeRequirements();
                 if (!argv.address) {
                     return;
                 }

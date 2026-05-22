@@ -53,6 +53,8 @@ work; v0 does not optimize the small-file workload yet.
 The TypeScript Peerbit side exposes a small POSIX-ish backend and a local
 JSON-lines IPC protocol with `getattr`, `readdir`, `open`, `read`, `write`,
 `flush`, `fsync`, `release`, `mkdir`, `rmdir`, `rename`, and `unlink`.
+Run `peerbit-fs status` to report the current host platform, selected adapter,
+and any missing native mount prerequisites.
 
 The first adapter path is intentionally experimental:
 
@@ -60,6 +62,13 @@ The first adapter path is intentionally experimental:
 - macOS requires macFUSE and the optional `fuse-native` package.
 - Windows requires a WinFsp adapter binary; the shared IPC contract is present,
   but this package does not bundle that binary yet.
+
+Portable CI covers the shared backend and IPC contract on Linux, macOS, and
+Windows, plus a cross-OS interop workflow where all three runners join one
+shared filesystem address and read each other's files. The native Linux FUSE
+smoke can be run manually with the `Shared FS Native Smoke` workflow. macOS and
+Windows native mount smoke tests need runners with macFUSE/WinFsp installed and
+are left as adapter hardening work.
 
 ## Conflicts
 
