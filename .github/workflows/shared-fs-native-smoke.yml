@@ -51,7 +51,12 @@ jobs:
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
             - name: Install optional native adapter
-              run: npm --prefix packages/shared-fs/library install --no-save --package-lock=false fuse-native@2.2.6
+              run: |
+                  native_deps="$RUNNER_TEMP/fuse-native-deps"
+                  npm install --prefix "$native_deps" --no-save --package-lock=false fuse-native@2.2.6
+                  mkdir -p packages/shared-fs/library/node_modules
+                  rm -rf packages/shared-fs/library/node_modules/fuse-native
+                  ln -s "$native_deps/node_modules/fuse-native" packages/shared-fs/library/node_modules/fuse-native
 
             - name: Verify optional native adapter import
               working-directory: packages/shared-fs/library
