@@ -81,9 +81,28 @@ const stopPeerbitForCli = async (
 
     try {
         await peerbit.stop();
+    } catch (error) {
+        if (!isPeerbitIndexCloseError(error)) {
+            throw error;
+        }
+        console.warn(
+            chalk.yellow(
+                "Peer shutdown hit a known document-index close race; continuing after successful CLI work."
+            )
+        );
     } finally {
         clearTimeout(timer);
     }
+};
+
+const isPeerbitIndexCloseError = (error: unknown) => {
+    if (!(error instanceof TypeError)) {
+        return false;
+    }
+    return (
+        error.message.includes("clearAll") &&
+        error.stack?.includes("DocumentIndex.close")
+    );
 };
 
 const waitForTermination = async (stop: () => Promise<void>) => {
@@ -288,7 +307,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 try {
                     const fsHandle = await openCliFs(peerbit, {
                         machineLabel: argv.machine,
-                        replicate: argv.replicate,
+                        replicate: false,
                     });
                     console.log(fsHandle.address);
                 } finally {
