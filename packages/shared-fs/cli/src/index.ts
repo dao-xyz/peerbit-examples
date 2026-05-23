@@ -37,6 +37,36 @@ type CliProgramArgs =
           replicate: false;
       };
 
+let peerbitRejectionGuardInstalled = false;
+
+const isPeerbitSelfReceiverError = (error: unknown) => {
+    return (
+        error instanceof Error &&
+        error.message.includes(
+            "Unexpected to create a message with self as the only receiver"
+        ) &&
+        error.stack?.includes("@peerbit/stream")
+    );
+};
+
+const installPeerbitRejectionGuard = () => {
+    if (peerbitRejectionGuardInstalled) {
+        return;
+    }
+    peerbitRejectionGuardInstalled = true;
+    process.on("unhandledRejection", (reason) => {
+        if (isPeerbitSelfReceiverError(reason)) {
+            console.warn(
+                chalk.yellow(
+                    "Peerbit emitted a known self-addressed RPC during local shared-fs operation; continuing."
+                )
+            );
+            return;
+        }
+        throw reason instanceof Error ? reason : new Error(String(reason));
+    });
+};
+
 const resolveDirectory = (directoryArg?: string) => {
     if (directoryArg === undefined) {
         const directory = path.join(os.homedir(), DEFAULT_DIRECTORY_NAME);
@@ -280,6 +310,7 @@ const openCliFs = async (
 };
 
 export const runCli = async (args = hideBin(process.argv)) => {
+    installPeerbitRejectionGuard();
     await yargs(args)
         .scriptName("peerbit-fs")
         .option("directory", {
