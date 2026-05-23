@@ -5,6 +5,7 @@ Experimental native mount CLI for `@peerbit/shared-fs`.
 ```bash
 peerbit-fs create
 peerbit-fs mount <address> <mountpoint>
+peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs benchmark [address]
@@ -20,7 +21,9 @@ available on the host, and any missing pieces before optionally opening an
 address.
 
 Linux/macOS mounts require FUSE/macFUSE plus the optional `fuse-native` package.
-Windows requires a WinFsp adapter binary; the shared IPC/backend contract is in
-place, but no WinFsp binary is bundled yet. The repo includes a manual
-`Shared FS Native Smoke` GitHub workflow for Linux FUSE. Portable CI still runs
-the backend and cross-OS shared-store checks on Linux, macOS, and Windows.
+The external `packages/shared-fs/native` adapter uses cgofuse for Linux FUSE,
+macFUSE, and WinFsp, and can be selected with `--native-adapter` or the
+`PEERBIT_SHARED_FS_NATIVE_ADAPTER` environment variable. The repo includes a
+manual `Shared FS Native Smoke` GitHub workflow for Linux FUSE. Portable CI
+still runs the backend and cross-OS shared-store checks on Linux, macOS, and
+Windows.

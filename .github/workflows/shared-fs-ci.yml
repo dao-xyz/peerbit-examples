@@ -96,3 +96,48 @@ jobs:
 
             - name: Check formatting
               run: pnpm exec prettier --check packages/shared-fs
+
+    native-adapter:
+        name: Native adapter checks (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 20
+        strategy:
+            fail-fast: false
+            matrix:
+                os:
+                    - ubuntu-latest
+                    - macos-latest
+                    - windows-latest
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Install Linux FUSE headers
+              if: runner.os == 'Linux'
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y fuse3 libfuse3-dev
+                  sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
+
+            - name: Test portable native adapter IPC
+              working-directory: packages/shared-fs/native
+              run: go test ./...
+
+            - name: Build Linux native adapter
+              if: runner.os == 'Linux'
+              working-directory: packages/shared-fs/native
+              run: go test -tags "native_mount fuse3" ./...
+
+            - name: Build Windows native adapter
+              if: runner.os == 'Windows'
+              working-directory: packages/shared-fs/native
+              env:
+                  CGO_ENABLED: "0"
+              run: go test -tags native_mount ./...

@@ -109,4 +109,28 @@ describe("shared fs mount backend", () => {
             await server.close();
         }
     });
+
+    it("round-trips backend calls through TCP IPC for external adapters", async () => {
+        const backend = createSharedFsMountBackend(fs);
+        const server = await createSharedFsIpcServer(
+            backend,
+            "tcp://127.0.0.1:0"
+        );
+        try {
+            expect(server.endpoint).toMatch(/^tcp:\/\/127\.0\.0\.1:\d+$/);
+            const client = createSharedFsIpcClient(server.endpoint);
+            await client.mkdir("/tcp");
+            const handle = await client.open("/tcp/file.txt", {
+                write: true,
+                create: true,
+                truncate: true,
+            });
+            await client.write(handle, encode("over tcp"), 0);
+            await client.release(handle);
+
+            expect(decode(await fs.readFile("/tcp/file.txt"))).toBe("over tcp");
+        } finally {
+            await server.close();
+        }
+    });
 });

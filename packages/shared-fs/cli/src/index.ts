@@ -11,6 +11,7 @@ import {
 } from "@peerbit/shared-fs";
 import { multiaddr } from "@multiformats/multiaddr";
 import chalk from "chalk";
+import { spawn, type ChildProcess } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -105,6 +106,90 @@ const waitForTermination = async (stop: () => Promise<void>) => {
         process.once("SIGINT", finish);
         process.once("SIGTERM", finish);
     });
+};
+
+const waitForChildExit = async (child: ChildProcess, timeoutMs = 5_000) => {
+    if (child.exitCode != null || child.signalCode != null) {
+        return;
+    }
+    await new Promise<void>((resolve) => {
+        const timeout = setTimeout(resolve, timeoutMs);
+        child.once("exit", () => {
+            clearTimeout(timeout);
+            resolve();
+        });
+    });
+};
+
+const mountExternalNativeAdapter = async (
+    command: string,
+    endpoint: string,
+    mountpoint: string
+) => {
+    const child = spawn(
+        command,
+        ["--endpoint", endpoint, "--mountpoint", mountpoint],
+        {
+            stdio: ["ignore", "pipe", "pipe"],
+        }
+    );
+    child.stderr.on("data", (chunk) => process.stderr.write(chunk));
+
+    await new Promise<void>((resolve, reject) => {
+        let output = "";
+        const timeout = setTimeout(() => {
+            cleanup();
+            reject(
+                new Error(
+                    `Native adapter did not report readiness within 15 seconds: ${command}`
+                )
+            );
+        }, 15_000);
+        const cleanup = () => {
+            clearTimeout(timeout);
+            child.stdout.off("data", onStdout);
+            child.off("error", onError);
+            child.off("exit", onExit);
+        };
+        const onStdout = (chunk: Buffer) => {
+            output += chunk.toString("utf8");
+            process.stdout.write(chunk);
+            if (output.includes("peerbit-shared-fs-native ready")) {
+                cleanup();
+                resolve();
+            }
+        };
+        const onError = (error: Error) => {
+            cleanup();
+            reject(error);
+        };
+        const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+            cleanup();
+            reject(
+                new Error(
+                    `Native adapter exited before mount readiness: code=${code} signal=${signal}`
+                )
+            );
+        };
+        child.stdout.on("data", onStdout);
+        child.once("error", onError);
+        child.once("exit", onExit);
+    });
+
+    return {
+        mountpoint,
+        async unmount() {
+            if (child.exitCode != null || child.signalCode != null) {
+                return;
+            }
+            child.kill("SIGINT");
+            await waitForChildExit(child);
+            if (child.exitCode == null && child.signalCode == null) {
+                child.kill("SIGTERM");
+                await waitForChildExit(child);
+            }
+        },
+    };
 };
 
 const printNativeRequirements = async () => {
@@ -223,6 +308,11 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     .positional("mountpoint", {
                         type: "string",
                         demandOption: true,
+                    })
+                    .option("native-adapter", {
+                        type: "string",
+                        description:
+                            "External native adapter command. Can also be set with PEERBIT_SHARED_FS_NATIVE_ADAPTER.",
                     }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
@@ -232,6 +322,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | undefined;
                 let mounted:
                     | Awaited<ReturnType<typeof mountNativeSharedFs>>
+                    | Awaited<ReturnType<typeof mountExternalNativeAdapter>>
                     | undefined;
                 try {
                     await connectToNetwork(peerbit, argv.peer);
@@ -241,13 +332,26 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         replicate: argv.replicate,
                     });
                     const backend = createSharedFsMountBackend(fsHandle);
-                    ipc = await createSharedFsIpcServer(backend);
-                    mounted = await mountNativeSharedFs(
-                        createSharedFsIpcClient(ipc.endpoint),
-                        {
-                            mountpoint: path.resolve(String(argv.mountpoint)),
-                        }
+                    const externalAdapter =
+                        argv.nativeAdapter ||
+                        process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER;
+                    const mountpoint = path.resolve(String(argv.mountpoint));
+                    ipc = await createSharedFsIpcServer(
+                        backend,
+                        externalAdapter ? "tcp://127.0.0.1:0" : undefined
                     );
+                    mounted = externalAdapter
+                        ? await mountExternalNativeAdapter(
+                              externalAdapter,
+                              ipc.endpoint,
+                              mountpoint
+                          )
+                        : await mountNativeSharedFs(
+                              createSharedFsIpcClient(ipc.endpoint),
+                              {
+                                  mountpoint,
+                              }
+                          );
                     console.log(
                         chalk.green(
                             `Mounted ${fsHandle.address} at ${mounted.mountpoint}`

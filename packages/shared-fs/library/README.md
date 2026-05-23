@@ -32,6 +32,7 @@ The companion `@peerbit/shared-fs-cli` package installs `peerbit-fs`:
 ```bash
 peerbit-fs create
 peerbit-fs mount <address> <mountpoint>
+peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
 peerbit-fs conflicts <address>
 peerbit-fs benchmark [address]
@@ -60,15 +61,16 @@ The first adapter path is intentionally experimental:
 
 - Linux requires FUSE/libfuse and the optional `fuse-native` package.
 - macOS requires macFUSE and the optional `fuse-native` package.
-- Windows requires a WinFsp adapter binary; the shared IPC contract is present,
-  but this package does not bundle that binary yet.
+- `packages/shared-fs/native` provides an experimental external native adapter
+  binary using cgofuse for Linux FUSE, macFUSE, and WinFsp. Use it with
+  `peerbit-fs mount --native-adapter peerbit-shared-fs-native`.
 
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
 shared filesystem address and read each other's files. The native Linux FUSE
-smoke can be run manually with the `Shared FS Native Smoke` workflow. macOS and
-Windows native mount smoke tests need runners with macFUSE/WinFsp installed and
-are left as adapter hardening work.
+smoke can be run manually with the `Shared FS Native Smoke` workflow. Native
+adapter compile checks run in CI for Linux and Windows; macOS native mount smoke
+still needs a runner with macFUSE installed.
 
 ## Conflicts
 

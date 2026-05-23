@@ -1,4 +1,9 @@
-import { createServer, createConnection, type Server } from "node:net";
+import {
+    createServer,
+    createConnection,
+    type Server,
+    type Socket,
+} from "node:net";
 import { existsSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -88,6 +93,55 @@ export const defaultSharedFsIpcEndpoint = (name = randomUUID()) => {
     return join("/tmp", `pbfs-${name.slice(0, 8)}.sock`);
 };
 
+const parseTcpEndpoint = (endpoint: string) => {
+    if (!endpoint.startsWith("tcp://")) {
+        return undefined;
+    }
+    const url = new URL(endpoint);
+    return {
+        host: url.hostname || "127.0.0.1",
+        port: Number(url.port || 0),
+    };
+};
+
+const listenServer = async (server: Server, endpoint: string) => {
+    const tcp = parseTcpEndpoint(endpoint);
+    await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        if (tcp) {
+            server.listen(tcp.port, tcp.host, () => {
+                server.off("error", reject);
+                resolve();
+            });
+            return;
+        }
+        if (process.platform !== "win32" && existsSync(endpoint)) {
+            unlinkSync(endpoint);
+        }
+        server.listen(endpoint, () => {
+            server.off("error", reject);
+            resolve();
+        });
+    });
+
+    if (!tcp) {
+        return endpoint;
+    }
+    const address = server.address();
+    if (typeof address !== "object" || address == null) {
+        return endpoint;
+    }
+    return `tcp://${address.address}:${address.port}`;
+};
+
+const connectEndpoint = (endpoint: string): Socket => {
+    const tcp = parseTcpEndpoint(endpoint);
+    if (tcp) {
+        return createConnection({ host: tcp.host, port: tcp.port });
+    }
+    return createConnection(endpoint);
+};
+
 export const createSharedFsIpcServer = async (
     backend: SharedFsMountBackend,
     endpoint = defaultSharedFsIpcEndpoint()
@@ -138,19 +192,10 @@ export const createSharedFsIpcServer = async (
         });
     });
 
-    await new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        if (process.platform !== "win32" && existsSync(endpoint)) {
-            unlinkSync(endpoint);
-        }
-        server.listen(endpoint, () => {
-            server.off("error", reject);
-            resolve();
-        });
-    });
+    const resolvedEndpoint = await listenServer(server, endpoint);
 
     return {
-        endpoint,
+        endpoint: resolvedEndpoint,
         close() {
             return new Promise<void>((resolve, reject) => {
                 server.close((error) => {
@@ -173,7 +218,7 @@ export const createSharedFsIpcClient = (
     const request = async (op: keyof SharedFsMountBackend, args: unknown[]) => {
         const id = nextId++;
         return new Promise<unknown>((resolve, reject) => {
-            const socket = createConnection(endpoint);
+            const socket = connectEndpoint(endpoint);
             let buffered = "";
             socket.on("error", reject);
             socket.on("connect", () => {

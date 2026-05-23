@@ -78,6 +78,13 @@ const packageAvailable = async (specifier: string) => {
     }
 };
 
+const externalNativeAdapterAvailable = async () => {
+    if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER) {
+        return true;
+    }
+    return commandExists("peerbit-shared-fs-native");
+};
+
 const errorMessage = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
 
@@ -88,10 +95,13 @@ export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
             (await commandExists("fusermount3")) ||
             (await commandExists("fusermount"));
         const hasFuseNative = await packageAvailable("fuse-native");
+        const hasExternalAdapter = await externalNativeAdapterAvailable();
         const missing = [
             !hasFuseDevice ? "/dev/fuse" : undefined,
             !hasFusermount ? "fusermount/fusermount3" : undefined,
-            !hasFuseNative ? "optional fuse-native package" : undefined,
+            !hasFuseNative && !hasExternalAdapter
+                ? "optional fuse-native package or peerbit-shared-fs-native adapter"
+                : undefined,
         ].filter((value): value is string => value != null);
         return {
             platform: process.platform,
@@ -107,9 +117,12 @@ export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
             (await pathExists("/Library/Filesystems/macfuse.fs")) ||
             (await commandExists("mount_macfuse"));
         const hasFuseNative = await packageAvailable("fuse-native");
+        const hasExternalAdapter = await externalNativeAdapterAvailable();
         const missing = [
             !hasMacFuse ? "macFUSE" : undefined,
-            !hasFuseNative ? "optional fuse-native package" : undefined,
+            !hasFuseNative && !hasExternalAdapter
+                ? "optional fuse-native package or peerbit-shared-fs-native adapter"
+                : undefined,
         ].filter((value): value is string => value != null);
         return {
             platform: process.platform,
@@ -130,17 +143,20 @@ export const getNativeMountSupport = async (): Promise<NativeMountSupport> => {
             (await pathExists(
                 "C:\\Program Files (x86)\\WinFsp\\bin\\winfsp-x64.dll"
             ));
+        const hasExternalAdapter = await externalNativeAdapterAvailable();
         const missing = [
             !hasWinFsp ? "WinFsp runtime" : undefined,
-            "WinFsp adapter binary",
+            !hasExternalAdapter
+                ? "peerbit-shared-fs-native adapter binary"
+                : undefined,
         ].filter((value): value is string => value != null);
         return {
             platform: process.platform,
             adapter: "winfsp",
-            available: false,
+            available: missing.length === 0,
             missing,
             notes: [
-                "The shared IPC/backend contract is present, but this package does not bundle a WinFsp adapter binary yet.",
+                "Windows native mounts use WinFsp through the external peerbit-shared-fs-native adapter.",
             ],
         };
     }
