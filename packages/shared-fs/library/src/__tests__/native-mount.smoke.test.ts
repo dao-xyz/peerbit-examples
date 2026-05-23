@@ -1,4 +1,11 @@
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+    mkdir,
+    mkdtemp,
+    readFile,
+    rename,
+    rm,
+    writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Peerbit } from "peerbit";
@@ -62,19 +69,43 @@ const runNativeSmoke = process.env.PEERBIT_SHARED_FS_NATIVE_SMOKE === "1";
                 | undefined;
             try {
                 session = await mountNativeSharedFs(fs, { mountpoint });
+                await mkdir(path.join(mountpoint, "docs"));
                 await writeFile(
-                    path.join(mountpoint, "hello.txt"),
+                    path.join(mountpoint, "docs", "hello.txt"),
                     "hello native"
                 );
 
                 await waitUntil(async () => {
-                    expect(decode(await fs.readFile("/hello.txt"))).toBe(
+                    expect(decode(await fs.readFile("/docs/hello.txt"))).toBe(
                         "hello native"
                     );
                 });
                 expect(
-                    await readFile(path.join(mountpoint, "hello.txt"), "utf8")
+                    await readFile(
+                        path.join(mountpoint, "docs", "hello.txt"),
+                        "utf8"
+                    )
                 ).toBe("hello native");
+
+                await rename(
+                    path.join(mountpoint, "docs", "hello.txt"),
+                    path.join(mountpoint, "docs", "renamed.txt")
+                );
+                await waitUntil(async () => {
+                    expect(
+                        await fs.readFile("/docs/hello.txt")
+                    ).toBeUndefined();
+                    expect(decode(await fs.readFile("/docs/renamed.txt"))).toBe(
+                        "hello native"
+                    );
+                });
+
+                await rm(path.join(mountpoint, "docs", "renamed.txt"));
+                await waitUntil(async () => {
+                    expect(
+                        await fs.readFile("/docs/renamed.txt")
+                    ).toBeUndefined();
+                });
             } catch (error) {
                 if (error instanceof NativeMountUnavailableError) {
                     throw new Error(
