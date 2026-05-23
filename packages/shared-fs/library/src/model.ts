@@ -1,5 +1,21 @@
-import { field, option, variant, vec } from "@dao-xyz/borsh";
+import { field, option, variant } from "@dao-xyz/borsh";
 import { sha256Base64Sync } from "@peerbit/crypto";
+
+const encodeStringList = (values?: string[]) => JSON.stringify(values ?? []);
+
+const decodeStringList = (value?: string) => {
+    if (!value) {
+        return [];
+    }
+    try {
+        const parsed = JSON.parse(value);
+        return Array.isArray(parsed)
+            ? parsed.filter((item): item is string => typeof item === "string")
+            : [];
+    } catch {
+        return [];
+    }
+};
 
 export type SharedFsEntryKind =
     | "directory"
@@ -259,8 +275,8 @@ export class FileVersion extends SharedFsEntry {
     @field({ type: "string" })
     name: string;
 
-    @field({ type: vec("string") })
-    parentVersionIds: string[];
+    @field({ type: "string" })
+    parentVersionIdsJson: string;
 
     @field({ type: "string" })
     contentHash: string;
@@ -268,8 +284,8 @@ export class FileVersion extends SharedFsEntry {
     @field({ type: "u64" })
     size: bigint;
 
-    @field({ type: vec("string") })
-    chunkIds: string[];
+    @field({ type: "string" })
+    chunkIdsJson: string;
 
     @field({ type: "u64" })
     createdAt: bigint;
@@ -313,6 +329,22 @@ export class FileVersion extends SharedFsEntry {
             this.conflictResolution = properties.conflictResolution ?? false;
         }
     }
+
+    get parentVersionIds() {
+        return decodeStringList(this.parentVersionIdsJson);
+    }
+
+    set parentVersionIds(value: string[]) {
+        this.parentVersionIdsJson = encodeStringList(value);
+    }
+
+    get chunkIds() {
+        return decodeStringList(this.chunkIdsJson);
+    }
+
+    set chunkIds(value: string[]) {
+        this.chunkIdsJson = encodeStringList(value);
+    }
 }
 
 @variant("shared_fs_delete_marker")
@@ -331,8 +363,8 @@ export class DeleteMarker extends SharedFsEntry {
     @field({ type: "string" })
     name: string;
 
-    @field({ type: vec("string") })
-    parentVersionIds: string[];
+    @field({ type: "string" })
+    parentVersionIdsJson: string;
 
     @field({ type: "u64" })
     createdAt: bigint;
@@ -364,6 +396,14 @@ export class DeleteMarker extends SharedFsEntry {
             this.authorKey = properties.authorKey;
             this.machineLabel = properties.machineLabel;
         }
+    }
+
+    get parentVersionIds() {
+        return decodeStringList(this.parentVersionIdsJson);
+    }
+
+    set parentVersionIds(value: string[]) {
+        this.parentVersionIdsJson = encodeStringList(value);
     }
 }
 

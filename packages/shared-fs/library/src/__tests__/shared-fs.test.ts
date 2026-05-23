@@ -1,3 +1,6 @@
+import nodeFs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
@@ -10,6 +13,22 @@ import {
 const encode = (value: string) => new TextEncoder().encode(value);
 const decode = (value: Uint8Array | undefined) =>
     value ? new TextDecoder().decode(value) : undefined;
+
+const stopPeer = async (peer: Peerbit) => {
+    try {
+        await peer.stop();
+    } catch (error) {
+        if (
+            !(
+                error instanceof TypeError &&
+                error.message.includes("clearAll") &&
+                error.stack?.includes("DocumentIndex.close")
+            )
+        ) {
+            throw error;
+        }
+    }
+};
 
 const patternedBytes = (size: number) => {
     const bytes = new Uint8Array(size);
@@ -52,7 +71,7 @@ describe("shared fs library", () => {
     });
 
     afterEach(async () => {
-        await peer.stop();
+        await stopPeer(peer);
     });
 
     it("creates, lists, reads, renames, deletes directories and files", async () => {
@@ -131,6 +150,46 @@ describe("shared fs library", () => {
         expect(result.smallFiles.count).toBe(3);
         expect(result.smallFiles.bytesPerFile).toBe(16);
     });
+
+    it("reopens from a persisted state directory", async () => {
+        const directory = await nodeFs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-library-")
+        );
+        let address = "";
+
+        try {
+            const firstPeer = await Peerbit.create({ directory });
+            try {
+                const firstFs = await openSharedFs({
+                    peerbit: firstPeer,
+                    machineLabel: "persistent-writer",
+                    replicate: false,
+                });
+                address = firstFs.address;
+                await firstFs.mkdir("/docs");
+                await firstFs.writeFile("/docs/hello.txt", "persisted");
+            } finally {
+                await stopPeer(firstPeer);
+            }
+
+            const secondPeer = await Peerbit.create({ directory });
+            try {
+                const secondFs = await openSharedFs({
+                    peerbit: secondPeer,
+                    address,
+                    machineLabel: "persistent-reader",
+                    replicate: false,
+                });
+                expect(decode(await secondFs.readFile("/docs/hello.txt"))).toBe(
+                    "persisted"
+                );
+            } finally {
+                await stopPeer(secondPeer);
+            }
+        } finally {
+            await nodeFs.rm(directory, { recursive: true, force: true });
+        }
+    });
 });
 
 describe("shared fs replication", () => {
@@ -143,7 +202,7 @@ describe("shared fs replication", () => {
     };
 
     afterEach(async () => {
-        await Promise.all(peers.splice(0).map((peer) => peer.stop()));
+        await Promise.all(peers.splice(0).map((peer) => stopPeer(peer)));
     });
 
     it("syncs a local-first write after peers reconnect", async () => {

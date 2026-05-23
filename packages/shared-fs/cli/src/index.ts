@@ -56,9 +56,16 @@ const coerceAddresses = (addrs: string | string[]) => {
     );
 };
 
-const connectToNetwork = async (peerbit: Peerbit, peer?: string | string[]) => {
+const connectToNetwork = async (
+    peerbit: Peerbit,
+    peer?: string | string[],
+    options?: { bootstrap?: boolean }
+) => {
     if (peer) {
         await peerbit.dial(coerceAddresses(peer));
+        return;
+    }
+    if (options?.bootstrap === false) {
         return;
     }
     await peerbit.bootstrap();
@@ -344,7 +351,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     | Awaited<ReturnType<typeof mountExternalNativeAdapter>>
                     | undefined;
                 try {
-                    await connectToNetwork(peerbit, argv.peer);
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: argv.replicate !== false,
+                    });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -411,7 +420,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await Peerbit.create({ directory });
                 try {
-                    await connectToNetwork(peerbit, argv.peer);
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: argv.replicate !== false,
+                    });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -439,7 +450,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await Peerbit.create({ directory });
                 try {
-                    await connectToNetwork(peerbit, argv.peer);
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: argv.replicate !== false,
+                    });
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,
                         machineLabel: argv.machine,
@@ -507,7 +520,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 const peerbit = await Peerbit.create({ directory });
                 try {
                     if (argv.address) {
-                        await connectToNetwork(peerbit, argv.peer);
+                        await connectToNetwork(peerbit, argv.peer, {
+                            bootstrap: argv.replicate !== false,
+                        });
                     }
                     const fsHandle = await openCliFs(peerbit, {
                         address: argv.address,

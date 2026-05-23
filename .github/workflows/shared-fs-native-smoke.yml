@@ -76,9 +76,10 @@ jobs:
                   log="$RUNNER_TEMP/pbfs-mount.log"
                   mkdir -p "$mountpoint"
 
-                  address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state")"
+                  address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state" --no-replicate)"
                   node packages/shared-fs/cli/lib/esm/bin.js mount "$address" "$mountpoint" \
                     --directory "$state" \
+                    --no-replicate \
                     --native-adapter "$RUNNER_TEMP/peerbit-shared-fs-native" \
                     > "$log" 2>&1 &
                   mount_pid="$!"
