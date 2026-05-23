@@ -93,7 +93,15 @@ jobs:
                     wait "$mount_pid" >/dev/null 2>&1 || true
                     fusermount -u "$mountpoint" >/dev/null 2>&1 || true
                   }
-                  trap cleanup EXIT
+                  finish() {
+                    status="$?"
+                    if [ "$status" -ne 0 ]; then
+                      cat "$log"
+                    fi
+                    cleanup
+                    exit "$status"
+                  }
+                  trap finish EXIT
 
                   for _ in {1..60}; do
                     if grep -q "Mounted " "$log"; then

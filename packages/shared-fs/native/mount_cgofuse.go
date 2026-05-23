@@ -343,5 +343,6 @@ func errno(err error) int {
 			return -fuse.EROFS
 		}
 	}
+	fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: %v\n", err)
 	return -fuse.EIO
 }
