@@ -233,22 +233,22 @@ jobs:
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
             - name: Download seed address
-              shell: bash
+              shell: powershell
               env:
                   GH_TOKEN: ${{ github.token }}
               run: |
-                  set -euo pipefail
-                  mkdir -p shared-fs-native-address
-                  for _ in {1..180}; do
-                    rm -f shared-fs-native-address/address.txt
-                    if gh run download "$GITHUB_RUN_ID" -n shared-fs-native-address -D shared-fs-native-address >/dev/null 2>&1 && test -s shared-fs-native-address/address.txt; then
-                      cat shared-fs-native-address/address.txt
+                  $ErrorActionPreference = "Stop"
+                  New-Item -ItemType Directory -Force -Path shared-fs-native-address | Out-Null
+                  for ($i = 0; $i -lt 180; $i++) {
+                    Remove-Item -Force -ErrorAction SilentlyContinue shared-fs-native-address/address.txt
+                    $DownloadOutput = & gh run download $env:GITHUB_RUN_ID -n shared-fs-native-address -D shared-fs-native-address 2>&1
+                    if ($LASTEXITCODE -eq 0 -and (Test-Path shared-fs-native-address/address.txt) -and ((Get-Item shared-fs-native-address/address.txt).Length -gt 0)) {
+                      Get-Content shared-fs-native-address/address.txt
                       exit 0
-                    fi
-                    sleep 5
-                  done
-                  echo "Timed out waiting for Linux seed address artifact"
-                  exit 1
+                    }
+                    Start-Sleep -Seconds 5
+                  }
+                  throw "Timed out waiting for Linux seed address artifact"
 
             - name: Run Windows native mount join
               shell: powershell
