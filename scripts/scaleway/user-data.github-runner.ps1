@@ -31,6 +31,7 @@ $EnableWinrm = "{{ENABLE_WINRM}}"
 $WinrmRemoteAddress = "{{WINRM_REMOTE_ADDRESS}}"
 
 $SkipDependencies = "{{SKIP_DEPENDENCIES}}"
+$SkipHeavyDependencies = "{{SKIP_HEAVY_DEPENDENCIES}}"
 
 $RunnerRoot = $env:RUNNER_DIR
 if ([string]::IsNullOrWhiteSpace($RunnerRoot)) {
@@ -337,6 +338,14 @@ Stop-RunnerTask
 
 Ensure-Chocolatey
 Ensure-Git
+
+if ($SkipHeavyDependencies -eq "1") {
+  Ensure-RunnerTask
+  Write-Log "Skipping Visual Studio/Rust installs (SKIP_HEAVY_DEPENDENCIES=1)."
+  Write-Log "Bootstrap complete."
+  exit 0
+}
+
 Ensure-VSBuildTools
 Ensure-Rustup
 Ensure-CargoOnMachinePath

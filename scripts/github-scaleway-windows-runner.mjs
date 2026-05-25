@@ -839,6 +839,10 @@ async function startRunner(repoInfo) {
     const skipDependencies =
         String(process.env.PEERBIT_WINDOWS_SKIP_DEPENDENCIES || "1").trim() !==
         "0";
+    const skipHeavyDependencies =
+        String(
+            process.env.PEERBIT_WINDOWS_SKIP_HEAVY_DEPENDENCIES || ""
+        ).trim() === "1";
     const publicKey = detectPublicKey();
     const sshAuthorizedKey =
         String(process.env.PEERBIT_SCALEWAY_SSH_AUTHORIZED_KEY || "").trim() ||
@@ -1065,6 +1069,7 @@ async function startRunner(repoInfo) {
         ENABLE_WINRM: enableWinrm ? "1" : "",
         WINRM_REMOTE_ADDRESS: escapePowerShell(winrmRemoteAddress),
         SKIP_DEPENDENCIES: skipDependencies ? "1" : "",
+        SKIP_HEAVY_DEPENDENCIES: skipHeavyDependencies ? "1" : "",
     });
 
     console.log(
@@ -1168,6 +1173,10 @@ async function bootstrapRunner(repoInfo) {
     const skipDependencies =
         String(process.env.PEERBIT_WINDOWS_SKIP_DEPENDENCIES || "").trim() ===
         "1";
+    const skipHeavyDependencies =
+        String(
+            process.env.PEERBIT_WINDOWS_SKIP_HEAVY_DEPENDENCIES || ""
+        ).trim() === "1";
     const publicKey = detectPublicKey();
     const sshAuthorizedKey =
         String(process.env.PEERBIT_SCALEWAY_SSH_AUTHORIZED_KEY || "").trim() ||
@@ -1298,6 +1307,7 @@ async function bootstrapRunner(repoInfo) {
         ENABLE_WINRM: enableWinrm ? "1" : "",
         WINRM_REMOTE_ADDRESS: escapePowerShell(winrmRemoteAddress),
         SKIP_DEPENDENCIES: skipDependencies ? "1" : "",
+        SKIP_HEAVY_DEPENDENCIES: skipHeavyDependencies ? "1" : "",
     });
 
     console.log(

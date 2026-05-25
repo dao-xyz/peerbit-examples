@@ -266,6 +266,7 @@ jobs:
                   PEERBIT_RUNNER_EPHEMERAL: "1"
                   PEERBIT_RUNNER_REPLACE: "1"
                   PEERBIT_WINDOWS_SKIP_DEPENDENCIES: "0"
+                  PEERBIT_WINDOWS_SKIP_HEAVY_DEPENDENCIES: "1"
                   PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
               run: node scripts/github-scaleway-windows-runner.mjs start
 
