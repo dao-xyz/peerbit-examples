@@ -140,6 +140,15 @@ function usage() {
         "  PEERBIT_SCALEWAY_ENABLE_KEXT=1         (default: 1; required for macFUSE)"
     );
     console.log(
+        "  PEERBIT_SCALEWAY_REUSE_SERVER=0        (set 1 to reuse a warm Mac host)"
+    );
+    console.log(
+        "  PEERBIT_SCALEWAY_REUSE_POOL=shared-fs  (stable pool name when reusing)"
+    );
+    console.log(
+        "  PEERBIT_SCALEWAY_DELETE_REUSABLE=0     (set 1 to delete reused host in stop)"
+    );
+    console.log(
         "  PEERBIT_SCALEWAY_JANITOR_MAX_AGE_MS=93600000 (default: 26h)"
     );
     console.log(
@@ -481,10 +490,15 @@ function bootstrapScript({
     runnerName,
     runnerLabels,
     ephemeral,
+    forceReconfigure,
 }) {
     const ephemeralFlag = ephemeral ? "  --ephemeral \\" : null;
+    const runOnce = ephemeral ? "1" : "";
+    const reconfigure = forceReconfigure ? "1" : "";
     return [
         "set -euo pipefail",
+        `RUNNER_EPHEMERAL=${JSON.stringify(runOnce)}`,
+        `RUNNER_RECONFIGURE=${JSON.stringify(reconfigure)}`,
         'RUNNER_DIR=${RUNNER_DIR:-"$HOME/actions-runner"}',
         'mkdir -p "$RUNNER_DIR"',
         'cd "$RUNNER_DIR"',
@@ -505,7 +519,13 @@ function bootstrapScript({
         "fi",
         '. "$HOME/.cargo/env"',
         "export RUNNER_ALLOW_RUNASROOT=1",
-        'if [ -f .runner ] && pgrep -f "Runner.Listener" >/dev/null 2>&1; then',
+        'if [ "$RUNNER_RECONFIGURE" = "1" ]; then',
+        "  ./svc.sh stop >/dev/null 2>&1 || true",
+        "  pkill -f Runner.Listener >/dev/null 2>&1 || true",
+        "  pkill -f Runner.Worker >/dev/null 2>&1 || true",
+        "  rm -f .runner .credentials .credentials_rsaparams",
+        "fi",
+        'if [ "$RUNNER_RECONFIGURE" != "1" ] && [ -f .runner ] && pgrep -f "Runner.Listener" >/dev/null 2>&1; then',
         '  echo "[github-scaleway-runner] Runner already configured and running; nothing to do."',
         "  exit 0",
         "fi",
@@ -518,6 +538,11 @@ function bootstrapScript({
         "  --work _work",
         'if pgrep -f "Runner.Listener" >/dev/null 2>&1; then',
         '  echo "[github-scaleway-runner] Runner already running; skipping start."',
+        "  exit 0",
+        "fi",
+        'if [ "$RUNNER_EPHEMERAL" = "1" ]; then',
+        '  echo "[github-scaleway-runner] Starting ephemeral runner via nohup"',
+        "  nohup ./run.sh > runner.log 2>&1 &",
         "  exit 0",
         "fi",
         "if ./svc.sh install >/dev/null 2>&1; then",
@@ -594,6 +619,9 @@ async function bootstrapRunner(repoInfo, state) {
         String(
             state.ephemeral ?? process.env.PEERBIT_RUNNER_EPHEMERAL ?? "1"
         ).trim() !== "0";
+    const forceReconfigure =
+        Boolean(state.reuseServer) ||
+        String(process.env.PEERBIT_RUNNER_RECONFIGURE || "").trim() === "1";
     const repoUrl = String(
         state.repoUrl || `https://github.com/${repoInfo.owner}/${repoInfo.repo}`
     ).trim();
@@ -634,6 +662,7 @@ async function bootstrapRunner(repoInfo, state) {
             runnerName,
             runnerLabels,
             ephemeral,
+            forceReconfigure,
         }),
     });
 
@@ -688,6 +717,20 @@ async function bootstrapRunner(repoInfo, state) {
     });
 }
 
+async function findReusableServer(secretKey, zone, serverName) {
+    const data = await scalewayRequest(
+        secretKey,
+        "GET",
+        `/apple-silicon/v1alpha1/zones/${encodeURIComponent(zone)}/servers`
+    );
+    const servers = Array.isArray(data?.servers) ? data.servers : [];
+    const matches = servers.filter(
+        (server) => extractServerName(server) === serverName
+    );
+    matches.sort((a, b) => serverCreatedAt(b) - serverCreatedAt(a));
+    return matches[0] || null;
+}
+
 async function startRunner(repoInfo) {
     const tokens = getGitHubTokens();
     if (tokens.length === 0) {
@@ -711,15 +754,22 @@ async function startRunner(repoInfo) {
         String(process.env.PEERBIT_RUNNER_EPHEMERAL || "1").trim() !== "0";
     const enableKext =
         String(process.env.PEERBIT_SCALEWAY_ENABLE_KEXT || "1").trim() !== "0";
+    const reuseServer =
+        String(process.env.PEERBIT_SCALEWAY_REUSE_SERVER || "").trim() === "1";
+    const reusePool = sanitizeName(
+        process.env.PEERBIT_SCALEWAY_REUSE_POOL || "shared-fs"
+    );
 
     const repoUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}`;
     const suffix = crypto.randomBytes(3).toString("hex");
     const runnerName = sanitizeName(
         `peerbit-selfhosted-scaleway-${repoInfo.repo}-${os.hostname()}-${suffix}`
     );
-    const serverName = sanitizeName(
-        `peerbit-gh-runner-macos-${repoInfo.repo}-${suffix}`
-    );
+    const serverName = reuseServer
+        ? sanitizeName(
+              `peerbit-gh-runner-macos-${repoInfo.repo}-${reusePool || "pool"}`
+          )
+        : sanitizeName(`peerbit-gh-runner-macos-${repoInfo.repo}-${suffix}`);
 
     const tracker = new ProcessTracker("github-scaleway-runner.json");
     const key = `${repoInfo.owner}/${repoInfo.repo}`;
@@ -754,36 +804,46 @@ async function startRunner(repoInfo) {
         throw error;
     }
 
-    console.log(
-        `[github-scaleway-runner] Creating Scaleway Apple Silicon server ${serverName} (${serverType}, ${zone})...`
-    );
-    let created;
-    try {
-        created = await scalewayRequest(
-            secretKey,
-            "POST",
-            `/apple-silicon/v1alpha1/zones/${encodeURIComponent(zone)}/servers`,
-            {
-                project_id: projectId,
-                type: serverType,
-                name: serverName,
-                os_id: osId,
-                ssh_key_ids: [sshKeyId],
-                enable_kext: enableKext,
-            }
+    let created = reuseServer
+        ? await findReusableServer(secretKey, zone, serverName)
+        : null;
+    const reusedServer = Boolean(created);
+    if (created) {
+        console.log(
+            `[github-scaleway-runner] Reusing Scaleway Apple Silicon server ${serverName} (${extractServerId(created)}).`
         );
-    } catch (error) {
-        const status = typeof error?.status === "number" ? error.status : null;
-        const body = typeof error?.body === "string" ? error.body : "";
-        if (status === 403 && body.includes("quotas_exceeded")) {
-            fail(
-                [
-                    "Scaleway returned quota exceeded for Apple Silicon servers.",
-                    "Open Scaleway console and request/enable Apple Silicon quota for this project, then re-run pnpm scaleway:start.",
-                ].join("\n")
+    } else {
+        console.log(
+            `[github-scaleway-runner] Creating Scaleway Apple Silicon server ${serverName} (${serverType}, ${zone})...`
+        );
+        try {
+            created = await scalewayRequest(
+                secretKey,
+                "POST",
+                `/apple-silicon/v1alpha1/zones/${encodeURIComponent(zone)}/servers`,
+                {
+                    project_id: projectId,
+                    type: serverType,
+                    name: serverName,
+                    os_id: osId,
+                    ssh_key_ids: [sshKeyId],
+                    enable_kext: enableKext,
+                }
             );
+        } catch (error) {
+            const status =
+                typeof error?.status === "number" ? error.status : null;
+            const body = typeof error?.body === "string" ? error.body : "";
+            if (status === 403 && body.includes("quotas_exceeded")) {
+                fail(
+                    [
+                        "Scaleway returned quota exceeded for Apple Silicon servers.",
+                        "Open Scaleway console and request/enable Apple Silicon quota for this project, then re-run pnpm scaleway:start.",
+                    ].join("\n")
+                );
+            }
+            throw error;
         }
-        throw error;
     }
 
     const serverId = extractServerId(created);
@@ -807,6 +867,8 @@ async function startRunner(repoInfo) {
         runnerVersion,
         ephemeral,
         enableKext,
+        reuseServer,
+        reusedServer,
         runnerId: null,
         serverHost: null,
     });
@@ -815,9 +877,12 @@ async function startRunner(repoInfo) {
         server_name: serverName,
         runner_name: runnerName,
         runner_labels: runnerLabels,
+        server_reused: reusedServer ? "1" : "0",
     });
 
-    console.log(`[github-scaleway-runner] Server created (id ${serverId}).`);
+    console.log(
+        `[github-scaleway-runner] Server ${reusedServer ? "selected" : "created"} (id ${serverId}).`
+    );
     console.log(
         "[github-scaleway-runner] Waiting for server to become ready..."
     );
@@ -912,7 +977,15 @@ async function stopRunner(repoInfo) {
     }
 
     let deletedServer = false;
-    if (state.serverId && state.zone) {
+    const releaseReusableServer =
+        Boolean(state.reuseServer) &&
+        String(process.env.PEERBIT_SCALEWAY_DELETE_REUSABLE || "").trim() !==
+            "1";
+    if (releaseReusableServer) {
+        console.log(
+            `[github-scaleway-runner] Keeping reusable Scaleway server ${state.serverId}; janitor will delete stale pool hosts.`
+        );
+    } else if (state.serverId && state.zone) {
         console.log(
             `[github-scaleway-runner] Deleting Scaleway server ${state.serverId}...`
         );
@@ -962,6 +1035,7 @@ async function stopRunner(repoInfo) {
 
     if (
         deletedServer ||
+        releaseReusableServer ||
         String(process.env.PEERBIT_FORCE_UNTRACK || "").trim() === "1"
     ) {
         tracker.untrack(key);

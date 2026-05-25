@@ -26,6 +26,10 @@ on:
 permissions:
     contents: read
 
+concurrency:
+    group: shared-fs-native-os-smoke
+    cancel-in-progress: false
+
 env:
     SCALEWAY_ZONE: ${{ vars.PEERBIT_SCALEWAY_ZONE || 'fr-par-1' }}
     PEERBIT_GITHUB_RUNNER_VERSION: ${{ vars.PEERBIT_GITHUB_RUNNER_VERSION || '2.330.0' }}
@@ -100,6 +104,8 @@ jobs:
                   PEERBIT_SCALEWAY_SSH_IDENTITY_FILE: ${{ runner.temp }}/scaleway_ssh
                   PEERBIT_RUNNER_EPHEMERAL: "1"
                   PEERBIT_SCALEWAY_ENABLE_KEXT: "1"
+                  PEERBIT_SCALEWAY_REUSE_SERVER: "1"
+                  PEERBIT_SCALEWAY_REUSE_POOL: shared-fs
                   PEERBIT_RUNNER_REPLACE: "1"
                   PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
               run: node scripts/github-scaleway-runner.mjs start

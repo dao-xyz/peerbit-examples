@@ -10,9 +10,14 @@ filesystem drivers:
   and macFUSE installed/loadable.
 - Windows requires a Scaleway Windows runner with WinFsp installed/loadable.
 
-The `Shared FS Native OS Smoke` workflow provisions temporary Scaleway runners,
-registers them as GitHub Actions ephemeral self-hosted runners, runs one native
-mount smoke job, then attempts cleanup.
+The `Shared FS Native OS Smoke` workflow provisions Scaleway runners, registers
+GitHub Actions ephemeral self-hosted runners, runs one native mount smoke job,
+then attempts cleanup.
+
+The macOS path reuses a warm Scaleway Apple Silicon host by default because
+those machines have a minimum allocation period. It still creates a fresh
+ephemeral GitHub runner registration, token, and unique label for each workflow
+run. The Windows path creates and deletes a fresh instance by default.
 
 ## Required GitHub Secrets
 
@@ -60,8 +65,13 @@ pnpm scaleway:windows:stop
 ## Cleanup Model
 
 The runners are registered with `--ephemeral`, so GitHub de-registers each
-runner after it accepts one job. The workflow still deletes the Scaleway
-machine in an `always()` cleanup job.
+runner after it accepts one job.
+
+For macOS, cleanup releases the runner registration but keeps the reusable
+Scaleway host warm. The scheduled janitor deletes stale macOS pool hosts after
+the configured age threshold.
+
+For Windows, cleanup deletes the Scaleway machine in an `always()` cleanup job.
 
 There is also a scheduled janitor in the same workflow:
 
