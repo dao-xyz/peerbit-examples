@@ -6,12 +6,25 @@ Set-Location $RepoRoot
 $TempRoot = if ($env:RUNNER_TEMP) { $env:RUNNER_TEMP } else { [System.IO.Path]::GetTempPath() }
 $Adapter = Join-Path $TempRoot "peerbit-shared-fs-native.exe"
 $State = Join-Path $TempRoot "pbfs-state"
-$Mountpoint = Join-Path $TempRoot "pbfs-mount"
 $Stdout = Join-Path $TempRoot "pbfs-mount.out.log"
 $Stderr = Join-Path $TempRoot "pbfs-mount.err.log"
 
-Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Mountpoint, $Stdout, $Stderr
-New-Item -ItemType Directory -Force -Path $State, $Mountpoint | Out-Null
+function Get-FreeMountDrive {
+  foreach ($Letter in @("P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
+    $Root = "$Letter`:\"
+    if (-not (Test-Path $Root)) {
+      return $Letter
+    }
+  }
+  throw "No free drive letter found for WinFsp smoke mount."
+}
+
+$MountDrive = Get-FreeMountDrive
+$Mountpoint = "$MountDrive`:"
+$MountRoot = "$MountDrive`:\"
+
+Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Stdout, $Stderr
+New-Item -ItemType Directory -Force -Path $State | Out-Null
 
 Push-Location "packages/shared-fs/native"
 try {
@@ -53,18 +66,18 @@ try {
     throw "mount did not become ready"
   }
 
-  New-Item -ItemType Directory -Force -Path (Join-Path $Mountpoint "docs") | Out-Null
-  Set-Content -NoNewline -Path (Join-Path $Mountpoint "docs\hello.txt") -Value "hello external native"
-  $Value = Get-Content -Raw -Path (Join-Path $Mountpoint "docs\hello.txt")
+  New-Item -ItemType Directory -Force -Path (Join-Path $MountRoot "docs") | Out-Null
+  Set-Content -NoNewline -Path (Join-Path $MountRoot "docs\hello.txt") -Value "hello external native"
+  $Value = Get-Content -Raw -Path (Join-Path $MountRoot "docs\hello.txt")
   if ($Value -ne "hello external native") {
     throw "unexpected file contents: $Value"
   }
-  Rename-Item -Path (Join-Path $Mountpoint "docs\hello.txt") -NewName "renamed.txt"
-  $Renamed = Get-Content -Raw -Path (Join-Path $Mountpoint "docs\renamed.txt")
+  Rename-Item -Path (Join-Path $MountRoot "docs\hello.txt") -NewName "renamed.txt"
+  $Renamed = Get-Content -Raw -Path (Join-Path $MountRoot "docs\renamed.txt")
   if ($Renamed -ne "hello external native") {
     throw "unexpected renamed file contents: $Renamed"
   }
-  Remove-Item -Force -Path (Join-Path $Mountpoint "docs\renamed.txt")
+  Remove-Item -Force -Path (Join-Path $MountRoot "docs\renamed.txt")
 } finally {
   if (-not $Process.HasExited) {
     Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
