@@ -31,3 +31,6 @@ peerbit-shared-fs-native --endpoint tcp://127.0.0.1:12345 --mountpoint /mnt/shar
 The endpoint is provided by the TypeScript Peerbit daemon. TCP loopback is used
 for external adapters so the same IPC transport works on Linux, macOS, and
 Windows.
+
+See [ci.md](./ci.md) for the optional Scaleway-backed macOS/Windows native
+mount CI setup.

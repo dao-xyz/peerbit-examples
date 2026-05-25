@@ -3,6 +3,8 @@ orbitdb
 /orbit-db
 orbit-db-stores
 lib
+!scripts/lib/
+!scripts/lib/*.mjs
 peerbit/
 .vscode
 /keystore/
@@ -14,6 +16,8 @@ keystore-test
 nginx_secrets
 nginx
 .env
+.env.scaleway
+!.env.scaleway.example
 /dist
 **/.pw-user-data/*
 test-results

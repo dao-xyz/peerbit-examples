@@ -1,0 +1,358 @@
+name: Shared FS Native OS Smoke
+
+on:
+    workflow_dispatch:
+        inputs:
+            operation:
+                description: Run native smoke tests or cleanup stale runners.
+                required: true
+                default: smoke
+                type: choice
+                options:
+                    - smoke
+                    - janitor
+            platform:
+                description: Native OS platform to test.
+                required: true
+                default: all
+                type: choice
+                options:
+                    - all
+                    - macos
+                    - windows
+    schedule:
+        - cron: "17 */6 * * *"
+
+permissions:
+    contents: read
+
+env:
+    SCALEWAY_ZONE: ${{ vars.PEERBIT_SCALEWAY_ZONE || 'fr-par-1' }}
+    PEERBIT_GITHUB_RUNNER_VERSION: ${{ vars.PEERBIT_GITHUB_RUNNER_VERSION || '2.330.0' }}
+
+jobs:
+    janitor:
+        name: Cleanup stale Scaleway native runners
+        if: ${{ github.event_name == 'schedule' || github.event.inputs.operation == 'janitor' }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Run janitors
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${ACCESS_KEY_ID:-}" ] || [ -z "${SECRET_ACCESS_KEY:-}" ]; then
+                    echo "Scaleway secrets are not configured; skipping janitor."
+                    exit 0
+                  fi
+                  node scripts/github-scaleway-runner.mjs janitor || true
+                  node scripts/github-scaleway-windows-runner.mjs janitor || true
+
+    provision-macos:
+        name: Provision ephemeral macOS runner
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'smoke' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'macos') }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        outputs:
+            runs_on: ${{ steps.labels.outputs.runs_on }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Compute runner labels
+              id: labels
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  label="peerbit-shared-fs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-macos"
+                  echo "unique_label=$label" >> "$GITHUB_OUTPUT"
+                  node -e 'console.log("runs_on=" + JSON.stringify(["self-hosted","macOS","scaleway",process.argv[1]]))' "$label" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare SSH key
+              shell: bash
+              env:
+                  PEERBIT_SCALEWAY_SSH_PRIVATE_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PRIVATE_KEY }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${PEERBIT_SCALEWAY_SSH_PRIVATE_KEY:-}" ]; then
+                    echo "Missing PEERBIT_SCALEWAY_SSH_PRIVATE_KEY secret."
+                    exit 1
+                  fi
+                  printf '%s\n' "$PEERBIT_SCALEWAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/scaleway_ssh"
+                  chmod 600 "$RUNNER_TEMP/scaleway_ssh"
+
+            - name: Start runner
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  SCALEWAY_SERVER_TYPE: ${{ vars.PEERBIT_SCALEWAY_MACOS_SERVER_TYPE || 'M2-M' }}
+                  PEERBIT_SCALEWAY_SSH_PUBLIC_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PUBLIC_KEY }}
+                  PEERBIT_SCALEWAY_SSH_IDENTITY_FILE: ${{ runner.temp }}/scaleway_ssh
+                  PEERBIT_RUNNER_EPHEMERAL: "1"
+                  PEERBIT_SCALEWAY_ENABLE_KEXT: "1"
+                  PEERBIT_RUNNER_REPLACE: "1"
+                  PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
+              run: node scripts/github-scaleway-runner.mjs start
+
+            - name: Preserve runner state
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: scaleway-macos-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes/github-scaleway-runner.json
+                  if-no-files-found: warn
+                  retention-days: 2
+
+    macos-native-smoke:
+        name: macOS macFUSE native smoke
+        needs: provision-macos
+        runs-on: ${{ fromJSON(needs.provision-macos.outputs.runs_on) }}
+        timeout-minutes: 45
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Check macFUSE
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [ ! -d /Library/Filesystems/macfuse.fs ] && ! command -v mount_macfuse >/dev/null 2>&1; then
+                    if command -v brew >/dev/null 2>&1; then
+                      brew install --cask macfuse || true
+                    fi
+                  fi
+                  if [ ! -d /Library/Filesystems/macfuse.fs ] && ! command -v mount_macfuse >/dev/null 2>&1; then
+                    echo "macFUSE is not installed or loadable. The Scaleway Mac must be created with kext support and macFUSE may need one-time approval/restart."
+                    exit 1
+                  fi
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Install optional fuse-native adapter
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  native_deps="$RUNNER_TEMP/fuse-native-deps"
+                  npm install --prefix "$native_deps" --no-save --package-lock=false fuse-native@2.2.6
+                  mkdir -p packages/shared-fs/library/node_modules
+                  rm -rf packages/shared-fs/library/node_modules/fuse-native
+                  ln -s "$native_deps/node_modules/fuse-native" packages/shared-fs/library/node_modules/fuse-native
+
+            - name: Run fuse-native mount smoke
+              env:
+                  PEERBIT_SHARED_FS_NATIVE_SMOKE: "1"
+              run: pnpm --filter @peerbit/shared-fs exec vitest run src/__tests__/native-mount.smoke.test.ts
+
+            - name: Run external native adapter smoke
+              run: scripts/shared-fs-external-native-smoke.sh
+
+    cleanup-macos:
+        name: Cleanup macOS runner
+        if: ${{ always() && needs.provision-macos.result != 'skipped' }}
+        needs:
+            - provision-macos
+            - macos-native-smoke
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Restore runner state
+              uses: actions/download-artifact@v4
+              continue-on-error: true
+              with:
+                  name: scaleway-macos-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes
+
+            - name: Stop runner
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  PEERBIT_FORCE: "1"
+              run: |
+                  set -euo pipefail
+                  if [ ! -f tmp/processes/github-scaleway-runner.json ]; then
+                    echo "No macOS runner state artifact found."
+                    exit 0
+                  fi
+                  node scripts/github-scaleway-runner.mjs stop
+
+    provision-windows:
+        name: Provision ephemeral Windows runner
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'smoke' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows') }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 45
+        outputs:
+            runs_on: ${{ steps.labels.outputs.runs_on }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Compute runner labels
+              id: labels
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  label="peerbit-shared-fs-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-windows"
+                  echo "unique_label=$label" >> "$GITHUB_OUTPUT"
+                  node -e 'console.log("runs_on=" + JSON.stringify(["self-hosted","Windows","scaleway",process.argv[1]]))' "$label" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare SSH key
+              shell: bash
+              env:
+                  PEERBIT_SCALEWAY_SSH_PRIVATE_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PRIVATE_KEY }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${PEERBIT_SCALEWAY_SSH_PRIVATE_KEY:-}" ]; then
+                    echo "Missing PEERBIT_SCALEWAY_SSH_PRIVATE_KEY secret."
+                    exit 1
+                  fi
+                  printf '%s\n' "$PEERBIT_SCALEWAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/scaleway_ssh"
+                  chmod 600 "$RUNNER_TEMP/scaleway_ssh"
+
+            - name: Start runner
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  SCALEWAY_WINDOWS_SERVER_TYPE: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_SERVER_TYPE || 'POP2-2C-8G-WIN' }}
+                  SCALEWAY_WINDOWS_IMAGE: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_IMAGE }}
+                  SCALEWAY_WINDOWS_ROOT_GB: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_ROOT_GB || '100' }}
+                  PEERBIT_SCALEWAY_SSH_PUBLIC_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PUBLIC_KEY }}
+                  PEERBIT_SCALEWAY_SSH_IDENTITY_FILE: ${{ runner.temp }}/scaleway_ssh
+                  PEERBIT_RUNNER_EPHEMERAL: "1"
+                  PEERBIT_RUNNER_REPLACE: "1"
+                  PEERBIT_WINDOWS_SKIP_DEPENDENCIES: "0"
+                  PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
+              run: node scripts/github-scaleway-windows-runner.mjs start
+
+            - name: Preserve runner state
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: scaleway-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes/github-scaleway-windows-runner.json
+                  if-no-files-found: warn
+                  retention-days: 2
+
+    windows-native-smoke:
+        name: Windows WinFsp native smoke
+        needs: provision-windows
+        runs-on: ${{ fromJSON(needs.provision-windows.outputs.runs_on) }}
+        timeout-minutes: 45
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Use Bash for pnpm scripts
+              run: pnpm config set script-shell "C:\Program Files\Git\bin\bash.exe"
+
+            - name: Install WinFsp
+              shell: pwsh
+              run: |
+                  if (-not (Test-Path "C:\Program Files\WinFsp\bin\winfsp-x64.dll")) {
+                    choco install winfsp -y --no-progress
+                  }
+                  if (-not (Test-Path "C:\Program Files\WinFsp\bin\winfsp-x64.dll")) {
+                    throw "WinFsp is not installed or loadable."
+                  }
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Run external native adapter smoke
+              shell: pwsh
+              run: scripts/shared-fs-external-native-smoke.ps1
+
+    cleanup-windows:
+        name: Cleanup Windows runner
+        if: ${{ always() && needs.provision-windows.result != 'skipped' }}
+        needs:
+            - provision-windows
+            - windows-native-smoke
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Restore runner state
+              uses: actions/download-artifact@v4
+              continue-on-error: true
+              with:
+                  name: scaleway-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes
+
+            - name: Stop runner
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  PEERBIT_FORCE: "1"
+              run: |
+                  set -euo pipefail
+                  if [ ! -f tmp/processes/github-scaleway-windows-runner.json ]; then
+                    echo "No Windows runner state artifact found."
+                    exit 0
+                  fi
+                  node scripts/github-scaleway-windows-runner.mjs stop
