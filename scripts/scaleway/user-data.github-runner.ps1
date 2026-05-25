@@ -344,3 +344,4 @@ Ensure-CargoOnMachinePath
 Ensure-RunnerTask
 
 Write-Log "Bootstrap complete."
+exit 0

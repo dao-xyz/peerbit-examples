@@ -341,7 +341,7 @@ function runPowerShellOverSsh({ host, script }) {
         "-o",
         "UserKnownHostsFile=/dev/null",
         `${user}@${host}`,
-        "powershell -NoProfile -ExecutionPolicy Bypass -Command -",
+        "powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command -",
     ];
 
     const result = spawnSync("ssh", args, {
