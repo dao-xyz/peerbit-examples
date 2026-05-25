@@ -80,6 +80,20 @@ const resolveDirectory = (directoryArg?: string) => {
     return directoryArg;
 };
 
+export const normalizeNativeMountpoint = (
+    mountpoint: string,
+    platform: NodeJS.Platform = process.platform
+) => {
+    if (platform === "win32") {
+        const driveRoot = /^([a-zA-Z]):[\\/]?$/.exec(mountpoint);
+        if (driveRoot) {
+            return `${driveRoot[1].toUpperCase()}:`;
+        }
+        return path.win32.resolve(mountpoint);
+    }
+    return path.resolve(mountpoint);
+};
+
 const coerceAddresses = (addrs: string | string[]) => {
     return (Array.isArray(addrs) ? addrs : [addrs]).map((address) =>
         multiaddr(address)
@@ -394,7 +408,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     const externalAdapter =
                         argv.nativeAdapter ||
                         process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER;
-                    const mountpoint = path.resolve(String(argv.mountpoint));
+                    const mountpoint = normalizeNativeMountpoint(
+                        String(argv.mountpoint)
+                    );
                     ipc = await createSharedFsIpcServer(
                         backend,
                         externalAdapter ? "tcp://127.0.0.1:0" : undefined
@@ -587,7 +603,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                 }),
             async (argv) => {
                 await unmountNativeMountpoint(
-                    path.resolve(String(argv.mountpoint))
+                    normalizeNativeMountpoint(String(argv.mountpoint))
                 );
                 console.log(chalk.green(`Unmounted ${argv.mountpoint}`));
             }

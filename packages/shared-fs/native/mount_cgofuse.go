@@ -24,19 +24,57 @@ func runNativeMount(endpoint string, mountpoint string, debug bool) error {
 		client: newIPCClient(endpoint),
 		debug:  debug,
 	}
+	fs.debugf("starting mount endpoint=%s mountpoint=%s", endpoint, mountpoint)
+	if debug {
+		if err := fs.preflight(); err != nil {
+			return err
+		}
+	}
 	host := fuse.NewFileSystemHost(fs)
 	host.SetCapOpenTrunc(true)
 	options := []string{"-s"}
 	if debug {
 		options = append(options, "-d")
 	}
+	fs.debugf("mount options=%v", append(options, mountpoint))
 	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
 	}
 	return nil
 }
 
+func (fs *peerbitFS) debugf(format string, args ...interface{}) {
+	if fs.debug {
+		fmt.Fprintf(os.Stderr, "peerbit-shared-fs-native: "+format+"\n", args...)
+	}
+}
+
+func (fs *peerbitFS) preflight() error {
+	result, err := fs.client.request("getattr", "/")
+	if err != nil {
+		return fmt.Errorf("native mount preflight getattr / failed: %w", err)
+	}
+	mapped, ok := result.(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("native mount preflight getattr / returned %T", result)
+	}
+	if mapped["kind"] != "directory" {
+		return fmt.Errorf("native mount preflight root is %v, expected directory", mapped["kind"])
+	}
+	entries, err := fs.client.request("readdir", "/")
+	if err != nil {
+		return fmt.Errorf("native mount preflight readdir / failed: %w", err)
+	}
+	if entriesSlice, ok := entries.([]interface{}); ok {
+		fs.debugf("preflight ok root entries=%d", len(entriesSlice))
+	} else {
+		fs.debugf("preflight ok readdir returned %T", entries)
+	}
+	return nil
+}
+
 func (fs *peerbitFS) Init() {
+	fs.debugf("fuse init")
 	fs.ready.Do(func() {
 		fmt.Fprintln(os.Stdout, "peerbit-shared-fs-native ready")
 	})

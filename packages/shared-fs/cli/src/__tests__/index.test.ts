@@ -2,11 +2,20 @@ import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { runCli } from "../index.js";
+import { normalizeNativeMountpoint, runCli } from "../index.js";
 
 describe("peerbit-fs cli", () => {
     it("exports the CLI entry point", () => {
         expect(runCli).toBeTypeOf("function");
+    });
+
+    it("keeps Windows drive mountpoints in WinFsp drive form", () => {
+        expect(normalizeNativeMountpoint("P:", "win32")).toBe("P:");
+        expect(normalizeNativeMountpoint("p:\\", "win32")).toBe("P:");
+        expect(normalizeNativeMountpoint("q:/", "win32")).toBe("Q:");
+        expect(normalizeNativeMountpoint("C:\\tmp\\peerbit", "win32")).toBe(
+            path.win32.resolve("C:\\tmp\\peerbit")
+        );
     });
 
     it("creates an address and exits cleanly", async () => {
