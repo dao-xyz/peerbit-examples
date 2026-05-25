@@ -1,0 +1,299 @@
+name: Shared FS Native Cross-OS Interop
+
+on:
+    workflow_dispatch:
+        inputs:
+            timeout_minutes:
+                description: "How long each native mount waits for the other OS file"
+                required: true
+                type: number
+                default: 35
+
+permissions:
+    actions: read
+    contents: read
+
+concurrency:
+    group: shared-fs-native-cross-os-interop
+    cancel-in-progress: false
+
+env:
+    SCALEWAY_ZONE: ${{ vars.PEERBIT_SCALEWAY_ZONE || 'fr-par-1' }}
+    PEERBIT_GITHUB_RUNNER_VERSION: ${{ vars.PEERBIT_GITHUB_RUNNER_VERSION || '2.330.0' }}
+    NATIVE_INTEROP_TIMEOUT_MINUTES: ${{ github.event.inputs.timeout_minutes || '35' }}
+
+jobs:
+    provision-windows:
+        name: Provision ephemeral Windows runner
+        runs-on: ubuntu-latest
+        timeout-minutes: 45
+        outputs:
+            runs_on: ${{ steps.labels.outputs.runs_on }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Compute runner labels
+              id: labels
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  label="peerbit-shared-fs-native-interop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-windows"
+                  echo "unique_label=$label" >> "$GITHUB_OUTPUT"
+                  node -e 'console.log("runs_on=" + JSON.stringify(["self-hosted","Windows","scaleway",process.argv[1]]))' "$label" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare SSH key
+              shell: bash
+              env:
+                  PEERBIT_SCALEWAY_SSH_PRIVATE_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PRIVATE_KEY }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${PEERBIT_SCALEWAY_SSH_PRIVATE_KEY:-}" ]; then
+                    echo "Missing PEERBIT_SCALEWAY_SSH_PRIVATE_KEY secret."
+                    exit 1
+                  fi
+                  printf '%s\n' "$PEERBIT_SCALEWAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/scaleway_ssh"
+                  chmod 600 "$RUNNER_TEMP/scaleway_ssh"
+
+            - name: Start runner
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  SCALEWAY_WINDOWS_SERVER_TYPE: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_SERVER_TYPE || 'POP2-2C-8G-WIN' }}
+                  SCALEWAY_WINDOWS_IMAGE: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_IMAGE }}
+                  SCALEWAY_WINDOWS_ROOT_GB: ${{ vars.PEERBIT_SCALEWAY_WINDOWS_ROOT_GB || '100' }}
+                  PEERBIT_SCALEWAY_SSH_PUBLIC_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PUBLIC_KEY }}
+                  PEERBIT_SCALEWAY_SSH_IDENTITY_FILE: ${{ runner.temp }}/scaleway_ssh
+                  PEERBIT_RUNNER_EPHEMERAL: "1"
+                  PEERBIT_RUNNER_REPLACE: "1"
+                  PEERBIT_WINDOWS_SKIP_DEPENDENCIES: "0"
+                  PEERBIT_WINDOWS_SKIP_HEAVY_DEPENDENCIES: "1"
+                  PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
+              run: node scripts/github-scaleway-windows-runner.mjs start
+
+            - name: Preserve runner state
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: scaleway-windows-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes/github-scaleway-windows-runner.json
+                  if-no-files-found: warn
+                  retention-days: 2
+
+    seed-linux-native:
+        name: Linux FUSE native seed
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Install FUSE
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y fuse3 libfuse3-dev
+                  sudo apt-get install -y libfuse2t64 || sudo apt-get install -y libfuse2
+                  sudo modprobe fuse || true
+                  sudo chmod 666 /dev/fuse || true
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Start Linux native seed mount
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p shared-fs-native-address native-interop-logs
+                  timeout_seconds=$((NATIVE_INTEROP_TIMEOUT_MINUTES * 60))
+                  (
+                    set +e
+                    bash scripts/shared-fs-native-cross-os-interop.sh \
+                      --role seed \
+                      --machine linux \
+                      --expected windows \
+                      --address-file shared-fs-native-address/address.txt \
+                      --timeout-seconds "$timeout_seconds" \
+                      > native-interop-logs/linux-seed.log 2>&1
+                    status="$?"
+                    echo "$status" > native-interop-logs/linux-seed.exit
+                    exit "$status"
+                  ) &
+                  echo "$!" > native-interop-logs/linux-seed.pid
+
+                  for _ in {1..120}; do
+                    if test -s shared-fs-native-address/address.txt; then
+                      cat shared-fs-native-address/address.txt
+                      exit 0
+                    fi
+                    if ! kill -0 "$(cat native-interop-logs/linux-seed.pid)" 2>/dev/null; then
+                      cat native-interop-logs/linux-seed.log
+                      exit 1
+                    fi
+                    sleep 2
+                  done
+
+                  cat native-interop-logs/linux-seed.log
+                  echo "Timed out waiting for Linux seed address"
+                  exit 1
+
+            - name: Upload shared filesystem address
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-address
+                  path: shared-fs-native-address/address.txt
+                  if-no-files-found: error
+
+            - name: Wait for Windows native mount peer
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  while ! test -f native-interop-logs/linux-seed.exit; do
+                    tail -n 80 native-interop-logs/linux-seed.log || true
+                    sleep 10
+                  done
+                  cat native-interop-logs/linux-seed.log
+                  exit "$(cat native-interop-logs/linux-seed.exit)"
+
+    windows-native-join:
+        name: Windows WinFsp native join
+        needs: provision-windows
+        runs-on: ${{ fromJSON(needs.provision-windows.outputs.runs_on) }}
+        timeout-minutes: 60
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Use Bash for pnpm scripts
+              run: pnpm config set script-shell "C:\Program Files\Git\bin\bash.exe"
+
+            - name: Install WinFsp
+              shell: powershell
+              run: |
+                  $WinFspDlls = @(
+                    "C:\Program Files\WinFsp\bin\winfsp-x64.dll",
+                    "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll"
+                  )
+                  if (-not ($WinFspDlls | Where-Object { Test-Path $_ })) {
+                    choco install winfsp -y --no-progress
+                  }
+                  if (-not ($WinFspDlls | Where-Object { Test-Path $_ })) {
+                    Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "winfsp*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+                    throw "WinFsp is not installed or loadable."
+                  }
+                  $WinFspDll = $WinFspDlls | Where-Object { Test-Path $_ } | Select-Object -First 1
+                  $WinFspBin = Split-Path -Parent $WinFspDll
+                  $WinFspBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                  Write-Host "WinFsp bin: $WinFspBin"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Download seed address
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p shared-fs-native-address
+                  for _ in {1..180}; do
+                    rm -f shared-fs-native-address/address.txt
+                    if gh run download "$GITHUB_RUN_ID" -n shared-fs-native-address -D shared-fs-native-address >/dev/null 2>&1 && test -s shared-fs-native-address/address.txt; then
+                      cat shared-fs-native-address/address.txt
+                      exit 0
+                    fi
+                    sleep 5
+                  done
+                  echo "Timed out waiting for Linux seed address artifact"
+                  exit 1
+
+            - name: Run Windows native mount join
+              shell: powershell
+              env:
+                  PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: "1"
+              run: |
+                  $TimeoutSeconds = [int]$env:NATIVE_INTEROP_TIMEOUT_MINUTES * 60
+                  scripts/shared-fs-native-cross-os-interop.ps1 `
+                    -Role join `
+                    -Machine windows `
+                    -Expected linux `
+                    -AddressFile shared-fs-native-address/address.txt `
+                    -TimeoutSeconds $TimeoutSeconds
+
+    cleanup-windows:
+        name: Cleanup Windows runner
+        if: ${{ always() && needs.provision-windows.result != 'skipped' }}
+        needs:
+            - provision-windows
+            - windows-native-join
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Restore runner state
+              uses: actions/download-artifact@v4
+              continue-on-error: true
+              with:
+                  name: scaleway-windows-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes
+
+            - name: Stop runner
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  PEERBIT_FORCE: "1"
+              run: |
+                  set -euo pipefail
+                  if [ ! -f tmp/processes/github-scaleway-windows-runner.json ]; then
+                    echo "No Windows runner state artifact found."
+                    exit 0
+                  fi
+                  node scripts/github-scaleway-windows-runner.mjs stop
