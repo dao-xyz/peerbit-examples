@@ -48,3 +48,15 @@ func TestIPCClientRoundTrip(t *testing.T) {
 		t.Fatalf("expected hello, got %q", string(bytes))
 	}
 }
+
+func TestWindowsStatModeAllowsSharedWrites(t *testing.T) {
+	if got := platformStatMode(statModeDirectory|0o755, "windows"); got != statModeDirectory|0o777 {
+		t.Fatalf("expected writable Windows directory mode, got %#o", got)
+	}
+	if got := platformStatMode(statModeRegular|0o644, "windows"); got != statModeRegular|0o666 {
+		t.Fatalf("expected writable Windows file mode, got %#o", got)
+	}
+	if got := platformStatMode(statModeDirectory|0o755, "linux"); got != statModeDirectory|0o755 {
+		t.Fatalf("expected Linux directory mode to be preserved, got %#o", got)
+	}
+}

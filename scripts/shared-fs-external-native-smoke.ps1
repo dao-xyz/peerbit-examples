@@ -31,6 +31,17 @@ if ($WinFspBin) {
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Stdout, $Stderr
 New-Item -ItemType Directory -Force -Path $State | Out-Null
 
+function Write-MountLogs {
+  Get-Content -ErrorAction SilentlyContinue $Stdout, $Stderr
+}
+
+function Stop-MountProcess {
+  if (-not $Process.HasExited) {
+    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
+    Wait-Process -Id $Process.Id -Timeout 10 -ErrorAction SilentlyContinue
+  }
+}
+
 Push-Location "packages/shared-fs/native"
 try {
   go build -tags "native_mount" -o $Adapter .
@@ -61,13 +72,13 @@ try {
       break
     }
     if ($Process.HasExited) {
-      Get-Content -ErrorAction SilentlyContinue $Stdout, $Stderr
+      Write-MountLogs
       throw "mount process exited with code $($Process.ExitCode)"
     }
     Start-Sleep -Seconds 1
   }
   if (-not $Mounted) {
-    Get-Content -ErrorAction SilentlyContinue $Stdout, $Stderr
+    Write-MountLogs
     throw "mount did not become ready"
   }
 
@@ -83,9 +94,10 @@ try {
     throw "unexpected renamed file contents: $Renamed"
   }
   Remove-Item -Force -Path (Join-Path $MountRoot "docs\renamed.txt")
+} catch {
+  Stop-MountProcess
+  Write-MountLogs
+  throw
 } finally {
-  if (-not $Process.HasExited) {
-    Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
-    Wait-Process -Id $Process.Id -Timeout 10 -ErrorAction SilentlyContinue
-  }
+  Stop-MountProcess
 }

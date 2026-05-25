@@ -281,7 +281,9 @@ func (fs *peerbitFS) Fsync(path string, datasync bool, fh uint64) int {
 func (fs *peerbitFS) Mkdir(path string, mode uint32) int {
 	_ = mode
 	_, err := fs.client.request("mkdir", path)
-	return errno(err)
+	code := errno(err)
+	fs.debugf("mkdir path=%s code=%d err=%v", path, code, err)
+	return code
 }
 
 func (fs *peerbitFS) Chmod(path string, mode uint32) int {
@@ -319,7 +321,7 @@ func (fs *peerbitFS) Unlink(path string) int {
 }
 
 func statFromResult(result map[string]interface{}) fuse.Stat_t {
-	mode := uint32(uint64Field(result, "mode"))
+	mode := nativeStatMode(uint32(uint64Field(result, "mode")))
 	mtime := msToTimespec(uint64Field(result, "mtimeMs"))
 	ctime := msToTimespec(uint64Field(result, "ctimeMs"))
 	return fuse.Stat_t{
