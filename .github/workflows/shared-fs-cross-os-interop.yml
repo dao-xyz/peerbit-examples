@@ -17,6 +17,15 @@ on:
                 required: true
                 type: number
                 default: 10
+            platform:
+                description: "Join platform(s) to run with the Linux seed"
+                required: true
+                type: choice
+                default: all
+                options:
+                    - all
+                    - macos
+                    - windows
 
 permissions:
     actions: read
@@ -26,8 +35,49 @@ env:
     INTEROP_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.timeout_minutes || '10' }}
 
 jobs:
+    interop-plan:
+        name: Plan interop peers
+        runs-on: ubuntu-latest
+        outputs:
+            expected: ${{ steps.plan.outputs.expected }}
+            matrix: ${{ steps.plan.outputs.matrix }}
+        steps:
+            - name: Select peers
+              id: plan
+              shell: bash
+              env:
+                  PLATFORM: ${{ github.event_name == 'workflow_dispatch' && inputs.platform || 'all' }}
+              run: |
+                  set -euo pipefail
+                  case "$PLATFORM" in
+                    all)
+                      expected="linux,macos,windows"
+                      matrix='{"include":[{"os":"macos-latest","machine":"macos"},{"os":"windows-latest","machine":"windows"}]}'
+                      ;;
+                    macos)
+                      expected="linux,macos"
+                      matrix='{"include":[{"os":"macos-latest","machine":"macos"}]}'
+                      ;;
+                    windows)
+                      expected="linux,windows"
+                      matrix='{"include":[{"os":"windows-latest","machine":"windows"}]}'
+                      ;;
+                    *)
+                      echo "Unsupported platform: $PLATFORM" >&2
+                      exit 1
+                      ;;
+                  esac
+
+                  {
+                    echo "expected=$expected"
+                    echo "matrix<<JSON"
+                    echo "$matrix"
+                    echo "JSON"
+                  } >> "$GITHUB_OUTPUT"
+
     seed-linux:
         name: Seed peer (linux)
+        needs: interop-plan
         runs-on: ubuntu-latest
         timeout-minutes: 20
 
@@ -55,6 +105,8 @@ jobs:
 
             - name: Start seed peer
               shell: bash
+              env:
+                  INTEROP_EXPECTED_MACHINES: ${{ needs.interop-plan.outputs.expected }}
               run: |
                   set -euo pipefail
                   mkdir -p shared-fs-address interop-logs
@@ -63,7 +115,7 @@ jobs:
                     node packages/shared-fs/cli/lib/esm/cross-os-interop.js \
                       --role seed \
                       --machine linux \
-                      --expected linux,macos,windows \
+                      --expected "$INTEROP_EXPECTED_MACHINES" \
                       --address-file shared-fs-address/address.txt \
                       --timeout-ms "$timeout_ms" \
                       --directory .peerbit-shared-fs-interop-linux \
@@ -108,16 +160,12 @@ jobs:
 
     join:
         name: Join peer (${{ matrix.machine }})
+        needs: interop-plan
         runs-on: ${{ matrix.os }}
         timeout-minutes: 20
         strategy:
             fail-fast: false
-            matrix:
-                include:
-                    - os: macos-latest
-                      machine: macos
-                    - os: windows-latest
-                      machine: windows
+            matrix: ${{ fromJSON(needs.interop-plan.outputs.matrix) }}
 
         steps:
             - name: Checkout
@@ -165,13 +213,15 @@ jobs:
 
             - name: Join shared filesystem
               shell: bash
+              env:
+                  INTEROP_EXPECTED_MACHINES: ${{ needs.interop-plan.outputs.expected }}
               run: |
                   set -euo pipefail
                   timeout_ms=$((INTEROP_TIMEOUT_MINUTES * 60 * 1000))
                   node packages/shared-fs/cli/lib/esm/cross-os-interop.js \
                     --role join \
                     --machine "${{ matrix.machine }}" \
-                    --expected linux,macos,windows \
+                    --expected "$INTEROP_EXPECTED_MACHINES" \
                     --address-file shared-fs-address/address.txt \
                     --timeout-ms "$timeout_ms" \
                     --directory ".peerbit-shared-fs-interop-${{ matrix.machine }}"

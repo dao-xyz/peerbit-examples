@@ -309,7 +309,7 @@ jobs:
               run: pnpm config set script-shell "C:\Program Files\Git\bin\bash.exe"
 
             - name: Install WinFsp
-              shell: pwsh
+              shell: powershell
               run: |
                   if (-not (Test-Path "C:\Program Files\WinFsp\bin\winfsp-x64.dll")) {
                     choco install winfsp -y --no-progress
@@ -325,7 +325,7 @@ jobs:
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
             - name: Run external native adapter smoke
-              shell: pwsh
+              shell: powershell
               run: scripts/shared-fs-external-native-smoke.ps1
 
     cleanup-windows:
