@@ -23,6 +23,11 @@ $MountDrive = Get-FreeMountDrive
 $Mountpoint = "$MountDrive`:"
 $MountRoot = "$MountDrive`:\"
 
+$WinFspBin = @("C:\Program Files\WinFsp\bin", "C:\Program Files (x86)\WinFsp\bin") | Where-Object { Test-Path $_ } | Select-Object -First 1
+if ($WinFspBin) {
+  $env:Path = "$WinFspBin;$env:Path"
+}
+
 Remove-Item -Recurse -Force -ErrorAction SilentlyContinue $State, $Stdout, $Stderr
 New-Item -ItemType Directory -Force -Path $State | Out-Null
 

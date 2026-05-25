@@ -322,6 +322,10 @@ jobs:
                     Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "winfsp*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
                     throw "WinFsp is not installed or loadable."
                   }
+                  $WinFspDll = $WinFspDlls | Where-Object { Test-Path $_ } | Select-Object -First 1
+                  $WinFspBin = Split-Path -Parent $WinFspDll
+                  $WinFspBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+                  Write-Host "WinFsp bin: $WinFspBin"
 
             - name: Install dependencies
               run: pnpm install --frozen-lockfile
@@ -331,6 +335,8 @@ jobs:
 
             - name: Run external native adapter smoke
               shell: powershell
+              env:
+                  PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: "1"
               run: scripts/shared-fs-external-native-smoke.ps1
 
     cleanup-windows:

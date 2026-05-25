@@ -182,13 +182,13 @@ const mountExternalNativeAdapter = async (
     endpoint: string,
     mountpoint: string
 ) => {
-    const child = spawn(
-        command,
-        ["--endpoint", endpoint, "--mountpoint", mountpoint],
-        {
-            stdio: ["ignore", "pipe", "pipe"],
-        }
-    );
+    const args = ["--endpoint", endpoint, "--mountpoint", mountpoint];
+    if (process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG === "1") {
+        args.push("--debug");
+    }
+    const child = spawn(command, args, {
+        stdio: ["ignore", "pipe", "pipe"],
+    });
     child.stderr.on("data", (chunk) => process.stderr.write(chunk));
 
     await new Promise<void>((resolve, reject) => {
