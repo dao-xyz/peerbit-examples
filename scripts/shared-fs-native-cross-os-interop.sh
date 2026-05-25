@@ -5,6 +5,7 @@ role=""
 machine="linux"
 address_file=""
 expected=""
+expected_acks=""
 timeout_seconds="2100"
 
 while [ "$#" -gt 0 ]; do
@@ -23,6 +24,10 @@ while [ "$#" -gt 0 ]; do
       ;;
     --expected)
       expected="$2"
+      shift 2
+      ;;
+    --expected-acks)
+      expected_acks="$2"
       shift 2
       ;;
     --timeout-seconds)
@@ -55,6 +60,8 @@ mountpoint="$temp_root/pbfs-native-interop-$machine-mount"
 log="$temp_root/pbfs-native-interop-$machine.log"
 local_file="$mountpoint/$machine.txt"
 local_contents="hello from $machine via native mount"
+ack_file="$mountpoint/$machine-ack.txt"
+ack_contents="acked by $machine via native mount"
 
 rm -rf "$state" "$mountpoint" "$log"
 mkdir -p "$state" "$mountpoint"
@@ -119,15 +126,10 @@ grep -q "Mounted " "$log" || { cat "$log"; exit 1; }
 printf "%s" "$local_contents" > "$local_file"
 test "$(cat "$local_file")" = "$local_contents"
 
-deadline=$((SECONDS + timeout_seconds))
-IFS=',' read -r -a expected_machines <<< "$expected"
-for expected_machine in "${expected_machines[@]}"; do
-  expected_machine="$(echo "$expected_machine" | xargs)"
-  if [ -z "$expected_machine" ]; then
-    continue
-  fi
-  expected_file="$mountpoint/$expected_machine.txt"
-  expected_contents="hello from $expected_machine via native mount"
+wait_for_file_contents() {
+  expected_file="$1"
+  expected_contents="$2"
+
   while true; do
     if [ -f "$expected_file" ] && [ "$(cat "$expected_file" 2>/dev/null || true)" = "$expected_contents" ]; then
       break
@@ -139,6 +141,32 @@ for expected_machine in "${expected_machines[@]}"; do
     fi
     sleep 2
   done
+}
+
+deadline=$((SECONDS + timeout_seconds))
+IFS=',' read -r -a expected_machines <<< "$expected"
+for expected_machine in "${expected_machines[@]}"; do
+  expected_machine="$(echo "$expected_machine" | xargs)"
+  if [ -z "$expected_machine" ]; then
+    continue
+  fi
+  expected_file="$mountpoint/$expected_machine.txt"
+  expected_contents="hello from $expected_machine via native mount"
+  wait_for_file_contents "$expected_file" "$expected_contents"
+done
+
+printf "%s" "$ack_contents" > "$ack_file"
+test "$(cat "$ack_file")" = "$ack_contents"
+
+IFS=',' read -r -a expected_ack_machines <<< "$expected_acks"
+for expected_machine in "${expected_ack_machines[@]}"; do
+  expected_machine="$(echo "$expected_machine" | xargs)"
+  if [ -z "$expected_machine" ]; then
+    continue
+  fi
+  expected_file="$mountpoint/$expected_machine-ack.txt"
+  expected_contents="acked by $expected_machine via native mount"
+  wait_for_file_contents "$expected_file" "$expected_contents"
 done
 
 echo "native mount interop complete for $machine"

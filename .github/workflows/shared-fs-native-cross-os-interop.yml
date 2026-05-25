@@ -248,6 +248,7 @@ jobs:
                     -Role join `
                     -Machine windows `
                     -Expected linux `
+                    -ExpectedAcks linux `
                     -AddressFile shared-fs-native-address/address.txt `
                     -TimeoutSeconds $TimeoutSeconds
 

@@ -6,6 +6,7 @@ param(
   [Parameter(Mandatory = $true)]
   [string] $AddressFile,
   [string] $Expected = "",
+  [string] $ExpectedAcks = "",
   [int] $TimeoutSeconds = 2100
 )
 
@@ -35,6 +36,8 @@ $Mountpoint = "$MountDrive`:"
 $MountRoot = "$MountDrive`:\"
 $LocalFile = "$MountRoot$Machine.txt"
 $LocalContents = "hello from $Machine via native mount"
+$AckFile = "$MountRoot$Machine-ack.txt"
+$AckContents = "acked by $Machine via native mount"
 
 $WinFspBin = @("C:\Program Files\WinFsp\bin", "C:\Program Files (x86)\WinFsp\bin") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($WinFspBin) {
@@ -110,19 +113,42 @@ try {
   }
 
   $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-  foreach ($ExpectedMachine in ($Expected -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
-    $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine.txt"
-    $ExpectedContents = "hello from $ExpectedMachine via native mount"
+  function Wait-FileContents {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string] $Path,
+      [Parameter(Mandatory = $true)]
+      [string] $Contents
+    )
+
     while ($true) {
-      if ((Test-Path $ExpectedFile) -and ((Get-Content -Raw -Path $ExpectedFile) -eq $ExpectedContents)) {
+      if ((Test-Path $Path) -and ((Get-Content -Raw -Path $Path) -eq $Contents)) {
         break
       }
       if ((Get-Date) -ge $Deadline) {
         Get-ChildItem -Force -ErrorAction SilentlyContinue $MountRoot
-        throw "Timed out waiting for $ExpectedFile"
+        throw "Timed out waiting for $Path"
       }
       Start-Sleep -Seconds 2
     }
+  }
+
+  foreach ($ExpectedMachine in ($Expected -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine.txt"
+    $ExpectedContents = "hello from $ExpectedMachine via native mount"
+    Wait-FileContents -Path $ExpectedFile -Contents $ExpectedContents
+  }
+
+  Set-Content -NoNewline -Path $AckFile -Value $AckContents
+  $AckReadBack = Get-Content -Raw -Path $AckFile
+  if ($AckReadBack -ne $AckContents) {
+    throw "unexpected ack file contents: $AckReadBack"
+  }
+
+  foreach ($ExpectedMachine in ($ExpectedAcks -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+    $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine-ack.txt"
+    $ExpectedContents = "acked by $ExpectedMachine via native mount"
+    Wait-FileContents -Path $ExpectedFile -Contents $ExpectedContents
   }
 
   Write-Host "native mount interop complete for $Machine"
