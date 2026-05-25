@@ -311,10 +311,15 @@ jobs:
             - name: Install WinFsp
               shell: powershell
               run: |
-                  if (-not (Test-Path "C:\Program Files\WinFsp\bin\winfsp-x64.dll")) {
+                  $WinFspDlls = @(
+                    "C:\Program Files\WinFsp\bin\winfsp-x64.dll",
+                    "C:\Program Files (x86)\WinFsp\bin\winfsp-x64.dll"
+                  )
+                  if (-not ($WinFspDlls | Where-Object { Test-Path $_ })) {
                     choco install winfsp -y --no-progress
                   }
-                  if (-not (Test-Path "C:\Program Files\WinFsp\bin\winfsp-x64.dll")) {
+                  if (-not ($WinFspDlls | Where-Object { Test-Path $_ })) {
+                    Get-ChildItem -Path "C:\Program Files", "C:\Program Files (x86)" -Filter "winfsp*.dll" -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
                     throw "WinFsp is not installed or loadable."
                   }
 
