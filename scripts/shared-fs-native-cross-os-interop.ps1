@@ -33,7 +33,7 @@ function Get-FreeMountDrive {
 $MountDrive = Get-FreeMountDrive
 $Mountpoint = "$MountDrive`:"
 $MountRoot = "$MountDrive`:\"
-$LocalFile = Join-Path $MountRoot "$Machine.txt"
+$LocalFile = "$MountRoot$Machine.txt"
 $LocalContents = "hello from $Machine via native mount"
 
 $WinFspBin = @("C:\Program Files\WinFsp\bin", "C:\Program Files (x86)\WinFsp\bin") | Where-Object { Test-Path $_ } | Select-Object -First 1
