@@ -30,7 +30,7 @@ func runNativeMount(endpoint string, mountpoint string, debug bool) error {
 	if debug {
 		options = append(options, "-d")
 	}
-	if !host.Mount(mountpoint, options) {
+	if !host.Mount("", append(options, mountpoint)) {
 		return fmt.Errorf("native mount failed for %s", mountpoint)
 	}
 	return nil
