@@ -154,7 +154,7 @@ if ($Role -eq "seed") {
 $AddressEndMs = Get-NowMs
 Add-Phase -Name "address" -StartMs $AddressStartMs -EndMs $AddressEndMs
 
-$Args = @(
+$MountArgs = @(
   "packages/shared-fs/cli/lib/esm/bin.js",
   "mount",
   $Address,
@@ -169,7 +169,7 @@ $Args = @(
 
 function Start-MountProcess {
   Remove-Item -Force -ErrorAction SilentlyContinue $Stdout, $Stderr
-  return Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
+  return Start-Process -FilePath "node" -ArgumentList $MountArgs -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
 }
 
 function Wait-MountReady {
