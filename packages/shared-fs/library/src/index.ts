@@ -223,11 +223,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             }),
             {
                 local: true,
-                remote: {
-                    timeout: 10_000,
-                    throwOnMissing: false,
-                    replicate: this.replicate !== false,
-                },
+                remote: false,
             } as any
         ) as Promise<SharedFsEntry[]>;
     }

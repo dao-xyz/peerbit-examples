@@ -151,6 +151,28 @@ describe("shared fs library", () => {
         expect(result.smallFiles.bytesPerFile).toBe(16);
     });
 
+    it("keeps filesystem projections local-only", async () => {
+        const originalSearch = fs.program.entries.index.search.bind(
+            fs.program.entries.index
+        );
+        const remoteOptions: unknown[] = [];
+        fs.program.entries.index.search = ((request: unknown, options: any) => {
+            remoteOptions.push(options?.remote);
+            return originalSearch(request as never, options);
+        }) as typeof fs.program.entries.index.search;
+
+        await fs.writeFile("/local.txt", "fast local write");
+        expect(decode(await fs.readFile("/local.txt"))).toBe(
+            "fast local write"
+        );
+        expect((await fs.list("/")).map((entry) => entry.name)).toEqual([
+            "local.txt",
+        ]);
+
+        expect(remoteOptions.length).toBeGreaterThan(0);
+        expect(remoteOptions.every((remote) => remote === false)).toBe(true);
+    });
+
     it("reopens from a persisted state directory", async () => {
         const directory = await nodeFs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-library-")
@@ -222,7 +244,6 @@ describe("shared fs replication", () => {
             peerbit: readerPeer,
             address: writer.address,
             machineLabel: "reader-machine",
-            replicate: false,
         });
 
         await waitUntil(async () => {
