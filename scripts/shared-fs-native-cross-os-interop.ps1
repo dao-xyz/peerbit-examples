@@ -115,6 +115,15 @@ function Write-MountLogs {
   Get-Content -ErrorAction SilentlyContinue $Stdout, $Stderr
 }
 
+function Get-MountLogsText {
+  return ((Get-Content -Raw -ErrorAction SilentlyContinue $Stdout, $Stderr) -join "`n")
+}
+
+function Test-RetryableMountResolveFailure {
+  $Logs = Get-MountLogsText
+  return $Logs -match "Failed to resolve program with address"
+}
+
 function Stop-MountProcess {
   $CleanupStartMs = Get-NowMs
   if ($null -ne $Process -and -not $Process.HasExited) {
@@ -158,25 +167,56 @@ $Args = @(
   $Adapter
 )
 
-$MountStartMs = Get-NowMs
-$Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
+function Start-MountProcess {
+  Remove-Item -Force -ErrorAction SilentlyContinue $Stdout, $Stderr
+  return Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
+}
 
-try {
-  $Mounted = $false
+function Wait-MountReady {
   for ($i = 0; $i -lt 90; $i++) {
     if ((Test-Path $Stdout) -and (Select-String -Path $Stdout -Pattern "Mounted " -Quiet)) {
-      $Mounted = $true
-      break
+      return "mounted"
     }
     if ($Process.HasExited) {
-      Write-MountLogs
-      throw "mount process exited with code $($Process.ExitCode)"
+      return "exited"
     }
     Start-Sleep -Seconds 1
   }
-  if (-not $Mounted) {
+  return "timeout"
+}
+
+$MountStartMs = Get-NowMs
+$MountResolveAttempts = if ($env:PEERBIT_SHARED_FS_NATIVE_MOUNT_RESOLVE_ATTEMPTS) {
+  [Math]::Max(1, [int]$env:PEERBIT_SHARED_FS_NATIVE_MOUNT_RESOLVE_ATTEMPTS)
+} else {
+  6
+}
+
+try {
+  for ($Attempt = 1; $Attempt -le $MountResolveAttempts; $Attempt++) {
+    $Process = Start-MountProcess
+    $MountStatus = Wait-MountReady
+    if ($MountStatus -eq "mounted") {
+      break
+    }
+
+    if ($MountStatus -eq "exited" -and (Test-RetryableMountResolveFailure) -and $Attempt -lt $MountResolveAttempts) {
+      Write-MountLogs
+      Write-Host "Mount could not resolve the shared filesystem address; retrying ($Attempt/$MountResolveAttempts)..."
+      Start-Sleep -Seconds 10
+      continue
+    }
+
     Write-MountLogs
+    if ($MountStatus -eq "exited") {
+      throw "mount process exited with code $($Process.ExitCode)"
+    }
     throw "mount did not become ready"
+  }
+
+  if ($null -eq $Process -or $Process.HasExited) {
+    Write-MountLogs
+    throw "mount process did not stay running"
   }
   $MountReadyMs = Get-NowMs
   Add-Phase -Name "mountReady" -StartMs $MountStartMs -EndMs $MountReadyMs

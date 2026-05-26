@@ -187,13 +187,15 @@ fi
 address_end_ms="$(now_ms)"
 address_ms=$((address_end_ms - address_start_ms))
 
-mount_start_ms="$(now_ms)"
-node packages/shared-fs/cli/lib/esm/bin.js mount "$address" "$mountpoint" \
-  --directory "$state" \
-  --machine "$machine" \
-  --native-adapter "$adapter" \
-  >"$log" 2>&1 &
-mount_pid="$!"
+start_mount_process() {
+  : >"$log"
+  node packages/shared-fs/cli/lib/esm/bin.js mount "$address" "$mountpoint" \
+    --directory "$state" \
+    --machine "$machine" \
+    --native-adapter "$adapter" \
+    >"$log" 2>&1 &
+  mount_pid="$!"
+}
 
 cleanup() {
   cleanup_start_ms="$(now_ms)"
@@ -223,17 +225,44 @@ finish() {
 }
 trap finish EXIT
 
-for _ in {1..90}; do
-  if grep -q "Mounted " "$log"; then
+mount_start_ms="$(now_ms)"
+mount_resolve_attempts="${PEERBIT_SHARED_FS_NATIVE_MOUNT_RESOLVE_ATTEMPTS:-6}"
+mount_attempt="0"
+
+while true; do
+  mount_attempt=$((mount_attempt + 1))
+  start_mount_process
+  mount_status="timeout"
+
+  for _ in {1..90}; do
+    if grep -q "Mounted " "$log"; then
+      mount_status="mounted"
+      break
+    fi
+    if ! kill -0 "$mount_pid" >/dev/null 2>&1; then
+      mount_status="exited"
+      break
+    fi
+    sleep 1
+  done
+
+  if [ "$mount_status" = "mounted" ]; then
     break
   fi
-  if ! kill -0 "$mount_pid" >/dev/null 2>&1; then
+
+  if [ "$mount_status" = "exited" ] &&
+    grep -q "Failed to resolve program with address" "$log" &&
+    [ "$mount_attempt" -lt "$mount_resolve_attempts" ]; then
     cat "$log"
-    exit 1
+    echo "Mount could not resolve the shared filesystem address; retrying ($mount_attempt/$mount_resolve_attempts)..."
+    wait "$mount_pid" >/dev/null 2>&1 || true
+    sleep 10
+    continue
   fi
-  sleep 1
+
+  cat "$log"
+  exit 1
 done
-grep -q "Mounted " "$log" || { cat "$log"; exit 1; }
 mount_ready_end_ms="$(now_ms)"
 mount_ready_ms=$((mount_ready_end_ms - mount_start_ms))
 
