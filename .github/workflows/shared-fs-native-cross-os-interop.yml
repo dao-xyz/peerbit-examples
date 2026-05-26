@@ -524,6 +524,7 @@ jobs:
               uses: actions/setup-node@v5
               with:
                   node-version: 22
+                  package-manager-cache: false
 
             - name: Setup Go
               uses: actions/setup-go@v6
