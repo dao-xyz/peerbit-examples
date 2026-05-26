@@ -159,6 +159,58 @@ function Resolve-Choco {
   return $null
 }
 
+function Get-RemoteUtcNow {
+  foreach ($uri in @("https://api.github.com/meta", "https://github.com")) {
+    try {
+      $response = Invoke-WebRequest -Uri $uri -Method Head -UseBasicParsing -TimeoutSec 20
+      $dateHeader = $response.Headers["Date"]
+      if ($dateHeader -is [array]) {
+        $dateHeader = $dateHeader[0]
+      }
+      if (-not [string]::IsNullOrWhiteSpace($dateHeader)) {
+        return ([DateTimeOffset]::Parse($dateHeader)).UtcDateTime
+      }
+    } catch {
+      Write-Log "Could not read remote Date header from ${uri}: $($_.Exception.Message)"
+    }
+  }
+  return $null
+}
+
+function Sync-SystemClock {
+  Write-Log "Synchronizing system clock before GitHub runner registration..."
+  try {
+    Set-Service -Name "W32Time" -StartupType Automatic -ErrorAction SilentlyContinue
+    Start-Service -Name "W32Time" -ErrorAction SilentlyContinue
+    $resync = & w32tm /resync /force 2>&1
+    if ($LASTEXITCODE -eq 0) {
+      Write-Log "w32tm resync requested."
+    } else {
+      Write-Log "w32tm resync did not complete ($LASTEXITCODE): $resync"
+    }
+  } catch {
+    Write-Log "w32tm resync failed: $($_.Exception.Message)"
+  }
+
+  $remoteUtc = Get-RemoteUtcNow
+  if ($null -eq $remoteUtc) {
+    Write-Log "Could not verify system clock against HTTPS Date header."
+    return
+  }
+
+  $localUtc = [DateTime]::UtcNow
+  $driftSeconds = [Math]::Abs(($localUtc - $remoteUtc).TotalSeconds)
+  Write-Log ("Clock check: local UTC {0:o}, remote UTC {1:o}, drift {2:n1}s." -f $localUtc, $remoteUtc, $driftSeconds)
+  if ($driftSeconds -le 30) {
+    return
+  }
+
+  Write-Log "Correcting system clock from HTTPS Date header."
+  Set-Date -Date $remoteUtc.ToLocalTime() | Out-Null
+  Start-Sleep -Seconds 2
+  Write-Log ("Clock corrected: local UTC {0:o}." -f [DateTime]::UtcNow)
+}
+
 function Ensure-Chocolatey {
   $choco = Resolve-Choco
   if ($null -ne $choco) {
@@ -370,6 +422,7 @@ function Stop-RunnerTask {
 
 Ensure-OpenSSH
 Ensure-WinRM
+Sync-SystemClock
 
 Ensure-RunnerInstalled
 Ensure-RunnerConfigured
