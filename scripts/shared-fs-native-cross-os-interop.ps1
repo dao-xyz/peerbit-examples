@@ -18,6 +18,23 @@ function Get-NowMs {
   return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
 }
 
+$Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+
+function Set-FileText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $Path,
+    [Parameter(Mandatory = $true)]
+    [string] $Value
+  )
+
+  $Parent = Split-Path -Parent $Path
+  if ($Parent) {
+    New-Item -ItemType Directory -Force -Path $Parent | Out-Null
+  }
+  [System.IO.File]::WriteAllText($Path, $Value, $Utf8NoBom)
+}
+
 $Metrics = [ordered]@{
   schema = 1
   machine = $Machine
@@ -121,8 +138,7 @@ Add-Phase -Name "adapterBuild" -StartMs $AdapterBuildStartMs -EndMs $AdapterBuil
 $AddressStartMs = Get-NowMs
 if ($Role -eq "seed") {
   $Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State).Trim()
-  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $AddressFile) | Out-Null
-  Set-Content -NoNewline -Path $AddressFile -Value $Address
+  Set-FileText -Path $AddressFile -Value $Address
 } else {
   $Address = (Get-Content -Raw -Path $AddressFile).Trim()
 }
@@ -166,7 +182,7 @@ try {
   Add-Phase -Name "mountReady" -StartMs $MountStartMs -EndMs $MountReadyMs
 
   $LocalWriteStartMs = Get-NowMs
-  Set-Content -NoNewline -Path $LocalFile -Value $LocalContents
+  Set-FileText -Path $LocalFile -Value $LocalContents
   $ReadBack = Get-Content -Raw -Path $LocalFile
   if ($ReadBack -ne $LocalContents) {
     throw "unexpected local file contents: $ReadBack"
@@ -213,7 +229,7 @@ try {
   }
 
   $AckWriteStartMs = Get-NowMs
-  Set-Content -NoNewline -Path $AckFile -Value $AckContents
+  Set-FileText -Path $AckFile -Value $AckContents
   $AckReadBack = Get-Content -Raw -Path $AckFile
   if ($AckReadBack -ne $AckContents) {
     throw "unexpected ack file contents: $AckReadBack"
