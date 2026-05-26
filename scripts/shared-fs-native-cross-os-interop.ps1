@@ -29,7 +29,7 @@ function Set-FileText {
   )
 
   $Parent = Split-Path -Parent $Path
-  if ($Parent) {
+  if ($Parent -and -not (Test-Path -LiteralPath $Parent)) {
     New-Item -ItemType Directory -Force -Path $Parent | Out-Null
   }
   [System.IO.File]::WriteAllText($Path, $Value, $Utf8NoBom)
