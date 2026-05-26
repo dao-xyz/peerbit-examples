@@ -43,7 +43,7 @@ jobs:
         timeout-minutes: 20
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Run janitors
               shell: bash
@@ -75,7 +75,7 @@ jobs:
             runs_on: ${{ steps.labels.outputs.runs_on }}
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Compute runner labels
               id: labels
@@ -118,7 +118,7 @@ jobs:
 
             - name: Preserve runner state
               if: always()
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v7
               with:
                   name: scaleway-macos-state-${{ github.run_id }}-${{ github.run_attempt }}
                   path: tmp/processes/github-scaleway-runner.json
@@ -132,7 +132,7 @@ jobs:
         timeout-minutes: 45
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Setup pnpm
               uses: pnpm/action-setup@v4
@@ -175,10 +175,10 @@ jobs:
         timeout-minutes: 20
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Restore runner state
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v8
               continue-on-error: true
               with:
                   name: scaleway-macos-state-${{ github.run_id }}-${{ github.run_attempt }}
@@ -209,7 +209,7 @@ jobs:
             runs_on: ${{ steps.labels.outputs.runs_on }}
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Compute runner labels
               id: labels
@@ -253,7 +253,7 @@ jobs:
 
             - name: Preserve runner state
               if: always()
-              uses: actions/upload-artifact@v4
+              uses: actions/upload-artifact@v7
               with:
                   name: scaleway-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
                   path: tmp/processes/github-scaleway-windows-runner.json
@@ -267,7 +267,7 @@ jobs:
         timeout-minutes: 45
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Setup pnpm
               uses: pnpm/action-setup@v4
@@ -329,10 +329,10 @@ jobs:
         timeout-minutes: 20
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Restore runner state
-              uses: actions/download-artifact@v4
+              uses: actions/download-artifact@v8
               continue-on-error: true
               with:
                   name: scaleway-windows-state-${{ github.run_id }}-${{ github.run_attempt }}
@@ -365,7 +365,7 @@ jobs:
         timeout-minutes: 10
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Check native runner resource limits
               shell: bash
