@@ -65,7 +65,7 @@
         "lint": "eslint --ext .ts . && prettier --check '{*,**/*}.{js,ts,jsx,tsx,json,vue}'",
         "lint:fix": "eslint --fix --ext .ts . && pnpm run fmt",
         "nuke": "shx rm -rf {.,packages/*/*}/{node_modules,yarn.lock}",
-        "postinstall": "patch-package && mkdir -p node_modules/chai-extend && cp chai-global.js node_modules/chai-extend/chai-global.js && echo '{\"type\": \"module\"}' > node_modules/chai-extend/package.json",
+        "postinstall": "node scripts/postinstall.mjs",
         "e2e:placeholderDelay": "pnpm --filter @giga-app/interface run build && cd packages/social-media-app/frontend && npx playwright test tests/placeholderDelay.spec.ts --reporter=line --timeout=70000",
         "test:frontend:unit": "vitest run -c packages/social-media-app/frontend/vitest.config.ts",
         "prefetch:update": "pnpm --filter @giga-app/interface-frontend run prefetch:update"

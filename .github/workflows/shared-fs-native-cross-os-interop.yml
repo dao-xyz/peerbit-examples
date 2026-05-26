@@ -297,7 +297,7 @@ jobs:
                   mkdir -p native-interop-metrics
                   started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
                   set +e
-                  pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
+                  PEERBIT_SKIP_ROOT_POSTINSTALL=1 pnpm install --frozen-lockfile --prod --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
                   status="$?"
                   set -e
                   ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
@@ -313,7 +313,7 @@ jobs:
                   mkdir -p native-interop-metrics
                   started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
                   set +e
-                  pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+                  node scripts/shared-fs-build-packages.mjs
                   status="$?"
                   set -e
                   ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
@@ -432,7 +432,7 @@ jobs:
                   mkdir -p native-interop-metrics
                   started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
                   set +e
-                  pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
+                  PEERBIT_SKIP_ROOT_POSTINSTALL=1 pnpm install --frozen-lockfile --prod --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
                   status="$?"
                   set -e
                   ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
@@ -448,7 +448,7 @@ jobs:
                   mkdir -p native-interop-metrics
                   started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
                   set +e
-                  pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+                  node scripts/shared-fs-build-packages.mjs
                   status="$?"
                   set -e
                   ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
@@ -561,7 +561,8 @@ jobs:
                   $StartedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                   $Status = 0
                   try {
-                    pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
+                    $env:PEERBIT_SKIP_ROOT_POSTINSTALL = "1"
+                    pnpm install --frozen-lockfile --prod --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
                     if ($LASTEXITCODE -ne 0) {
                       throw "pnpm install failed with exit code $LASTEXITCODE"
                     }
@@ -582,7 +583,7 @@ jobs:
                   $StartedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                   $Status = 0
                   try {
-                    pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+                    node scripts/shared-fs-build-packages.mjs
                     if ($LASTEXITCODE -ne 0) {
                       throw "shared-fs build failed with exit code $LASTEXITCODE"
                     }
