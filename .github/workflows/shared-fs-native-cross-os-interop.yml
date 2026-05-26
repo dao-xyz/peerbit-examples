@@ -8,13 +8,22 @@ on:
                 required: true
                 type: number
                 default: 35
+            join_platforms:
+                description: "Native join platform(s) to run with the Linux seed"
+                required: true
+                type: choice
+                default: all
+                options:
+                    - all
+                    - macos
+                    - windows
 
 permissions:
     actions: read
     contents: read
 
 concurrency:
-    group: shared-fs-native-cross-os-interop
+    group: shared-fs-native-scaleway
     cancel-in-progress: false
 
 env:
@@ -23,8 +32,146 @@ env:
     NATIVE_INTEROP_TIMEOUT_MINUTES: ${{ github.event.inputs.timeout_minutes || '35' }}
 
 jobs:
+    plan:
+        name: Plan native join platforms
+        runs-on: ubuntu-latest
+        outputs:
+            macos: ${{ steps.plan.outputs.macos }}
+            windows: ${{ steps.plan.outputs.windows }}
+            expected_joiners: ${{ steps.plan.outputs.expected_joiners }}
+            macos_expected: ${{ steps.plan.outputs.macos_expected }}
+            windows_expected: ${{ steps.plan.outputs.windows_expected }}
+        steps:
+            - name: Compute join plan
+              id: plan
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  join_platforms="${{ github.event.inputs.join_platforms || 'all' }}"
+                  macos=false
+                  windows=false
+                  case "$join_platforms" in
+                    all)
+                      macos=true
+                      windows=true
+                      expected_joiners="macos,windows"
+                      macos_expected="linux,windows"
+                      windows_expected="linux,macos"
+                      ;;
+                    macos)
+                      macos=true
+                      expected_joiners="macos"
+                      macos_expected="linux"
+                      windows_expected=""
+                      ;;
+                    windows)
+                      windows=true
+                      expected_joiners="windows"
+                      macos_expected=""
+                      windows_expected="linux"
+                      ;;
+                    *)
+                      echo "Unsupported join_platforms: $join_platforms" >&2
+                      exit 2
+                      ;;
+                  esac
+                  echo "macos=$macos" >> "$GITHUB_OUTPUT"
+                  echo "windows=$windows" >> "$GITHUB_OUTPUT"
+                  echo "expected_joiners=$expected_joiners" >> "$GITHUB_OUTPUT"
+                  echo "macos_expected=$macos_expected" >> "$GITHUB_OUTPUT"
+                  echo "windows_expected=$windows_expected" >> "$GITHUB_OUTPUT"
+                  echo "join_platforms=$join_platforms"
+                  echo "expected_joiners=$expected_joiners"
+
+    provision-macos:
+        name: Provision reusable macOS runner
+        needs: plan
+        if: ${{ needs.plan.outputs.macos == 'true' }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+        outputs:
+            runs_on: ${{ steps.labels.outputs.runs_on }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Compute runner labels
+              id: labels
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  label="peerbit-shared-fs-native-interop-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}-macos"
+                  echo "unique_label=$label" >> "$GITHUB_OUTPUT"
+                  node -e 'console.log("runs_on=" + JSON.stringify(["self-hosted","macOS","scaleway",process.argv[1]]))' "$label" >> "$GITHUB_OUTPUT"
+
+            - name: Prepare SSH key
+              shell: bash
+              env:
+                  PEERBIT_SCALEWAY_SSH_PRIVATE_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PRIVATE_KEY }}
+              run: |
+                  set -euo pipefail
+                  if [ -z "${PEERBIT_SCALEWAY_SSH_PRIVATE_KEY:-}" ]; then
+                    echo "Missing PEERBIT_SCALEWAY_SSH_PRIVATE_KEY secret."
+                    exit 1
+                  fi
+                  printf '%s\n' "$PEERBIT_SCALEWAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/scaleway_ssh"
+                  chmod 600 "$RUNNER_TEMP/scaleway_ssh"
+
+            - name: Start runner
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  SCALEWAY_SERVER_TYPE: ${{ vars.PEERBIT_SCALEWAY_MACOS_SERVER_TYPE || 'M2-M' }}
+                  PEERBIT_SCALEWAY_SSH_PUBLIC_KEY: ${{ secrets.PEERBIT_SCALEWAY_SSH_PUBLIC_KEY }}
+                  PEERBIT_SCALEWAY_SSH_IDENTITY_FILE: ${{ runner.temp }}/scaleway_ssh
+                  PEERBIT_RUNNER_EPHEMERAL: "1"
+                  PEERBIT_SCALEWAY_ENABLE_KEXT: "1"
+                  PEERBIT_SCALEWAY_REUSE_SERVER: "1"
+                  PEERBIT_SCALEWAY_REUSE_POOL: shared-fs
+                  PEERBIT_RUNNER_REPLACE: "1"
+                  PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  set +e
+                  node scripts/github-scaleway-runner.mjs start
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/provision-macos.json \
+                    macos provision runnerProvision "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
+
+            - name: Preserve runner state
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: scaleway-macos-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes/github-scaleway-runner.json
+                  if-no-files-found: warn
+                  retention-days: 2
+
+            - name: Report provisioning timing
+              if: always()
+              run: node scripts/shared-fs-native-interop-metrics.mjs summary native-interop-metrics/provision-macos.json
+
+            - name: Upload provisioning timing
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-macos-provision-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-metrics/provision-macos.json
+                  if-no-files-found: warn
+                  retention-days: 14
+
     provision-windows:
         name: Provision ephemeral Windows runner
+        needs: plan
+        if: ${{ needs.plan.outputs.windows == 'true' }}
         runs-on: ubuntu-latest
         timeout-minutes: 45
         outputs:
@@ -109,6 +256,7 @@ jobs:
 
     seed-linux-native:
         name: Linux FUSE native seed
+        needs: plan
         runs-on: ubuntu-latest
         timeout-minutes: 60
         steps:
@@ -184,7 +332,8 @@ jobs:
                     bash scripts/shared-fs-native-cross-os-interop.sh \
                       --role seed \
                       --machine linux \
-                      --expected windows \
+                      --expected "${{ needs.plan.outputs.expected_joiners }}" \
+                      --expected-acks "${{ needs.plan.outputs.expected_joiners }}" \
                       --address-file shared-fs-native-address/address.txt \
                       --metrics-file native-interop-metrics/linux.json \
                       --timeout-seconds "$timeout_seconds" \
@@ -218,7 +367,7 @@ jobs:
                   path: shared-fs-native-address/address.txt
                   if-no-files-found: error
 
-            - name: Wait for Windows native mount peer
+            - name: Wait for native mount peers
               shell: bash
               run: |
                   set -euo pipefail
@@ -241,9 +390,134 @@ jobs:
                   if-no-files-found: warn
                   retention-days: 14
 
+    macos-native-join:
+        name: macOS macFUSE native join
+        needs:
+            - plan
+            - provision-macos
+        if: ${{ needs.plan.outputs.macos == 'true' }}
+        runs-on: ${{ fromJSON(needs.provision-macos.outputs.runs_on) }}
+        timeout-minutes: 60
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v4
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Setup Go
+              uses: actions/setup-go@v5
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Check macFUSE
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [ ! -d /Library/Filesystems/macfuse.fs ] && ! command -v mount_macfuse >/dev/null 2>&1; then
+                    if command -v brew >/dev/null 2>&1; then
+                      brew install --cask macfuse || true
+                    fi
+                  fi
+                  if [ ! -d /Library/Filesystems/macfuse.fs ] && ! command -v mount_macfuse >/dev/null 2>&1; then
+                    echo "macFUSE is not installed or loadable. The Scaleway Mac must be created with kext support and macFUSE may need one-time approval/restart."
+                    exit 1
+                  fi
+
+            - name: Install dependencies
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  set +e
+                  pnpm install --frozen-lockfile
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/macos-workflow.json \
+                    macos workflow installDependencies "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
+
+            - name: Build shared-fs packages
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  set +e
+                  pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/macos-workflow.json \
+                    macos workflow buildSharedFs "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
+
+            - name: Wait for seed address artifact
+              shell: bash
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  node scripts/wait-github-artifact.mjs shared-fs-native-address
+
+            - name: Download seed address
+              uses: actions/download-artifact@v4
+              with:
+                  name: shared-fs-native-address
+                  path: shared-fs-native-address
+
+            - name: Run macOS native mount join
+              shell: bash
+              env:
+                  PEERBIT_SHARED_FS_NATIVE_ADAPTER_DEBUG: "1"
+              run: |
+                  set -euo pipefail
+                  timeout_seconds=$((NATIVE_INTEROP_TIMEOUT_MINUTES * 60))
+                  bash scripts/shared-fs-native-cross-os-interop.sh \
+                    --role join \
+                    --machine macos \
+                    --expected "${{ needs.plan.outputs.macos_expected }}" \
+                    --expected-acks "${{ needs.plan.outputs.macos_expected }}" \
+                    --address-file shared-fs-native-address/address.txt \
+                    --metrics-file native-interop-metrics/macos.json \
+                    --timeout-seconds "$timeout_seconds"
+
+            - name: Report macOS timing
+              if: always()
+              run: |
+                  node scripts/shared-fs-native-interop-metrics.mjs summary \
+                    native-interop-metrics/macos-workflow.json \
+                    native-interop-metrics/macos.json
+
+            - name: Upload macOS timing
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-macos-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-metrics/*.json
+                  if-no-files-found: warn
+                  retention-days: 14
+
     windows-native-join:
         name: Windows WinFsp native join
-        needs: provision-windows
+        needs:
+            - plan
+            - provision-windows
+        if: ${{ needs.plan.outputs.windows == 'true' }}
         runs-on: ${{ fromJSON(needs.provision-windows.outputs.runs_on) }}
         timeout-minutes: 60
         steps:
@@ -332,6 +606,13 @@ jobs:
                       windows workflow buildSharedFs $StartedMs $EndedMs $Status
                   }
 
+            - name: Wait for seed address artifact
+              shell: powershell
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
+              run: |
+                  node scripts/wait-github-artifact.mjs shared-fs-native-address
+
             - name: Download seed address
               uses: actions/download-artifact@v4
               with:
@@ -347,8 +628,8 @@ jobs:
                   scripts/shared-fs-native-cross-os-interop.ps1 `
                     -Role join `
                     -Machine windows `
-                    -Expected linux `
-                    -ExpectedAcks linux `
+                    -Expected "${{ needs.plan.outputs.windows_expected }}" `
+                    -ExpectedAcks "${{ needs.plan.outputs.windows_expected }}" `
                     -AddressFile shared-fs-native-address/address.txt `
                     -MetricsFile native-interop-metrics/windows.json `
                     -TimeoutSeconds $TimeoutSeconds
@@ -367,6 +648,68 @@ jobs:
               with:
                   name: shared-fs-native-windows-timing-${{ github.run_id }}-${{ github.run_attempt }}
                   path: native-interop-metrics/*.json
+                  if-no-files-found: warn
+                  retention-days: 14
+
+    cleanup-macos:
+        name: Cleanup macOS runner
+        if: ${{ always() && needs.provision-macos.result != 'skipped' }}
+        needs:
+            - provision-macos
+            - macos-native-join
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Restore runner state
+              uses: actions/download-artifact@v4
+              continue-on-error: true
+              with:
+                  name: scaleway-macos-native-interop-state-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: tmp/processes
+
+            - name: Stop runner
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.PEERBIT_RUNNER_ADMIN_TOKEN }}
+                  ACCESS_KEY_ID: ${{ secrets.SCALEWAY_ACCESS_KEY_ID }}
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+                  SCALEWAY_PROJECT_ID: ${{ secrets.SCALEWAY_PROJECT_ID }}
+                  PEERBIT_FORCE: "1"
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  if [ ! -f tmp/processes/github-scaleway-runner.json ]; then
+                    echo "No macOS runner state artifact found."
+                    ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                    node scripts/shared-fs-native-interop-metrics.mjs phase \
+                      native-interop-metrics/cleanup-macos.json \
+                      macos cleanup runnerCleanup "$started_ms" "$ended_ms" 0
+                    exit 0
+                  fi
+                  set +e
+                  node scripts/github-scaleway-runner.mjs stop
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/cleanup-macos.json \
+                    macos cleanup runnerCleanup "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
+
+            - name: Report cleanup timing
+              if: always()
+              run: node scripts/shared-fs-native-interop-metrics.mjs summary native-interop-metrics/cleanup-macos.json
+
+            - name: Upload cleanup timing
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-macos-cleanup-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-metrics/cleanup-macos.json
                   if-no-files-found: warn
                   retention-days: 14
 

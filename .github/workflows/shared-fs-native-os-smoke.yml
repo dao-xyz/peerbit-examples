@@ -27,7 +27,7 @@ permissions:
     contents: read
 
 concurrency:
-    group: shared-fs-native-os-smoke
+    group: shared-fs-native-scaleway
     cancel-in-progress: false
 
 env:

@@ -14,6 +14,11 @@ The `Shared FS Native OS Smoke` workflow provisions Scaleway runners, registers
 GitHub Actions ephemeral self-hosted runners, runs one native mount smoke job,
 then attempts cleanup.
 
+The `Shared FS Native Cross-OS Interop` workflow starts a Linux FUSE seed and
+can join either `windows`, `macos`, or `all` native peers. The `all` mode waits
+for Linux, macOS, and Windows to each write a file through its native mount, read
+the other platforms' files, then write and observe ack files.
+
 The macOS path reuses a warm Scaleway Apple Silicon host by default because
 those machines have a minimum allocation period. It still creates a fresh
 ephemeral GitHub runner registration, token, and unique label for each workflow
@@ -66,6 +71,9 @@ pnpm scaleway:windows:stop
 
 The runners are registered with `--ephemeral`, so GitHub de-registers each
 runner after it accepts one job.
+
+The native smoke and cross-OS interop workflows share one concurrency group so
+only one Scaleway native run provisions or reconfigures runners at a time.
 
 For macOS, cleanup releases the runner registration but keeps the reusable
 Scaleway host warm. The scheduled janitor deletes stale macOS pool hosts after
