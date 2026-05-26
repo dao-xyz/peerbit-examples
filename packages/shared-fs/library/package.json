@@ -35,15 +35,15 @@
         "test:watch": "vitest"
     },
     "devDependencies": {
-        "@peerbit/test-utils": "^3.0.33",
+        "@peerbit/test-utils": "^3.0.34",
         "typescript": "^5.6.3"
     },
     "dependencies": {
         "@dao-xyz/borsh": "^6.0.0",
         "@peerbit/crypto": "^3",
-        "@peerbit/document": "^13",
-        "@peerbit/program": "^6",
-        "peerbit": "^5",
+        "@peerbit/document": "^13.0.43",
+        "@peerbit/program": "^6.0.30",
+        "peerbit": "^5.2.19",
         "uint8arrays": "^5.1.0"
     }
 }

@@ -41,7 +41,7 @@
         "@multiformats/multiaddr": "^13.0.1",
         "@peerbit/shared-fs": "workspace:*",
         "chalk": "^5.3.0",
-        "peerbit": "^5",
+        "peerbit": "^5.2.19",
         "yargs": "^17.7.2"
     },
     "devDependencies": {
