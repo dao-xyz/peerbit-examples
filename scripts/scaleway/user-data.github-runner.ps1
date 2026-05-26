@@ -22,6 +22,7 @@ $RunnerToken = "{{RUNNER_TOKEN}}"
 $RunnerName = "{{RUNNER_NAME}}"
 $RunnerLabels = "{{RUNNER_LABELS}}"
 $RunnerEphemeral = "{{RUNNER_EPHEMERAL}}"
+$RunnerReconfigure = "{{RUNNER_RECONFIGURE}}"
 
 $EnableSsh = "{{ENABLE_SSH}}"
 $SshAuthorizedKey = "{{SSH_AUTHORIZED_KEY}}"
@@ -259,9 +260,20 @@ function Ensure-RunnerInstalled {
 
 function Ensure-RunnerConfigured {
   $runnerMarker = Join-Path $RunnerRoot ".runner"
-  if (Test-Path $runnerMarker) {
+  if ((Test-Path $runnerMarker) -and $RunnerReconfigure -ne "1") {
     Write-Log "Runner already configured; skipping config."
     return
+  }
+
+  if (Test-Path $runnerMarker) {
+    Write-Log "Runner already configured; reconfiguring."
+    Stop-RunnerTask
+    foreach ($file in @(".runner", ".credentials", ".credentials_rsaparams")) {
+      $path = Join-Path $RunnerRoot $file
+      if (Test-Path $path) {
+        Remove-Item -Force -Recurse $path
+      }
+    }
   }
 
   Write-Log "Configuring runner: $RunnerName ($RunnerLabels)"

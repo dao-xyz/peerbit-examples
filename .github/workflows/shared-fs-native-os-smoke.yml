@@ -63,7 +63,7 @@ jobs:
                   node scripts/shared-fs-scaleway-resource-check.mjs \
                     --repo "${GITHUB_REPOSITORY##*/}" \
                     --mac-max 1 \
-                    --windows-max 0 \
+                    --windows-max 1 \
                     --skip-missing-credentials
 
     provision-macos:
@@ -201,7 +201,7 @@ jobs:
                   node scripts/github-scaleway-runner.mjs stop
 
     provision-windows:
-        name: Provision ephemeral Windows runner
+        name: Provision reusable Windows runner
         if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'smoke' && (github.event.inputs.platform == 'all' || github.event.inputs.platform == 'windows') }}
         runs-on: ubuntu-latest
         timeout-minutes: 45
@@ -246,6 +246,8 @@ jobs:
                   PEERBIT_SCALEWAY_SSH_IDENTITY_FILE: ${{ runner.temp }}/scaleway_ssh
                   PEERBIT_RUNNER_EPHEMERAL: "1"
                   PEERBIT_RUNNER_REPLACE: "1"
+                  PEERBIT_SCALEWAY_WINDOWS_REUSE_SERVER: "1"
+                  PEERBIT_SCALEWAY_WINDOWS_REUSE_POOL: shared-fs
                   PEERBIT_WINDOWS_SKIP_DEPENDENCIES: "0"
                   PEERBIT_WINDOWS_SKIP_HEAVY_DEPENDENCIES: "1"
                   PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
@@ -379,5 +381,5 @@ jobs:
                   node scripts/shared-fs-scaleway-resource-check.mjs \
                     --repo "${GITHUB_REPOSITORY##*/}" \
                     --mac-max 1 \
-                    --windows-max 0 \
+                    --windows-max 1 \
                     --skip-missing-credentials

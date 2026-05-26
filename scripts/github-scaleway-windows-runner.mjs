@@ -195,6 +195,15 @@ function usage() {
     console.log(
         "  PEERBIT_RUNNER_EPHEMERAL=1                  (default: 1; runner accepts one job)"
     );
+    console.log(
+        "  PEERBIT_SCALEWAY_WINDOWS_REUSE_SERVER=0     (set 1 to reuse a warm Windows host)"
+    );
+    console.log(
+        "  PEERBIT_SCALEWAY_WINDOWS_REUSE_POOL=shared-fs (stable pool name when reusing)"
+    );
+    console.log(
+        "  PEERBIT_SCALEWAY_WINDOWS_DELETE_REUSABLE=0  (set 1 to delete reused host in stop)"
+    );
     console.log("  PEERBIT_SCALEWAY_JANITOR_MAX_AGE_MS=7200000 (default: 2h)");
     console.log(
         "  PEERBIT_FORCE=1                             (allow stop while runner busy)"
@@ -576,6 +585,11 @@ function extractServerId(data) {
     return String(server?.id || "").trim();
 }
 
+function extractServerName(data) {
+    const server = extractServer(data);
+    return String(server?.name || "").trim();
+}
+
 function extractServerStatus(server) {
     const candidates = [server?.state, server?.status, server?.phase]
         .map((value) => String(value || "").trim())
@@ -807,6 +821,20 @@ async function listWindowsImages(secretKey, zone, projectId) {
     );
 }
 
+async function findReusableServer(secretKey, zone, serverName) {
+    const data = await scalewayJson(
+        secretKey,
+        "GET",
+        `/instance/v1/zones/${encodeURIComponent(zone)}/servers?per_page=100`
+    );
+    const servers = Array.isArray(data?.servers) ? data.servers : [];
+    const matches = servers.filter(
+        (server) => extractServerName(server) === serverName
+    );
+    matches.sort((a, b) => serverCreatedAt(b) - serverCreatedAt(a));
+    return matches[0] || null;
+}
+
 async function startRunner(repoInfo) {
     const tokens = getGitHubTokens();
     if (tokens.length === 0) {
@@ -831,6 +859,20 @@ async function startRunner(repoInfo) {
     const ephemeral =
         String(process.env.PEERBIT_RUNNER_EPHEMERAL || "1").trim() !== "0";
     const rootGb = getEnvInt("SCALEWAY_WINDOWS_ROOT_GB", 100);
+    const reuseServer =
+        String(
+            process.env.PEERBIT_SCALEWAY_WINDOWS_REUSE_SERVER ||
+                process.env.PEERBIT_SCALEWAY_REUSE_SERVER ||
+                ""
+        ).trim() === "1";
+    const reusePool = sanitizeName(
+        process.env.PEERBIT_SCALEWAY_WINDOWS_REUSE_POOL ||
+            process.env.PEERBIT_SCALEWAY_REUSE_POOL ||
+            "shared-fs"
+    );
+    const forceReconfigure =
+        reuseServer ||
+        String(process.env.PEERBIT_RUNNER_RECONFIGURE || "").trim() === "1";
 
     const enableSsh =
         String(process.env.PEERBIT_WINDOWS_ENABLE_SSH || "1").trim() !== "0";
@@ -879,9 +921,11 @@ async function startRunner(repoInfo) {
     const runnerName = sanitizeName(
         `peerbit-selfhosted-scaleway-windows-${repoInfo.repo}-${os.hostname()}-${suffix}`
     );
-    const serverName = sanitizeName(
-        `peerbit-gh-runner-windows-${repoInfo.repo}-${suffix}`
-    );
+    const serverName = reuseServer
+        ? sanitizeName(
+              `peerbit-gh-runner-windows-${repoInfo.repo}-${reusePool || "pool"}`
+          )
+        : sanitizeName(`peerbit-gh-runner-windows-${repoInfo.repo}-${suffix}`);
 
     const tracker = new ProcessTracker("github-scaleway-windows-runner.json");
     const key = `${repoInfo.owner}/${repoInfo.repo}`;
@@ -939,38 +983,48 @@ async function startRunner(repoInfo) {
         );
     }
 
-    console.log(
-        `[github-scaleway-windows-runner] Creating Scaleway Instance ${serverName} (${serverType}, ${zone})...`
-    );
-    const serverPayload = {
-        name: serverName,
-        project: projectId,
-        commercial_type: serverType,
-        dynamic_ip_required: true,
-        image,
-        volumes: {
-            0: {
-                size: rootGb * 1000 * 1000 * 1000,
+    let created = reuseServer
+        ? await findReusableServer(secretKey, zone, serverName)
+        : null;
+    const reusedServer = Boolean(created);
+    if (created) {
+        console.log(
+            `[github-scaleway-windows-runner] Reusing Scaleway Instance ${serverName} (${extractServerId(created)}).`
+        );
+    } else {
+        console.log(
+            `[github-scaleway-windows-runner] Creating Scaleway Instance ${serverName} (${serverType}, ${zone})...`
+        );
+        const serverPayload = {
+            name: serverName,
+            project: projectId,
+            commercial_type: serverType,
+            dynamic_ip_required: true,
+            image,
+            volumes: {
+                0: {
+                    size: rootGb * 1000 * 1000 * 1000,
+                },
             },
-        },
-        tags: [
-            "peerbit",
-            "github-runner",
-            "scaleway",
-            "windows",
-            ...(enableSsh ? ["with-ssh"] : []),
-        ],
-    };
-    if (encryptAdminPassword && sshKeyId) {
-        serverPayload.admin_password_encryption_ssh_key_id = sshKeyId;
-    }
+            tags: [
+                "peerbit",
+                "github-runner",
+                "scaleway",
+                "windows",
+                ...(enableSsh ? ["with-ssh"] : []),
+            ],
+        };
+        if (encryptAdminPassword && sshKeyId) {
+            serverPayload.admin_password_encryption_ssh_key_id = sshKeyId;
+        }
 
-    const created = await scalewayJson(
-        secretKey,
-        "POST",
-        `/instance/v1/zones/${encodeURIComponent(zone)}/servers`,
-        serverPayload
-    );
+        created = await scalewayJson(
+            secretKey,
+            "POST",
+            `/instance/v1/zones/${encodeURIComponent(zone)}/servers`,
+            serverPayload
+        );
+    }
 
     const serverId = extractServerId(created);
     if (!serverId) {
@@ -984,7 +1038,7 @@ async function startRunner(repoInfo) {
         zone,
         projectId,
         serverId,
-        serverName,
+        serverName: extractServerName(created) || serverName,
         serverType,
         image,
         sshKeyId: sshKeyId || null,
@@ -992,6 +1046,8 @@ async function startRunner(repoInfo) {
         runnerLabels,
         runnerVersion,
         ephemeral,
+        reuseServer,
+        reusedServer,
         runnerId: null,
         serverHost: null,
     });
@@ -1000,10 +1056,11 @@ async function startRunner(repoInfo) {
         server_name: serverName,
         runner_name: runnerName,
         runner_labels: runnerLabels,
+        server_reused: reusedServer ? "1" : "0",
     });
 
     console.log(
-        `[github-scaleway-windows-runner] Server created (id ${serverId}).`
+        `[github-scaleway-windows-runner] Server ${reusedServer ? "selected" : "created"} (id ${serverId}).`
     );
 
     await restartInstance(secretKey, zone, serverId);
@@ -1063,6 +1120,7 @@ async function startRunner(repoInfo) {
         RUNNER_NAME: escapePowerShell(runnerName),
         RUNNER_LABELS: escapePowerShell(runnerLabels),
         RUNNER_EPHEMERAL: ephemeral ? "1" : "",
+        RUNNER_RECONFIGURE: forceReconfigure ? "1" : "",
         ENABLE_SSH: enableSsh ? "1" : "",
         SSH_AUTHORIZED_KEY: escapePowerShell(sshAuthorizedKey),
         SSH_REMOTE_ADDRESS: escapePowerShell(sshRemoteAddress),
@@ -1162,6 +1220,9 @@ async function bootstrapRunner(repoInfo) {
         String(
             state.ephemeral ?? process.env.PEERBIT_RUNNER_EPHEMERAL ?? "1"
         ).trim() !== "0";
+    const forceReconfigure =
+        Boolean(state.reuseServer) ||
+        String(process.env.PEERBIT_RUNNER_RECONFIGURE || "").trim() === "1";
     const repoUrl = String(
         state.repoUrl || `https://github.com/${repoInfo.owner}/${repoInfo.repo}`
     ).trim();
@@ -1301,6 +1362,7 @@ async function bootstrapRunner(repoInfo) {
         RUNNER_NAME: escapePowerShell(runnerName),
         RUNNER_LABELS: escapePowerShell(runnerLabels),
         RUNNER_EPHEMERAL: ephemeral ? "1" : "",
+        RUNNER_RECONFIGURE: forceReconfigure ? "1" : "",
         ENABLE_SSH: enableSsh ? "1" : "",
         SSH_AUTHORIZED_KEY: escapePowerShell(sshAuthorizedKey),
         SSH_REMOTE_ADDRESS: escapePowerShell(sshRemoteAddress),
@@ -1405,6 +1467,13 @@ async function stopRunner(repoInfo) {
     }
 
     let deletedServer = false;
+    const releaseReusableServer =
+        Boolean(state.reuseServer) &&
+        String(
+            process.env.PEERBIT_SCALEWAY_WINDOWS_DELETE_REUSABLE ||
+                process.env.PEERBIT_SCALEWAY_DELETE_REUSABLE ||
+                ""
+        ).trim() !== "1";
     if (state.serverId && state.zone) {
         const zone = String(state.zone).trim();
         const serverId = String(state.serverId).trim();
@@ -1430,20 +1499,26 @@ async function stopRunner(repoInfo) {
             );
         }
 
-        console.log(
-            `[github-scaleway-windows-runner] Deleting Scaleway server ${serverId}...`
-        );
-        try {
-            await scalewayJson(
-                secretKey,
-                "DELETE",
-                `/instance/v1/zones/${encodeURIComponent(zone)}/servers/${encodeURIComponent(serverId)}`
+        if (releaseReusableServer) {
+            console.log(
+                `[github-scaleway-windows-runner] Keeping reusable Scaleway server ${serverId} powered off; janitor will delete stale pool hosts.`
             );
-            deletedServer = true;
-        } catch (error) {
-            console.warn(
-                `[github-scaleway-windows-runner] Warning: could not delete Scaleway server (${error instanceof Error ? error.message : String(error)}).`
+        } else {
+            console.log(
+                `[github-scaleway-windows-runner] Deleting Scaleway server ${serverId}...`
             );
+            try {
+                await scalewayJson(
+                    secretKey,
+                    "DELETE",
+                    `/instance/v1/zones/${encodeURIComponent(zone)}/servers/${encodeURIComponent(serverId)}`
+                );
+                deletedServer = true;
+            } catch (error) {
+                console.warn(
+                    `[github-scaleway-windows-runner] Warning: could not delete Scaleway server (${error instanceof Error ? error.message : String(error)}).`
+                );
+            }
         }
     } else {
         console.warn(
@@ -1479,13 +1554,14 @@ async function stopRunner(repoInfo) {
 
     if (
         deletedServer ||
+        releaseReusableServer ||
         String(process.env.PEERBIT_FORCE_UNTRACK || "").trim() === "1"
     ) {
         tracker.untrack(key);
         console.log("[github-scaleway-windows-runner] Runner stopped.");
     } else {
         console.log(
-            "[github-scaleway-windows-runner] Runner state kept (server delete failed). Re-run stop once the server is powered off, or set PEERBIT_FORCE_UNTRACK=1 to forget it."
+            "[github-scaleway-windows-runner] Runner state kept because the server was not deleted. Re-run stop later, or set PEERBIT_FORCE_UNTRACK=1 to forget it."
         );
     }
 }
