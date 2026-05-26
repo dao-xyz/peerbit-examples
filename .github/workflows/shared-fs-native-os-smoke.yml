@@ -148,17 +148,7 @@ jobs:
 
             - name: Check macFUSE
               shell: bash
-              run: |
-                  set -euo pipefail
-                  if [ ! -d /Library/Filesystems/macfuse.fs ] && ! command -v mount_macfuse >/dev/null 2>&1; then
-                    if command -v brew >/dev/null 2>&1; then
-                      brew install --cask macfuse || true
-                    fi
-                  fi
-                  if [ ! -d /Library/Filesystems/macfuse.fs ] && ! command -v mount_macfuse >/dev/null 2>&1; then
-                    echo "macFUSE is not installed or loadable. The Scaleway Mac must be created with kext support and macFUSE may need one-time approval/restart."
-                    exit 1
-                  fi
+              run: scripts/shared-fs-check-macfuse.sh
 
             - name: Install dependencies
               run: pnpm install --frozen-lockfile

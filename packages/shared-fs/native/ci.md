@@ -24,6 +24,11 @@ those machines have a minimum allocation period. It still creates a fresh
 ephemeral GitHub runner registration, token, and unique label for each workflow
 run. The Windows path creates and deletes a fresh instance by default.
 
+The reusable macOS host must have macFUSE installed and approved once in macOS
+System Settings. Scaleway's kernel-extension flag allows the host to load kernel
+extensions, but macFUSE still needs the one-time Privacy & Security approval and
+a reboot after first installation.
+
 ## Required GitHub Secrets
 
 Set these repository secrets before running the workflow:
