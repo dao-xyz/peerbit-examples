@@ -7,10 +7,56 @@ param(
   [string] $AddressFile,
   [string] $Expected = "",
   [string] $ExpectedAcks = "",
+  [string] $MetricsFile = "",
   [int] $TimeoutSeconds = 2100
 )
 
 $ErrorActionPreference = "Stop"
+$ScriptStatus = 0
+
+function Get-NowMs {
+  return [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+}
+
+$Metrics = [ordered]@{
+  schema = 1
+  machine = $Machine
+  role = $Role
+  status = 0
+  startedAtMs = $(Get-NowMs)
+  endedAtMs = $null
+  durationMs = $null
+  phases = [ordered]@{}
+  observations = @()
+}
+
+function Add-Phase {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string] $Name,
+    [Parameter(Mandatory = $true)]
+    [long] $StartMs,
+    [Parameter(Mandatory = $true)]
+    [long] $EndMs
+  )
+
+  $Metrics.phases[$Name] = $EndMs - $StartMs
+}
+
+function Write-TimingMetrics {
+  if (-not $MetricsFile) {
+    return
+  }
+
+  $Metrics.status = $ScriptStatus
+  $Metrics.endedAtMs = Get-NowMs
+  $Metrics.durationMs = $Metrics.endedAtMs - $Metrics.startedAtMs
+  $MetricsDirectory = Split-Path -Parent $MetricsFile
+  if ($MetricsDirectory) {
+    New-Item -ItemType Directory -Force -Path $MetricsDirectory | Out-Null
+  }
+  $Metrics | ConvertTo-Json -Depth 6 | Set-Content -Path $MetricsFile -Encoding utf8
+}
 
 $RepoRoot = Resolve-Path (Join-Path $PSScriptRoot "..")
 Set-Location $RepoRoot
@@ -20,6 +66,7 @@ $Adapter = Join-Path $TempRoot "peerbit-shared-fs-native-$Machine.exe"
 $State = Join-Path $TempRoot "pbfs-native-interop-$Machine-state"
 $Stdout = Join-Path $TempRoot "pbfs-native-interop-$Machine.out.log"
 $Stderr = Join-Path $TempRoot "pbfs-native-interop-$Machine.err.log"
+$Process = $null
 
 function Get-FreeMountDrive {
   foreach ($Letter in @("P", "Q", "R", "S", "T", "U", "V", "W", "X", "Y", "Z")) {
@@ -52,19 +99,26 @@ function Write-MountLogs {
 }
 
 function Stop-MountProcess {
+  $CleanupStartMs = Get-NowMs
   if ($null -ne $Process -and -not $Process.HasExited) {
     Stop-Process -Id $Process.Id -Force -ErrorAction SilentlyContinue
     Wait-Process -Id $Process.Id -Timeout 10 -ErrorAction SilentlyContinue
   }
+  $CleanupEndMs = Get-NowMs
+  Add-Phase -Name "cleanup" -StartMs $CleanupStartMs -EndMs $CleanupEndMs
 }
 
+$AdapterBuildStartMs = Get-NowMs
 Push-Location "packages/shared-fs/native"
 try {
   go build -tags "native_mount" -o $Adapter .
 } finally {
   Pop-Location
 }
+$AdapterBuildEndMs = Get-NowMs
+Add-Phase -Name "adapterBuild" -StartMs $AdapterBuildStartMs -EndMs $AdapterBuildEndMs
 
+$AddressStartMs = Get-NowMs
 if ($Role -eq "seed") {
   $Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State).Trim()
   New-Item -ItemType Directory -Force -Path (Split-Path -Parent $AddressFile) | Out-Null
@@ -72,6 +126,8 @@ if ($Role -eq "seed") {
 } else {
   $Address = (Get-Content -Raw -Path $AddressFile).Trim()
 }
+$AddressEndMs = Get-NowMs
+Add-Phase -Name "address" -StartMs $AddressStartMs -EndMs $AddressEndMs
 
 $Args = @(
   "packages/shared-fs/cli/lib/esm/bin.js",
@@ -86,6 +142,7 @@ $Args = @(
   $Adapter
 )
 
+$MountStartMs = Get-NowMs
 $Process = Start-Process -FilePath "node" -ArgumentList $Args -RedirectStandardOutput $Stdout -RedirectStandardError $Stderr -PassThru -WindowStyle Hidden
 
 try {
@@ -105,24 +162,40 @@ try {
     Write-MountLogs
     throw "mount did not become ready"
   }
+  $MountReadyMs = Get-NowMs
+  Add-Phase -Name "mountReady" -StartMs $MountStartMs -EndMs $MountReadyMs
 
+  $LocalWriteStartMs = Get-NowMs
   Set-Content -NoNewline -Path $LocalFile -Value $LocalContents
   $ReadBack = Get-Content -Raw -Path $LocalFile
   if ($ReadBack -ne $LocalContents) {
     throw "unexpected local file contents: $ReadBack"
   }
+  $LocalWriteEndMs = Get-NowMs
+  Add-Phase -Name "localWriteReadback" -StartMs $LocalWriteStartMs -EndMs $LocalWriteEndMs
 
   $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
   function Wait-FileContents {
     param(
+      [Parameter(Mandatory = $true)]
+      [string] $Kind,
+      [Parameter(Mandatory = $true)]
+      [string] $Machine,
       [Parameter(Mandatory = $true)]
       [string] $Path,
       [Parameter(Mandatory = $true)]
       [string] $Contents
     )
 
+    $WaitStartMs = Get-NowMs
     while ($true) {
       if ((Test-Path $Path) -and ((Get-Content -Raw -Path $Path) -eq $Contents)) {
+        $WaitEndMs = Get-NowMs
+        $Metrics.observations += [ordered]@{
+          kind = $Kind
+          machine = $Machine
+          waitMs = $WaitEndMs - $WaitStartMs
+        }
         break
       }
       if ((Get-Date) -ge $Deadline) {
@@ -136,26 +209,30 @@ try {
   foreach ($ExpectedMachine in ($Expected -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
     $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine.txt"
     $ExpectedContents = "hello from $ExpectedMachine via native mount"
-    Wait-FileContents -Path $ExpectedFile -Contents $ExpectedContents
+    Wait-FileContents -Kind "fileVisible" -Machine $ExpectedMachine -Path $ExpectedFile -Contents $ExpectedContents
   }
 
+  $AckWriteStartMs = Get-NowMs
   Set-Content -NoNewline -Path $AckFile -Value $AckContents
   $AckReadBack = Get-Content -Raw -Path $AckFile
   if ($AckReadBack -ne $AckContents) {
     throw "unexpected ack file contents: $AckReadBack"
   }
+  $AckWriteEndMs = Get-NowMs
+  Add-Phase -Name "ackWriteReadback" -StartMs $AckWriteStartMs -EndMs $AckWriteEndMs
 
   foreach ($ExpectedMachine in ($ExpectedAcks -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
     $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine-ack.txt"
     $ExpectedContents = "acked by $ExpectedMachine via native mount"
-    Wait-FileContents -Path $ExpectedFile -Contents $ExpectedContents
+    Wait-FileContents -Kind "ackVisible" -Machine $ExpectedMachine -Path $ExpectedFile -Contents $ExpectedContents
   }
 
   Write-Host "native mount interop complete for $Machine"
 } catch {
-  Stop-MountProcess
+  $ScriptStatus = 1
   Write-MountLogs
   throw
 } finally {
   Stop-MountProcess
+  Write-TimingMetrics
 }

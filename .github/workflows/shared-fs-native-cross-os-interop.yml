@@ -71,7 +71,19 @@ jobs:
                   PEERBIT_WINDOWS_SKIP_DEPENDENCIES: "0"
                   PEERBIT_WINDOWS_SKIP_HEAVY_DEPENDENCIES: "1"
                   PEERBIT_RUNNER_LABELS: peerbit,scaleway,shared-fs-native,${{ steps.labels.outputs.unique_label }}
-              run: node scripts/github-scaleway-windows-runner.mjs start
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  set +e
+                  node scripts/github-scaleway-windows-runner.mjs start
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/provision-windows.json \
+                    windows provision runnerProvision "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
 
             - name: Preserve runner state
               if: always()
@@ -81,6 +93,19 @@ jobs:
                   path: tmp/processes/github-scaleway-windows-runner.json
                   if-no-files-found: warn
                   retention-days: 2
+
+            - name: Report provisioning timing
+              if: always()
+              run: node scripts/shared-fs-native-interop-metrics.mjs summary native-interop-metrics/provision-windows.json
+
+            - name: Upload provisioning timing
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-provision-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-metrics/provision-windows.json
+                  if-no-files-found: warn
+                  retention-days: 14
 
     seed-linux-native:
         name: Linux FUSE native seed
@@ -117,10 +142,36 @@ jobs:
                   sudo chmod 666 /dev/fuse || true
 
             - name: Install dependencies
-              run: pnpm install --frozen-lockfile
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  set +e
+                  pnpm install --frozen-lockfile
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/linux-workflow.json \
+                    linux workflow installDependencies "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
 
             - name: Build shared-fs packages
-              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  set +e
+                  pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/linux-workflow.json \
+                    linux workflow buildSharedFs "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
 
             - name: Start Linux native seed mount
               shell: bash
@@ -135,6 +186,7 @@ jobs:
                       --machine linux \
                       --expected windows \
                       --address-file shared-fs-native-address/address.txt \
+                      --metrics-file native-interop-metrics/linux.json \
                       --timeout-seconds "$timeout_seconds" \
                       > native-interop-logs/linux-seed.log 2>&1
                     status="$?"
@@ -175,7 +227,19 @@ jobs:
                     sleep 10
                   done
                   cat native-interop-logs/linux-seed.log
+                  node scripts/shared-fs-native-interop-metrics.mjs summary \
+                    native-interop-metrics/linux-workflow.json \
+                    native-interop-metrics/linux.json || true
                   exit "$(cat native-interop-logs/linux-seed.exit)"
+
+            - name: Upload Linux timing
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-linux-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-metrics/*.json
+                  if-no-files-found: warn
+                  retention-days: 14
 
     windows-native-join:
         name: Windows WinFsp native join
@@ -227,10 +291,46 @@ jobs:
                   Write-Host "WinFsp bin: $WinFspBin"
 
             - name: Install dependencies
-              run: pnpm install --frozen-lockfile
+              shell: powershell
+              run: |
+                  New-Item -ItemType Directory -Force -Path native-interop-metrics | Out-Null
+                  $StartedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                  $Status = 0
+                  try {
+                    pnpm install --frozen-lockfile
+                    if ($LASTEXITCODE -ne 0) {
+                      throw "pnpm install failed with exit code $LASTEXITCODE"
+                    }
+                  } catch {
+                    $Status = 1
+                    throw
+                  } finally {
+                    $EndedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                    node scripts/shared-fs-native-interop-metrics.mjs phase `
+                      native-interop-metrics/windows-workflow.json `
+                      windows workflow installDependencies $StartedMs $EndedMs $Status
+                  }
 
             - name: Build shared-fs packages
-              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+              shell: powershell
+              run: |
+                  New-Item -ItemType Directory -Force -Path native-interop-metrics | Out-Null
+                  $StartedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                  $Status = 0
+                  try {
+                    pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+                    if ($LASTEXITCODE -ne 0) {
+                      throw "shared-fs build failed with exit code $LASTEXITCODE"
+                    }
+                  } catch {
+                    $Status = 1
+                    throw
+                  } finally {
+                    $EndedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+                    node scripts/shared-fs-native-interop-metrics.mjs phase `
+                      native-interop-metrics/windows-workflow.json `
+                      windows workflow buildSharedFs $StartedMs $EndedMs $Status
+                  }
 
             - name: Download seed address
               uses: actions/download-artifact@v4
@@ -250,7 +350,25 @@ jobs:
                     -Expected linux `
                     -ExpectedAcks linux `
                     -AddressFile shared-fs-native-address/address.txt `
+                    -MetricsFile native-interop-metrics/windows.json `
                     -TimeoutSeconds $TimeoutSeconds
+
+            - name: Report Windows timing
+              if: always()
+              shell: powershell
+              run: |
+                  node scripts/shared-fs-native-interop-metrics.mjs summary `
+                    native-interop-metrics/windows-workflow.json `
+                    native-interop-metrics/windows.json
+
+            - name: Upload Windows timing
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-windows-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-metrics/*.json
+                  if-no-files-found: warn
+                  retention-days: 14
 
     cleanup-windows:
         name: Cleanup Windows runner
@@ -281,8 +399,35 @@ jobs:
                   PEERBIT_FORCE: "1"
               run: |
                   set -euo pipefail
+                  mkdir -p native-interop-metrics
+                  started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
                   if [ ! -f tmp/processes/github-scaleway-windows-runner.json ]; then
                     echo "No Windows runner state artifact found."
+                    ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                    node scripts/shared-fs-native-interop-metrics.mjs phase \
+                      native-interop-metrics/cleanup-windows.json \
+                      windows cleanup runnerCleanup "$started_ms" "$ended_ms" 0
                     exit 0
                   fi
+                  set +e
                   node scripts/github-scaleway-windows-runner.mjs stop
+                  status="$?"
+                  set -e
+                  ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
+                  node scripts/shared-fs-native-interop-metrics.mjs phase \
+                    native-interop-metrics/cleanup-windows.json \
+                    windows cleanup runnerCleanup "$started_ms" "$ended_ms" "$status"
+                  exit "$status"
+
+            - name: Report cleanup timing
+              if: always()
+              run: node scripts/shared-fs-native-interop-metrics.mjs summary native-interop-metrics/cleanup-windows.json
+
+            - name: Upload cleanup timing
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: shared-fs-native-cleanup-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-metrics/cleanup-windows.json
+                  if-no-files-found: warn
+                  retention-days: 14
