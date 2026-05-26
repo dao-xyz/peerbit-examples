@@ -5,6 +5,7 @@ import { Peerbit } from "peerbit";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
     DEFAULT_FILE_CHUNK_SIZE,
+    encodePublicSignKey,
     openSharedFs,
     runSharedFsBenchmark,
     type SharedFsHandle,
@@ -300,6 +301,48 @@ describe("shared fs replication", () => {
                     .map((version) => version.machineLabel)
                     .sort()
             ).toEqual(["peer-a", "peer-b"]);
+        });
+    });
+
+    it("requires trusted writer signatures for access-controlled filesystems", async () => {
+        const ownerPeer = await createPeer();
+        const writerPeer = await createPeer();
+        await ownerPeer.dial(writerPeer);
+
+        const ownerFs = await openSharedFs({
+            peerbit: ownerPeer,
+            machineLabel: "owner-machine",
+            rootKey: ownerPeer.identity.publicKey,
+        });
+        const writerFs = await openSharedFs({
+            peerbit: writerPeer,
+            address: ownerFs.address,
+            machineLabel: "writer-machine",
+        });
+
+        expect(ownerFs.accessControlled).toBe(true);
+        expect(writerFs.accessControlled).toBe(true);
+        await expect(
+            writerFs.writeFile("/blocked.txt", "untrusted")
+        ).rejects.toThrow();
+        expect(await ownerFs.readFile("/blocked.txt")).toBeUndefined();
+
+        await ownerFs.authorizeWriter(writerPeer.identity.publicKey);
+        await waitUntil(async () => {
+            expect(
+                await writerFs.isTrustedWriter(writerPeer.identity.publicKey)
+            ).toBe(true);
+        });
+
+        const version = await writerFs.writeFile("/trusted.txt", "trusted");
+        expect(version.authorKey).toBe(
+            encodePublicSignKey(writerPeer.identity.publicKey)
+        );
+
+        await waitUntil(async () => {
+            expect(decode(await ownerFs.readFile("/trusted.txt"))).toBe(
+                "trusted"
+            );
         });
     });
 });

@@ -13,6 +13,7 @@ const peerbit = await Peerbit.create({ directory: "./peerbit-fs-state" });
 const fs = await openSharedFs({
     peerbit,
     machineLabel: "workstation-a",
+    rootKey: peerbit.identity.publicKey,
 });
 
 await fs.mkdir("/docs");
@@ -25,12 +26,19 @@ The v0 model is commit-on-close for mounted writes, local-first, and conflict
 preserving. Concurrent versions are never overwritten silently; they are exposed
 through `conflicts()` and can be resolved with `resolveConflict()`.
 
+When `rootKey` is provided while creating a filesystem, writes are
+access-controlled by a trusted-writer graph rooted at that key. Entries must be
+signed by a trusted Peerbit identity, and the stored `authorKey` must match the
+entry signer. Use `authorizeWriter(publicKey)` to trust another writer.
+
 ## CLI
 
 The companion `@peerbit/shared-fs-cli` package installs `peerbit-fs`:
 
 ```bash
-peerbit-fs create
+peerbit-fs create --auth
+peerbit-fs whoami
+peerbit-fs trust <address> <public-key>
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]

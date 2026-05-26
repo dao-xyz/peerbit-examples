@@ -993,6 +993,9 @@ importers:
       '@peerbit/program':
         specifier: ^6.0.30
         version: 6.0.30(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
+      '@peerbit/trusted-network':
+        specifier: ^6.0.43
+        version: 6.0.43(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))
       peerbit:
         specifier: ^5.2.19
         version: 5.2.19(react-native@0.83.1(@babel/core@7.29.7)(@types/react@19.2.10)(react@19.2.4))

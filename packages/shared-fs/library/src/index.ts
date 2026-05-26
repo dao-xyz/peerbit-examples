@@ -1,5 +1,8 @@
-import { field, variant } from "@dao-xyz/borsh";
+import { deserialize, field, option, variant } from "@dao-xyz/borsh";
 import {
+    type PublicSignKey,
+    PublicSignKey as PublicSignKeyType,
+    fromBase64,
     randomBytes,
     sha256Base64Sync,
     sha256Sync,
@@ -8,6 +11,7 @@ import {
 } from "@peerbit/crypto";
 import { Documents, SearchRequest } from "@peerbit/document";
 import { Program } from "@peerbit/program";
+import { TrustedNetwork } from "@peerbit/trusted-network";
 import { concat, fromString } from "uint8arrays";
 import type { Peerbit } from "peerbit";
 import {
@@ -60,6 +64,7 @@ export type OpenSharedFsOptions = SharedFsOpenArgs & {
     address?: string | unknown;
     id?: Uint8Array;
     directory?: string;
+    rootKey?: PublicSignKey;
 };
 
 export type SharedFsEntryInfo = {
@@ -122,6 +127,11 @@ const now = () => BigInt(Date.now());
 const createId = (prefix: string) =>
     `${prefix}:${toBase64URL(randomBytes(32))}`;
 
+export const encodePublicSignKey = (key: PublicSignKey) => toBase64(key.bytes);
+
+export const decodePublicSignKey = (key: string) =>
+    deserialize(fromBase64(key), PublicSignKeyType) as PublicSignKey;
+
 const toBytes = async (
     source: Uint8Array | string | AsyncIterable<Uint8Array>
 ): Promise<Uint8Array> => {
@@ -179,12 +189,21 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     @field({ type: Documents })
     entries: Documents<SharedFsEntry, IndexableSharedFsEntry>;
 
+    @field({ type: option(TrustedNetwork) })
+    trustGraph?: TrustedNetwork;
+
     machineLabel = "unknown-machine";
     replicate: OpenReplicateOptions | undefined;
 
-    constructor(properties: { id?: Uint8Array } = {}) {
+    constructor(properties: { id?: Uint8Array; rootKey?: PublicSignKey } = {}) {
         super();
         this.id = properties.id ?? randomBytes(32);
+        this.trustGraph = properties.rootKey
+            ? new TrustedNetwork({
+                  id: this.id,
+                  rootTrust: properties.rootKey,
+              })
+            : undefined;
         this.entries = new Documents({
             id: sha256Sync(concat([this.id, fromString("/shared-fs")])),
         });
@@ -193,10 +212,14 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     async open(args?: SharedFsOpenArgs) {
         this.machineLabel = args?.machineLabel || "unknown-machine";
         this.replicate = args?.replicate;
+        await this.trustGraph?.open({
+            replicate: args?.replicate as any,
+        });
         await this.entries.open({
             type: SharedFsEntry,
             replicate: args?.replicate as any,
             replicas: { min: 3 },
+            canPerform: (operation) => this.canPerformEntry(operation),
             index: {
                 type: IndexableSharedFsEntry,
             },
@@ -204,7 +227,7 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     }
 
     private authorKey() {
-        return toBase64(this.node.identity.publicKey.bytes);
+        return encodePublicSignKey(this.node.identity.publicKey);
     }
 
     private signedMetadata() {
@@ -213,6 +236,72 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
             machineLabel: this.machineLabel,
             timestamp: now(),
         };
+    }
+
+    private entryAuthorKey(entry: unknown) {
+        if (
+            entry instanceof DirectoryRecord ||
+            entry instanceof FileRecord ||
+            entry instanceof FileVersion ||
+            entry instanceof DeleteMarker
+        ) {
+            return entry.authorKey;
+        }
+        return undefined;
+    }
+
+    private async canPerformEntry(operation: any) {
+        if (!this.trustGraph) {
+            return true;
+        }
+        const keys = await operation.entry.getPublicKeys();
+        const trustedKeys: PublicSignKey[] = [];
+        for (const key of keys) {
+            if (await this.trustGraph.isTrusted(key)) {
+                trustedKeys.push(key);
+            }
+        }
+        if (trustedKeys.length === 0) {
+            return false;
+        }
+        if (operation.type === "put") {
+            const authorKey = this.entryAuthorKey(operation.value);
+            if (authorKey) {
+                return trustedKeys.some(
+                    (key) => encodePublicSignKey(key) === authorKey
+                );
+            }
+        }
+        return true;
+    }
+
+    get accessControlled() {
+        return !!this.trustGraph;
+    }
+
+    get rootKey() {
+        return this.trustGraph
+            ? encodePublicSignKey(this.trustGraph.rootTrust)
+            : undefined;
+    }
+
+    get localPublicKey() {
+        return this.authorKey();
+    }
+
+    async authorizeWriter(publicKey: PublicSignKey) {
+        if (!this.trustGraph) {
+            throw new Error("Shared filesystem is not access controlled");
+        }
+        await this.trustGraph.add(publicKey);
+    }
+
+    async isTrustedWriter(publicKey: PublicSignKey) {
+        return this.trustGraph ? this.trustGraph.isTrusted(publicKey) : true;
+    }
+
+    async trustedWriters() {
+        return this.trustGraph ? this.trustGraph.getTrusted() : [];
     }
 
     private async allEntries(): Promise<SharedFsEntry[]> {
@@ -820,6 +909,18 @@ export class SharedFsHandle {
         return this.program.address?.toString();
     }
 
+    get accessControlled() {
+        return this.program.accessControlled;
+    }
+
+    get rootKey() {
+        return this.program.rootKey;
+    }
+
+    get localPublicKey() {
+        return this.program.localPublicKey;
+    }
+
     readFile(path: string) {
         return this.program.readFile(path);
     }
@@ -863,6 +964,18 @@ export class SharedFsHandle {
     resolveConflict(path: string, versionId: string) {
         return this.program.resolveConflict(path, versionId);
     }
+
+    authorizeWriter(publicKey: PublicSignKey) {
+        return this.program.authorizeWriter(publicKey);
+    }
+
+    isTrustedWriter(publicKey: PublicSignKey) {
+        return this.program.isTrustedWriter(publicKey);
+    }
+
+    trustedWriters() {
+        return this.program.trustedWriters();
+    }
 }
 
 export const openSharedFs = async (options: OpenSharedFsOptions) => {
@@ -874,9 +987,15 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
         ? await options.peerbit.open<SharedFileSystem>(options.address as any, {
               args,
           })
-        : await options.peerbit.open(new SharedFileSystem({ id: options.id }), {
-              existing: "reuse",
-              args,
-          });
+        : await options.peerbit.open(
+              new SharedFileSystem({
+                  id: options.id,
+                  rootKey: options.rootKey,
+              }),
+              {
+                  existing: "reuse",
+                  args,
+              }
+          );
     return new SharedFsHandle(program);
 };

@@ -3,6 +3,8 @@ import {
     createSharedFsIpcClient,
     createSharedFsIpcServer,
     createSharedFsMountBackend,
+    decodePublicSignKey,
+    encodePublicSignKey,
     getNativeMountSupport,
     mountNativeSharedFs,
     openSharedFs,
@@ -325,6 +327,7 @@ const openCliFs = async (
         address?: string;
         machineLabel?: string;
         replicate?: boolean;
+        rootKey?: Peerbit["identity"]["publicKey"];
     }
 ) => {
     const programArgs: CliProgramArgs =
@@ -335,6 +338,7 @@ const openCliFs = async (
         peerbit,
         address: options.address,
         machineLabel: options.machineLabel || os.hostname(),
+        rootKey: options.rootKey,
         ...programArgs,
     });
 };
@@ -368,7 +372,13 @@ export const runCli = async (args = hideBin(process.argv)) => {
         .command(
             "create",
             "create a new experimental shared filesystem",
-            (command) => command,
+            (command) =>
+                command.option("auth", {
+                    type: "boolean",
+                    default: false,
+                    description:
+                        "Create with trusted-writer access control rooted at this peer identity.",
+                }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);
                 const peerbit = await Peerbit.create({ directory });
@@ -376,8 +386,63 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     const fsHandle = await openCliFs(peerbit, {
                         machineLabel: argv.machine,
                         replicate: false,
+                        rootKey: argv.auth
+                            ? peerbit.identity.publicKey
+                            : undefined,
                     });
                     console.log(fsHandle.address);
+                } finally {
+                    await stopPeerbitForCli(peerbit);
+                }
+            }
+        )
+        .command(
+            "whoami",
+            "print the local Peerbit writer public key",
+            (command) => command,
+            async (argv) => {
+                const directory = resolveDirectory(argv.directory);
+                const peerbit = await Peerbit.create({ directory });
+                try {
+                    console.log(
+                        encodePublicSignKey(peerbit.identity.publicKey)
+                    );
+                } finally {
+                    await stopPeerbitForCli(peerbit);
+                }
+            }
+        )
+        .command(
+            "trust <address> <public-key>",
+            "authorize a writer key on an access-controlled shared filesystem",
+            (command) =>
+                command
+                    .positional("address", {
+                        type: "string",
+                        demandOption: true,
+                    })
+                    .positional("public-key", {
+                        type: "string",
+                        demandOption: true,
+                        description:
+                            "Base64 public key printed by peerbit-fs whoami.",
+                    }),
+            async (argv) => {
+                const directory = resolveDirectory(argv.directory);
+                const peerbit = await Peerbit.create({ directory });
+                try {
+                    await connectToNetwork(peerbit, argv.peer, {
+                        bootstrap: argv.replicate !== false,
+                    });
+                    const fsHandle = await openCliFs(peerbit, {
+                        address: argv.address,
+                        machineLabel: argv.machine,
+                        replicate: argv.replicate,
+                    });
+                    await fsHandle.authorizeWriter(
+                        decodePublicSignKey(String(argv.publicKey))
+                    );
+                    console.log(chalk.green("Writer trusted"));
                 } finally {
                     await stopPeerbitForCli(peerbit);
                 }
@@ -494,6 +559,15 @@ export const runCli = async (args = hideBin(process.argv)) => {
                     const rootEntries = await fsHandle.list("/");
                     const conflicts = await fsHandle.conflicts();
                     console.log(`address: ${fsHandle.address}`);
+                    console.log(`local public key: ${fsHandle.localPublicKey}`);
+                    console.log(
+                        `access controlled: ${
+                            fsHandle.accessControlled ? "yes" : "no"
+                        }`
+                    );
+                    if (fsHandle.rootKey) {
+                        console.log(`root key: ${fsHandle.rootKey}`);
+                    }
                     console.log(`root entries: ${rootEntries.length}`);
                     console.log(`conflicts: ${conflicts.length}`);
                 } finally {

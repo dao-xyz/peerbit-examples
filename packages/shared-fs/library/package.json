@@ -43,6 +43,7 @@
         "@peerbit/crypto": "^3",
         "@peerbit/document": "^13.0.43",
         "@peerbit/program": "^6.0.30",
+        "@peerbit/trusted-network": "^6.0.43",
         "peerbit": "^5.2.19",
         "uint8arrays": "^5.1.0"
     }
