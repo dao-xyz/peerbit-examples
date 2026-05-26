@@ -15,7 +15,6 @@ import {
     deleteRunner,
     detectRepoFromGit,
     explainPatAccessIssue,
-    findRunnerId,
     getGitHubTokens,
     getRunnerRegistrationToken,
     listRunners,
@@ -835,6 +834,41 @@ async function findReusableServer(secretKey, zone, serverName) {
     return matches[0] || null;
 }
 
+async function waitForRunnerOnline({
+    tokens,
+    owner,
+    repo,
+    runnerName,
+    timeoutMs,
+    pollMs,
+}) {
+    const deadline = Date.now() + timeoutMs;
+    let runnerId = null;
+    let lastStatus = "not registered";
+
+    while (Date.now() < deadline) {
+        const runners = await listRunners(tokens, owner, repo);
+        const match =
+            runners.find((runner) => runner?.name === runnerName) || null;
+        if (match?.id) {
+            runnerId = match.id;
+            lastStatus = String(match.status || "unknown");
+            if (lastStatus === "online") return match;
+        }
+        await sleep(pollMs);
+    }
+
+    if (runnerId) {
+        throw new Error(
+            `Runner ${runnerName} registered as ${runnerId}, but did not come online within ${Math.round(timeoutMs / 1000)}s (last status: ${lastStatus}).`
+        );
+    }
+
+    throw new Error(
+        `Runner ${runnerName} did not register within ${Math.round(timeoutMs / 1000)}s.`
+    );
+}
+
 async function startRunner(repoInfo) {
     const tokens = getGitHubTokens();
     if (tokens.length === 0) {
@@ -919,7 +953,7 @@ async function startRunner(repoInfo) {
     const repoUrl = `https://github.com/${repoInfo.owner}/${repoInfo.repo}`;
     const suffix = crypto.randomBytes(3).toString("hex");
     const runnerName = sanitizeName(
-        `peerbit-selfhosted-scaleway-windows-${repoInfo.repo}-${os.hostname()}-${suffix}`
+        `peerbit-win-${repoInfo.repo}-${reusePool || "pool"}-${suffix}`
     );
     const serverName = reuseServer
         ? sanitizeName(
@@ -1141,34 +1175,23 @@ async function startRunner(repoInfo) {
     );
     const registerPollMs = getEnvInt("PEERBIT_RUNNER_REGISTER_POLL_MS", 5000);
     console.log(
-        `[github-scaleway-windows-runner] Waiting for runner to register with GitHub (timeout ${Math.round(registerWaitMs / 60000)}m)...`
+        `[github-scaleway-windows-runner] Waiting for runner to register and come online with GitHub (timeout ${Math.round(registerWaitMs / 60000)}m)...`
     );
-    const registerDeadline = Date.now() + registerWaitMs;
-    let runnerId = null;
-    while (Date.now() < registerDeadline) {
-        runnerId = await findRunnerId(
-            tokens,
-            repoInfo.owner,
-            repoInfo.repo,
-            runnerName
-        );
-        if (runnerId) break;
-        await sleep(registerPollMs);
-    }
+    const runner = await waitForRunnerOnline({
+        tokens,
+        owner: repoInfo.owner,
+        repo: repoInfo.repo,
+        runnerName,
+        timeoutMs: registerWaitMs,
+        pollMs: registerPollMs,
+    });
 
-    if (!runnerId) {
-        console.warn(
-            `[github-scaleway-windows-runner] Runner did not register within ${Math.round(registerWaitMs / 1000)}s. Check C:\\peerbit-gh-runner-bootstrap.log and C:\\actions-runner\\_diag on the VM, then re-run status/stop.`
-        );
-        return;
-    }
-
-    tracker.track(key, { ...(tracker.list()[key] || {}), runnerId });
+    tracker.track(key, { ...(tracker.list()[key] || {}), runnerId: runner.id });
     console.log(
-        `[github-scaleway-windows-runner] Runner registered (id ${runnerId}, name ${runnerName}).`
+        `[github-scaleway-windows-runner] Runner online (id ${runner.id}, name ${runnerName}).`
     );
     writeGitHubOutput({
-        runner_id: runnerId,
+        runner_id: runner.id,
         runner_name: runnerName,
         runner_labels: runnerLabels,
     });
@@ -1383,34 +1406,23 @@ async function bootstrapRunner(repoInfo) {
     );
     const registerPollMs = getEnvInt("PEERBIT_RUNNER_REGISTER_POLL_MS", 5000);
     console.log(
-        `[github-scaleway-windows-runner] Waiting for runner to register with GitHub (timeout ${Math.round(registerWaitMs / 60000)}m)...`
+        `[github-scaleway-windows-runner] Waiting for runner to register and come online with GitHub (timeout ${Math.round(registerWaitMs / 60000)}m)...`
     );
-    const registerDeadline = Date.now() + registerWaitMs;
-    let runnerId = null;
-    while (Date.now() < registerDeadline) {
-        runnerId = await findRunnerId(
-            tokens,
-            repoInfo.owner,
-            repoInfo.repo,
-            runnerName
-        );
-        if (runnerId) break;
-        await sleep(registerPollMs);
-    }
+    const runner = await waitForRunnerOnline({
+        tokens,
+        owner: repoInfo.owner,
+        repo: repoInfo.repo,
+        runnerName,
+        timeoutMs: registerWaitMs,
+        pollMs: registerPollMs,
+    });
 
-    if (!runnerId) {
-        console.warn(
-            `[github-scaleway-windows-runner] Runner did not register within ${Math.round(registerWaitMs / 1000)}s. Check C:\\peerbit-gh-runner-bootstrap.log and C:\\actions-runner\\_diag on the VM, then re-run status/bootstrap.`
-        );
-        return;
-    }
-
-    tracker.track(key, { ...(tracker.list()[key] || {}), runnerId });
+    tracker.track(key, { ...(tracker.list()[key] || {}), runnerId: runner.id });
     console.log(
-        `[github-scaleway-windows-runner] Runner registered (id ${runnerId}, name ${runnerName}).`
+        `[github-scaleway-windows-runner] Runner online (id ${runner.id}, name ${runnerName}).`
     );
     writeGitHubOutput({
-        runner_id: runnerId,
+        runner_id: runner.id,
         runner_name: runnerName,
         runner_labels: runnerLabels,
     });
@@ -1916,15 +1928,16 @@ async function janitor(repoInfo) {
     }
 
     if (tokens.length === 0) return;
-    const runnerPrefix = sanitizeName(
-        `peerbit-selfhosted-scaleway-windows-${repoInfo.repo}-`
-    );
+    const runnerPrefixes = [
+        sanitizeName(`peerbit-selfhosted-scaleway-windows-${repoInfo.repo}-`),
+        sanitizeName(`peerbit-win-${repoInfo.repo}-`),
+    ];
     const runners = await listRunners(tokens, repoInfo.owner, repoInfo.repo);
     for (const runner of runners) {
         const name = String(runner?.name || "");
         if (
             !runner?.id ||
-            !name.startsWith(runnerPrefix) ||
+            !runnerPrefixes.some((prefix) => name.startsWith(prefix)) ||
             runner?.busy ||
             runner?.status !== "offline"
         )

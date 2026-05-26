@@ -298,6 +298,17 @@ function Ensure-RunnerConfigured {
 function Ensure-RunnerTask {
   $taskName = "peerbit-github-runner"
   $task = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+  if ($null -ne $task -and $RunnerReconfigure -eq "1") {
+    Write-Log "Re-registering scheduled task: $taskName"
+    try {
+      Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
+    } catch {
+      # ignore
+    }
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue | Out-Null
+    $task = $null
+  }
+
   if ($null -eq $task) {
     Write-Log "Registering scheduled task: $taskName"
     $cmd = "cd /d `"$RunnerRoot`" && `"$RunnerRoot\\run.cmd`""
@@ -315,6 +326,31 @@ function Ensure-RunnerTask {
     # ignore
   }
   Start-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue | Out-Null
+
+  $deadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $deadline) {
+    $listener = Get-Process -Name "Runner.Listener" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $listener) {
+      Write-Log "Runner listener started."
+      return
+    }
+    Start-Sleep -Seconds 1
+  }
+
+  Write-Log "Scheduled task did not start Runner.Listener; starting detached runner process."
+  Start-Process -FilePath "cmd.exe" -ArgumentList "/c cd /d `"$RunnerRoot`" && `"$RunnerRoot\\run.cmd`"" -WindowStyle Hidden
+
+  $deadline = (Get-Date).AddSeconds(30)
+  while ((Get-Date) -lt $deadline) {
+    $listener = Get-Process -Name "Runner.Listener" -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($null -ne $listener) {
+      Write-Log "Runner listener started after detached fallback."
+      return
+    }
+    Start-Sleep -Seconds 1
+  }
+
+  throw "Runner.Listener did not start."
 }
 
 function Stop-RunnerTask {
