@@ -12,7 +12,7 @@ const readJson = (file) => {
 			observations: [],
 		};
 	}
-	return JSON.parse(fs.readFileSync(file, "utf8"));
+	return JSON.parse(fs.readFileSync(file, "utf8").replace(/^\uFEFF/, ""));
 };
 
 const writeJson = (file, value) => {
