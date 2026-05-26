@@ -30,6 +30,7 @@ env:
     SCALEWAY_ZONE: ${{ vars.PEERBIT_SCALEWAY_ZONE || 'fr-par-1' }}
     PEERBIT_GITHUB_RUNNER_VERSION: ${{ vars.PEERBIT_GITHUB_RUNNER_VERSION || '2.330.0' }}
     NATIVE_INTEROP_TIMEOUT_MINUTES: ${{ github.event.inputs.timeout_minutes || '35' }}
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 jobs:
     plan:
@@ -523,14 +524,12 @@ jobs:
               uses: actions/setup-node@v4
               with:
                   node-version: 22
-                  cache: pnpm
-                  cache-dependency-path: pnpm-lock.yaml
 
             - name: Setup Go
               uses: actions/setup-go@v5
               with:
                   go-version: "1.24.x"
-                  cache-dependency-path: packages/shared-fs/native/go.sum
+                  cache: false
 
             - name: Use Bash for pnpm scripts
               run: pnpm config set script-shell "C:\Program Files\Git\bin\bash.exe"
@@ -764,3 +763,27 @@ jobs:
                   path: native-interop-metrics/cleanup-windows.json
                   if-no-files-found: warn
                   retention-days: 14
+
+    resource-sanity:
+        name: Check Scaleway resource cleanup
+        if: ${{ always() }}
+        needs:
+            - cleanup-macos
+            - cleanup-windows
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v4
+
+            - name: Check native runner resource limits
+              shell: bash
+              env:
+                  SECRET_ACCESS_KEY: ${{ secrets.SCALEWAY_SECRET_ACCESS_KEY }}
+              run: |
+                  set -euo pipefail
+                  node scripts/shared-fs-scaleway-resource-check.mjs \
+                    --repo "${GITHUB_REPOSITORY##*/}" \
+                    --mac-max 1 \
+                    --windows-max 0 \
+                    --skip-missing-credentials

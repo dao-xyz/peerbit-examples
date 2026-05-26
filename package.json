@@ -53,6 +53,7 @@
         "scaleway:stop": "node scripts/github-scaleway-runner.mjs stop",
         "scaleway:status": "node scripts/github-scaleway-runner.mjs status",
         "scaleway:janitor": "node scripts/github-scaleway-runner.mjs janitor",
+        "scaleway:resources": "node scripts/shared-fs-scaleway-resource-check.mjs",
         "scaleway:windows:start": "node scripts/github-scaleway-windows-runner.mjs start",
         "scaleway:windows:bootstrap": "node scripts/github-scaleway-windows-runner.mjs bootstrap",
         "scaleway:windows:stop": "node scripts/github-scaleway-windows-runner.mjs stop",

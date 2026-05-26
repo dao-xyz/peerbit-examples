@@ -83,6 +83,9 @@ runner after it accepts one job.
 
 The native smoke and cross-OS interop workflows share one concurrency group so
 only one Scaleway native run provisions or reconfigures runners at a time.
+Both workflows also run a resource sanity check after cleanup. The check fails
+if more than one matching reusable macOS pool host exists or if any matching
+ephemeral Windows runner remains.
 
 For macOS, cleanup releases the runner registration but keeps the reusable
 Scaleway host warm. The scheduled janitor deletes stale macOS pool hosts after
@@ -98,3 +101,9 @@ There is also a scheduled janitor in the same workflow:
 
 If cleanup cannot delete a server, the local state is intentionally kept so
 `pnpm scaleway:stop` can be retried later.
+
+To inspect the current native runner resources locally:
+
+```bash
+pnpm scaleway:resources -- --mac-max 1 --windows-max 0
+```
