@@ -297,7 +297,7 @@ jobs:
                   mkdir -p native-interop-metrics
                   started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
                   set +e
-                  pnpm install --frozen-lockfile
+                  pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
                   status="$?"
                   set -e
                   ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
@@ -432,7 +432,7 @@ jobs:
                   mkdir -p native-interop-metrics
                   started_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
                   set +e
-                  pnpm install --frozen-lockfile
+                  pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
                   status="$?"
                   set -e
                   ended_ms="$(node -e 'process.stdout.write(String(Date.now()))')"
@@ -561,7 +561,7 @@ jobs:
                   $StartedMs = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
                   $Status = 0
                   try {
-                    pnpm install --frozen-lockfile
+                    pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
                     if ($LASTEXITCODE -ne 0) {
                       throw "pnpm install failed with exit code $LASTEXITCODE"
                     }

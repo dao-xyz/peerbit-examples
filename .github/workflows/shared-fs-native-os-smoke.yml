@@ -157,7 +157,7 @@ jobs:
               run: scripts/shared-fs-check-macfuse.sh
 
             - name: Install dependencies
-              run: pnpm install --frozen-lockfile
+              run: pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
 
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
@@ -309,7 +309,7 @@ jobs:
                   Write-Host "WinFsp bin: $WinFspBin"
 
             - name: Install dependencies
-              run: pnpm install --frozen-lockfile
+              run: pnpm install --frozen-lockfile --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
 
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
