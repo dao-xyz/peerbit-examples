@@ -49,6 +49,14 @@ const isPeerbitSelfReceiverError = (error: unknown) => {
     );
 };
 
+const isPeerbitFanoutJoinTimeout = (error: unknown) => {
+    return (
+        error instanceof Error &&
+        error.message.includes("fanout join timed out") &&
+        error.stack?.includes("@peerbit/pubsub")
+    );
+};
+
 const installPeerbitRejectionGuard = () => {
     if (peerbitRejectionGuardInstalled) {
         return;
@@ -59,6 +67,14 @@ const installPeerbitRejectionGuard = () => {
             console.warn(
                 chalk.yellow(
                     "Peerbit emitted a known self-addressed RPC during local shared-fs operation; continuing."
+                )
+            );
+            return;
+        }
+        if (isPeerbitFanoutJoinTimeout(reason)) {
+            console.warn(
+                chalk.yellow(
+                    "Peerbit fanout bootstrap timed out during shared-fs operation; continuing while replication retries."
                 )
             );
             return;
