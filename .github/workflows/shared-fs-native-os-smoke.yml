@@ -156,21 +156,6 @@ jobs:
             - name: Build shared-fs packages
               run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
 
-            - name: Install optional fuse-native adapter
-              shell: bash
-              run: |
-                  set -euo pipefail
-                  native_deps="$RUNNER_TEMP/fuse-native-deps"
-                  npm install --prefix "$native_deps" --no-save --package-lock=false fuse-native@2.2.6
-                  mkdir -p packages/shared-fs/library/node_modules
-                  rm -rf packages/shared-fs/library/node_modules/fuse-native
-                  ln -s "$native_deps/node_modules/fuse-native" packages/shared-fs/library/node_modules/fuse-native
-
-            - name: Run fuse-native mount smoke
-              env:
-                  PEERBIT_SHARED_FS_NATIVE_SMOKE: "1"
-              run: pnpm --filter @peerbit/shared-fs exec vitest run src/__tests__/native-mount.smoke.test.ts
-
             - name: Run external native adapter smoke
               run: scripts/shared-fs-external-native-smoke.sh
 
