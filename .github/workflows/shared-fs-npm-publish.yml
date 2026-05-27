@@ -1,0 +1,100 @@
+name: Shared FS NPM Publish
+
+on:
+    workflow_dispatch:
+        inputs:
+            dry_run:
+                description: "Run npm publish with --dry-run."
+                required: true
+                default: true
+                type: boolean
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+    publish:
+        name: Publish shared-fs packages
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v5
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+                  registry-url: https://registry.npmjs.org
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Test shared-fs CLI
+              run: pnpm --filter @peerbit/shared-fs-cli run test
+
+            - name: Verify native adapter release exists
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  set -euo pipefail
+                  version="$(node -p "require('./packages/shared-fs/cli/package.json').version")"
+                  gh release view "shared-fs-native-v${version}" >/dev/null
+
+            - name: Pack install smoke
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  pack_dir="$RUNNER_TEMP/shared-fs-packs"
+                  project_dir="$RUNNER_TEMP/shared-fs-install-smoke"
+                  mkdir -p "$pack_dir" "$project_dir"
+                  pnpm --filter @peerbit/shared-fs pack --pack-destination "$pack_dir"
+                  pnpm --filter @peerbit/shared-fs-cli pack --pack-destination "$pack_dir"
+                  cd "$project_dir"
+                  npm init -y
+                  shared_fs_tgz="$(find "$pack_dir" -maxdepth 1 -name 'peerbit-shared-fs-[0-9]*.tgz' | head -n 1)"
+                  cli_tgz="$(find "$pack_dir" -maxdepth 1 -name 'peerbit-shared-fs-cli-*.tgz' | head -n 1)"
+                  npm install --ignore-scripts "$shared_fs_tgz" "$cli_tgz"
+                  node -e "import('@peerbit/shared-fs').then((m) => { if (typeof m.openSharedFs !== 'function') throw new Error('openSharedFs export missing'); })"
+                  node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js install-adapter --prefix "$RUNNER_TEMP/shared-fs-native-adapter" --print-path
+
+            - name: Publish library
+              shell: bash
+              working-directory: packages/shared-fs/library
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  args=(--access public --no-git-checks)
+                  if [ "${{ inputs.dry_run }}" = "true" ]; then
+                    args+=(--dry-run)
+                  fi
+                  pnpm publish "${args[@]}"
+
+            - name: Publish CLI
+              shell: bash
+              working-directory: packages/shared-fs/cli
+              env:
+                  NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+              run: |
+                  set -euo pipefail
+                  args=(--access public --no-git-checks)
+                  if [ "${{ inputs.dry_run }}" = "true" ]; then
+                    args+=(--dry-run)
+                  fi
+                  pnpm publish "${args[@]}"
