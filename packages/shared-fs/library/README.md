@@ -5,6 +5,10 @@ Experimental shared filesystem primitives for Peerbit.
 This package is intentionally marked experimental. It provides the Peerbit-backed
 metadata and content model used by the `peerbit-fs` CLI and native mount adapters.
 
+```bash
+npm install @peerbit/shared-fs
+```
+
 ```ts
 import { openSharedFs } from "@peerbit/shared-fs";
 import { Peerbit } from "peerbit";
@@ -33,7 +37,24 @@ entry signer. Use `authorizeWriter(publicKey)` to trust another writer.
 
 ## CLI
 
-The companion `@peerbit/shared-fs-cli` package installs `peerbit-fs`:
+The companion `@peerbit/shared-fs-cli` package installs `peerbit-fs` for native
+mounts:
+
+```bash
+npm install -g @peerbit/shared-fs-cli
+peerbit-fs install-adapter
+peerbit-fs status
+```
+
+Then create and mount an authenticated filesystem:
+
+```bash
+ADDRESS=$(peerbit-fs create)
+mkdir -p "$HOME/PeerbitShared"
+peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
+```
+
+The CLI commands are:
 
 ```bash
 peerbit-fs create
@@ -53,15 +74,9 @@ Mounted writes are buffered by the native adapter and committed as one signed
 Peerbit file version on `flush`, `fsync`, or `release`/close.
 
 `peerbit-fs create` is access-controlled by default. Use `peerbit-fs create
---no-auth` only for explicitly unauthenticated test/demo filesystems.
-
-The normal package install path is:
-
-```bash
-npm install -g @peerbit/shared-fs-cli
-peerbit-fs install-adapter
-peerbit-fs status
-```
+--no-auth` only for explicitly unauthenticated test/demo filesystems. Another
+machine can join by running `peerbit-fs whoami`; an authorized writer can then
+run `peerbit-fs trust <address> <public-key>`.
 
 From this repository on macOS, the local development install path is:
 
