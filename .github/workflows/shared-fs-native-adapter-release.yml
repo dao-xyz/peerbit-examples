@@ -75,7 +75,7 @@ jobs:
                       build-tags: native_mount fuse3
                       package: tar
                     - target: darwin-x64
-                      runs-on: macos-13
+                      runs-on: macos-15-intel
                       goos: darwin
                       goarch: amd64
                       build-tags: native_mount
@@ -87,7 +87,7 @@ jobs:
                       build-tags: native_mount
                       package: tar
                     - target: win32-x64
-                      runs-on: windows-latest
+                      runs-on: windows-2025
                       goos: windows
                       goarch: amd64
                       build-tags: native_mount
