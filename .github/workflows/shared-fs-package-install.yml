@@ -1,0 +1,105 @@
+name: Shared FS Package Install
+
+on:
+    pull_request:
+        paths:
+            - ".github/workflows/shared-fs-package-install.yml"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "tsconfig.json"
+            - "packages/shared-fs/**"
+    push:
+        branches: [master]
+        paths:
+            - ".github/workflows/shared-fs-package-install.yml"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "tsconfig.json"
+            - "packages/shared-fs/**"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+    tarball-install:
+        name: Tarball install (${{ matrix.os }})
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 30
+        strategy:
+            fail-fast: false
+            matrix:
+                os:
+                    - ubuntu-latest
+                    - macos-latest
+                    - windows-2025
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v5
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Use Bash for pnpm scripts on Windows
+              if: runner.os == 'Windows'
+              run: pnpm config set script-shell "C:\\Program Files\\Git\\bin\\bash.exe"
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Build shared-fs packages
+              run: pnpm -r --sort --filter @peerbit/shared-fs --filter @peerbit/shared-fs-cli run build
+
+            - name: Pack packages
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  pack_dir="$RUNNER_TEMP/shared-fs-packs"
+                  mkdir -p "$pack_dir"
+                  pnpm --filter @peerbit/shared-fs pack --pack-destination "$pack_dir"
+                  pnpm --filter @peerbit/shared-fs-cli pack --pack-destination "$pack_dir"
+                  ls -l "$pack_dir"
+
+            - name: Install packed packages in clean project
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  pack_dir="$RUNNER_TEMP/shared-fs-packs"
+                  project_dir="$RUNNER_TEMP/shared-fs-install-smoke"
+                  mkdir -p "$project_dir"
+                  cd "$project_dir"
+                  npm init -y
+                  shared_fs_tgz="$(find "$pack_dir" -maxdepth 1 -name 'peerbit-shared-fs-[0-9]*.tgz' | head -n 1)"
+                  cli_tgz="$(find "$pack_dir" -maxdepth 1 -name 'peerbit-shared-fs-cli-*.tgz' | head -n 1)"
+                  test -n "$shared_fs_tgz"
+                  test -n "$cli_tgz"
+                  npm install --ignore-scripts "$shared_fs_tgz" "$cli_tgz"
+                  node -e "import('@peerbit/shared-fs').then((m) => { if (typeof m.openSharedFs !== 'function') throw new Error('openSharedFs export missing'); })"
+                  node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js --help >/dev/null
+
+            - name: Install released native adapter
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  project_dir="$RUNNER_TEMP/shared-fs-install-smoke"
+                  adapter_dir="$RUNNER_TEMP/shared-fs-native-adapter"
+                  cd "$project_dir"
+                  adapter_path="$(node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js install-adapter --prefix "$adapter_dir" --print-path)"
+                  test -f "$adapter_path"
+                  if [ "$RUNNER_OS" != "Windows" ]; then
+                    test -x "$adapter_path"
+                  fi
+                  echo "installed adapter: $adapter_path"
