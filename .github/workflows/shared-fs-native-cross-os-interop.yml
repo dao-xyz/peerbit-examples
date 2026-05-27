@@ -117,6 +117,7 @@ jobs:
                   fi
                   printf '%s\n' "$PEERBIT_SCALEWAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/scaleway_ssh"
                   chmod 600 "$RUNNER_TEMP/scaleway_ssh"
+                  ssh-keygen -y -f "$RUNNER_TEMP/scaleway_ssh" > "$RUNNER_TEMP/scaleway_ssh.pub"
 
             - name: Start runner
               env:
@@ -202,6 +203,7 @@ jobs:
                   fi
                   printf '%s\n' "$PEERBIT_SCALEWAY_SSH_PRIVATE_KEY" > "$RUNNER_TEMP/scaleway_ssh"
                   chmod 600 "$RUNNER_TEMP/scaleway_ssh"
+                  ssh-keygen -y -f "$RUNNER_TEMP/scaleway_ssh" > "$RUNNER_TEMP/scaleway_ssh.pub"
 
             - name: Start runner
               env:

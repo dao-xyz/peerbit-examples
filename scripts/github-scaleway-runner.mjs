@@ -275,11 +275,30 @@ function sanitizeName(value) {
 
 function detectPublicKey() {
     const fromEnv = (process.env.PEERBIT_SCALEWAY_SSH_PUBLIC_KEY || "").trim();
+    const explicitIdentityFile = (
+        process.env.PEERBIT_SCALEWAY_SSH_IDENTITY_FILE || ""
+    ).trim();
     if (fromEnv) {
-        const identityFile = (
-            process.env.PEERBIT_SCALEWAY_SSH_IDENTITY_FILE || ""
-        ).trim();
-        return { publicKey: fromEnv, identityFile: identityFile || null };
+        return {
+            publicKey: fromEnv,
+            identityFile: explicitIdentityFile || null,
+        };
+    }
+
+    if (explicitIdentityFile) {
+        try {
+            const raw = fs
+                .readFileSync(`${explicitIdentityFile}.pub`, "utf-8")
+                .trim();
+            if (raw) {
+                return {
+                    publicKey: raw,
+                    identityFile: explicitIdentityFile,
+                };
+            }
+        } catch {
+            // ignore
+        }
     }
 
     const home = process.env.HOME || os.homedir();
@@ -316,6 +335,13 @@ function detectPublicKey() {
     return { publicKey: "", identityFile: null };
 }
 
+function normalizeSshPublicKey(value) {
+    const parts = String(value || "")
+        .trim()
+        .split(/\s+/);
+    return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : parts.join(" ");
+}
+
 async function ensureScalewaySshKey(secretKey, projectId) {
     const explicitId = String(
         process.env.PEERBIT_SCALEWAY_SSH_KEY_ID || ""
@@ -335,6 +361,7 @@ async function ensureScalewaySshKey(secretKey, projectId) {
             ].join("\n")
         );
     }
+    const normalizedPublicKey = normalizeSshPublicKey(publicKey);
 
     const list = await scalewayRequest(
         secretKey,
@@ -344,7 +371,8 @@ async function ensureScalewaySshKey(secretKey, projectId) {
     const keys = Array.isArray(list?.ssh_keys) ? list.ssh_keys : [];
     const match =
         keys.find(
-            (item) => String(item?.public_key || "").trim() === publicKey.trim()
+            (item) =>
+                normalizeSshPublicKey(item?.public_key) === normalizedPublicKey
         ) ||
         keys.find((item) => String(item?.name || "").trim() === keyName) ||
         null;
@@ -357,7 +385,7 @@ async function ensureScalewaySshKey(secretKey, projectId) {
         {
             project_id: projectId,
             name: keyName,
-            public_key: publicKey,
+            public_key: normalizedPublicKey,
         }
     );
     const id = String(created?.id || "").trim();
@@ -783,8 +811,16 @@ async function startRunner(repoInfo) {
     }
 
     const projectId = await resolveProjectId(secretKey);
-    const sshKeyId = await ensureScalewaySshKey(secretKey, projectId);
-    const osId = await resolveOsId(secretKey, zone, serverType);
+    let created = reuseServer
+        ? await findReusableServer(secretKey, zone, serverName)
+        : null;
+    const reusedServer = Boolean(created);
+    let sshKeyId = "";
+    let osId = "";
+    if (!created) {
+        sshKeyId = await ensureScalewaySshKey(secretKey, projectId);
+        osId = await resolveOsId(secretKey, zone, serverType);
+    }
 
     console.log(
         "[github-scaleway-runner] Requesting GitHub runner registration token..."
@@ -804,10 +840,6 @@ async function startRunner(repoInfo) {
         throw error;
     }
 
-    let created = reuseServer
-        ? await findReusableServer(secretKey, zone, serverName)
-        : null;
-    const reusedServer = Boolean(created);
     if (created) {
         console.log(
             `[github-scaleway-runner] Reusing Scaleway Apple Silicon server ${serverName} (${extractServerId(created)}).`

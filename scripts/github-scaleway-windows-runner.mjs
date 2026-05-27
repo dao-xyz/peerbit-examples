@@ -517,6 +517,13 @@ function detectPublicKey(identityFile = "") {
     return "";
 }
 
+function normalizeSshPublicKey(value) {
+    const parts = String(value || "")
+        .trim()
+        .split(/\s+/);
+    return parts.length >= 2 ? `${parts[0]} ${parts[1]}` : parts.join(" ");
+}
+
 async function ensureScalewaySshKey(secretKey, projectId, publicKey) {
     const explicitId = String(
         process.env.PEERBIT_SCALEWAY_SSH_KEY_ID || ""
@@ -534,6 +541,7 @@ async function ensureScalewaySshKey(secretKey, projectId, publicKey) {
             ].join("\n")
         );
     }
+    const normalizedPublicKey = normalizeSshPublicKey(publicKey);
 
     const list = await scalewayJson(
         secretKey,
@@ -543,7 +551,8 @@ async function ensureScalewaySshKey(secretKey, projectId, publicKey) {
     const keys = Array.isArray(list?.ssh_keys) ? list.ssh_keys : [];
     const matchByKey =
         keys.find(
-            (item) => String(item?.public_key || "").trim() === publicKey.trim()
+            (item) =>
+                normalizeSshPublicKey(item?.public_key) === normalizedPublicKey
         ) || null;
     if (matchByKey?.id) return matchByKey.id;
 
@@ -552,7 +561,7 @@ async function ensureScalewaySshKey(secretKey, projectId, publicKey) {
         null;
     const createName =
         matchByName &&
-        String(matchByName?.public_key || "").trim() !== publicKey.trim()
+        normalizeSshPublicKey(matchByName?.public_key) !== normalizedPublicKey
             ? `${keyName}-alt-${crypto.randomBytes(2).toString("hex")}`
             : keyName;
 
@@ -563,7 +572,7 @@ async function ensureScalewaySshKey(secretKey, projectId, publicKey) {
         {
             project_id: projectId,
             name: createName,
-            public_key: publicKey,
+            public_key: normalizedPublicKey,
         }
     );
     const id = String(created?.id || "").trim();
@@ -973,7 +982,6 @@ async function startRunner(repoInfo) {
     }
 
     const projectId = await resolveProjectId(secretKey);
-    const image = await resolveWindowsImage(secretKey, zone, projectId);
     const supportsEncryption = supportsAdminPasswordEncryption(serverType);
     if (enableSsh && !publicKey) {
         fail(
@@ -985,47 +993,54 @@ async function startRunner(repoInfo) {
         );
     }
 
-    let sshKeyId = "";
-    if (publicKey) {
-        sshKeyId = await ensureScalewaySshKey(secretKey, projectId, publicKey);
-    }
-
-    const encryptAdminPassword =
-        supportsEncryption &&
-        publicKey &&
-        publicKey.startsWith("ssh-rsa ") &&
-        Boolean(sshKeyId);
-
-    if (
-        supportsEncryption &&
-        (!publicKey || !publicKey.startsWith("ssh-rsa "))
-    ) {
-        console.warn(
-            [
-                `[github-scaleway-windows-runner] Note: ${serverType} supports admin password encryption, but no RSA SSH public key was detected.`,
-                "Windows password encryption requires an RSA key (ssh-rsa).",
-                "Generate one with: ssh-keygen -t rsa -b 4096 -f ~/.ssh/peerbit_scaleway_rsa -N ''",
-                "Then re-run, or set PEERBIT_SCALEWAY_SSH_PUBLIC_KEY to your RSA public key.",
-                "Continuing without admin password encryption.",
-            ].join("\n")
-        );
-    }
-
-    if (!supportsEncryption) {
-        console.warn(
-            `[github-scaleway-windows-runner] Note: ${serverType} does not support admin password encryption via SSH key (only POP2-WIN).`
-        );
-    }
-
     let created = reuseServer
         ? await findReusableServer(secretKey, zone, serverName)
         : null;
     const reusedServer = Boolean(created);
+    let sshKeyId = "";
+    let image = "";
+
     if (created) {
         console.log(
             `[github-scaleway-windows-runner] Reusing Scaleway Instance ${serverName} (${extractServerId(created)}).`
         );
     } else {
+        image = await resolveWindowsImage(secretKey, zone, projectId);
+        if (publicKey) {
+            sshKeyId = await ensureScalewaySshKey(
+                secretKey,
+                projectId,
+                publicKey
+            );
+        }
+
+        const encryptAdminPassword =
+            supportsEncryption &&
+            publicKey &&
+            publicKey.startsWith("ssh-rsa ") &&
+            Boolean(sshKeyId);
+
+        if (
+            supportsEncryption &&
+            (!publicKey || !publicKey.startsWith("ssh-rsa "))
+        ) {
+            console.warn(
+                [
+                    `[github-scaleway-windows-runner] Note: ${serverType} supports admin password encryption, but no RSA SSH public key was detected.`,
+                    "Windows password encryption requires an RSA key (ssh-rsa).",
+                    "Generate one with: ssh-keygen -t rsa -b 4096 -f ~/.ssh/peerbit_scaleway_rsa -N ''",
+                    "Then re-run, or set PEERBIT_SCALEWAY_SSH_PUBLIC_KEY to your RSA public key.",
+                    "Continuing without admin password encryption.",
+                ].join("\n")
+            );
+        }
+
+        if (!supportsEncryption) {
+            console.warn(
+                `[github-scaleway-windows-runner] Note: ${serverType} does not support admin password encryption via SSH key (only POP2-WIN).`
+            );
+        }
+
         console.log(
             `[github-scaleway-windows-runner] Creating Scaleway Instance ${serverName} (${serverType}, ${zone})...`
         );
