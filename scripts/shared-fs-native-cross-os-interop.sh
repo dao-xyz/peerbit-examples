@@ -410,7 +410,7 @@ for expected_machine in "${expected_ack_machines[@]}"; do
 done
 
 local_delete_start_ms="$(now_ms)"
-rm "$rename_target_file"
+rm -f "$rename_target_file"
 test ! -e "$rename_target_file"
 local_delete_end_ms="$(now_ms)"
 local_delete_ms=$((local_delete_end_ms - local_delete_start_ms))
