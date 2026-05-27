@@ -326,14 +326,16 @@ const extractArchive = async (
     target: NativeAdapterTarget
 ) => {
     if (target.archiveExtension === "zip") {
+        const quotePowerShell = (value: string) =>
+            `'${value.replace(/'/g, "''")}'`;
         await runProcess("powershell.exe", [
             "-NoProfile",
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            "Expand-Archive -LiteralPath $args[0] -DestinationPath $args[1] -Force",
-            archivePath,
-            outputDirectory,
+            `Expand-Archive -LiteralPath ${quotePowerShell(
+                archivePath
+            )} -DestinationPath ${quotePowerShell(outputDirectory)} -Force`,
         ]);
         return;
     }
