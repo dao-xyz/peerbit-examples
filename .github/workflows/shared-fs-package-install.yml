@@ -97,7 +97,7 @@ jobs:
                   project_dir="$RUNNER_TEMP/shared-fs-install-smoke"
                   adapter_dir="$RUNNER_TEMP/shared-fs-native-adapter"
                   cd "$project_dir"
-                  adapter_path="$(node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js install-adapter --prefix "$adapter_dir" --print-path)"
+                  adapter_path="$(bash "$GITHUB_WORKSPACE/scripts/shared-fs-install-adapter-with-retry.sh" "$adapter_dir" node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js)"
                   test -f "$adapter_path"
                   if [ "$RUNNER_OS" != "Windows" ]; then
                     test -x "$adapter_path"
