@@ -48,14 +48,14 @@ jobs:
                   mkdir -p "$project_dir"
                   cd "$project_dir"
                   npm init -y
-                  npm install @peerbit/shared-fs
+                  npm install --omit=peer @peerbit/shared-fs
                   node --input-type=module -e "import('@peerbit/shared-fs').then((m) => { if (typeof m.openSharedFs !== 'function') throw new Error('openSharedFs export missing'); })"
 
             - name: Install CLI globally from npm
               shell: bash
               run: |
                   set -euo pipefail
-                  npm install -g @peerbit/shared-fs-cli
+                  npm install -g --omit=peer @peerbit/shared-fs-cli
                   global_prefix="$(npm prefix -g)"
                   if [ "$RUNNER_OS" = "Windows" ]; then
                     echo "$global_prefix" >> "$GITHUB_PATH"

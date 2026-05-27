@@ -41,7 +41,7 @@ The companion `@peerbit/shared-fs-cli` package installs `peerbit-fs` for native
 mounts:
 
 ```bash
-npm install -g @peerbit/shared-fs-cli
+npm install -g --omit=peer @peerbit/shared-fs-cli
 peerbit-fs install-adapter
 peerbit-fs status
 ```

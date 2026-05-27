@@ -86,7 +86,7 @@ jobs:
                   cli_tgz="$(find "$pack_dir" -maxdepth 1 -name 'peerbit-shared-fs-cli-*.tgz' | head -n 1)"
                   test -n "$shared_fs_tgz"
                   test -n "$cli_tgz"
-                  npm install --ignore-scripts "$shared_fs_tgz" "$cli_tgz"
+                  npm install --ignore-scripts --omit=peer "$shared_fs_tgz" "$cli_tgz"
                   node -e "import('@peerbit/shared-fs').then((m) => { if (typeof m.openSharedFs !== 'function') throw new Error('openSharedFs export missing'); })"
                   node node_modules/@peerbit/shared-fs-cli/lib/esm/bin.js --help >/dev/null
 

@@ -35,10 +35,13 @@ authorize that writer.
 Install the CLI, then make sure the native adapter is installed:
 
 ```bash
-npm install -g @peerbit/shared-fs-cli
+npm install -g --omit=peer @peerbit/shared-fs-cli
 peerbit-fs install-adapter
 peerbit-fs status
 ```
+
+`--omit=peer` keeps npm from auto-installing optional browser and React Native
+peer packages that are not needed by the Node.js CLI.
 
 `peerbit-fs install-adapter` downloads a prebuilt
 `peerbit-shared-fs-native` binary into `~/.peerbit/shared-fs/bin`. The global
