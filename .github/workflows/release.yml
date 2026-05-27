@@ -51,7 +51,7 @@ jobs:
               uses: changesets/action@v1
               with:
                   version: pnpm version-packages
-                  publish: pnpm release:shared-fs
+                  publish: pnpm release:packages
                   title: Version Packages
                   commit: Version Packages
               env:

@@ -22,21 +22,36 @@ const nativeTargets = [
     "linux-x64.tar.gz",
     "win32-x64.zip",
 ];
-const releasePackages = [
-    {
-        dir: "packages/shared-fs/library",
-        jsonPath: "packages/shared-fs/library/package.json",
-    },
-    {
-        dir: "packages/shared-fs/cli",
-        jsonPath: "packages/shared-fs/cli/package.json",
-    },
-];
+const sharedFsPackageNames = new Set([
+    "@peerbit/shared-fs",
+    "@peerbit/shared-fs-cli",
+]);
+const sharedFsCliPackageName = "@peerbit/shared-fs-cli";
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const readJson = (relativePath) =>
     JSON.parse(fs.readFileSync(path.join(repoRoot, relativePath), "utf8"));
+
+const findPackageJsonFiles = (directory) => {
+    const found = [];
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+        if (
+            entry.name === "node_modules" ||
+            entry.name === "lib" ||
+            entry.name.startsWith(".")
+        ) {
+            continue;
+        }
+        const fullPath = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+            found.push(...findPackageJsonFiles(fullPath));
+        } else if (entry.isFile() && entry.name === "package.json") {
+            found.push(fullPath);
+        }
+    }
+    return found.sort();
+};
 
 const run = (command, args, options = {}) => {
     const result = spawnSync(command, args, {
@@ -280,6 +295,22 @@ const packagePublished = (packageName, version) => {
     }
 };
 
+const discoverPublishablePackages = () =>
+    findPackageJsonFiles(path.join(repoRoot, "packages"))
+        .map((jsonPath) => {
+            const relativeJsonPath = path.relative(repoRoot, jsonPath);
+            const manifest = readJson(relativeJsonPath);
+            return {
+                dir: path.dirname(relativeJsonPath),
+                jsonPath: relativeJsonPath,
+                ...manifest,
+            };
+        })
+        .filter((pkg) => pkg.name && pkg.version && pkg.private !== true);
+
+const unpublishedPackages = (packages) =>
+    packages.filter((pkg) => !packagePublished(pkg.name, pkg.version));
+
 const runPackInstallSmoke = () => {
     const tempDir = fs.mkdtempSync(
         path.join(os.tmpdir(), "peerbit-shared-fs-release-")
@@ -357,7 +388,24 @@ const runPackInstallSmoke = () => {
     }
 };
 
-const runValidations = () => {
+const buildPackages = (packages) => {
+    if (packages.length === 0) {
+        return;
+    }
+
+    const filters = packages.flatMap((pkg) => ["--filter", `${pkg.name}...`]);
+    run("pnpm", [
+        "-r",
+        "--sort",
+        "--workspace-concurrency=1",
+        ...filters,
+        "--if-present",
+        "run",
+        "build",
+    ]);
+};
+
+const runSharedFsValidations = () => {
     run("pnpm", [
         "-r",
         "--sort",
@@ -372,74 +420,94 @@ const runValidations = () => {
     runPackInstallSmoke();
 };
 
-const publishPackages = (packages, unpublished) => {
-    if (!dryRun && !hasNpmToken()) {
-        throw new Error(
-            "NPM_TOKEN or NODE_AUTH_TOKEN is required to publish shared-fs packages."
-        );
-    }
+const runValidations = (packages) => {
+    buildPackages(packages);
 
-    for (const pkg of packages) {
-        if (!dryRun && !unpublished.includes(pkg)) {
-            console.log(`${pkg.name}@${pkg.version} is already published.`);
-            continue;
-        }
-
-        const args = ["publish", "--access", "public", "--no-git-checks"];
-        if (dryRun) {
-            args.push("--dry-run");
-        }
-        try {
-            run("pnpm", args, { cwd: path.join(repoRoot, pkg.dir) });
-        } catch (error) {
-            if (!dryRun && packagePublished(pkg.name, pkg.version)) {
-                console.log(
-                    `${pkg.name}@${pkg.version} is published after the publish command failed; continuing.`
-                );
-                continue;
-            }
-            throw error;
-        }
+    if (packages.some((pkg) => sharedFsPackageNames.has(pkg.name))) {
+        runSharedFsValidations();
     }
 };
 
-const packages = releasePackages.map((pkg) => ({
-    ...pkg,
-    ...readJson(pkg.jsonPath),
-}));
+const publishDryRun = (packages) => {
+    for (const pkg of packages) {
+        run(
+            "pnpm",
+            ["publish", "--access", "public", "--no-git-checks", "--dry-run"],
+            { cwd: path.join(repoRoot, pkg.dir) }
+        );
+    }
+};
 
-const versions = new Set(packages.map((pkg) => pkg.version));
-if (versions.size !== 1) {
-    throw new Error(
-        `Shared-fs packages must use the same version: ${packages
-            .map((pkg) => `${pkg.name}@${pkg.version}`)
-            .join(", ")}`
-    );
-}
+const publishPackages = (unpublished) => {
+    if (!dryRun && !hasNpmToken()) {
+        throw new Error(
+            "NPM_TOKEN or NODE_AUTH_TOKEN is required to publish packages."
+        );
+    }
 
-const version = packages[0].version;
-const tag = `shared-fs-native-v${version}`;
+    if (dryRun) {
+        publishDryRun(unpublished);
+        return;
+    }
+
+    try {
+        run("pnpm", ["changeset", "publish"]);
+    } catch (error) {
+        const stillUnpublished = unpublishedPackages(unpublished);
+        if (stillUnpublished.length === 0) {
+            console.log(
+                "All targeted package versions are published after the publish command failed; continuing."
+            );
+            return;
+        }
+        console.error(
+            `Still unpublished after failed publish: ${stillUnpublished
+                .map((pkg) => `${pkg.name}@${pkg.version}`)
+                .join(", ")}`
+        );
+        throw error;
+    }
+};
+
+const packages = discoverPublishablePackages();
+const unpublished = unpublishedPackages(packages);
 console.log(
-    `Preparing shared-fs release ${version}${dryRun ? " (dry run)" : ""}.`
+    `Preparing release for ${packages.length} publishable packages${
+        dryRun ? " (dry run)" : ""
+    }.`
 );
 
-const unpublished = dryRun
-    ? packages
-    : packages.filter((pkg) => !packagePublished(pkg.name, pkg.version));
-
 if (!dryRun && unpublished.length === 0) {
-    console.log("Shared-fs package versions are already published.");
+    console.log("All package versions are already published.");
+    process.exit(0);
+}
+
+if (dryRun && unpublished.length === 0) {
+    console.log("All package versions are already published.");
     process.exit(0);
 }
 
 if (!dryRun && !hasNpmToken()) {
     throw new Error(
-        "NPM_TOKEN or NODE_AUTH_TOKEN is required to publish shared-fs packages."
+        "NPM_TOKEN or NODE_AUTH_TOKEN is required to publish packages."
     );
 }
 
-await ensureNativeAdapterRelease(tag);
-if (!skipValidation) {
-    runValidations();
+console.log(
+    `Unpublished package versions: ${unpublished
+        .map((pkg) => `${pkg.name}@${pkg.version}`)
+        .join(", ")}`
+);
+
+const unpublishedSharedFsCli = unpublished.find(
+    (pkg) => pkg.name === sharedFsCliPackageName
+);
+if (unpublishedSharedFsCli) {
+    const tag = `shared-fs-native-v${unpublishedSharedFsCli.version}`;
+    await ensureNativeAdapterRelease(tag);
 }
-publishPackages(packages, unpublished);
+
+if (!skipValidation) {
+    runValidations(unpublished);
+}
+publishPackages(unpublished);

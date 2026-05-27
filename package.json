@@ -40,7 +40,7 @@
         "dev:prod": "pnpm --filter @giga-app/interface-frontend run dev:prod",
         "pub": "pnpm changeset publish",
         "version-packages": "pnpm changeset version && pnpm install --lockfile-only",
-        "release:shared-fs": "node scripts/shared-fs-release.mjs",
+        "release:packages": "node scripts/release-packages.mjs",
         "changeset": "changeset",
         "changeset:version": "changeset version",
         "changeset:publish": "changeset publish",
