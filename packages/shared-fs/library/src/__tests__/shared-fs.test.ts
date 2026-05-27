@@ -95,6 +95,16 @@ describe("shared fs library", () => {
         expect((await fs.list("/")).map((entry) => entry.name)).toEqual([]);
     });
 
+    it("replaces destination files when renaming", async () => {
+        await fs.writeFile("/source.txt", "source");
+        await fs.writeFile("/target.txt", "target");
+
+        await fs.rename("/source.txt", "/target.txt");
+
+        expect(await fs.readFile("/source.txt")).toBeUndefined();
+        expect(decode(await fs.readFile("/target.txt"))).toBe("source");
+    });
+
     it("chunks and reads large files", async () => {
         const bytes = patternedBytes(DEFAULT_FILE_CHUNK_SIZE * 2 + 17);
         await fs.writeFile("/large.bin", bytes);

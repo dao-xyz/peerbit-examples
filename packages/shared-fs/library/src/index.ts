@@ -861,13 +861,29 @@ export class SharedFileSystem extends Program<SharedFsOpenArgs> {
     async rename(from: string, to: string) {
         const fromPath = normalizeFsPath(from);
         const toPath = normalizeFsPath(to);
+        if (fromPath === toPath) {
+            return;
+        }
         const projection = await this.projection();
         const resolved = await this.resolvePath(fromPath, projection);
         if (!resolved || resolved.kind === "root") {
             throw new Error(`Path does not exist: ${fromPath}`);
         }
-        if (await this.resolvePath(toPath, projection)) {
-            throw new Error(`Destination already exists: ${toPath}`);
+        const destination = await this.resolvePath(toPath, projection);
+        if (destination) {
+            if (destination.kind === "root") {
+                throw new Error(`Cannot replace root path: ${toPath}`);
+            }
+            if (destination.record.nodeId === resolved.record.nodeId) {
+                return;
+            }
+            if (
+                resolved.kind === "directory" ||
+                destination.kind === "directory"
+            ) {
+                throw new Error(`Cannot replace directory path: ${toPath}`);
+            }
+            await this.rm(toPath);
         }
         const parentId = await this.resolveParent(toPath, projection);
         const metadata = this.signedMetadata();
