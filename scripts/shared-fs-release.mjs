@@ -389,7 +389,17 @@ const publishPackages = (packages, unpublished) => {
         if (dryRun) {
             args.push("--dry-run");
         }
-        run("pnpm", args, { cwd: path.join(repoRoot, pkg.dir) });
+        try {
+            run("pnpm", args, { cwd: path.join(repoRoot, pkg.dir) });
+        } catch (error) {
+            if (!dryRun && packagePublished(pkg.name, pkg.version)) {
+                console.log(
+                    `${pkg.name}@${pkg.version} is published after the publish command failed; continuing.`
+                );
+                continue;
+            }
+            throw error;
+        }
     }
 };
 
