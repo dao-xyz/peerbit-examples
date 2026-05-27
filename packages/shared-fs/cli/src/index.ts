@@ -20,6 +20,10 @@ import path from "node:path";
 import { Peerbit } from "peerbit";
 import yargs from "yargs";
 import { hideBin } from "yargs/helpers";
+import {
+    installNativeAdapter,
+    resolveExternalNativeAdapter,
+} from "./native-adapter.js";
 
 const DEFAULT_DIRECTORY_NAME = "peerbit-shared-fs";
 const CLI_REPLICATION_ARGS = {
@@ -280,11 +284,21 @@ const mountExternalNativeAdapter = async (
     };
 };
 
+const configureExternalNativeAdapterEnv = async () => {
+    const adapter = await resolveExternalNativeAdapter();
+    if (adapter && !process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER) {
+        process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER = adapter;
+    }
+    return adapter;
+};
+
 const printNativeRequirements = async () => {
+    const externalAdapter = await configureExternalNativeAdapterEnv();
     const support = await getNativeMountSupport();
     console.log(chalk.bold("Native mount status"));
     console.log(`platform: ${support.platform}`);
     console.log(`adapter: ${support.adapter}`);
+    console.log(`external adapter: ${externalAdapter ?? "not found"}`);
     console.log(`available: ${support.available ? "yes" : "no"}`);
     if (support.missing.length > 0) {
         console.log("missing:");
@@ -297,9 +311,15 @@ const printNativeRequirements = async () => {
     }
     console.log("");
     console.log(chalk.bold("Native mount requirements"));
-    console.log("linux: libfuse/FUSE plus the optional fuse-native package");
-    console.log("macOS: macFUSE plus the optional fuse-native package");
-    console.log("windows: WinFsp adapter binary is required");
+    console.log(
+        "linux: libfuse/FUSE plus fuse-native or the peerbit-shared-fs-native adapter"
+    );
+    console.log(
+        "macOS: macFUSE plus fuse-native or the peerbit-shared-fs-native adapter"
+    );
+    console.log(
+        "windows: WinFsp runtime plus the peerbit-shared-fs-native adapter"
+    );
 };
 
 const printBenchmarkResult = (
@@ -449,6 +469,69 @@ export const runCli = async (args = hideBin(process.argv)) => {
             }
         )
         .command(
+            "install-adapter",
+            "download and install the prebuilt native mount adapter",
+            (command) =>
+                command
+                    .option("prefix", {
+                        type: "string",
+                        description:
+                            "Install directory. Defaults to ~/.peerbit/shared-fs/bin.",
+                    })
+                    .option("version", {
+                        type: "string",
+                        description:
+                            "Adapter release version. Defaults to this CLI package version.",
+                    })
+                    .option("base-url", {
+                        type: "string",
+                        description:
+                            "Release asset base URL override for mirrors or test builds.",
+                    })
+                    .option("force", {
+                        type: "boolean",
+                        default: false,
+                        description: "Replace an existing installed adapter.",
+                    })
+                    .option("print-path", {
+                        type: "boolean",
+                        default: false,
+                        description:
+                            "Print the installed adapter path after resolving/installing.",
+                    })
+                    .option("if-needed", {
+                        type: "boolean",
+                        default: false,
+                        hidden: true,
+                    }),
+            async (argv) => {
+                const result = await installNativeAdapter({
+                    installDir: argv.prefix,
+                    version: argv.version,
+                    baseUrl: argv.baseUrl,
+                    force: argv.force,
+                    ifNeeded: argv.ifNeeded,
+                });
+                if (argv.printPath) {
+                    console.log(result.binaryPath);
+                    return;
+                }
+                if (result.installed) {
+                    console.log(
+                        chalk.green(
+                            `Installed native adapter ${result.assetName} at ${result.binaryPath}`
+                        )
+                    );
+                    return;
+                }
+                console.log(
+                    chalk.gray(
+                        `Native adapter already installed at ${result.binaryPath}`
+                    )
+                );
+            }
+        )
+        .command(
             "mount <address> <mountpoint>",
             "mount a shared filesystem using the native adapter",
             (command) =>
@@ -486,9 +569,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         replicate: argv.replicate,
                     });
                     const backend = createSharedFsMountBackend(fsHandle);
-                    const externalAdapter =
-                        argv.nativeAdapter ||
-                        process.env.PEERBIT_SHARED_FS_NATIVE_ADAPTER;
+                    const externalAdapter = await resolveExternalNativeAdapter(
+                        argv.nativeAdapter
+                    );
                     const mountpoint = normalizeNativeMountpoint(
                         String(argv.mountpoint)
                     );

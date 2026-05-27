@@ -24,6 +24,7 @@
     "files": [
         "lib",
         "src",
+        "scripts",
         "!src/**/__tests__",
         "!lib/**/__tests__",
         "LICENSE"
@@ -34,6 +35,8 @@
     "scripts": {
         "clean": "shx rm -rf lib/*",
         "build": "pnpm run clean && tsc -p tsconfig.json",
+        "install-native-adapter": "node lib/esm/install-native-adapter.js",
+        "postinstall": "node scripts/postinstall.mjs",
         "test": "vitest run",
         "test:watch": "vitest"
     },

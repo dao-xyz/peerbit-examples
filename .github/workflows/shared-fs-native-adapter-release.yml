@@ -1,0 +1,194 @@
+name: Shared FS Native Adapter Release
+
+on:
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Release tag. Defaults to shared-fs-native-v<CLI package version>."
+                required: false
+                type: string
+            publish_release:
+                description: "Create/update the GitHub release and upload assets."
+                required: true
+                default: false
+                type: boolean
+    push:
+        tags:
+            - "shared-fs-native-v*"
+
+permissions:
+    contents: write
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+    resolve:
+        name: Resolve release tag
+        runs-on: ubuntu-latest
+        outputs:
+            tag: ${{ steps.release.outputs.tag }}
+            publish_release: ${{ steps.release.outputs.publish_release }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Resolve tag
+              id: release
+              shell: bash
+              env:
+                  INPUT_TAG: ${{ github.event.inputs.tag }}
+                  INPUT_PUBLISH_RELEASE: ${{ github.event.inputs.publish_release }}
+              run: |
+                  set -euo pipefail
+                  if [ "${GITHUB_REF_TYPE:-}" = "tag" ]; then
+                    tag="$GITHUB_REF_NAME"
+                    publish_release="true"
+                  elif [ -n "$INPUT_TAG" ]; then
+                    tag="$INPUT_TAG"
+                    publish_release="$INPUT_PUBLISH_RELEASE"
+                  else
+                    version="$(node -p "require('./packages/shared-fs/cli/package.json').version")"
+                    tag="shared-fs-native-v${version}"
+                    publish_release="${INPUT_PUBLISH_RELEASE:-false}"
+                  fi
+                  echo "tag=$tag" >> "$GITHUB_OUTPUT"
+                  echo "publish_release=$publish_release" >> "$GITHUB_OUTPUT"
+
+    build:
+        name: Build ${{ matrix.target }}
+        needs: resolve
+        strategy:
+            fail-fast: false
+            matrix:
+                include:
+                    - target: linux-x64
+                      runs-on: ubuntu-latest
+                      goos: linux
+                      goarch: amd64
+                      build-tags: native_mount fuse3
+                      package: tar
+                    - target: linux-arm64
+                      runs-on: ubuntu-24.04-arm
+                      goos: linux
+                      goarch: arm64
+                      build-tags: native_mount fuse3
+                      package: tar
+                    - target: darwin-x64
+                      runs-on: macos-13
+                      goos: darwin
+                      goarch: amd64
+                      build-tags: native_mount
+                      package: tar
+                    - target: darwin-arm64
+                      runs-on: macos-15
+                      goos: darwin
+                      goarch: arm64
+                      build-tags: native_mount
+                      package: tar
+                    - target: win32-x64
+                      runs-on: windows-latest
+                      goos: windows
+                      goarch: amd64
+                      build-tags: native_mount
+                      package: zip
+        runs-on: ${{ matrix.runs-on }}
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Setup Go
+              uses: actions/setup-go@v6
+              with:
+                  go-version: "1.24.x"
+                  cache-dependency-path: packages/shared-fs/native/go.sum
+
+            - name: Install Linux FUSE headers
+              if: runner.os == 'Linux'
+              shell: bash
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y fuse3 libfuse3-dev
+
+            - name: Install macFUSE headers
+              if: runner.os == 'macOS'
+              shell: bash
+              run: |
+                  brew install --cask macfuse || true
+                  if [ ! -f /usr/local/include/fuse/fuse.h ] && [ ! -f /usr/local/include/osxfuse/fuse/fuse.h ]; then
+                    echo "macFUSE headers were not found after install." >&2
+                    exit 1
+                  fi
+
+            - name: Build native adapter
+              shell: bash
+              working-directory: packages/shared-fs/native
+              env:
+                  CGO_ENABLED: ${{ runner.os == 'Windows' && '0' || '1' }}
+                  GOOS: ${{ matrix.goos }}
+                  GOARCH: ${{ matrix.goarch }}
+              run: |
+                  set -euo pipefail
+                  binary="peerbit-shared-fs-native"
+                  if [ "${{ runner.os }}" = "Windows" ]; then
+                    binary="${binary}.exe"
+                  fi
+                  go build -tags "${{ matrix.build-tags }}" -o "$RUNNER_TEMP/$binary" .
+
+            - name: Package tar asset
+              if: matrix.package == 'tar'
+              shell: bash
+              env:
+                  ASSET_NAME: peerbit-shared-fs-native-${{ matrix.target }}.tar.gz
+              run: |
+                  set -euo pipefail
+                  mkdir -p "$RUNNER_TEMP/asset"
+                  cp "$RUNNER_TEMP/peerbit-shared-fs-native" "$RUNNER_TEMP/asset/peerbit-shared-fs-native"
+                  chmod 755 "$RUNNER_TEMP/asset/peerbit-shared-fs-native"
+                  tar -C "$RUNNER_TEMP/asset" -czf "$RUNNER_TEMP/$ASSET_NAME" peerbit-shared-fs-native
+
+            - name: Package zip asset
+              if: matrix.package == 'zip'
+              shell: pwsh
+              env:
+                  ASSET_NAME: peerbit-shared-fs-native-${{ matrix.target }}.zip
+              run: |
+                  New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\asset" | Out-Null
+                  Copy-Item "$env:RUNNER_TEMP\peerbit-shared-fs-native.exe" "$env:RUNNER_TEMP\asset\peerbit-shared-fs-native.exe"
+                  Compress-Archive -Path "$env:RUNNER_TEMP\asset\peerbit-shared-fs-native.exe" -DestinationPath "$env:RUNNER_TEMP\$env:ASSET_NAME" -Force
+
+            - name: Upload asset artifact
+              uses: actions/upload-artifact@v7
+              with:
+                  name: peerbit-shared-fs-native-${{ matrix.target }}
+                  path: ${{ runner.temp }}/peerbit-shared-fs-native-${{ matrix.target }}.*
+                  if-no-files-found: error
+
+    publish:
+        name: Publish release assets
+        needs:
+            - resolve
+            - build
+        if: needs.resolve.outputs.publish_release == 'true'
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Download assets
+              uses: actions/download-artifact@v8
+              with:
+                  path: dist/native-adapter
+                  merge-multiple: true
+
+            - name: Publish GitHub release
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  TAG: ${{ needs.resolve.outputs.tag }}
+              run: |
+                  set -euo pipefail
+                  if ! gh release view "$TAG" >/dev/null 2>&1; then
+                    gh release create "$TAG" --title "$TAG" --notes "Prebuilt Peerbit shared-fs native adapter binaries."
+                  fi
+                  gh release upload "$TAG" dist/native-adapter/* --clobber

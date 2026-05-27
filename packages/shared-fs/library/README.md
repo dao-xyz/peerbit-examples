@@ -40,6 +40,7 @@ peerbit-fs create
 peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
+peerbit-fs install-adapter
 peerbit-fs mount <address> <mountpoint>
 peerbit-fs mount <address> <mountpoint> --native-adapter peerbit-shared-fs-native
 peerbit-fs status [address]
@@ -54,7 +55,15 @@ Peerbit file version on `flush`, `fsync`, or `release`/close.
 `peerbit-fs create` is access-controlled by default. Use `peerbit-fs create
 --no-auth` only for explicitly unauthenticated test/demo filesystems.
 
-From this repository on macOS, the simplest experimental install path is:
+The normal package install path is:
+
+```bash
+npm install -g @peerbit/shared-fs-cli
+peerbit-fs install-adapter
+peerbit-fs status
+```
+
+From this repository on macOS, the local development install path is:
 
 ```bash
 pnpm shared-fs:install:macos
@@ -79,11 +88,13 @@ and any missing native mount prerequisites.
 
 The first adapter path is intentionally experimental:
 
-- Linux requires FUSE/libfuse and the optional `fuse-native` package.
-- macOS requires macFUSE and the optional `fuse-native` package.
+- Linux requires FUSE/libfuse plus `fuse-native` or the external adapter.
+- macOS requires macFUSE plus `fuse-native` or the external adapter.
+- Windows requires WinFsp plus the external adapter.
 - `packages/shared-fs/native` provides an experimental external native adapter
-  binary using cgofuse for Linux FUSE, macFUSE, and WinFsp. Use it with
-  `peerbit-fs mount --native-adapter peerbit-shared-fs-native`.
+  binary using cgofuse for Linux FUSE, macFUSE, and WinFsp.
+  `peerbit-fs install-adapter` downloads the matching prebuilt adapter when a
+  release asset exists.
 
 Portable CI covers the shared backend and IPC contract on Linux, macOS, and
 Windows, plus a cross-OS interop workflow where all three runners join one
