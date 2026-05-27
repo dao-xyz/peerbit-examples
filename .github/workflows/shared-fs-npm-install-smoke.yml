@@ -1,0 +1,77 @@
+name: Shared FS Published NPM Smoke
+
+on:
+    workflow_dispatch:
+    workflow_run:
+        workflows:
+            - Release
+        types:
+            - completed
+    pull_request:
+        paths:
+            - ".github/workflows/shared-fs-npm-install-smoke.yml"
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+    NPM_CONFIG_AUDIT: "false"
+    NPM_CONFIG_FUND: "false"
+
+jobs:
+    published-install:
+        name: Published install (${{ matrix.os }})
+        if: ${{ github.event_name != 'workflow_run' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'master') }}
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 25
+        strategy:
+            fail-fast: false
+            matrix:
+                os:
+                    - ubuntu-latest
+                    - macos-latest
+                    - windows-2025
+
+        steps:
+            - name: Setup Node
+              uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  registry-url: https://registry.npmjs.org
+
+            - name: Install library from npm
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  project_dir="$RUNNER_TEMP/shared-fs-npm-smoke"
+                  mkdir -p "$project_dir"
+                  cd "$project_dir"
+                  npm init -y
+                  npm install @peerbit/shared-fs
+                  node --input-type=module -e "import('@peerbit/shared-fs').then((m) => { if (typeof m.openSharedFs !== 'function') throw new Error('openSharedFs export missing'); })"
+
+            - name: Install CLI globally from npm
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  npm install -g @peerbit/shared-fs-cli
+                  global_prefix="$(npm prefix -g)"
+                  if [ "$RUNNER_OS" = "Windows" ]; then
+                    echo "$global_prefix" >> "$GITHUB_PATH"
+                  else
+                    echo "$global_prefix/bin" >> "$GITHUB_PATH"
+                  fi
+
+            - name: Install released native adapter
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  peerbit-fs --help >/dev/null
+                  adapter_dir="$RUNNER_TEMP/shared-fs-native-adapter"
+                  adapter_path="$(peerbit-fs install-adapter --prefix "$adapter_dir" --print-path)"
+                  test -f "$adapter_path"
+                  if [ "$RUNNER_OS" != "Windows" ]; then
+                    test -x "$adapter_path"
+                  fi
+                  echo "installed adapter: $adapter_path"

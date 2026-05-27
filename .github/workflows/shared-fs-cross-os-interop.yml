@@ -32,6 +32,7 @@ permissions:
     contents: read
 
 env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     INTEROP_TIMEOUT_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.timeout_minutes || '10' }}
 
 jobs:
@@ -83,15 +84,15 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Setup pnpm
-              uses: pnpm/action-setup@v4
+              uses: pnpm/action-setup@v5
               with:
                   run_install: false
 
             - name: Setup Node
-              uses: actions/setup-node@v4
+              uses: actions/setup-node@v5
               with:
                   node-version: 22
                   cache: pnpm
@@ -169,15 +170,15 @@ jobs:
 
         steps:
             - name: Checkout
-              uses: actions/checkout@v4
+              uses: actions/checkout@v6
 
             - name: Setup pnpm
-              uses: pnpm/action-setup@v4
+              uses: pnpm/action-setup@v5
               with:
                   run_install: false
 
             - name: Setup Node
-              uses: actions/setup-node@v4
+              uses: actions/setup-node@v5
               with:
                   node-version: 22
                   cache: pnpm
