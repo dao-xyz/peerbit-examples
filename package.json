@@ -48,6 +48,7 @@
         "test:vitest:watch": "vitest",
         "test:vitest:quick": "vitest run",
         "vitest": "vitest",
+        "shared-fs:install:macos": "scripts/install-shared-fs-macos.sh",
         "scaleway:start": "node scripts/github-scaleway-runner.mjs start",
         "scaleway:bootstrap": "node scripts/github-scaleway-runner.mjs bootstrap",
         "scaleway:stop": "node scripts/github-scaleway-runner.mjs stop",

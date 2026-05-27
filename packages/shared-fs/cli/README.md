@@ -3,7 +3,8 @@
 Experimental native mount CLI for `@peerbit/shared-fs`.
 
 ```bash
-peerbit-fs create --auth
+peerbit-fs create
+peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
 peerbit-fs mount <address> <mountpoint>
@@ -22,10 +23,30 @@ optimized for code workspaces.
 available on the host, and any missing pieces before optionally opening an
 address.
 
-`create --auth` creates an access-controlled filesystem rooted at the local
-Peerbit identity. Another machine can run `peerbit-fs whoami` to print its
-writer key; the owner can then run `peerbit-fs trust <address> <public-key>` to
+`create` creates an access-controlled filesystem rooted at the local Peerbit
+identity. Use `create --no-auth` only for explicitly unauthenticated test/demo
+filesystems. Another machine can run `peerbit-fs whoami` to print its writer
+key; the owner can then run `peerbit-fs trust <address> <public-key>` to
 authorize that writer.
+
+## macOS from this repo
+
+The current experimental macOS installer builds the TypeScript CLI and the
+external Go/macFUSE adapter, then installs wrappers into `~/.local/bin`:
+
+```bash
+pnpm shared-fs:install:macos
+export PATH="$HOME/.local/bin:$PATH"
+
+peerbit-fs status
+ADDRESS=$(peerbit-fs create)
+mkdir -p "$HOME/PeerbitShared"
+peerbit-fs mount "$ADDRESS" "$HOME/PeerbitShared"
+```
+
+macFUSE is required. The installer tries `brew install --cask macfuse` when
+Homebrew is available, but macOS may still require one-time approval in System
+Settings > Privacy & Security and a reboot.
 
 Linux/macOS mounts require FUSE/macFUSE plus the optional `fuse-native` package.
 The external `packages/shared-fs/native` adapter uses cgofuse for Linux FUSE,

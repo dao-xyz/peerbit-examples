@@ -375,9 +375,9 @@ export const runCli = async (args = hideBin(process.argv)) => {
             (command) =>
                 command.option("auth", {
                     type: "boolean",
-                    default: false,
+                    default: true,
                     description:
-                        "Create with trusted-writer access control rooted at this peer identity.",
+                        "Create with trusted-writer access control rooted at this peer identity. Disable with --no-auth.",
                 }),
             async (argv) => {
                 const directory = resolveDirectory(argv.directory);

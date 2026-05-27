@@ -32,5 +32,16 @@ The endpoint is provided by the TypeScript Peerbit daemon. TCP loopback is used
 for external adapters so the same IPC transport works on Linux, macOS, and
 Windows.
 
+On macOS, from the repository root, the easiest experimental setup is:
+
+```bash
+pnpm shared-fs:install:macos
+export PATH="$HOME/.local/bin:$PATH"
+peerbit-fs status
+```
+
+This builds the TypeScript CLI and this adapter, installs wrappers in
+`~/.local/bin`, and configures the wrapper to launch the external adapter.
+
 See [ci.md](./ci.md) for the optional Scaleway-backed macOS/Windows native
 mount CI setup.

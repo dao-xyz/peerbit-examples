@@ -34,14 +34,14 @@ describe("peerbit-fs cli", () => {
         }
     });
 
-    it("creates an access-controlled address and prints the local writer key", async () => {
+    it("creates an access-controlled address by default and prints the local writer key", async () => {
         const directory = await fs.mkdtemp(
             path.join(os.tmpdir(), "peerbit-shared-fs-cli-auth-")
         );
         const log = vi.spyOn(console, "log").mockImplementation(() => {});
 
         try {
-            await runCli(["create", "--auth", "--directory", directory]);
+            await runCli(["create", "--directory", directory]);
             expect(log).toHaveBeenCalledTimes(1);
             expect(log.mock.calls[0]?.[0]).toMatch(/^zb2/);
 
@@ -49,6 +49,22 @@ describe("peerbit-fs cli", () => {
             await runCli(["whoami", "--directory", directory]);
             expect(log).toHaveBeenCalledTimes(1);
             expect(log.mock.calls[0]?.[0]).toMatch(/^[A-Za-z0-9+/]+=*$/);
+        } finally {
+            log.mockRestore();
+            await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("allows unauthenticated filesystems as an explicit opt-in", async () => {
+        const directory = await fs.mkdtemp(
+            path.join(os.tmpdir(), "peerbit-shared-fs-cli-no-auth-")
+        );
+        const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+        try {
+            await runCli(["create", "--no-auth", "--directory", directory]);
+            expect(log).toHaveBeenCalledTimes(1);
+            expect(log.mock.calls[0]?.[0]).toMatch(/^zb2/);
         } finally {
             log.mockRestore();
             await fs.rm(directory, { recursive: true, force: true });

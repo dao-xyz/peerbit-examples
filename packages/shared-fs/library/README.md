@@ -36,7 +36,8 @@ entry signer. Use `authorizeWriter(publicKey)` to trust another writer.
 The companion `@peerbit/shared-fs-cli` package installs `peerbit-fs`:
 
 ```bash
-peerbit-fs create --auth
+peerbit-fs create
+peerbit-fs create --no-auth
 peerbit-fs whoami
 peerbit-fs trust <address> <public-key>
 peerbit-fs mount <address> <mountpoint>
@@ -49,6 +50,17 @@ peerbit-fs unmount <mountpoint>
 
 Mounted writes are buffered by the native adapter and committed as one signed
 Peerbit file version on `flush`, `fsync`, or `release`/close.
+
+`peerbit-fs create` is access-controlled by default. Use `peerbit-fs create
+--no-auth` only for explicitly unauthenticated test/demo filesystems.
+
+From this repository on macOS, the simplest experimental install path is:
+
+```bash
+pnpm shared-fs:install:macos
+export PATH="$HOME/.local/bin:$PATH"
+peerbit-fs status
+```
 
 ## Benchmark Baseline
 
