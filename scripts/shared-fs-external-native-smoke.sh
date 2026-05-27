@@ -9,7 +9,31 @@ state="${RUNNER_TEMP:-/tmp}/pbfs-state"
 mountpoint="${RUNNER_TEMP:-/tmp}/pbfs-mount"
 log="${RUNNER_TEMP:-/tmp}/pbfs-mount.log"
 
-rm -rf "$state" "$mountpoint" "$log"
+unmount_path() {
+  local target="$1"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    umount "$target" >/dev/null 2>&1 ||
+      umount -f "$target" >/dev/null 2>&1 ||
+      diskutil unmount force "$target" >/dev/null 2>&1 ||
+      true
+  else
+    fusermount -u "$target" >/dev/null 2>&1 || fusermount3 -u "$target" >/dev/null 2>&1 || true
+  fi
+}
+
+remove_path() {
+  local target="$1"
+  rm -rf "$target" >/dev/null 2>&1 && return 0
+  unmount_path "$target"
+  rm -rf "$target" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+if ! remove_path "$mountpoint"; then
+  echo "Could not remove stale mountpoint $mountpoint; using a unique mountpoint." >&2
+  mountpoint="$(mktemp -d "${RUNNER_TEMP:-/tmp}/pbfs-mount.XXXXXX")"
+fi
+rm -rf "$state" "$log"
 mkdir -p "$state" "$mountpoint"
 
 tags="${PEERBIT_SHARED_FS_NATIVE_GO_TAGS:-native_mount}"
@@ -33,11 +57,7 @@ mount_pid="$!"
 cleanup() {
   kill -INT "$mount_pid" >/dev/null 2>&1 || true
   wait "$mount_pid" >/dev/null 2>&1 || true
-  if [ "$(uname -s)" = "Darwin" ]; then
-    umount "$mountpoint" >/dev/null 2>&1 || true
-  else
-    fusermount -u "$mountpoint" >/dev/null 2>&1 || fusermount3 -u "$mountpoint" >/dev/null 2>&1 || true
-  fi
+  unmount_path "$mountpoint"
 }
 
 finish() {

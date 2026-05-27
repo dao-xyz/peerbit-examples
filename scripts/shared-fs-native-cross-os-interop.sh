@@ -68,15 +68,6 @@ state="$temp_root/pbfs-native-interop-$machine-state"
 mountpoint="$temp_root/pbfs-native-interop-$machine-mount"
 log="$temp_root/pbfs-native-interop-$machine.log"
 observations_file="$temp_root/pbfs-native-interop-$machine-observations.tsv"
-local_file="$mountpoint/$machine.txt"
-local_contents="hello from $machine via native mount"
-ack_file="$mountpoint/$machine-ack.txt"
-ack_contents="acked by $machine via native mount"
-rename_source_file="$mountpoint/$machine-rename-source.txt"
-rename_target_file="$mountpoint/$machine-rename-target.txt"
-rename_contents="rename from $machine via native mount"
-rename_ack_file="$mountpoint/$machine-rename-ack.txt"
-rename_ack_contents="rename observed by $machine via native mount"
 mount_pid=""
 script_status=0
 started_at_ms="$(now_ms)"
@@ -90,9 +81,43 @@ local_rename_ms=""
 local_delete_ms=""
 cleanup_ms=""
 
-rm -rf "$state" "$mountpoint" "$log" "$observations_file"
+unmount_path() {
+  local target="$1"
+  if [ "$(uname -s)" = "Darwin" ]; then
+    umount "$target" >/dev/null 2>&1 ||
+      umount -f "$target" >/dev/null 2>&1 ||
+      diskutil unmount force "$target" >/dev/null 2>&1 ||
+      true
+  else
+    fusermount -u "$target" >/dev/null 2>&1 || fusermount3 -u "$target" >/dev/null 2>&1 || true
+  fi
+}
+
+remove_path() {
+  local target="$1"
+  rm -rf "$target" >/dev/null 2>&1 && return 0
+  unmount_path "$target"
+  rm -rf "$target" >/dev/null 2>&1 && return 0
+  return 1
+}
+
+if ! remove_path "$mountpoint"; then
+  echo "Could not remove stale mountpoint $mountpoint; using a unique mountpoint." >&2
+  mountpoint="$(mktemp -d "$temp_root/pbfs-native-interop-$machine-mount.XXXXXX")"
+fi
+rm -rf "$state" "$log" "$observations_file"
 mkdir -p "$state" "$mountpoint"
 touch "$observations_file"
+
+local_file="$mountpoint/$machine.txt"
+local_contents="hello from $machine via native mount"
+ack_file="$mountpoint/$machine-ack.txt"
+ack_contents="acked by $machine via native mount"
+rename_source_file="$mountpoint/$machine-rename-source.txt"
+rename_target_file="$mountpoint/$machine-rename-target.txt"
+rename_contents="rename from $machine via native mount"
+rename_ack_file="$mountpoint/$machine-rename-ack.txt"
+rename_ack_contents="rename observed by $machine via native mount"
 
 record_observation() {
   printf "%s\t%s\t%s\n" "$1" "$2" "$3" >> "$observations_file"
@@ -214,11 +239,7 @@ cleanup() {
     kill -INT "$mount_pid" >/dev/null 2>&1 || true
     wait "$mount_pid" >/dev/null 2>&1 || true
   fi
-  if [ "$(uname -s)" = "Darwin" ]; then
-    umount "$mountpoint" >/dev/null 2>&1 || true
-  else
-    fusermount -u "$mountpoint" >/dev/null 2>&1 || fusermount3 -u "$mountpoint" >/dev/null 2>&1 || true
-  fi
+  unmount_path "$mountpoint"
   cleanup_end_ms="$(now_ms)"
   cleanup_ms=$((cleanup_end_ms - cleanup_start_ms))
 }
