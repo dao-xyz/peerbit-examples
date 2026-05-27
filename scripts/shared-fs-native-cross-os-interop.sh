@@ -72,6 +72,11 @@ local_file="$mountpoint/$machine.txt"
 local_contents="hello from $machine via native mount"
 ack_file="$mountpoint/$machine-ack.txt"
 ack_contents="acked by $machine via native mount"
+rename_source_file="$mountpoint/$machine-rename-source.txt"
+rename_target_file="$mountpoint/$machine-rename-target.txt"
+rename_contents="rename from $machine via native mount"
+rename_ack_file="$mountpoint/$machine-rename-ack.txt"
+rename_ack_contents="rename observed by $machine via native mount"
 mount_pid=""
 script_status=0
 started_at_ms="$(now_ms)"
@@ -81,6 +86,8 @@ address_ms=""
 mount_ready_ms=""
 local_write_ms=""
 ack_write_ms=""
+local_rename_ms=""
+local_delete_ms=""
 cleanup_ms=""
 
 rm -rf "$state" "$mountpoint" "$log" "$observations_file"
@@ -106,6 +113,8 @@ write_metrics() {
     MOUNT_READY_MS="$mount_ready_ms" \
     LOCAL_WRITE_MS="$local_write_ms" \
     ACK_WRITE_MS="$ack_write_ms" \
+    LOCAL_RENAME_MS="$local_rename_ms" \
+    LOCAL_DELETE_MS="$local_delete_ms" \
     CLEANUP_MS="$cleanup_ms" \
     node - "$metrics_file" "$observations_file" <<'NODE'
 const fs = require("node:fs");
@@ -127,6 +136,8 @@ addPhase(phases, "address", "ADDRESS_MS");
 addPhase(phases, "mountReady", "MOUNT_READY_MS");
 addPhase(phases, "localWriteReadback", "LOCAL_WRITE_MS");
 addPhase(phases, "ackWriteReadback", "ACK_WRITE_MS");
+addPhase(phases, "localRenameReadback", "LOCAL_RENAME_MS");
+addPhase(phases, "localDeleteReadback", "LOCAL_DELETE_MS");
 addPhase(phases, "cleanup", "CLEANUP_MS");
 
 const observations = fs.existsSync(observationsFile)
@@ -294,6 +305,27 @@ wait_for_file_contents() {
   done
 }
 
+wait_for_path_absent() {
+  kind="$1"
+  expected_machine="$2"
+  expected_file="$3"
+  wait_start_ms="$(now_ms)"
+
+  while true; do
+    if [ ! -e "$expected_file" ]; then
+      wait_end_ms="$(now_ms)"
+      record_observation "$kind" "$expected_machine" "$((wait_end_ms - wait_start_ms))"
+      break
+    fi
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      echo "Timed out waiting for $expected_file to disappear"
+      ls -la "$mountpoint" || true
+      exit 1
+    fi
+    sleep 2
+  done
+}
+
 deadline=$((SECONDS + timeout_seconds))
 IFS=',' read -r -a expected_machines <<< "$expected"
 for expected_machine in "${expected_machines[@]}"; do
@@ -321,6 +353,54 @@ for expected_machine in "${expected_ack_machines[@]}"; do
   expected_file="$mountpoint/$expected_machine-ack.txt"
   expected_contents="acked by $expected_machine via native mount"
   wait_for_file_contents "ackVisible" "$expected_machine" "$expected_file" "$expected_contents"
+done
+
+local_rename_start_ms="$(now_ms)"
+printf "%s" "$rename_contents" > "$rename_source_file"
+mv "$rename_source_file" "$rename_target_file"
+test "$(cat "$rename_target_file")" = "$rename_contents"
+test ! -e "$rename_source_file"
+local_rename_end_ms="$(now_ms)"
+local_rename_ms=$((local_rename_end_ms - local_rename_start_ms))
+
+for expected_machine in "${expected_machines[@]}"; do
+  expected_machine="$(echo "$expected_machine" | xargs)"
+  if [ -z "$expected_machine" ]; then
+    continue
+  fi
+  expected_source="$mountpoint/$expected_machine-rename-source.txt"
+  expected_target="$mountpoint/$expected_machine-rename-target.txt"
+  expected_contents="rename from $expected_machine via native mount"
+  wait_for_file_contents "renameVisible" "$expected_machine" "$expected_target" "$expected_contents"
+  wait_for_path_absent "renameSourceGone" "$expected_machine" "$expected_source"
+done
+
+printf "%s" "$rename_ack_contents" > "$rename_ack_file"
+test "$(cat "$rename_ack_file")" = "$rename_ack_contents"
+
+for expected_machine in "${expected_ack_machines[@]}"; do
+  expected_machine="$(echo "$expected_machine" | xargs)"
+  if [ -z "$expected_machine" ]; then
+    continue
+  fi
+  expected_file="$mountpoint/$expected_machine-rename-ack.txt"
+  expected_contents="rename observed by $expected_machine via native mount"
+  wait_for_file_contents "renameAckVisible" "$expected_machine" "$expected_file" "$expected_contents"
+done
+
+local_delete_start_ms="$(now_ms)"
+rm "$rename_target_file"
+test ! -e "$rename_target_file"
+local_delete_end_ms="$(now_ms)"
+local_delete_ms=$((local_delete_end_ms - local_delete_start_ms))
+
+for expected_machine in "${expected_ack_machines[@]}"; do
+  expected_machine="$(echo "$expected_machine" | xargs)"
+  if [ -z "$expected_machine" ]; then
+    continue
+  fi
+  expected_file="$mountpoint/$expected_machine-rename-target.txt"
+  wait_for_path_absent "deleteVisible" "$expected_machine" "$expected_file"
 done
 
 echo "native mount interop complete for $machine"

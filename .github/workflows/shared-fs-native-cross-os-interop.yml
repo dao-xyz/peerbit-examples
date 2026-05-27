@@ -590,6 +590,24 @@ jobs:
                       windows workflow installDependencies $StartedMs $EndedMs $Status
                   }
 
+            - name: Report pnpm store size
+              if: always()
+              shell: powershell
+              run: |
+                  $StorePath = pnpm store path
+                  Write-Host "pnpm store path: $StorePath"
+                  if (Test-Path -LiteralPath $StorePath) {
+                    $Measure = Get-ChildItem -LiteralPath $StorePath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
+                    $Bytes = 0
+                    if ($null -ne $Measure.Sum) {
+                      $Bytes = [int64]$Measure.Sum
+                    }
+                    $MiB = [Math]::Round($Bytes / 1MB, 2)
+                    Write-Host "pnpm store size: $MiB MiB ($($Measure.Count) files)"
+                  } else {
+                    Write-Host "pnpm store path does not exist yet."
+                  }
+
             - name: Build shared-fs packages
               shell: powershell
               run: |
@@ -803,3 +821,29 @@ jobs:
                     --mac-max 1 \
                     --windows-max 1 \
                     --skip-missing-credentials
+
+            - name: Download native timing artifacts
+              if: always()
+              uses: actions/download-artifact@v8
+              continue-on-error: true
+              with:
+                  pattern: shared-fs-native-*timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-timing
+
+            - name: Report aggregate native timing
+              if: always()
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  mkdir -p native-interop-timing
+                  node scripts/shared-fs-native-interop-metrics.mjs aggregate native-interop-timing \
+                    | tee native-interop-timing/summary.md
+
+            - name: Upload aggregate native timing
+              if: always()
+              uses: actions/upload-artifact@v7
+              with:
+                  name: shared-fs-native-aggregate-timing-${{ github.run_id }}-${{ github.run_attempt }}
+                  path: native-interop-timing/summary.md
+                  if-no-files-found: warn
+                  retention-days: 14

@@ -102,6 +102,11 @@ $LocalFile = "$MountRoot$Machine.txt"
 $LocalContents = "hello from $Machine via native mount"
 $AckFile = "$MountRoot$Machine-ack.txt"
 $AckContents = "acked by $Machine via native mount"
+$RenameSourceFile = "$MountRoot$Machine-rename-source.txt"
+$RenameTargetFile = "$MountRoot$Machine-rename-target.txt"
+$RenameContents = "rename from $Machine via native mount"
+$RenameAckFile = "$MountRoot$Machine-rename-ack.txt"
+$RenameAckContents = "rename observed by $Machine via native mount"
 
 $WinFspBin = @("C:\Program Files\WinFsp\bin", "C:\Program Files (x86)\WinFsp\bin") | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($WinFspBin) {
@@ -262,7 +267,39 @@ try {
     }
   }
 
-  foreach ($ExpectedMachine in ($Expected -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+  function Wait-PathAbsent {
+    param(
+      [Parameter(Mandatory = $true)]
+      [string] $Kind,
+      [Parameter(Mandatory = $true)]
+      [string] $Machine,
+      [Parameter(Mandatory = $true)]
+      [string] $Path
+    )
+
+    $WaitStartMs = Get-NowMs
+    while ($true) {
+      if (-not (Test-Path $Path)) {
+        $WaitEndMs = Get-NowMs
+        $Metrics.observations += [ordered]@{
+          kind = $Kind
+          machine = $Machine
+          waitMs = $WaitEndMs - $WaitStartMs
+        }
+        break
+      }
+      if ((Get-Date) -ge $Deadline) {
+        Get-ChildItem -Force -ErrorAction SilentlyContinue $MountRoot
+        throw "Timed out waiting for $Path to disappear"
+      }
+      Start-Sleep -Seconds 2
+    }
+  }
+
+  $ExpectedMachines = @($Expected -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+  $ExpectedAckMachines = @($ExpectedAcks -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+
+  foreach ($ExpectedMachine in $ExpectedMachines) {
     $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine.txt"
     $ExpectedContents = "hello from $ExpectedMachine via native mount"
     Wait-FileContents -Kind "fileVisible" -Machine $ExpectedMachine -Path $ExpectedFile -Contents $ExpectedContents
@@ -277,10 +314,56 @@ try {
   $AckWriteEndMs = Get-NowMs
   Add-Phase -Name "ackWriteReadback" -StartMs $AckWriteStartMs -EndMs $AckWriteEndMs
 
-  foreach ($ExpectedMachine in ($ExpectedAcks -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })) {
+  foreach ($ExpectedMachine in $ExpectedAckMachines) {
     $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine-ack.txt"
     $ExpectedContents = "acked by $ExpectedMachine via native mount"
     Wait-FileContents -Kind "ackVisible" -Machine $ExpectedMachine -Path $ExpectedFile -Contents $ExpectedContents
+  }
+
+  $LocalRenameStartMs = Get-NowMs
+  Set-FileText -Path $RenameSourceFile -Value $RenameContents
+  Rename-Item -Path $RenameSourceFile -NewName "$Machine-rename-target.txt"
+  $RenameReadBack = Get-Content -Raw -Path $RenameTargetFile
+  if ($RenameReadBack -ne $RenameContents) {
+    throw "unexpected renamed file contents: $RenameReadBack"
+  }
+  if (Test-Path $RenameSourceFile) {
+    throw "rename source still exists: $RenameSourceFile"
+  }
+  $LocalRenameEndMs = Get-NowMs
+  Add-Phase -Name "localRenameReadback" -StartMs $LocalRenameStartMs -EndMs $LocalRenameEndMs
+
+  foreach ($ExpectedMachine in $ExpectedMachines) {
+    $ExpectedSource = Join-Path $MountRoot "$ExpectedMachine-rename-source.txt"
+    $ExpectedTarget = Join-Path $MountRoot "$ExpectedMachine-rename-target.txt"
+    $ExpectedContents = "rename from $ExpectedMachine via native mount"
+    Wait-FileContents -Kind "renameVisible" -Machine $ExpectedMachine -Path $ExpectedTarget -Contents $ExpectedContents
+    Wait-PathAbsent -Kind "renameSourceGone" -Machine $ExpectedMachine -Path $ExpectedSource
+  }
+
+  Set-FileText -Path $RenameAckFile -Value $RenameAckContents
+  $RenameAckReadBack = Get-Content -Raw -Path $RenameAckFile
+  if ($RenameAckReadBack -ne $RenameAckContents) {
+    throw "unexpected rename ack contents: $RenameAckReadBack"
+  }
+
+  foreach ($ExpectedMachine in $ExpectedAckMachines) {
+    $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine-rename-ack.txt"
+    $ExpectedContents = "rename observed by $ExpectedMachine via native mount"
+    Wait-FileContents -Kind "renameAckVisible" -Machine $ExpectedMachine -Path $ExpectedFile -Contents $ExpectedContents
+  }
+
+  $LocalDeleteStartMs = Get-NowMs
+  Remove-Item -Force -Path $RenameTargetFile
+  if (Test-Path $RenameTargetFile) {
+    throw "deleted file still exists: $RenameTargetFile"
+  }
+  $LocalDeleteEndMs = Get-NowMs
+  Add-Phase -Name "localDeleteReadback" -StartMs $LocalDeleteStartMs -EndMs $LocalDeleteEndMs
+
+  foreach ($ExpectedMachine in $ExpectedAckMachines) {
+    $ExpectedFile = Join-Path $MountRoot "$ExpectedMachine-rename-target.txt"
+    Wait-PathAbsent -Kind "deleteVisible" -Machine $ExpectedMachine -Path $ExpectedFile
   }
 
   Write-Host "native mount interop complete for $Machine"

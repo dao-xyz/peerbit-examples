@@ -268,5 +268,76 @@ const expectNativeMountAvailable = (error: unknown) => {
                 expectNativeMountAvailable(error);
             }
         });
+
+        it("propagates native renames and deletes between mounted peers", async () => {
+            const peerA = await createPeer();
+            const peerB = await createPeer();
+            await peerA.dial(peerB);
+
+            const fsA = await openSharedFs({
+                peerbit: peerA,
+                machineLabel: "native-peer-a",
+            });
+            const fsB = await openSharedFs({
+                peerbit: peerB,
+                address: fsA.address,
+                machineLabel: "native-peer-b",
+            });
+            const mountA = await createMountpoint();
+            const mountB = await createMountpoint();
+
+            try {
+                await mount(fsA, mountA);
+                await mount(fsB, mountB);
+
+                await mkdir(path.join(mountA, "docs"));
+                await writeFile(
+                    path.join(mountA, "docs", "draft.txt"),
+                    "rename me"
+                );
+
+                await waitUntil(async () => {
+                    expect(
+                        await readFile(
+                            path.join(mountB, "docs", "draft.txt"),
+                            "utf8"
+                        )
+                    ).toBe("rename me");
+                });
+
+                await rename(
+                    path.join(mountA, "docs", "draft.txt"),
+                    path.join(mountA, "docs", "final.txt")
+                );
+
+                await waitUntil(async () => {
+                    await expect(
+                        readFile(path.join(mountB, "docs", "draft.txt"))
+                    ).rejects.toMatchObject({ code: "ENOENT" });
+                    expect(
+                        await readFile(
+                            path.join(mountB, "docs", "final.txt"),
+                            "utf8"
+                        )
+                    ).toBe("rename me");
+                });
+
+                await rm(path.join(mountB, "docs", "final.txt"));
+
+                await waitUntil(async () => {
+                    await expect(
+                        readFile(path.join(mountA, "docs", "final.txt"))
+                    ).rejects.toMatchObject({ code: "ENOENT" });
+                    expect(
+                        await fsA.readFile("/docs/final.txt")
+                    ).toBeUndefined();
+                    expect(
+                        await fsB.readFile("/docs/final.txt")
+                    ).toBeUndefined();
+                });
+            } catch (error) {
+                expectNativeMountAvailable(error);
+            }
+        });
     }
 );

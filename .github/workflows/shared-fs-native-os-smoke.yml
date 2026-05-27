@@ -327,6 +327,24 @@ jobs:
                   $env:PEERBIT_SKIP_ROOT_POSTINSTALL = "1"
                   pnpm install --prefer-offline --frozen-lockfile --prod --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
 
+            - name: Report pnpm store size
+              if: always()
+              shell: powershell
+              run: |
+                  $StorePath = pnpm store path
+                  Write-Host "pnpm store path: $StorePath"
+                  if (Test-Path -LiteralPath $StorePath) {
+                    $Measure = Get-ChildItem -LiteralPath $StorePath -Recurse -File -ErrorAction SilentlyContinue | Measure-Object -Property Length -Sum
+                    $Bytes = 0
+                    if ($null -ne $Measure.Sum) {
+                      $Bytes = [int64]$Measure.Sum
+                    }
+                    $MiB = [Math]::Round($Bytes / 1MB, 2)
+                    Write-Host "pnpm store size: $MiB MiB ($($Measure.Count) files)"
+                  } else {
+                    Write-Host "pnpm store path does not exist yet."
+                  }
+
             - name: Build shared-fs packages
               run: node scripts/shared-fs-build-packages.mjs
 
