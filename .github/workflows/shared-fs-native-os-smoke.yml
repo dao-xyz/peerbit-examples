@@ -291,6 +291,18 @@ jobs:
             - name: Use Bash for pnpm scripts
               run: pnpm config set script-shell "C:\Program Files\Git\bin\bash.exe"
 
+            - name: Configure persistent pnpm store
+              shell: powershell
+              run: |
+                  $Store = $env:PEERBIT_WINDOWS_PNPM_STORE_DIR
+                  if ([string]::IsNullOrWhiteSpace($Store)) {
+                    $Store = "C:\peerbit-cache\pnpm-store"
+                  }
+                  New-Item -ItemType Directory -Force -Path $Store | Out-Null
+                  "npm_config_store_dir=$Store" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+                  $env:npm_config_store_dir = $Store
+                  Write-Host "pnpm store path: $(pnpm store path)"
+
             - name: Install WinFsp
               shell: powershell
               run: |
@@ -313,7 +325,7 @@ jobs:
             - name: Install dependencies
               run: |
                   $env:PEERBIT_SKIP_ROOT_POSTINSTALL = "1"
-                  pnpm install --frozen-lockfile --prod --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
+                  pnpm install --prefer-offline --frozen-lockfile --prod --filter @peerbit/shared-fs... --filter @peerbit/shared-fs-cli...
 
             - name: Build shared-fs packages
               run: node scripts/shared-fs-build-packages.mjs

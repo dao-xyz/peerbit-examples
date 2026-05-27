@@ -38,6 +38,8 @@ $RunnerRoot = $env:RUNNER_DIR
 if ([string]::IsNullOrWhiteSpace($RunnerRoot)) {
   $RunnerRoot = "C:\\actions-runner"
 }
+$PersistentCacheRoot = "C:\\peerbit-cache"
+$PersistentPnpmStore = Join-Path $PersistentCacheRoot "pnpm-store"
 
 function Ensure-OpenSSH {
   if ($EnableSsh -ne "1") {
@@ -209,6 +211,17 @@ function Sync-SystemClock {
   Set-Date -Date $remoteUtc.ToLocalTime() | Out-Null
   Start-Sleep -Seconds 2
   Write-Log ("Clock corrected: local UTC {0:o}." -f [DateTime]::UtcNow)
+}
+
+function Ensure-PersistentCaches {
+  Write-Log "Ensuring persistent cache directories..."
+  New-Item -ItemType Directory -Force -Path $PersistentPnpmStore | Out-Null
+  try {
+    & icacls $PersistentCacheRoot /inheritance:e /grant "SYSTEM:(OI)(CI)F" /grant "Administrators:(OI)(CI)F" | Out-Null
+  } catch {
+    Write-Log "Could not update persistent cache ACLs: $($_.Exception.Message)"
+  }
+  [Environment]::SetEnvironmentVariable("PEERBIT_WINDOWS_PNPM_STORE_DIR", $PersistentPnpmStore, "Machine")
 }
 
 function Ensure-Chocolatey {
@@ -423,6 +436,7 @@ function Stop-RunnerTask {
 Ensure-OpenSSH
 Ensure-WinRM
 Sync-SystemClock
+Ensure-PersistentCaches
 
 Ensure-RunnerInstalled
 Ensure-RunnerConfigured
