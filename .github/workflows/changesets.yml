@@ -1,0 +1,43 @@
+name: Changesets
+
+on:
+    pull_request:
+        branches:
+            - master
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+    status:
+        name: Changeset Status
+        if: ${{ !startsWith(github.head_ref, 'changeset-release/') }}
+        runs-on: ubuntu-latest
+        timeout-minutes: 15
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+              with:
+                  fetch-depth: 0
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v5
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Check changesets
+              run: pnpm changeset status --since=origin/master
