@@ -478,7 +478,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
                         description:
                             "Install directory. Defaults to ~/.peerbit/shared-fs/bin.",
                     })
-                    .option("version", {
+                    .option("adapter-version", {
                         type: "string",
                         description:
                             "Adapter release version. Defaults to this CLI package version.",
@@ -507,7 +507,7 @@ export const runCli = async (args = hideBin(process.argv)) => {
             async (argv) => {
                 const result = await installNativeAdapter({
                     installDir: argv.prefix,
-                    version: argv.version,
+                    version: argv.adapterVersion,
                     baseUrl: argv.baseUrl,
                     force: argv.force,
                     ifNeeded: argv.ifNeeded,
