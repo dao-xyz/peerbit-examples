@@ -1000,9 +1000,13 @@ export const openSharedFs = async (options: OpenSharedFsOptions) => {
         replicate: options.replicate,
     };
     const program = options.address
-        ? await options.peerbit.open<SharedFileSystem>(options.address as any, {
-              args,
-          })
+        ? await SharedFileSystem.open(
+              options.address as string,
+              options.peerbit as any,
+              {
+                  args,
+              }
+          )
         : await options.peerbit.open(
               new SharedFileSystem({
                   id: options.id,
