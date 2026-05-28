@@ -1,8 +1,15 @@
 import fs from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { openSharedFs } from "@peerbit/shared-fs";
+import { Peerbit } from "peerbit";
 import { describe, expect, it, vi } from "vitest";
 import { normalizeNativeMountpoint, runCli } from "../index.js";
+
+const stopPeer = async (peer: Peerbit) => {
+    await peer.stop();
+    await peer.services.blocks.stop();
+};
 
 describe("peerbit-fs cli", () => {
     it("exports the CLI entry point", () => {
@@ -68,6 +75,28 @@ describe("peerbit-fs cli", () => {
         } finally {
             log.mockRestore();
             await fs.rm(directory, { recursive: true, force: true });
+        }
+    });
+
+    it("opens shared-fs addresses with the CLI dependency graph", async () => {
+        const writerPeer = await Peerbit.create();
+        const readerPeer = await Peerbit.create();
+        try {
+            await writerPeer.dial(readerPeer);
+            const writer = await openSharedFs({
+                peerbit: writerPeer,
+                machineLabel: "writer",
+                replicate: false,
+            });
+            const reader = await openSharedFs({
+                peerbit: readerPeer,
+                address: writer.address,
+                machineLabel: "reader",
+                replicate: false,
+            });
+            expect(reader.address).toBe(writer.address);
+        } finally {
+            await Promise.all([stopPeer(writerPeer), stopPeer(readerPeer)]);
         }
     });
 });
