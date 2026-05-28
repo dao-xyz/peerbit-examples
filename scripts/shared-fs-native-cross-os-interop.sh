@@ -214,7 +214,7 @@ adapter_build_ms=$((adapter_build_end_ms - adapter_build_start_ms))
 
 address_start_ms="$(now_ms)"
 if [ "$role" = "seed" ]; then
-  address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state")"
+  address="$(node packages/shared-fs/cli/lib/esm/bin.js create --directory "$state" --no-auth)"
   mkdir -p "$(dirname "$address_file")"
   printf "%s\n" "$address" > "$address_file"
 else
@@ -283,7 +283,7 @@ while true; do
   fi
 
   if [ "$mount_status" = "exited" ] &&
-    grep -q "Failed to resolve program with address" "$log" &&
+    grep -Eq "Failed to resolve program with address|Failed to load program" "$log" &&
     [ "$mount_attempt" -lt "$mount_resolve_attempts" ]; then
     cat "$log"
     echo "Mount could not resolve the shared filesystem address; retrying ($mount_attempt/$mount_resolve_attempts)..."
