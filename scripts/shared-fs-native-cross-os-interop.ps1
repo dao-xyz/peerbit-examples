@@ -126,7 +126,10 @@ function Get-MountLogsText {
 
 function Test-RetryableMountResolveFailure {
   $Logs = Get-MountLogsText
-  return $Logs -match "Failed to resolve program with address"
+  return (
+    $Logs -match "Failed to resolve program with address" -or
+    $Logs -match "Failed to load program"
+  )
 }
 
 function Stop-MountProcess {
@@ -151,7 +154,7 @@ Add-Phase -Name "adapterBuild" -StartMs $AdapterBuildStartMs -EndMs $AdapterBuil
 
 $AddressStartMs = Get-NowMs
 if ($Role -eq "seed") {
-  $Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State).Trim()
+  $Address = (node packages/shared-fs/cli/lib/esm/bin.js create --directory $State --no-auth).Trim()
   Set-FileText -Path $AddressFile -Value $Address
 } else {
   $Address = (Get-Content -Raw -Path $AddressFile).Trim()
