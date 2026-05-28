@@ -1,5 +1,14 @@
 # @peerbit/shared-fs-cli
 
+## 0.0.4
+
+### Patch Changes
+
+- 9b3932d: Refresh shared-fs dependencies to the Peerbit release that keeps
+  `@peerbit/libp2p-test-utils` out of production installs.
+- Updated dependencies [9b3932d]
+    - @peerbit/shared-fs@0.0.4
+
 ## 0.0.3
 
 ### Patch Changes
