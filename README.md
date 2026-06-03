@@ -40,6 +40,14 @@
 ### [Collaborative machine learning](./packages/collaborative-learning/)
 [<img src="./packages/collaborative-learning/demo.gif" width="600" />](./packages/collaborative-learning/)
 
+### [Vue example](./packages/vue-example/)
+A minimal Vue 3 + Vite app that opens a Peerbit document store from the browser.
+
+### React examples
+- [Chat room](./packages/one-chat-room/)
+- [Lobby + chat rooms](./packages/many-chat-rooms/)
+- [Sync files React app](./packages/file-share/)
+
 ## Requirements
 
 1. Node.js >= 22 (You can switch to Node 22 using `nvm use 22`)
