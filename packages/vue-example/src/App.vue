@@ -26,12 +26,13 @@ onMounted(async () => {
         };
 
         store.documents.events.addEventListener("change", onChange);
-        cleanup = () => store?.documents.events.removeEventListener("change", onChange);
+        cleanup = () =>
+            store?.documents.events.removeEventListener("change", onChange);
 
         await store.documents.put(
             new SimpleDocument({
                 content: `Hello from ${peerId.value}`,
-            }),
+            })
         );
     } catch (err) {
         error.value = err instanceof Error ? err.message : String(err);
@@ -61,7 +62,8 @@ const sendMessage = async () => {
         <p class="eyebrow">Peerbit + Vue 3</p>
         <h1>Peerbit Vue Example</h1>
         <p class="intro">
-            Open this app in multiple tabs to see document updates replicated with Peerbit.
+            Open this app in multiple tabs to see document updates replicated
+            with Peerbit.
         </p>
 
         <section class="panel">

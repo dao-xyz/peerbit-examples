@@ -7,15 +7,22 @@ import { Program } from "@peerbit/program";
 import { Peerbit } from "peerbit";
 import { v4 as uuid } from "uuid";
 
+const borshField = field as unknown as (
+    properties: Parameters<typeof field>[0]
+) => PropertyDecorator;
+const borshVariant = variant as unknown as (
+    index: Parameters<typeof variant>[0]
+) => ClassDecorator;
+
 const relayTransport = circuitRelayTransport({}) as unknown as ReturnType<
     typeof webSockets
 >;
 
 export class SimpleDocument {
-    @field({ type: "string" })
+    @borshField({ type: "string" })
     id: string;
 
-    @field({ type: "string" })
+    @borshField({ type: "string" })
     content: string;
 
     constructor(properties: { content: string }) {
@@ -24,9 +31,9 @@ export class SimpleDocument {
     }
 }
 
-@variant("vue-example-store")
+@borshVariant("vue-example-store")
 export class ExampleStore extends Program {
-    @field({ type: Documents })
+    @borshField({ type: Documents })
     documents: Documents<SimpleDocument>;
 
     constructor() {
@@ -61,7 +68,7 @@ export const createClient = async (localNetwork = false) => {
     if (localNetwork) {
         await client.dial(
             "/ip4/127.0.0.1/tcp/8002/ws/p2p/" +
-                (await (await fetch("http://localhost:8082/peer/id")).text()),
+                (await (await fetch("http://localhost:8082/peer/id")).text())
         );
     } else {
         await client.bootstrap();
