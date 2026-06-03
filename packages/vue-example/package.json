@@ -1,0 +1,27 @@
+{
+    "name": "vue-example",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "vite dev",
+        "start": "vite dev",
+        "start-remote": "vite dev --mode staging",
+        "build": "vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "@peerbit/document": "^13.0.43",
+        "peerbit": "^5.2.19",
+        "uuid": "^10",
+        "vue": "^3.5.35"
+    },
+    "devDependencies": {
+        "@peerbit/vite": "^2.0.6",
+        "@vitejs/plugin-vue": "^6.0.7",
+        "@types/uuid": "^8",
+        "typescript": "^5.6.3",
+        "vite": "^7.1.4",
+        "vue-tsc": "^3.3.3"
+    }
+}
