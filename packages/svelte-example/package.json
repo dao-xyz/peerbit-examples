@@ -10,8 +10,8 @@
         "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
     },
     "dependencies": {
-        "@peerbit/document": "^13.0.43",
-        "peerbit": "^5.2.19",
+        "@peerbit/document": "^13.1.0",
+        "peerbit": "^5.3.0",
         "uuid": "^10"
     },
     "devDependencies": {
