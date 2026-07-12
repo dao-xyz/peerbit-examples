@@ -9,7 +9,7 @@ import { File } from "./File";
 import { Spinner } from "./Spinner";
 import * as Switch from "@radix-ui/react-switch";
 import * as Slider from "@radix-ui/react-slider";
-import { SearchRequest } from "@peerbit/document";
+import { IsNull, SearchRequest } from "@peerbit/document";
 import * as Popover from "@radix-ui/react-popover";
 import { useStorageUsage } from "./MemoryUsage";
 import { useNetworkUsage } from "./NetworkUsage";
@@ -18,12 +18,58 @@ import * as Progress from "@radix-ui/react-progress";
 import { ReplicationOptions } from "@peerbit/shared-log";
 import {
     applyRootFileChangeToList,
+    getPendingReadyRootReconciliation,
     getReadyLargeFileSignature,
     getRootFileChange,
     shouldRefreshRootListForFileChange,
     sortRootFilesForDisplay,
 } from "./root-list";
 import { getPeerDialAddresses, withSharePeerHints } from "./share-url";
+import {
+    bindRefreshContext,
+    callEvenInterval,
+    createRefreshContextGuard,
+    drainCoalescedRefreshQueue,
+    isRefreshContextActive,
+    queueCoalescedRefresh,
+    type RefreshContext,
+} from "./refresh-scheduler";
+import {
+    applyReplicationRoleGuarded,
+    createFileShareReplicationRole,
+    DEFAULT_REPLICATION_ROLE,
+    formatFileShareStorageMegabytes,
+    getInitialReplicationRole,
+    parseFileShareStorageMegabytes,
+    parseStoredRole,
+} from "./role-state";
+import {
+    coalesceRootListRefreshSource,
+    getRootListRefreshSource,
+    listRemoteRootFilesForReconciliation,
+    listRootFilesForRole,
+    REMOTE_ROOT_RECONCILIATION_INTERVAL_MS,
+    shouldReconcileRemoteRootFiles,
+} from "./file-list-loader";
+import {
+    createPendingReadyResolver,
+    resolveRemoteReadyRoot,
+    type PendingReadyResolver,
+} from "./pending-ready-resolver";
+import { confirmRemoteRoot } from "./remote-root-confirmation";
+import {
+    applyRemoteRootConfirmation,
+    createRemoteRootConfirmationScheduler,
+    createRemoteRootReconciliationState,
+    invalidateRemoteRootAbsenceForVisibleRoots,
+    isRemoteRootObservationCurrent,
+    observeLocalRootSnapshot,
+    observeRemoteRootSnapshot,
+    recordExplicitRootChange,
+    type RemoteRootConfirmationScheduler,
+    type RemoteRootObservation,
+} from "./remote-root-reconciliation";
+import { settleUploadBatch } from "./upload-lifecycle";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -31,15 +77,6 @@ const saveRoleLocalStorage = (files: Files, role: string) => {
 const getRoleFromLocalStorage = (files: Files) => {
     return localStorage.getItem(files.address + "-role"); // Save role in localstorage for next time
 };
-
-const DEFAULT_REPLICATION_ROLE: ReplicationOptions = {
-    limits: { cpu: { max: 1, monitor: undefined } },
-};
-
-const parseStoredRole = (
-    serializedRole: string | null
-): ReplicationOptions | undefined =>
-    serializedRole == null ? undefined : JSON.parse(serializedRole);
 
 const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000n;
 
@@ -57,6 +94,7 @@ type ListingDiagnostics = {
     firstProgramHookReadyAt: number | null;
     programHookStatus: string | null;
     programHookLoading: boolean;
+    programHookError: string | null;
     onOpenStartedAt: number | null;
     trustCheckStartedAt: number | null;
     trustCheckFinishedAt: number | null;
@@ -70,6 +108,10 @@ type ListingDiagnostics = {
     lastUpdateRoleFinishedAt: number | null;
     lastAppliedRole: "replicator" | "observer" | null;
     listCallCount: number;
+    coalescedListRefreshCount: number;
+    listRefreshInFlight: boolean;
+    lastCoalescedListSource: string | null;
+    staleListResultIgnoredCount: number;
     adaptiveRefreshCount: number;
     adaptiveRefreshInFlight: boolean;
     lastAdaptiveRefreshReason: string | null;
@@ -80,7 +122,14 @@ type ListingDiagnostics = {
     rootFileChangeEventCount: number;
     rootChangeDirectAddCount: number;
     rootChangeDirectRemoveCount: number;
+    rootChangeAvoidedListRefreshCount: number;
     skippedChildFileChangeEventCount: number;
+    pendingReadyResolverStartCount: number;
+    pendingReadyResolverResolvedCount: number;
+    pendingReadyResolverExpiredCount: number;
+    pendingReadyResolverErrorCount: number;
+    pendingReadyResolverActiveCount: number;
+    lastPendingReadyResolverError: string | null;
     activeTransferCount: number;
     skippedActiveTransferRefreshCount: number;
     sharePeerAddressCount: number;
@@ -97,6 +146,23 @@ type SaveFilePickerWindow = Window & {
 const isUserCancelledDownload = (error: unknown) =>
     error instanceof DOMException &&
     (error.name === "AbortError" || error.name === "NotAllowedError");
+
+const getProgramHookErrorMessage = (error: unknown) => {
+    if (error == null) {
+        return null;
+    }
+    if (error instanceof Error) {
+        return error.message;
+    }
+    if (
+        typeof error === "object" &&
+        "message" in error &&
+        typeof error.message === "string"
+    ) {
+        return error.message;
+    }
+    return String(error);
+};
 
 const getStreamingDownloadThresholdBytes = () => {
     const override = (window as SaveFilePickerWindow)
@@ -139,6 +205,7 @@ const createListingDiagnostics = (
     firstProgramHookReadyAt: null,
     programHookStatus: null,
     programHookLoading: false,
+    programHookError: null,
     onOpenStartedAt: null,
     trustCheckStartedAt: null,
     trustCheckFinishedAt: null,
@@ -152,6 +219,10 @@ const createListingDiagnostics = (
     lastUpdateRoleFinishedAt: null,
     lastAppliedRole: null,
     listCallCount: 0,
+    coalescedListRefreshCount: 0,
+    listRefreshInFlight: false,
+    lastCoalescedListSource: null,
+    staleListResultIgnoredCount: 0,
     adaptiveRefreshCount: 0,
     adaptiveRefreshInFlight: false,
     lastAdaptiveRefreshReason: null,
@@ -162,7 +233,14 @@ const createListingDiagnostics = (
     rootFileChangeEventCount: 0,
     rootChangeDirectAddCount: 0,
     rootChangeDirectRemoveCount: 0,
+    rootChangeAvoidedListRefreshCount: 0,
     skippedChildFileChangeEventCount: 0,
+    pendingReadyResolverStartCount: 0,
+    pendingReadyResolverResolvedCount: 0,
+    pendingReadyResolverExpiredCount: 0,
+    pendingReadyResolverErrorCount: 0,
+    pendingReadyResolverActiveCount: 0,
+    lastPendingReadyResolverError: null,
     activeTransferCount: 0,
     skippedActiveTransferRefreshCount: 0,
     sharePeerAddressCount: 0,
@@ -177,22 +255,6 @@ export const useDebouncedEffect = (effect, deps, delay) => {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [...(deps || []), delay]);
 };
-
-function callEvenInterval(func, delay) {
-    var timer: ReturnType<typeof setTimeout> = undefined;
-    let promise: any = undefined;
-    return function debouncedFn(args?: any) {
-        if (timer || promise) {
-            return;
-        }
-        timer = setTimeout(async () => {
-            promise = func(args);
-            await promise;
-            promise = undefined;
-            timer = undefined;
-        }, delay);
-    };
-}
 
 export const Drop = () => {
     const navigate = useNavigate();
@@ -212,6 +274,8 @@ export const Drop = () => {
         new Set()
     );
     const [isHost, setIsHost] = useState<boolean>();
+    const isHostRef = useRef<boolean | undefined>(isHost);
+    isHostRef.current = isHost;
     const [replicatorCount, setReplicatorCount] = useState(0);
     const [left, setLeft] = useState(false);
     const shareAddress = params.address && decodeURIComponent(params.address);
@@ -223,20 +287,61 @@ export const Drop = () => {
     const [currentRole, setCurrentRole] = useState<ReplicationOptions>(
         storedRole ?? DEFAULT_REPLICATION_ROLE
     );
+    const currentRoleRef = useRef<ReplicationOptions>(currentRole);
+    const roleRevisionRef = useRef(0);
     const diagnosticsRef = useRef<ListingDiagnostics>(
         createListingDiagnostics(shareAddress, storedRole)
     );
-    const adaptiveRefreshRef = useRef<Promise<void> | null>(null);
-    const adaptiveRefreshSignatureRef = useRef<string | null>(null);
-
+    const adaptiveRefreshRef = useRef<
+        (RefreshContext<Files> & { promise: Promise<void> }) | null
+    >(null);
+    const adaptiveRefreshSignatureRef = useRef<
+        (RefreshContext<Files> & { signature: string }) | null
+    >(null);
+    const listRefreshRef = useRef<Promise<void> | null>(null);
+    const queuedListRefreshSourceRef = useRef<string | null>(null);
+    const listRefreshGenerationRef = useRef(0);
+    const rootListRevisionRef = useRef(0);
+    const remoteRootReconciliationStartedAtRef = useRef<number | null>(null);
+    const remoteRootConfirmationRunStartedAtRef = useRef<number | null>(null);
+    const remoteRootReconciliationStateRef = useRef(
+        createRemoteRootReconciliationState()
+    );
+    const remoteRootConfirmationSchedulerRef = useRef<{
+        generation: number;
+        program: Files;
+        scheduler: RemoteRootConfirmationScheduler<
+            RemoteRootObservation<Files>
+        >;
+    } | null>(null);
+    const listRefreshProgramRef = useRef<Files | null>(null);
+    const pendingReadyResolverRef = useRef<{
+        program: Files;
+        resolver: PendingReadyResolver<Files>;
+    } | null>(null);
     useEffect(() => {
         diagnosticsRef.current = createListingDiagnostics(
             shareAddress,
             storedRole
         );
         setRootList([]);
+        setReplicationSet(new Set());
+        const nextRole = storedRole ?? DEFAULT_REPLICATION_ROLE;
+        currentRoleRef.current = nextRole;
+        roleRevisionRef.current += 1;
+        setCurrentRole(nextRole);
         adaptiveRefreshRef.current = null;
         adaptiveRefreshSignatureRef.current = null;
+        listRefreshGenerationRef.current += 1;
+        listRefreshRef.current = null;
+        queuedListRefreshSourceRef.current = null;
+        rootListRevisionRef.current += 1;
+        remoteRootReconciliationStartedAtRef.current = null;
+        remoteRootConfirmationRunStartedAtRef.current = null;
+        remoteRootConfirmationSchedulerRef.current?.scheduler.reset();
+        remoteRootConfirmationSchedulerRef.current = null;
+        remoteRootReconciliationStateRef.current =
+            createRemoteRootReconciliationState();
         // Reset diagnostics only when we enter a different share. Role changes
         // inside the same share are part of the same session we want to measure.
         // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -248,6 +353,7 @@ export const Drop = () => {
             replicate: storedRole ?? DEFAULT_REPLICATION_ROLE,
         },
     });
+    listRefreshProgramRef.current = files.program ?? null;
 
     useEffect(() => {
         if (peer && diagnosticsRef.current.firstPeerReadyAt == null) {
@@ -258,13 +364,16 @@ export const Drop = () => {
     useEffect(() => {
         diagnosticsRef.current.programHookStatus = files.status;
         diagnosticsRef.current.programHookLoading = files.loading;
+        diagnosticsRef.current.programHookError = getProgramHookErrorMessage(
+            files.error
+        );
         if (
             files.program &&
             diagnosticsRef.current.firstProgramHookReadyAt == null
         ) {
             diagnosticsRef.current.firstProgramHookReadyAt = Date.now();
         }
-    }, [files.loading, files.program, files.status]);
+    }, [files.error, files.loading, files.program, files.status]);
 
     const { memory } = useStorageUsage(files.program?.files.log);
     const { up, down } = useNetworkUsage();
@@ -277,6 +386,19 @@ export const Drop = () => {
     const [limitCPU, setLimitCPU] = useState<number | undefined>(1);
     const [uploadProgress, setUploadProgress] = useState<number | null>(null);
     const activeTransferCountRef = useRef(0);
+
+    const selectRole = (nextRole: "replicator" | "observer") => {
+        setRole(nextRole);
+        if (nextRole === "observer" && currentRoleRef.current !== false) {
+            currentRoleRef.current = false;
+            roleRevisionRef.current += 1;
+            pendingReadyResolverRef.current?.resolver.cancelAll();
+            if (listRefreshProgramRef.current) {
+                listRefreshProgramRef.current.persistChunkReads = false;
+            }
+            void updateList("role-change");
+        }
+    };
 
     const startActiveTransfer = () => {
         activeTransferCountRef.current += 1;
@@ -293,10 +415,91 @@ export const Drop = () => {
             activeTransferCountRef.current;
     };
 
-    // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
-    const updateRole = async (roleOptions?: ReplicationOptions) => {
-        if (roleOptions == null || !files.program) {
+    const getCurrentRefreshContext = (): RefreshContext<Files | null> => ({
+        generation: listRefreshGenerationRef.current,
+        program: listRefreshProgramRef.current,
+    });
+
+    const reconcilePendingReadyRoots = (
+        program: Files,
+        context: RefreshContext<Files>,
+        rootFiles: AbstractFile[]
+    ) => {
+        const activeResolver = pendingReadyResolverRef.current;
+        if (
+            !activeResolver ||
+            activeResolver.program !== program ||
+            !isRefreshContextActive(getCurrentRefreshContext(), context)
+        ) {
             return;
+        }
+        const reconciliation = getPendingReadyRootReconciliation(rootFiles);
+        for (const id of reconciliation.readyIds) {
+            activeResolver.resolver.cancel(id, program);
+        }
+        if (currentRoleRef.current === false || isHostRef.current === true) {
+            diagnosticsRef.current.pendingReadyResolverActiveCount =
+                activeResolver.resolver.size;
+            return;
+        }
+        for (const file of reconciliation.pending) {
+            const start = activeResolver.resolver.start(file.id, program);
+            if (start.status !== "started") {
+                continue;
+            }
+            diagnosticsRef.current.pendingReadyResolverStartCount += 1;
+            diagnosticsRef.current.lastPendingReadyResolverError = null;
+            void start.promise.finally(() => {
+                if (
+                    pendingReadyResolverRef.current === activeResolver &&
+                    isRefreshContextActive(getCurrentRefreshContext(), context)
+                ) {
+                    diagnosticsRef.current.pendingReadyResolverActiveCount =
+                        activeResolver.resolver.size;
+                }
+            });
+        }
+        diagnosticsRef.current.pendingReadyResolverActiveCount =
+            activeResolver.resolver.size;
+    };
+
+    const applyReplicationRole = async (
+        program: Files,
+        roleOptions: ReplicationOptions,
+        revision: number,
+        context: RefreshContext<Files>
+    ) =>
+        applyReplicationRoleGuarded(program, roleOptions, {
+            expectedRevision: revision,
+            getCurrentRevision: () => roleRevisionRef.current,
+            getCurrentRole: () => currentRoleRef.current,
+            isContextActive: () =>
+                isRefreshContextActive(getCurrentRefreshContext(), context),
+        });
+
+    // we exclude the string type 'replicator' | 'observer' from the roleOptions so that we can easily serialize it with JSON
+    const updateRole = async (
+        roleOptions?: ReplicationOptions,
+        targetProgram = files.program
+    ) => {
+        if (roleOptions == null || !targetProgram || targetProgram.closed) {
+            return;
+        }
+
+        const roleModeChanged =
+            (currentRoleRef.current === false) !== (roleOptions === false);
+
+        const context: RefreshContext<Files> = {
+            generation: listRefreshGenerationRef.current,
+            program: targetProgram,
+        };
+        if (!isRefreshContextActive(getCurrentRefreshContext(), context)) {
+            return;
+        }
+        let appliedRoleRevision = ++roleRevisionRef.current;
+        currentRoleRef.current = roleOptions;
+        if (roleOptions === false) {
+            pendingReadyResolverRef.current?.resolver.cancelAll();
         }
 
         diagnosticsRef.current.updateRoleCount += 1;
@@ -305,27 +508,67 @@ export const Drop = () => {
         diagnosticsRef.current.lastUpdateRoleStartedAt = Date.now();
 
         setCurrentRole(roleOptions);
-        files.program.persistChunkReads = roleOptions !== false;
 
         // console.log("X", files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]?.max)
-        saveRoleLocalStorage(files.program, JSON.stringify(roleOptions)); // Save role in localstorage for next time
-        await files.program.files.log.replicate(false);
-        if (roleOptions !== false) {
-            await files.program.files.log.replicate(roleOptions);
+        saveRoleLocalStorage(targetProgram, JSON.stringify(roleOptions)); // Save role in localstorage for next time
+        await applyReplicationRole(
+            targetProgram,
+            roleOptions,
+            appliedRoleRevision,
+            context
+        );
+        while (
+            isRefreshContextActive(getCurrentRefreshContext(), context) &&
+            appliedRoleRevision !== roleRevisionRef.current
+        ) {
+            appliedRoleRevision = roleRevisionRef.current;
+            await applyReplicationRole(
+                targetProgram,
+                currentRoleRef.current,
+                appliedRoleRevision,
+                context
+            );
         }
-        diagnosticsRef.current.lastUpdateRoleFinishedAt = Date.now();
+        if (
+            appliedRoleRevision === roleRevisionRef.current &&
+            isRefreshContextActive(getCurrentRefreshContext(), context)
+        ) {
+            diagnosticsRef.current.lastUpdateRoleFinishedAt = Date.now();
+            if (roleModeChanged) {
+                await updateList("role-change", context);
+            }
+        }
     };
 
-    const refreshAdaptiveReplication = async (reason: string) => {
-        if (!files.program || files.program.closed || currentRole === false) {
+    const refreshAdaptiveReplication = async (
+        reason: string,
+        context: RefreshContext<Files>
+    ) => {
+        if (
+            !isRefreshContextActive(
+                getCurrentRefreshContext(),
+                context,
+                currentRoleRef.current !== false
+            ) ||
+            context.program.closed
+        ) {
             return;
         }
-        if (adaptiveRefreshRef.current) {
-            return adaptiveRefreshRef.current;
+        const existing = adaptiveRefreshRef.current;
+        if (
+            existing &&
+            existing.generation === context.generation &&
+            existing.program === context.program
+        ) {
+            return existing.promise;
         }
 
-        const program = files.program;
-        const roleOptions = currentRole;
+        const program = context.program;
+        const roleOptions = currentRoleRef.current;
+        if (roleOptions === false) {
+            return;
+        }
+        let appliedRoleRevision = roleRevisionRef.current;
         diagnosticsRef.current.adaptiveRefreshCount += 1;
         diagnosticsRef.current.adaptiveRefreshInFlight = true;
         diagnosticsRef.current.lastAdaptiveRefreshReason = reason;
@@ -338,41 +581,90 @@ export const Drop = () => {
             await program.files.log.replicate(roleOptions, {
                 rebalance: true,
             });
+            while (
+                isRefreshContextActive(getCurrentRefreshContext(), context) &&
+                appliedRoleRevision !== roleRevisionRef.current
+            ) {
+                appliedRoleRevision = roleRevisionRef.current;
+                await applyReplicationRole(
+                    program,
+                    currentRoleRef.current,
+                    appliedRoleRevision,
+                    context
+                );
+            }
         })();
 
-        adaptiveRefreshRef.current = refresh;
+        const operation = { ...context, promise: refresh };
+        adaptiveRefreshRef.current = operation;
         try {
             await refresh;
         } catch (error) {
-            diagnosticsRef.current.lastAdaptiveRefreshError =
-                error instanceof Error ? error.message : String(error);
+            if (isRefreshContextActive(getCurrentRefreshContext(), context)) {
+                diagnosticsRef.current.lastAdaptiveRefreshError =
+                    error instanceof Error ? error.message : String(error);
+            }
             throw error;
         } finally {
-            if (adaptiveRefreshRef.current === refresh) {
+            if (adaptiveRefreshRef.current === operation) {
                 adaptiveRefreshRef.current = null;
             }
-            diagnosticsRef.current.adaptiveRefreshInFlight = false;
-            diagnosticsRef.current.lastAdaptiveRefreshFinishedAt = Date.now();
+            if (isRefreshContextActive(getCurrentRefreshContext(), context)) {
+                diagnosticsRef.current.adaptiveRefreshInFlight = false;
+                diagnosticsRef.current.lastAdaptiveRefreshFinishedAt =
+                    Date.now();
+            }
         }
     };
 
     const scheduleAdaptiveRefresh = (
         reason: string,
-        signature?: string | null
+        signature?: string | null,
+        requestedContext?: RefreshContext<Files>
     ) => {
-        if (!files.program || files.program.closed || currentRole === false) {
+        const currentContext = getCurrentRefreshContext();
+        const context =
+            requestedContext ??
+            (currentContext.program
+                ? {
+                      generation: currentContext.generation,
+                      program: currentContext.program,
+                  }
+                : undefined);
+        if (
+            !context ||
+            context.program.closed ||
+            !isRefreshContextActive(
+                currentContext,
+                context,
+                currentRoleRef.current !== false
+            )
+        ) {
             return;
         }
+        if (activeTransferCountRef.current > 0) {
+            diagnosticsRef.current.skippedActiveTransferRefreshCount += 1;
+            return;
+        }
+        let signatureToken:
+            | (RefreshContext<Files> & { signature: string })
+            | undefined;
         if (signature) {
-            if (adaptiveRefreshSignatureRef.current === signature) {
+            const existing = adaptiveRefreshSignatureRef.current;
+            if (
+                existing?.signature === signature &&
+                existing.generation === context.generation &&
+                existing.program === context.program
+            ) {
                 return;
             }
-            adaptiveRefreshSignatureRef.current = signature;
+            signatureToken = { ...context, signature };
+            adaptiveRefreshSignatureRef.current = signatureToken;
         }
-        void refreshAdaptiveReplication(reason).catch((error) => {
+        void refreshAdaptiveReplication(reason, context).catch((error) => {
             if (
-                signature &&
-                adaptiveRefreshSignatureRef.current === signature
+                signatureToken &&
+                adaptiveRefreshSignatureRef.current === signatureToken
             ) {
                 adaptiveRefreshSignatureRef.current = null;
             }
@@ -389,6 +681,9 @@ export const Drop = () => {
                 setReplicationRole: (
                     roleOptions: ReplicationOptions
                 ) => Promise<void>;
+                setPersistChunkReads: (persist: boolean) => boolean;
+                getLightweightSnapshot: () => Record<string, unknown>;
+                getTopologySnapshot: () => Promise<Record<string, unknown>>;
                 getDiagnostics: () => Promise<Record<string, unknown>>;
             };
             __peerbitFileShareBenchmarkStats?: {
@@ -396,7 +691,7 @@ export const Drop = () => {
             };
         };
         const program = files.program;
-        testWindow.__peerbitFileShareTestHooks = {
+        const testHooks = {
             setReplicationRole: async (roleOptions) => {
                 if (!program || program.closed) {
                     throw new Error("Program is not ready");
@@ -404,6 +699,91 @@ export const Drop = () => {
                 saveRoleLocalStorage(program, JSON.stringify(roleOptions));
                 setRole(roleOptions ? "replicator" : "observer");
                 await updateRole(roleOptions);
+            },
+            setPersistChunkReads: (persist) => {
+                if (!program || program.closed) {
+                    throw new Error("Program is not ready");
+                }
+                program.persistChunkReads = persist;
+                return program.persistChunkReads;
+            },
+            getLightweightSnapshot: () => ({
+                capturedAt: Date.now(),
+                programAddress: program?.address ?? null,
+                programClosed: program?.closed ?? null,
+                programHookStatus: files.status,
+                programHookError: getProgramHookErrorMessage(files.error),
+                persistChunkReads: program?.persistChunkReads ?? null,
+                listCount: listRef.current.length,
+                listedFiles: listRef.current.map((file) => ({
+                    id: file.id,
+                    name: file.name,
+                    type: isLargeFileLike(file) ? "large" : "tiny",
+                    size: file.size.toString(),
+                    ready: isLargeFileLike(file) ? file.ready : undefined,
+                    finalHash: isLargeFileLike(file)
+                        ? file.finalHash
+                        : undefined,
+                })),
+            }),
+            getTopologySnapshot: async () => {
+                const activeProgram =
+                    program && !program.closed ? program : undefined;
+                const replicators = activeProgram
+                    ? await activeProgram.files.log
+                          .getReplicators()
+                          .catch(() => undefined)
+                    : undefined;
+                const peerHash =
+                    peer?.identity?.publicKey?.hashcode?.() ?? null;
+                const replicatorHashes = replicators
+                    ? [...replicators]
+                          .map(
+                              (
+                                  replicator:
+                                      | string
+                                      | { hashcode?: () => string }
+                              ) =>
+                                  typeof replicator === "string"
+                                      ? replicator
+                                      : replicator.hashcode?.()
+                          )
+                          .filter((hash): hash is string => hash != null)
+                    : undefined;
+                const appDiagnostics = (
+                    window as Window & {
+                        __peerbitFileShareAppDiagnostics?: () => {
+                            peersProvided?: boolean;
+                            peerHintSource?: string | null;
+                            peerAddressCount?: number;
+                            connectionState?: string;
+                            dialStartedAt?: number | null;
+                            dialFinishedAt?: number | null;
+                        };
+                    }
+                ).__peerbitFileShareAppDiagnostics?.();
+                const connections =
+                    (peer as any)?.libp2p?.getConnections?.() ?? [];
+
+                return {
+                    capturedAt: Date.now(),
+                    peersProvided: appDiagnostics?.peersProvided ?? null,
+                    peerHintSource: appDiagnostics?.peerHintSource ?? null,
+                    peerAddressCount: appDiagnostics?.peerAddressCount ?? null,
+                    appConnectionState: appDiagnostics?.connectionState ?? null,
+                    appDialStartedAt: appDiagnostics?.dialStartedAt ?? null,
+                    appDialFinishedAt: appDiagnostics?.dialFinishedAt ?? null,
+                    connectionCount: connections.length,
+                    peerHash,
+                    replicatorCount:
+                        replicators && typeof replicators.size === "number"
+                            ? replicators.size
+                            : null,
+                    selfInReplicatorSet:
+                        peerHash && replicatorHashes
+                            ? replicatorHashes.includes(peerHash)
+                            : null,
+                };
             },
             getDiagnostics: async () => {
                 const activeProgram =
@@ -427,6 +807,9 @@ export const Drop = () => {
                         type: isLargeFileLike(file) ? "large" : "tiny",
                         size: file.size.toString(),
                         ready: isLargeFileLike(file) ? file.ready : undefined,
+                        finalHash: isLargeFileLike(file)
+                            ? file.finalHash
+                            : undefined,
                         chunkCount: isLargeFileLike(file)
                             ? file.chunkCount
                             : undefined,
@@ -434,6 +817,12 @@ export const Drop = () => {
                             activeProgram && isLargeFileLike(file)
                                 ? await activeProgram
                                       .countLocalChunks(file)
+                                      .catch(() => null)
+                                : undefined,
+                        localChunkBlockCount:
+                            activeProgram && isLargeFileLike(file)
+                                ? await activeProgram
+                                      .countLocalChunkBlocks(file)
                                       .catch(() => null)
                                 : undefined,
                     }))
@@ -456,14 +845,13 @@ export const Drop = () => {
                     peerAddresses,
                     peerStatus,
                     peerLoading,
+                    programHookError: getProgramHookErrorMessage(files.error),
                     connectionCount: connections.length,
                     connectionPeers: connections,
-                    programOpenDiagnostics:
-                        program?.openDiagnostics ?? null,
+                    programOpenDiagnostics: program?.openDiagnostics ?? null,
                     lastUploadDiagnostics:
                         program?.lastUploadDiagnostics ?? null,
-                    lastReadDiagnostics:
-                        program?.lastReadDiagnostics ?? null,
+                    lastReadDiagnostics: program?.lastReadDiagnostics ?? null,
                     replicatorCount:
                         replicators && typeof replicators.size === "number"
                             ? replicators.size
@@ -479,13 +867,17 @@ export const Drop = () => {
                 };
             },
         };
+        testWindow.__peerbitFileShareTestHooks = testHooks;
         return () => {
-            delete testWindow.__peerbitFileShareTestHooks;
+            if (testWindow.__peerbitFileShareTestHooks === testHooks) {
+                delete testWindow.__peerbitFileShareTestHooks;
+            }
         };
     }, [
         files.program,
         files.program?.address,
         files.program?.closed,
+        files.error,
         files.loading,
         files.status,
         isHost,
@@ -544,20 +936,15 @@ export const Drop = () => {
 
     useDebouncedEffect(
         () => {
-            const limitSizeMB = Number(limitStorageString);
-            const sizeBytes = limitSizeMB * 1e6;
+            const sizeBytes =
+                parseFileShareStorageMegabytes(limitStorageString);
 
             updateRole(
                 role === "replicator"
-                    ? {
-                          limits: {
-                              cpu:
-                                  limitCPU != null
-                                      ? { max: limitCPU }
-                                      : undefined,
-                              storage: limitStorage ? sizeBytes : undefined,
-                          },
-                      }
+                    ? createFileShareReplicationRole({
+                          cpuMax: limitCPU,
+                          storage: limitStorage ? sizeBytes : undefined,
+                      })
                     : false
             );
         },
@@ -571,7 +958,220 @@ export const Drop = () => {
             return;
         }
 
-        const updateListDebounced = callEvenInterval(updateList, 500);
+        listRefreshGenerationRef.current += 1;
+        listRefreshRef.current = null;
+        queuedListRefreshSourceRef.current = null;
+        adaptiveRefreshRef.current = null;
+        adaptiveRefreshSignatureRef.current = null;
+        remoteRootReconciliationStartedAtRef.current = null;
+        remoteRootConfirmationRunStartedAtRef.current = null;
+        remoteRootConfirmationSchedulerRef.current?.scheduler.reset();
+        remoteRootConfirmationSchedulerRef.current = null;
+        const remoteRootReconciliationState =
+            createRemoteRootReconciliationState();
+        remoteRootReconciliationStateRef.current =
+            remoteRootReconciliationState;
+        diagnosticsRef.current.adaptiveRefreshInFlight = false;
+
+        const program = files.program;
+        const refreshContext: RefreshContext<Files> = {
+            generation: listRefreshGenerationRef.current,
+            program,
+        };
+        let disposed = false;
+        const hasCurrentContext = createRefreshContextGuard(
+            getCurrentRefreshContext,
+            refreshContext
+        );
+        const isContextCurrent = () => !disposed && hasCurrentContext();
+        const pendingReadyResolver = createPendingReadyResolver<
+            Files,
+            AbstractFile
+        >({
+            attemptTimeoutMs: 1_500,
+            retryDelayMs: 350,
+            maxEntries: 64,
+            maxLifetimeMs: 5 * 60_000,
+            resolve: (id, targetProgram, signal, attemptTimeoutMs) =>
+                resolveRemoteReadyRoot(
+                    targetProgram,
+                    id,
+                    signal,
+                    attemptTimeoutMs
+                ),
+            isActive: (id, targetProgram) => {
+                if (
+                    targetProgram !== program ||
+                    targetProgram.closed ||
+                    currentRoleRef.current === false ||
+                    isHostRef.current === true ||
+                    !isContextCurrent()
+                ) {
+                    return false;
+                }
+                const listed = listRef.current.find((file) => file.id === id);
+                return Boolean(
+                    listed && isLargeFileLike(listed) && !listed.ready
+                );
+            },
+            onReady: (id, targetProgram, readyFile) => {
+                if (
+                    targetProgram !== program ||
+                    readyFile.id !== id ||
+                    targetProgram.closed ||
+                    currentRoleRef.current === false ||
+                    !isContextCurrent()
+                ) {
+                    return;
+                }
+                const listed = listRef.current.find((file) => file.id === id);
+                if (!listed || !isLargeFileLike(listed) || listed.ready) {
+                    return;
+                }
+
+                diagnosticsRef.current.pendingReadyResolverResolvedCount += 1;
+                rootListRevisionRef.current += 1;
+                const nextList = applyRootFileChangeToList(listRef.current, {
+                    added: [readyFile],
+                    removed: [],
+                });
+                setRootList(nextList);
+                forceUpdate();
+            },
+            onError: (_id, _targetProgram, error) => {
+                if (!isContextCurrent()) {
+                    return;
+                }
+                diagnosticsRef.current.pendingReadyResolverErrorCount += 1;
+                diagnosticsRef.current.lastPendingReadyResolverError =
+                    error instanceof Error ? error.message : String(error);
+            },
+            onExpired: () => {
+                if (isContextCurrent()) {
+                    diagnosticsRef.current.pendingReadyResolverExpiredCount += 1;
+                }
+            },
+        });
+        pendingReadyResolverRef.current = {
+            program,
+            resolver: pendingReadyResolver,
+        };
+        const remoteRootConfirmationScheduler =
+            createRemoteRootConfirmationScheduler<
+                RemoteRootObservation<Files>,
+                Awaited<ReturnType<typeof confirmRemoteRoot>>
+            >({
+                maxCandidatesPerRun: 8,
+                concurrency: 2,
+                confirm: (id, signal) => confirmRemoteRoot(program, id, signal),
+                onResult: (id, result, observation) => {
+                    if (
+                        !isContextCurrent() ||
+                        !isRemoteRootObservationCurrent(
+                            {
+                                generation: listRefreshGenerationRef.current,
+                                program: listRefreshProgramRef.current,
+                                rootRevision: rootListRevisionRef.current,
+                            },
+                            observation
+                        )
+                    ) {
+                        return "retry";
+                    }
+                    const action = applyRemoteRootConfirmation(
+                        remoteRootReconciliationState,
+                        id,
+                        result
+                    );
+                    if (action.type === "merge") {
+                        const nextList = applyRootFileChangeToList(
+                            listRef.current,
+                            { added: [action.root], removed: [] }
+                        );
+                        setRootList(nextList);
+                        reconcilePendingReadyRoots(
+                            program,
+                            refreshContext,
+                            nextList
+                        );
+                        const readyLargeFileSignature =
+                            getReadyLargeFileSignature(nextList);
+                        if (readyLargeFileSignature) {
+                            scheduleAdaptiveRefresh(
+                                "ready-exact-remote-root",
+                                readyLargeFileSignature,
+                                refreshContext
+                            );
+                        }
+                        forceUpdate();
+                    } else if (action.type === "remove") {
+                        const nextList = applyRootFileChangeToList(
+                            listRef.current,
+                            {
+                                added: [],
+                                removed: [{ id, parentId: undefined }],
+                            }
+                        );
+                        setRootList(nextList);
+                        pendingReadyResolver.cancel(id, program);
+                        diagnosticsRef.current.pendingReadyResolverActiveCount =
+                            pendingReadyResolver.size;
+                        setReplicationSet((current) => {
+                            const next = new Set(current);
+                            next.delete(id);
+                            return next;
+                        });
+                        forceUpdate();
+                    }
+                    return action.retry ? "retry" : "complete";
+                },
+            });
+        remoteRootConfirmationSchedulerRef.current = {
+            ...refreshContext,
+            scheduler: remoteRootConfirmationScheduler,
+        };
+        const cancelPendingReadyResolver = (id: string) => {
+            if (pendingReadyResolver.cancel(id, program)) {
+                diagnosticsRef.current.pendingReadyResolverActiveCount =
+                    pendingReadyResolver.size;
+            }
+        };
+        const startPendingReadyResolver = (file: AbstractFile) => {
+            if (
+                !isLargeFileLike(file) ||
+                file.ready ||
+                currentRoleRef.current === false ||
+                isHostRef.current === true ||
+                !isContextCurrent()
+            ) {
+                return;
+            }
+            const start = pendingReadyResolver.start(file.id, program);
+            if (start.status !== "started") {
+                diagnosticsRef.current.pendingReadyResolverActiveCount =
+                    pendingReadyResolver.size;
+                return;
+            }
+            diagnosticsRef.current.pendingReadyResolverStartCount += 1;
+            diagnosticsRef.current.lastPendingReadyResolverError = null;
+            diagnosticsRef.current.pendingReadyResolverActiveCount =
+                pendingReadyResolver.size;
+            void start.promise.finally(() => {
+                if (isContextCurrent()) {
+                    diagnosticsRef.current.pendingReadyResolverActiveCount =
+                        pendingReadyResolver.size;
+                }
+            });
+        };
+        const updateListForProgram = bindRefreshContext<Files, string | Event>(
+            () => ({
+                generation: listRefreshGenerationRef.current,
+                program: listRefreshProgramRef.current,
+            }),
+            refreshContext,
+            (sourceOrEvent, context) => updateList(sourceOrEvent, context)
+        );
+        const updateListDebounced = callEvenInterval(updateListForProgram, 500);
         const refresh = setInterval(() => {
             if (activeTransferCountRef.current > 0) {
                 diagnosticsRef.current.skippedActiveTransferRefreshCount += 1;
@@ -579,12 +1179,12 @@ export const Drop = () => {
             }
             updateListDebounced();
         }, 5000);
-        files.program.files.log.events.addEventListener("join", updateList);
-        files.program.files.log.events.addEventListener(
-            "leave",
-            updateListDebounced
-        );
+        program.files.log.events.addEventListener("join", updateListForProgram);
+        program.files.log.events.addEventListener("leave", updateListDebounced);
         const filesChangeListener = (event: Event) => {
+            if (!isContextCurrent()) {
+                return;
+            }
             diagnosticsRef.current.fileChangeEventCount += 1;
             if (!shouldRefreshRootListForFileChange(event)) {
                 diagnosticsRef.current.skippedChildFileChangeEventCount += 1;
@@ -598,131 +1198,223 @@ export const Drop = () => {
                     rootChange.added.length;
                 diagnosticsRef.current.rootChangeDirectRemoveCount +=
                     rootChange.removed.length;
+                rootListRevisionRef.current += 1;
+                const changedRemoteRootIds = recordExplicitRootChange(
+                    remoteRootReconciliationState,
+                    {
+                        removed: rootChange.removed,
+                        added: rootChange.added,
+                    }
+                );
+                for (const id of changedRemoteRootIds) {
+                    remoteRootConfirmationScheduler.forget(id);
+                }
                 const nextList = applyRootFileChangeToList(
                     listRef.current,
                     rootChange
                 );
                 setRootList(nextList);
+                for (const removed of rootChange.removed) {
+                    cancelPendingReadyResolver(removed.id);
+                }
+                for (const added of rootChange.added) {
+                    if (isLargeFileLike(added) && added.ready) {
+                        cancelPendingReadyResolver(added.id);
+                    } else {
+                        startPendingReadyResolver(added);
+                    }
+                }
+                setReplicationSet((current) => {
+                    const next = new Set(current);
+                    for (const removed of rootChange.removed) {
+                        next.delete(removed.id);
+                    }
+                    for (const added of rootChange.added) {
+                        next.add(added.id);
+                    }
+                    return next;
+                });
                 const readyLargeFileSignature =
                     getReadyLargeFileSignature(nextList);
                 if (readyLargeFileSignature) {
                     scheduleAdaptiveRefresh(
                         "ready-change:event",
-                        readyLargeFileSignature
+                        readyLargeFileSignature,
+                        refreshContext
                     );
                 }
                 forceUpdate();
+                diagnosticsRef.current.rootChangeAvoidedListRefreshCount += 1;
+                return;
             }
             updateListDebounced(event);
         };
 
-        files.program.files.events.addEventListener(
-            "change",
-            filesChangeListener
-        );
+        program.files.events.addEventListener("change", filesChangeListener);
 
         const replicatorsChangeListener = async () => {
             try {
-                setReplicatorCount(
-                    (await files.program.files.log.getReplicators()).size
-                );
+                const replicators = await program.files.log.getReplicators();
+                if (isContextCurrent()) {
+                    setReplicatorCount(replicators.size);
+                }
             } catch (error) {
-                console.warn(
-                    "Failed to refresh replicator count: " +
-                        (error instanceof Error ? error.message : String(error))
-                );
+                if (isContextCurrent()) {
+                    console.warn(
+                        "Failed to refresh replicator count: " +
+                            (error instanceof Error
+                                ? error.message
+                                : String(error))
+                    );
+                }
             }
 
             //  setCurrentRole(ev.detail.replicate); TODO this should be somewhere else
         };
 
-        files.program.files.log.events.addEventListener(
+        program.files.log.events.addEventListener(
             "replication:change",
             replicatorsChangeListener
         );
 
-        let onOpen = async () => {
+        const onOpen = async () => {
+            if (!isContextCurrent()) {
+                return;
+            }
             diagnosticsRef.current.onOpenStartedAt = Date.now();
 
-            const serializedRoleFromStorage = getRoleFromLocalStorage(
-                files.program
-            );
+            const serializedRoleFromStorage = getRoleFromLocalStorage(program);
             const hasStoredRole = serializedRoleFromStorage != null;
-            const roleFromLocalstore = parseStoredRole(
+            const desiredRole = getInitialReplicationRole(
                 serializedRoleFromStorage
             );
-            const desiredRole = hasStoredRole
-                ? roleFromLocalstore
-                : role === "replicator"
-                  ? DEFAULT_REPLICATION_ROLE
-                  : false;
 
-            files.program.persistChunkReads = desiredRole !== false;
+            program.persistChunkReads = desiredRole !== false;
+            currentRoleRef.current = desiredRole;
+            roleRevisionRef.current += 1;
+            if (desiredRole === false) {
+                pendingReadyResolver.cancelAll();
+            }
             setCurrentRole(desiredRole);
             setRole(desiredRole === false ? "observer" : "replicator");
-            void updateList("initial-open");
+            void updateListForProgram("initial-open");
 
             diagnosticsRef.current.trustCheckStartedAt = Date.now();
             const isTrusted =
-                !files.program.trustGraph ||
-                (await files.program.trustGraph.isTrusted(
-                    peer.identity.publicKey
-                ));
+                !program.trustGraph ||
+                (await program.trustGraph.isTrusted(peer.identity.publicKey));
+            if (!isContextCurrent()) {
+                return;
+            }
             diagnosticsRef.current.trustCheckFinishedAt = Date.now();
             setIsHost(isTrusted);
 
-            files.program = files.program;
             if (isTrusted && hasStoredRole) {
                 setLimitCPU(
-                    files.program.files.log["_roleOptions"]?.["limits"]?.["cpu"]
-                        ?.max
+                    program.files.log["_roleOptions"]?.["limits"]?.["cpu"]?.max
                 ); // TODO export types
                 const limitStorageLoaded =
-                    files.program.files.log["_roleOptions"]?.["limits"]?.memory;
+                    program.files.log["_roleOptions"]?.["limits"]?.storage;
                 setLimitStorage(limitStorageLoaded != null); // TODO export types
                 setLimitStorageString(
                     limitStorageLoaded != null
-                        ? String(limitStorageLoaded)
+                        ? formatFileShareStorageMegabytes(limitStorageLoaded)
                         : "0"
                 ); // TODO export types
             }
 
-            const replicators = await files.program.files.log.getReplicators();
-            setReplicatorCount(replicators.size);
+            const replicators = await program.files.log.getReplicators();
+            if (isContextCurrent()) {
+                setReplicatorCount(replicators.size);
+            }
         };
 
-        onOpen();
+        void onOpen().catch((error) => {
+            if (isContextCurrent()) {
+                console.warn(
+                    "Failed to initialize file-share view: " +
+                        (error instanceof Error ? error.message : String(error))
+                );
+            }
+        });
 
         return () => {
+            disposed = true;
+            pendingReadyResolver.cancelAll();
+            if (
+                pendingReadyResolverRef.current?.program === program &&
+                pendingReadyResolverRef.current.resolver ===
+                    pendingReadyResolver
+            ) {
+                pendingReadyResolverRef.current = null;
+            }
             clearInterval(refresh);
+            updateListDebounced.cancel();
+            remoteRootConfirmationScheduler.reset();
+            if (
+                remoteRootConfirmationSchedulerRef.current?.scheduler ===
+                remoteRootConfirmationScheduler
+            ) {
+                remoteRootConfirmationSchedulerRef.current = null;
+            }
+            if (
+                remoteRootReconciliationStateRef.current ===
+                remoteRootReconciliationState
+            ) {
+                remoteRootReconciliationStateRef.current =
+                    createRemoteRootReconciliationState();
+            }
+            listRefreshGenerationRef.current += 1;
+            listRefreshRef.current = null;
+            queuedListRefreshSourceRef.current = null;
+            if (
+                adaptiveRefreshRef.current?.generation ===
+                    refreshContext.generation &&
+                adaptiveRefreshRef.current.program === program
+            ) {
+                adaptiveRefreshRef.current = null;
+            }
+            if (
+                adaptiveRefreshSignatureRef.current?.generation ===
+                    refreshContext.generation &&
+                adaptiveRefreshSignatureRef.current.program === program
+            ) {
+                adaptiveRefreshSignatureRef.current = null;
+            }
 
-            files.program.files.log.events.removeEventListener(
+            program.files.log.events.removeEventListener(
                 "join",
-                updateList
+                updateListForProgram
             );
-            files.program.files.log.events.removeEventListener(
+            program.files.log.events.removeEventListener(
                 "leave",
                 updateListDebounced
             );
-            files.program.files.events.removeEventListener(
+            program.files.events.removeEventListener(
                 "change",
                 filesChangeListener
             );
-            files.program.files.log.events.removeEventListener(
+            program.files.log.events.removeEventListener(
                 "replication:change",
                 replicatorsChangeListener
             );
-            files.program.events.removeEventListener("open", onOpen);
         };
-    }, [files.program?.address, files.program?.closed]);
+    }, [files.program, files.program?.closed]);
 
-    const updateList = async (sourceOrEvent: string | Event = "refresh") => {
-        if (files.program.files.log.closed) {
+    const refreshList = async (
+        source: string,
+        generation: number,
+        program: Files
+    ) => {
+        const refreshContext = { generation, program };
+        const isContextCurrent = createRefreshContextGuard(
+            getCurrentRefreshContext,
+            refreshContext
+        );
+        if (program.files.log.closed || !isContextCurrent()) {
             return;
         }
 
-        const source =
-            typeof sourceOrEvent === "string" ? sourceOrEvent : "event";
         const benchmarkWindow = window as Window & {
             __peerbitFileShareBenchmarkStats?: {
                 updateListCalls?: Array<Record<string, unknown>>;
@@ -732,6 +1424,77 @@ export const Drop = () => {
         const updateListStats: Record<string, unknown> = {
             source,
             startedAt: Date.now(),
+        };
+        const remoteRootReconciliationState =
+            remoteRootReconciliationStateRef.current;
+        const scheduleRemoteRootConfirmations = (
+            ids: Iterable<string>,
+            rateLimited: boolean
+        ) => {
+            const confirmationScheduler =
+                remoteRootConfirmationSchedulerRef.current;
+            if (
+                confirmationScheduler?.generation !== generation ||
+                confirmationScheduler.program !== program
+            ) {
+                return;
+            }
+            let run = activeTransferCountRef.current === 0;
+            if (run && rateLimited) {
+                const now = Date.now();
+                const lastStartedAt =
+                    remoteRootConfirmationRunStartedAtRef.current;
+                run =
+                    lastStartedAt == null ||
+                    now - lastStartedAt >=
+                        REMOTE_ROOT_RECONCILIATION_INTERVAL_MS;
+                if (run) {
+                    remoteRootConfirmationRunStartedAtRef.current = now;
+                }
+            }
+            void confirmationScheduler.scheduler
+                .schedule(
+                    ids,
+                    {
+                        generation,
+                        program,
+                        rootRevision: rootListRevisionRef.current,
+                    },
+                    run
+                )
+                .catch((error) => {
+                    if (isContextCurrent()) {
+                        console.warn(
+                            "Failed to confirm remote roots: " +
+                                (error instanceof Error
+                                    ? error.message
+                                    : String(error))
+                        );
+                    }
+                });
+        };
+        const listLocalRootMetadata = () =>
+            program.files.index.search(
+                new SearchRequest({
+                    query: new IsNull({ key: "parentId" }),
+                    fetch: 0xffffffff,
+                }),
+                {
+                    local: true,
+                    remote: false,
+                }
+            );
+        const queueRefreshAfterStaleRootRevision = () => {
+            diagnosticsRef.current.staleListResultIgnoredCount += 1;
+            updateListStats.staleListResultIgnored = true;
+            updateListStats.displayListCount = listRef.current.length;
+            queueCoalescedRefresh(
+                queuedListRefreshSourceRef,
+                coalesceRootListRefreshSource(
+                    queuedListRefreshSourceRef.current,
+                    "stale-root-revision"
+                )
+            );
         };
 
         // TODO don't reload the whole list, just add the new elements..
@@ -743,9 +1506,31 @@ export const Drop = () => {
                 diagnosticsRef.current.firstListSource = source;
             }
             const listStartedAt = performance.now();
-            const list = await files.program.list();
+            const rootListRevision = rootListRevisionRef.current;
+            const listRole = currentRoleRef.current;
+            const [list, observerLocalRootFiles] = await Promise.all([
+                listRootFilesForRole(program, listRole),
+                listRole === false
+                    ? listLocalRootMetadata().catch((error) => {
+                          if (isContextCurrent()) {
+                              console.warn(
+                                  "Failed to distinguish local observer roots: " +
+                                      (error instanceof Error
+                                          ? error.message
+                                          : String(error))
+                              );
+                          }
+                          return undefined;
+                      })
+                    : Promise.resolve(undefined),
+            ]);
             updateListStats.listMs = performance.now() - listStartedAt;
             updateListStats.listCount = list.length;
+            updateListStats.listMode =
+                listRole === false ? "observer-remote" : "replicator-local";
+            if (!isContextCurrent()) {
+                return;
+            }
             const finishedAt = Date.now();
             if (diagnosticsRef.current.firstListFinishedAt == null) {
                 diagnosticsRef.current.firstListFinishedAt = finishedAt;
@@ -755,79 +1540,296 @@ export const Drop = () => {
             const rootFiles = sortRootFilesForDisplay(
                 list.filter((x) => !x.parentId)
             );
-            const displayRootFiles = applyRootFileChangeToList(
-                listRef.current,
-                { added: rootFiles, removed: [] }
-            );
-            updateListStats.displayListCount = displayRootFiles.length;
-            setRootList(displayRootFiles);
-            const readyLargeFileSignature =
-                getReadyLargeFileSignature(displayRootFiles);
-            if (readyLargeFileSignature) {
-                scheduleAdaptiveRefresh(
-                    `ready-list:${source}`,
-                    readyLargeFileSignature
-                );
-            }
-            forceUpdate();
-            void (async () => {
-                try {
-                    const metadataStartedAt = performance.now();
-                    const [allFiles, replicators] = await Promise.all([
-                        files.program.files.index.search(
-                            new SearchRequest({}),
-                            { local: true, remote: false }
-                        ),
-                        files.program.files.log.getReplicators(),
-                    ]);
-                    updateListStats.metadataMs =
-                        performance.now() - metadataStartedAt;
-                    updateListStats.replicationSetSize = allFiles.length;
-                    updateListStats.replicatorCount = replicators.size;
-                    updateListStats.totalMs =
-                        performance.now() - updateListStartedAt;
-                    const updateListCalls =
-                        benchmarkWindow.__peerbitFileShareBenchmarkStats
-                            ?.updateListCalls ?? [];
-                    updateListCalls.push(updateListStats);
-                    benchmarkWindow.__peerbitFileShareBenchmarkStats = {
-                        updateListCalls,
-                    };
-                    setReplicationSet(new Set(allFiles.map((x) => x.id)));
-                    setReplicatorCount(replicators.size);
-                    if (
-                        diagnosticsRef.current.firstMetadataRefreshFinishedAt ==
-                        null
-                    ) {
-                        diagnosticsRef.current.firstMetadataRefreshFinishedAt =
-                            Date.now();
+            if (rootListRevision === rootListRevisionRef.current) {
+                let observerRemoteRootObservation:
+                    | ReturnType<typeof observeRemoteRootSnapshot>
+                    | undefined;
+                const visibleRootFiles = (() => {
+                    if (listRole !== false) {
+                        return observeLocalRootSnapshot(
+                            remoteRootReconciliationState,
+                            rootFiles
+                        );
                     }
-                    forceUpdate();
-                } catch (error) {
-                    console.warn(
-                        "Failed to refresh replication metadata: " +
-                            error?.message
+                    if (observerLocalRootFiles == null) {
+                        return rootFiles.filter(
+                            (file) =>
+                                !remoteRootReconciliationState.suppressedIds.has(
+                                    file.id
+                                )
+                        );
+                    }
+                    observeLocalRootSnapshot(
+                        remoteRootReconciliationState,
+                        observerLocalRootFiles ?? []
+                    );
+                    observerRemoteRootObservation = observeRemoteRootSnapshot(
+                        remoteRootReconciliationState,
+                        rootFiles
+                    );
+                    const confirmationScheduler =
+                        remoteRootConfirmationSchedulerRef.current;
+                    if (
+                        confirmationScheduler?.generation === generation &&
+                        confirmationScheduler.program === program
+                    ) {
+                        invalidateRemoteRootAbsenceForVisibleRoots(
+                            confirmationScheduler.scheduler,
+                            observerRemoteRootObservation.visibleRoots
+                        );
+                    }
+                    return observerRemoteRootObservation.visibleRoots;
+                })();
+                const displayRootFiles = applyRootFileChangeToList(
+                    listRef.current,
+                    { added: visibleRootFiles, removed: [] }
+                );
+                updateListStats.displayListCount = displayRootFiles.length;
+                setRootList(displayRootFiles);
+                reconcilePendingReadyRoots(
+                    program,
+                    refreshContext,
+                    displayRootFiles
+                );
+                const readyLargeFileSignature =
+                    getReadyLargeFileSignature(displayRootFiles);
+                if (readyLargeFileSignature) {
+                    scheduleAdaptiveRefresh(
+                        `ready-list:${source}`,
+                        readyLargeFileSignature,
+                        refreshContext
                     );
                 }
-            })();
+                forceUpdate();
+                if (observerRemoteRootObservation) {
+                    scheduleRemoteRootConfirmations(
+                        observerRemoteRootObservation.confirmationIds,
+                        true
+                    );
+                }
+            } else {
+                queueRefreshAfterStaleRootRevision();
+                return;
+            }
+            const remoteReconciliationStartedAt = Date.now();
+            if (
+                shouldReconcileRemoteRootFiles({
+                    role: listRole,
+                    source,
+                    now: remoteReconciliationStartedAt,
+                    lastStartedAt: remoteRootReconciliationStartedAtRef.current,
+                })
+            ) {
+                remoteRootReconciliationStartedAtRef.current =
+                    remoteReconciliationStartedAt;
+                const remoteRootListRevision = rootListRevisionRef.current;
+                const remoteListStartedAt = performance.now();
+                try {
+                    const remoteList =
+                        await listRemoteRootFilesForReconciliation(program);
+                    updateListStats.remoteReconciliationMs =
+                        performance.now() - remoteListStartedAt;
+                    updateListStats.remoteReconciliationCount =
+                        remoteList.length;
+                    updateListStats.remoteReconciliationMode =
+                        "partial-remote-merge";
+                    if (!isContextCurrent()) {
+                        return;
+                    }
+                    if (
+                        remoteRootListRevision !== rootListRevisionRef.current
+                    ) {
+                        queueRefreshAfterStaleRootRevision();
+                        return;
+                    }
+                    const remoteRootFiles = sortRootFilesForDisplay(
+                        remoteList.filter((file) => !file.parentId)
+                    );
+                    const remoteRootObservation = observeRemoteRootSnapshot(
+                        remoteRootReconciliationState,
+                        remoteRootFiles
+                    );
+                    const confirmationScheduler =
+                        remoteRootConfirmationSchedulerRef.current;
+                    if (
+                        confirmationScheduler?.generation === generation &&
+                        confirmationScheduler.program === program
+                    ) {
+                        invalidateRemoteRootAbsenceForVisibleRoots(
+                            confirmationScheduler.scheduler,
+                            remoteRootObservation.visibleRoots
+                        );
+                    }
+                    const displayRootFiles = applyRootFileChangeToList(
+                        listRef.current,
+                        {
+                            added: remoteRootObservation.visibleRoots,
+                            removed: [],
+                        }
+                    );
+                    updateListStats.displayListCount = displayRootFiles.length;
+                    setRootList(displayRootFiles);
+                    reconcilePendingReadyRoots(
+                        program,
+                        refreshContext,
+                        displayRootFiles
+                    );
+                    const readyLargeFileSignature =
+                        getReadyLargeFileSignature(displayRootFiles);
+                    if (readyLargeFileSignature) {
+                        scheduleAdaptiveRefresh(
+                            `ready-remote-list:${source}`,
+                            readyLargeFileSignature,
+                            refreshContext
+                        );
+                    }
+                    forceUpdate();
+                    scheduleRemoteRootConfirmations(
+                        remoteRootObservation.confirmationIds,
+                        false
+                    );
+                } catch (error) {
+                    if (isContextCurrent()) {
+                        updateListStats.remoteReconciliationError =
+                            error instanceof Error
+                                ? error.message
+                                : String(error);
+                        console.warn(
+                            "Failed to reconcile remote root list: " +
+                                (error instanceof Error
+                                    ? error.message
+                                    : String(error))
+                        );
+                    }
+                }
+            }
+            try {
+                const metadataStartedAt = performance.now();
+                const [localRootFiles, replicators] = await Promise.all([
+                    observerLocalRootFiles ?? listLocalRootMetadata(),
+                    program.files.log.getReplicators(),
+                ]);
+                if (!isContextCurrent()) {
+                    return;
+                }
+                updateListStats.metadataMs =
+                    performance.now() - metadataStartedAt;
+                updateListStats.replicationSetSize = localRootFiles.length;
+                updateListStats.replicatorCount = replicators.size;
+                updateListStats.totalMs =
+                    performance.now() - updateListStartedAt;
+                const updateListCalls =
+                    benchmarkWindow.__peerbitFileShareBenchmarkStats
+                        ?.updateListCalls ?? [];
+                updateListCalls.push(updateListStats);
+                benchmarkWindow.__peerbitFileShareBenchmarkStats = {
+                    updateListCalls,
+                };
+                setReplicationSet(
+                    new Set(localRootFiles.map((file) => file.id))
+                );
+                setReplicatorCount(replicators.size);
+                if (
+                    diagnosticsRef.current.firstMetadataRefreshFinishedAt ==
+                    null
+                ) {
+                    diagnosticsRef.current.firstMetadataRefreshFinishedAt =
+                        Date.now();
+                }
+                forceUpdate();
+            } catch (error) {
+                if (isContextCurrent()) {
+                    console.warn(
+                        "Failed to refresh replication metadata: " +
+                            (error instanceof Error
+                                ? error.message
+                                : String(error))
+                    );
+                }
+            }
         } catch (error) {
-            console.warn(
-                "Failed to resolve complete file list: " + error?.message
-            );
+            if (isContextCurrent()) {
+                console.warn(
+                    "Failed to resolve complete file list: " +
+                        (error instanceof Error ? error.message : String(error))
+                );
+            }
         }
+    };
+
+    const updateList = (
+        sourceOrEvent: string | Event = "refresh",
+        context?: RefreshContext<Files>
+    ) => {
+        const program = context?.program ?? files.program;
+        const generation =
+            context?.generation ?? listRefreshGenerationRef.current;
+        const refreshContext = program ? { generation, program } : undefined;
+        const isContextCurrent = refreshContext
+            ? createRefreshContextGuard(
+                  getCurrentRefreshContext,
+                  refreshContext
+              )
+            : () => false;
+        if (!program || program.files.log.closed || !isContextCurrent()) {
+            return Promise.resolve();
+        }
+
+        const source = getRootListRefreshSource(sourceOrEvent);
+        queueCoalescedRefresh(
+            queuedListRefreshSourceRef,
+            coalesceRootListRefreshSource(
+                queuedListRefreshSourceRef.current,
+                source
+            )
+        );
+        if (listRefreshRef.current) {
+            diagnosticsRef.current.coalescedListRefreshCount += 1;
+            diagnosticsRef.current.lastCoalescedListSource = source;
+            return listRefreshRef.current;
+        }
+
+        const refresh = (async () => {
+            diagnosticsRef.current.listRefreshInFlight = true;
+            try {
+                await drainCoalescedRefreshQueue(
+                    queuedListRefreshSourceRef,
+                    isContextCurrent,
+                    (queuedSource) =>
+                        refreshList(queuedSource, generation, program)
+                );
+            } finally {
+                if (listRefreshRef.current === refresh) {
+                    listRefreshRef.current = null;
+                }
+                if (isContextCurrent()) {
+                    diagnosticsRef.current.listRefreshInFlight = false;
+                }
+            }
+        })();
+        listRefreshRef.current = refresh;
+        return refresh;
     };
 
     const download = async (
         file: AbstractFile,
         progress: (progress: number | null) => void
     ) => {
+        const program = files.program;
+        if (!program || program.closed) {
+            progress(null);
+            return;
+        }
         const timeout = getDownloadTimeout(file);
         startActiveTransfer();
         try {
             if (isLargeFileLike(file)) {
-                files.program?.retainFileRead(file);
+                program.retainFileRead(file);
             }
-            scheduleAdaptiveRefresh("download-start");
+
+            // Do not change the replication role around a download. Switching a
+            // live reader to observer mode can detach the fanout route that a
+            // partially-local file still needs for its missing chunk queries.
 
             const saveFilePicker = (window as SaveFilePickerWindow)
                 .showSaveFilePicker;
@@ -846,7 +1848,7 @@ export const Drop = () => {
                 });
                 if (handle) {
                     const writable = await handle.createWritable();
-                    await file.writeFile(files.program, writable, {
+                    await file.writeFile(program, writable, {
                         timeout,
                         progress: (value) => {
                             progress(value);
@@ -857,7 +1859,7 @@ export const Drop = () => {
                 return;
             }
 
-            const bytes = await file.getFile(files.program, {
+            const bytes = await file.getFile(program, {
                 as: "chunks",
                 timeout,
                 progress,
@@ -873,8 +1875,14 @@ export const Drop = () => {
             }, 60_000);
         } finally {
             finishActiveTransfer();
+            scheduleAdaptiveRefresh("download-finished");
             progress(null);
         }
+    };
+
+    const reportUploadFailure = (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        alert("Failed to upload: " + message);
     };
 
     function dropHandler(ev) {
@@ -906,22 +1914,28 @@ export const Drop = () => {
                 promises.push(addFile([file], false));
             });
         }
-        Promise.all(promises).finally(() => {
-            setUploadProgress(null);
-        });
+        void settleUploadBatch(promises, reportUploadFailure)
+            .finally(() => {
+                setUploadProgress(null);
+            })
+            .catch((error) => {
+                console.warn("Failed to finish upload batch", error);
+            });
     }
 
-    const addFile = (filesToAdd: FileList | File[], endProgress = true) => {
-        return new Promise<void>((resolve, reject) => {
-            let promises: Promise<any>[] = [];
-            const transferStarted = filesToAdd.length > 0;
-            if (transferStarted) {
-                startActiveTransfer();
-            }
+    const addFile = async (
+        filesToAdd: FileList | File[] | null | undefined,
+        endProgress = true
+    ) => {
+        const uploadFiles = filesToAdd ? [...filesToAdd] : [];
+        const transferStarted = uploadFiles.length > 0;
+        if (transferStarted) {
+            startActiveTransfer();
+        }
 
-            // there will just by one file here in practice
-            for (const file of filesToAdd) {
-                promises.push(
+        try {
+            await Promise.all(
+                uploadFiles.map((file) =>
                     files.program.addBlob(
                         file.name,
                         file,
@@ -934,29 +1948,18 @@ export const Drop = () => {
                             );
                         }
                     )
-                );
+                )
+            );
+            scheduleAdaptiveRefresh("upload-complete");
+            void updateList();
+        } finally {
+            if (endProgress) {
+                setUploadProgress(null);
             }
-
-            if (promises.length === filesToAdd.length) {
-                Promise.all(promises)
-                    .then(async () => {
-                        scheduleAdaptiveRefresh("upload-complete");
-                        if (endProgress) {
-                            setUploadProgress(null);
-                        }
-                        updateList();
-                        resolve();
-                    })
-                    .catch((e) => {
-                        reject(e);
-                    })
-                    .finally(() => {
-                        if (transferStarted) {
-                            finishActiveTransfer();
-                        }
-                    });
+            if (transferStarted) {
+                finishActiveTransfer();
             }
-        });
+        }
     };
 
     const goBack = () => (
@@ -1030,7 +2033,9 @@ export const Drop = () => {
                                             data-testid="upload-input"
                                             className="hidden"
                                             onChange={(e) => {
-                                                addFile(e.target?.files);
+                                                void addFile(
+                                                    e.target?.files
+                                                ).catch(reportUploadFailure);
                                             }}
                                         />
                                         <button
@@ -1053,7 +2058,7 @@ export const Drop = () => {
                             <Toggle.Root
                                 data-testid="seed-toggle"
                                 onPressedChange={(e) => {
-                                    setRole(e ? "replicator" : "observer");
+                                    selectRole(e ? "replicator" : "observer");
                                 }}
                                 disabled={!files.program}
                                 pressed={role === "replicator"}
@@ -1093,7 +2098,7 @@ export const Drop = () => {
                                                     className="SwitchRoot"
                                                     id="seed"
                                                     onCheckedChange={(e) => {
-                                                        setRole(
+                                                        selectRole(
                                                             e
                                                                 ? "replicator"
                                                                 : "observer"
@@ -1312,9 +2317,9 @@ export const Drop = () => {
                                     Files ({list.length}):
                                 </h1>
                                 <ul data-testid="file-list">
-                                    {list.map((x, ix) => {
+                                    {list.map((x) => {
                                         return (
-                                            <li key={ix}>
+                                            <li key={x.id}>
                                                 <File
                                                     isHost={isHost}
                                                     delete={() => {

@@ -39,7 +39,7 @@ const getReaderRoleOptions = () => {
         return false;
     }
     if (READER_ROLE === "adaptive") {
-        return { limits: { cpu: { max: 1 } } };
+        return { limits: { interval: 300_000, cpu: { max: 1 } } };
     }
     throw new Error(`Unsupported PW_READER_ROLE='${READER_ROLE}'`);
 };
@@ -137,7 +137,7 @@ const waitForTestHooks = async (page, timeout = TEST_HOOK_TIMEOUT_MS) => {
         () =>
             Boolean(
                 window.__peerbitFileShareTestHooks &&
-                    window.__peerbitFileShareTestHooks.getDiagnostics
+                window.__peerbitFileShareTestHooks.getDiagnostics
             ),
         undefined,
         { timeout }
@@ -593,9 +593,7 @@ const getLinkHeaderUrl = (linkHeader, rel) => {
         return undefined;
     }
     for (const part of linkHeader.split(",")) {
-        const match = part
-            .trim()
-            .match(/^<([^>]+)>;\s*rel="([^"]+)"$/);
+        const match = part.trim().match(/^<([^>]+)>;\s*rel="([^"]+)"$/);
         if (match?.[2] === rel) {
             return match[1];
         }

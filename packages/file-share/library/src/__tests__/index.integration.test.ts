@@ -1,5 +1,6 @@
 import { Peerbit } from "peerbit";
 import {
+    AbstractFile,
     Files,
     IndexableFile,
     LargeFile,
@@ -22,6 +23,21 @@ const getQueryValue = (query: any) => query?.value?.value ?? query?.value;
 const stripChunkEntryHeads = (file: LargeFile | undefined) => {
     (file as any).chunkEntryHeads = undefined;
 };
+
+const uploadLargeThrough = (
+    filestore: Files,
+    path: "bytes" | "source",
+    name: string,
+    bytes: Uint8Array
+) =>
+    path === "bytes"
+        ? filestore.add(name, bytes)
+        : filestore.addSource(name, {
+              size: BigInt(bytes.byteLength),
+              readChunks: async function* () {
+                  yield bytes;
+              },
+          });
 
 describe("index", () => {
     let peer: Peerbit, peer2: Peerbit;
@@ -60,6 +76,166 @@ describe("index", () => {
         expect(await filestoreReader.getByName("tiny file")).to.be.undefined;
     });
 
+    it("removes a remote-only root through a non-replicating observer", async () => {
+        const writer = await peer.open(new Files());
+        const fileId = await writer.add(
+            "remote-only observer removal",
+            new Uint8Array([1, 2, 3])
+        );
+        const reader = await peer2.open<Files>(writer.address, {
+            args: { replicate: false },
+        });
+        await reader.files.log.waitForReplicator(peer.identity.publicKey);
+
+        expect(
+            await reader.files.index.get(fileId, {
+                local: true,
+                remote: false,
+            })
+        ).to.be.undefined;
+
+        const originalSearch = reader.files.index.search.bind(
+            reader.files.index
+        );
+        const originalDelete = reader.files.del.bind(reader.files);
+        let exactRemoteOptions: any;
+        let localHeadAtDelete: string | undefined;
+        (reader.files.index as any).search = async (
+            request: any,
+            options: any
+        ) => {
+            const queries = Array.isArray(request.query)
+                ? request.query
+                : [request.query];
+            if (
+                queries.some(
+                    (query: any) =>
+                        getQueryKey(query) === "id" &&
+                        getQueryValue(query) === fileId
+                )
+            ) {
+                exactRemoteOptions = options;
+            }
+            return originalSearch(request, options);
+        };
+        (reader.files as any).del = async (id: string, ...args: any[]) => {
+            const local = await reader.files.index.get(id, {
+                local: true,
+                remote: false,
+            });
+            localHeadAtDelete = (local as any)?.__context?.head;
+            return (originalDelete as any)(id, ...args);
+        };
+
+        try {
+            await reader.removeById(fileId);
+        } finally {
+            (reader.files.index as any).search = originalSearch;
+            (reader.files as any).del = originalDelete;
+        }
+
+        expect(localHeadAtDelete).to.be.a("string");
+        expect(exactRemoteOptions?.local).to.be.false;
+        expect(exactRemoteOptions?.remote?.replicate).to.be.true;
+        expect(exactRemoteOptions?.remote?.throwOnMissing).to.be.true;
+        expect(exactRemoteOptions?.remote?.from).to.deep.eq([
+            peer.identity.publicKey.hashcode(),
+        ]);
+        expect(
+            await reader.files.index.get(fileId, {
+                local: true,
+                remote: false,
+            })
+        ).to.be.undefined;
+        await waitForResolved(async () => {
+            expect(
+                await writer.files.index.get(fileId, {
+                    local: true,
+                    remote: false,
+                })
+            ).to.be.undefined;
+        });
+    });
+
+    it("keeps public nested tiny files across restart state and removal", async () => {
+        const filestore = await peer.open(new Files());
+        const parentId = await filestore.add(
+            "nested parent",
+            new Uint8Array([1])
+        );
+        const nestedBytes = new Uint8Array([2, 3]);
+        const nestedId = await filestore.add(
+            "public nested tiny",
+            nestedBytes,
+            parentId
+        );
+        const nested = (await filestore.files.index.get(nestedId, {
+            local: true,
+            remote: false,
+        })) as TinyFile;
+        const nestedHead = (nested as any).__context.head as string;
+        const nestedEntry = await filestore.files.log.log.get(nestedHead);
+
+        expect(nested).to.be.instanceOf(TinyFile);
+        expect(nested.parentId).to.eq(parentId);
+        expect(nested.index).to.be.undefined;
+
+        const reader = await peer2.open<Files>(filestore.address);
+        await reader.files.log.waitForReplicator(peer.identity.publicKey);
+        await reader.files.index.get(nestedId, {
+            local: true,
+            remote: {
+                timeout: 10_000,
+                throwOnMissing: false,
+                replicate: true,
+            },
+        } as any);
+        await waitForResolved(async () => {
+            const local = await reader.files.index.get(nestedId, {
+                local: true,
+                remote: false,
+            });
+            expect((local as any)?.__context?.head).to.eq(nestedHead);
+        });
+        (reader as any).clearFileRuntimeState();
+        expect(await (reader as any).shouldKeepFileEntry(nestedEntry)).to.be
+            .true;
+        expect(
+            (reader as any).retainedEntryHeadsByFileId.get(nestedId)
+        ).to.deep.eq(new Set([nestedHead]));
+        expect((reader as any).retainedChunkIds.has(nestedId)).to.be.false;
+
+        // Runtime retention maps are intentionally empty after a restart. The
+        // current authored document must rebuild ownership under its own id,
+        // not be subjected to LargeFile chunk validation under its parent.
+        (filestore as any).clearFileRuntimeState();
+        expect(await (filestore as any).shouldKeepFileEntry(nestedEntry)).to.be
+            .true;
+        expect(
+            (filestore as any).retainedEntryHeadsByFileId.get(nestedId)
+        ).to.deep.eq(new Set([nestedHead]));
+        expect((filestore as any).retainedEntryHeadsByFileId.has(parentId)).to
+            .be.false;
+        expect((filestore as any).retainedChunkIds.has(nestedId)).to.be.false;
+
+        await filestore.removeById(nestedId);
+
+        expect(
+            await filestore.files.index.get(nestedId, {
+                local: true,
+                remote: false,
+            })
+        ).to.be.undefined;
+        expect(
+            await filestore.files.index.get(parentId, {
+                local: true,
+                remote: false,
+            })
+        ).not.to.be.undefined;
+        expect((filestore as any).retainedChunkEntryHeads.has(nestedHead)).to.be
+            .false;
+    });
+
     it("small file", async () => {
         // Peer 1 is subscribing to a replication topic (to start helping the network)
         const filestore = await peer.open(new Files());
@@ -86,16 +262,63 @@ describe("index", () => {
     });
 
     describe("large file", () => {
-        it("keeps self-signed shallow chunk entries during adaptive pruning", async () => {
+        it("keeps only current or pending self-authored puts and signed deletes", async () => {
             const filestore = await peer.open(new Files());
-            const entryHash = "self-signed-chunk-entry";
-
-            expect(
-                await (filestore as any).shouldKeepFileEntry({
-                    hash: entryHash,
-                    signatures: [{ publicKey: peer.identity.publicKey }],
+            const fileId = "self-authored-pruning";
+            const first = await filestore.files.put(
+                new TinyFile({
+                    id: fileId,
+                    name: "self-authored-pruning-first.bin",
+                    file: new Uint8Array([1]),
                 })
-            ).to.be.true;
+            );
+
+            expect(await (filestore as any).shouldKeepFileEntry(first.entry)).to
+                .be.true;
+
+            const second = await filestore.files.put(
+                new TinyFile({
+                    id: fileId,
+                    name: "self-authored-pruning-second.bin",
+                    file: new Uint8Array([2]),
+                })
+            );
+            (filestore as any).pendingAuthoredDocumentIds.set(fileId, 1);
+            expect(await (filestore as any).shouldKeepFileEntry(first.entry)).to
+                .be.true;
+            (filestore as any).pendingAuthoredDocumentIds.delete(fileId);
+            expect(await (filestore as any).shouldKeepFileEntry(first.entry)).to
+                .be.false;
+            expect(await (filestore as any).shouldKeepFileEntry(second.entry))
+                .to.be.true;
+
+            const deleted = await filestore.files.del(fileId);
+            expect(await (filestore as any).shouldKeepFileEntry(second.entry))
+                .to.be.false;
+            expect(await (filestore as any).shouldKeepFileEntry(deleted.entry))
+                .to.be.true;
+
+            // Simulate a restart where all in-memory retention maps and release
+            // tombstones are empty. The index is still the source of truth.
+            (filestore as any).clearFileRuntimeState();
+            expect(await (filestore as any).shouldKeepFileEntry(first.entry)).to
+                .be.false;
+            expect(await (filestore as any).shouldKeepFileEntry(second.entry))
+                .to.be.false;
+            expect(await (filestore as any).shouldKeepFileEntry(deleted.entry))
+                .to.be.true;
+
+            const readded = await filestore.files.put(
+                new TinyFile({
+                    id: fileId,
+                    name: "self-authored-pruning-readded.bin",
+                    file: new Uint8Array([3]),
+                })
+            );
+            expect(await (filestore as any).shouldKeepFileEntry(readded.entry))
+                .to.be.true;
+            expect(await (filestore as any).shouldKeepFileEntry(second.entry))
+                .to.be.false;
         });
 
         it("keeps retained chunk entries by payload during adaptive pruning", async () => {
@@ -117,6 +340,15 @@ describe("index", () => {
             const retainedHead = (retainedChunk as any).__context.head;
             const retainedEntry = await writer.files.log.log.get(retainedHead);
             reader.retainChunkRead(retainedChunkId);
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+            await waitForResolved(async () => {
+                const current = await reader.files.index.get(retainedChunkId, {
+                    resolve: false,
+                    local: true,
+                    remote: false,
+                } as any);
+                expect((current as any)?.__context?.head).to.eq(retainedHead);
+            });
 
             expect(await (reader as any).shouldKeepFileEntry(retainedEntry)).to
                 .be.true;
@@ -190,6 +422,7 @@ describe("index", () => {
         it("keeps ready root manifests during adaptive pruning", async () => {
             const writer = await peer.open(new Files());
             const reader = await peer2.open<Files>(writer.address);
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
             const readyRoot = new LargeFileWithChunkHeads({
                 id: "adaptive-root-ready",
                 name: "adaptive-root-ready.bin",
@@ -200,6 +433,16 @@ describe("index", () => {
                 chunkEntryHeads: ["chunk-head-0", "chunk-head-1"],
             });
             const appended = await writer.files.put(readyRoot);
+            await waitForResolved(async () => {
+                const current = await reader.files.index.get(readyRoot.id, {
+                    resolve: false,
+                    local: true,
+                    remote: false,
+                } as any);
+                expect((current as any)?.__context?.head).to.eq(
+                    appended.entry.hash
+                );
+            });
 
             expect(await (reader as any).shouldKeepFileEntry(appended.entry)).to
                 .be.true;
@@ -251,6 +494,83 @@ describe("index", () => {
             await filestore.removeByName("random large file");
             expect(await filestoreReader.getByName("random large file")).to.be
                 .undefined;
+        });
+
+        it("retries exact child cleanup after the root deletion commits", async () => {
+            const filestore = await peer.open(new Files());
+            const fileId = await filestore.add(
+                "retry child cleanup",
+                new Uint8Array(5_000_001)
+            );
+            const ready = await filestore.files.index.get(fileId, {
+                local: true,
+                remote: false,
+            });
+            expect(isLargeFileLike(ready)).to.be.true;
+            const chunkCount = (ready as LargeFile).chunkCount;
+            const failedChunkId = `${fileId}:1`;
+            const originalDelete = filestore.files.del.bind(filestore.files);
+            let rootDeleteCommitted = false;
+            let rejectedChildDelete = false;
+
+            (filestore.files as any).del = async (
+                id: string,
+                ...args: any[]
+            ) => {
+                if (id === fileId) {
+                    const result = await (originalDelete as any)(id, ...args);
+                    rootDeleteCommitted = true;
+                    return result;
+                }
+                if (id === failedChunkId && !rejectedChildDelete) {
+                    expect(rootDeleteCommitted).to.be.true;
+                    rejectedChildDelete = true;
+                    throw new Error("injected child delete failure");
+                }
+                return (originalDelete as any)(id, ...args);
+            };
+
+            try {
+                await expect(filestore.removeById(fileId)).rejects.toThrow(
+                    "injected child delete failure"
+                );
+            } finally {
+                (filestore.files as any).del = originalDelete;
+            }
+
+            expect(rootDeleteCommitted).to.be.true;
+            expect(rejectedChildDelete).to.be.true;
+            expect(
+                await filestore.files.index.get(fileId, {
+                    local: true,
+                    remote: false,
+                })
+            ).to.be.undefined;
+            expect(
+                await filestore.files.index.get(failedChunkId, {
+                    local: true,
+                    remote: false,
+                })
+            ).not.to.be.undefined;
+            expect((filestore as any).pendingLargeFileDeletions.has(fileId)).to
+                .be.true;
+
+            await filestore.removeById(fileId);
+
+            for (let index = 0; index < chunkCount; index++) {
+                expect(
+                    await filestore.files.index.get(`${fileId}:${index}`, {
+                        local: true,
+                        remote: false,
+                    })
+                ).to.be.undefined;
+            }
+            expect((filestore as any).retainedChunkIdsByFileId.has(fileId)).to
+                .be.false;
+            expect((filestore as any).retainedEntryHeadsByFileId.has(fileId)).to
+                .be.false;
+            expect((filestore as any).pendingLargeFileDeletions.has(fileId)).to
+                .be.false;
         });
 
         it("streams blob uploads without changing the root hash", async () => {
@@ -349,6 +669,734 @@ describe("index", () => {
             }
         });
 
+        for (const uploadPath of ["bytes", "source"] as const) {
+            it(`does not leave a pending ${uploadPath} root after a precommit put rejection`, async () => {
+                const filestore = await peer.open(new Files());
+                const bytes = new Uint8Array(5_000_001);
+                const originalPut = filestore.files.put.bind(filestore.files);
+                const originalDelete = filestore.files.del.bind(
+                    filestore.files
+                );
+                let uploadId: string | undefined;
+                let rootDeleteCalls = 0;
+
+                (filestore.files as any).put = async (
+                    value: AbstractFile,
+                    ...args: any[]
+                ) => {
+                    if (isLargeFileLike(value) && !value.ready) {
+                        uploadId = value.id;
+                        throw new Error("pending put rejected before commit");
+                    }
+                    return (originalPut as any)(value, ...args);
+                };
+                (filestore.files as any).del = async (
+                    id: string,
+                    ...args: any[]
+                ) => {
+                    if (id === uploadId) {
+                        rootDeleteCalls += 1;
+                    }
+                    return (originalDelete as any)(id, ...args);
+                };
+
+                try {
+                    await expect(
+                        uploadLargeThrough(
+                            filestore,
+                            uploadPath,
+                            `precommit pending ${uploadPath}`,
+                            bytes
+                        )
+                    ).rejects.toThrow("pending put rejected before commit");
+                } finally {
+                    (filestore.files as any).put = originalPut;
+                    (filestore.files as any).del = originalDelete;
+                }
+
+                expect(uploadId).to.be.a("string");
+                expect(rootDeleteCalls).to.eq(0);
+                expect(
+                    await filestore.files.index.get(uploadId!, {
+                        local: true,
+                        remote: false,
+                    })
+                ).to.be.undefined;
+            });
+
+            it(`cleans a committed pending ${uploadPath} root when put rejects`, async () => {
+                const filestore = await peer.open(new Files());
+                const bytes = new Uint8Array(5_000_001);
+                const originalPut = filestore.files.put.bind(filestore.files);
+                let uploadId: string | undefined;
+
+                (filestore.files as any).put = async (
+                    value: AbstractFile,
+                    ...args: any[]
+                ) => {
+                    const result = await (originalPut as any)(value, ...args);
+                    if (isLargeFileLike(value) && !value.ready) {
+                        uploadId = value.id;
+                        throw new Error("pending put rejected after commit");
+                    }
+                    return result;
+                };
+
+                try {
+                    await expect(
+                        uploadLargeThrough(
+                            filestore,
+                            uploadPath,
+                            `postcommit pending ${uploadPath}`,
+                            bytes
+                        )
+                    ).rejects.toThrow("pending put rejected after commit");
+                } finally {
+                    (filestore.files as any).put = originalPut;
+                }
+
+                expect(uploadId).to.be.a("string");
+                expect(
+                    await filestore.files.index.get(uploadId!, {
+                        local: true,
+                        remote: false,
+                    })
+                ).to.be.undefined;
+                expect(
+                    (filestore as any).retainedEntryHeadsByFileId.has(uploadId)
+                ).to.be.false;
+                expect(
+                    (filestore as any).retainedLargeFileChunkCounts.has(
+                        uploadId
+                    )
+                ).to.be.false;
+            });
+
+            it(`accepts a committed ready ${uploadPath} manifest when put rejects`, async () => {
+                const filestore = await peer.open(new Files());
+                const bytes = new Uint8Array(5_000_001);
+                bytes[bytes.length - 1] = 7;
+                const originalPut = filestore.files.put.bind(filestore.files);
+                let rejectedReadyPut = false;
+                let pendingHead: string | undefined;
+
+                (filestore.files as any).put = async (
+                    value: AbstractFile,
+                    ...args: any[]
+                ) => {
+                    const result = await (originalPut as any)(value, ...args);
+                    if (isLargeFileLike(value) && !value.ready) {
+                        pendingHead = result.entry.hash;
+                    }
+                    if (
+                        isLargeFileLike(value) &&
+                        value.ready &&
+                        !rejectedReadyPut
+                    ) {
+                        rejectedReadyPut = true;
+                        throw new Error("ready put rejected after commit");
+                    }
+                    return result;
+                };
+
+                let uploadId: string;
+                try {
+                    uploadId = await uploadLargeThrough(
+                        filestore,
+                        uploadPath,
+                        `postcommit ready ${uploadPath}`,
+                        bytes
+                    );
+                } finally {
+                    (filestore.files as any).put = originalPut;
+                }
+
+                const ready = await filestore.files.index.get(uploadId!, {
+                    local: true,
+                    remote: false,
+                });
+                expect(rejectedReadyPut).to.be.true;
+                expect(isLargeFileLike(ready)).to.be.true;
+                expect((ready as LargeFile).ready).to.be.true;
+                expect((ready as LargeFile).finalHash).to.eq(
+                    sha256Base64Sync(bytes)
+                );
+                const retainedHeads = (
+                    filestore as any
+                ).retainedEntryHeadsByFileId.get(uploadId) as Set<string>;
+                expect(retainedHeads).to.contain((ready as any).__context.head);
+                expect(retainedHeads).not.to.contain(pendingHead);
+            });
+
+            it(`cancels a ${uploadPath} upload deleted before its ready commit`, async () => {
+                const filestore = await peer.open(new Files());
+                const bytes = new Uint8Array(5_000_001);
+                const originalCommit = (
+                    filestore as any
+                ).commitReadyManifest.bind(filestore);
+                let uploadId: string | undefined;
+                let releaseCommit!: () => void;
+                let markCommitReached!: () => void;
+                const commitGate = new Promise<void>((resolve) => {
+                    releaseCommit = resolve;
+                });
+                const commitReached = new Promise<void>((resolve) => {
+                    markCommitReached = resolve;
+                });
+
+                (filestore as any).commitReadyManifest = async (
+                    pendingFile: LargeFile,
+                    ...args: any[]
+                ) => {
+                    uploadId = pendingFile.id;
+                    markCommitReached();
+                    await commitGate;
+                    return originalCommit(pendingFile, ...args);
+                };
+
+                try {
+                    const upload = uploadLargeThrough(
+                        filestore,
+                        uploadPath,
+                        `delete-before-ready ${uploadPath}`,
+                        bytes
+                    );
+                    await commitReached;
+                    const chunkIds = [
+                        ...(((filestore as any).retainedChunkIdsByFileId.get(
+                            uploadId
+                        ) as Set<string> | undefined) ?? []),
+                    ];
+                    expect(chunkIds.length).to.be.greaterThan(0);
+
+                    await filestore.removeById(uploadId!);
+                    releaseCommit();
+                    await expect(upload).rejects.toThrow(
+                        "cancelled or superseded before ready manifest commit"
+                    );
+
+                    expect(
+                        await filestore.files.index.get(uploadId!, {
+                            local: true,
+                            remote: false,
+                        })
+                    ).to.be.undefined;
+                    for (const chunkId of chunkIds) {
+                        expect(
+                            await filestore.files.index.get(chunkId, {
+                                local: true,
+                                remote: false,
+                            })
+                        ).to.be.undefined;
+                    }
+                    expect(
+                        (filestore as any).retainedEntryHeadsByFileId.has(
+                            uploadId
+                        )
+                    ).to.be.false;
+                    expect(
+                        (filestore as any).retainedChunkIdsByFileId.has(
+                            uploadId
+                        )
+                    ).to.be.false;
+                    expect(
+                        (filestore as any).retainedLargeFileChunkCounts.has(
+                            uploadId
+                        )
+                    ).to.be.false;
+                } finally {
+                    releaseCommit();
+                    (filestore as any).commitReadyManifest = originalCommit;
+                }
+            });
+
+            it(`preserves a pending replacement that supersedes a ${uploadPath} upload`, async () => {
+                const filestore = await peer.open(new Files());
+                const bytes = new Uint8Array(5_000_001);
+                const originalCommit = (
+                    filestore as any
+                ).commitReadyManifest.bind(filestore);
+                const originalCleanup = (
+                    filestore as any
+                ).cleanupChunkedUpload.bind(filestore);
+                let pendingFile: LargeFile | undefined;
+                let releaseCommit!: () => void;
+                let markCommitReached!: () => void;
+                let cleanupCalls = 0;
+                const commitGate = new Promise<void>((resolve) => {
+                    releaseCommit = resolve;
+                });
+                const commitReached = new Promise<void>((resolve) => {
+                    markCommitReached = resolve;
+                });
+
+                (filestore as any).commitReadyManifest = async (
+                    candidate: LargeFile,
+                    ...args: any[]
+                ) => {
+                    pendingFile = candidate;
+                    markCommitReached();
+                    await commitGate;
+                    return originalCommit(candidate, ...args);
+                };
+                (filestore as any).cleanupChunkedUpload = async (
+                    ...args: any[]
+                ) => {
+                    cleanupCalls += 1;
+                    return originalCleanup(...args);
+                };
+
+                try {
+                    const upload = uploadLargeThrough(
+                        filestore,
+                        uploadPath,
+                        `superseded-before-ready ${uploadPath}`,
+                        bytes
+                    );
+                    await commitReached;
+                    const replacement = new LargeFile({
+                        id: pendingFile!.id,
+                        name: `replacement ${uploadPath}`,
+                        size: pendingFile!.size,
+                        chunkCount: pendingFile!.chunkCount,
+                        ready: false,
+                    });
+                    const replacementPut = await (
+                        filestore as any
+                    ).putAuthoredFile(replacement);
+                    const replacementChunk = new TinyFile({
+                        name: `replacement ${uploadPath}/owned`,
+                        file: new Uint8Array([9]),
+                        parentId: replacement.id,
+                        index: replacement.chunkCount + 10,
+                    });
+                    const replacementChunkPut = await (
+                        filestore as any
+                    ).putAuthoredFile(replacementChunk);
+
+                    releaseCommit();
+                    await expect(upload).rejects.toThrow(
+                        "cancelled or superseded before ready manifest commit"
+                    );
+
+                    expect(cleanupCalls).to.eq(0);
+                    const current = await filestore.files.index.get(
+                        replacement.id,
+                        { local: true, remote: false }
+                    );
+                    expect((current as any)?.__context?.head).to.eq(
+                        replacementPut.entry.hash
+                    );
+                    expect((current as LargeFile).name).to.eq(
+                        `replacement ${uploadPath}`
+                    );
+                    expect(
+                        await filestore.files.index.get(replacementChunk.id, {
+                            local: true,
+                            remote: false,
+                        })
+                    ).not.to.be.undefined;
+                    expect(
+                        (filestore as any).retainedChunkEntryHeads
+                    ).to.contain(replacementChunkPut.entry.hash);
+                    expect(
+                        (filestore as any).retainedEntryHeadsByFileId.get(
+                            replacement.id
+                        )
+                    ).to.contain(replacementPut.entry.hash);
+                } finally {
+                    releaseCommit();
+                    (filestore as any).commitReadyManifest = originalCommit;
+                    (filestore as any).cleanupChunkedUpload = originalCleanup;
+                }
+            });
+
+            it(`preserves a replacement inserted after failed ${uploadPath} root proof`, async () => {
+                const filestore = await peer.open(new Files());
+                const bytes = new Uint8Array(5_000_001);
+                bytes[bytes.length - 1] = 4;
+                const originalCommit = (
+                    filestore as any
+                ).commitReadyManifest.bind(filestore);
+                const originalCleanup = (
+                    filestore as any
+                ).cleanupChunkedUpload.bind(filestore);
+                let replacementRootHead: string | undefined;
+                let replacementChunkHead: string | undefined;
+                let failedChunkHeads: string[] = [];
+
+                (filestore as any).commitReadyManifest = async () => {
+                    throw new Error(`forced ${uploadPath} ready failure`);
+                };
+                (filestore as any).cleanupChunkedUpload = async (
+                    uploadId: string,
+                    expectedChunkCount: number,
+                    chunkEntryHeads: string[]
+                ) => {
+                    failedChunkHeads = [...chunkEntryHeads];
+                    const replacementChunk = new TinyFile({
+                        id: `${uploadId}:0`,
+                        name: `replacement after proof ${uploadPath}/0`,
+                        file: new Uint8Array([7, 8, 9]),
+                        parentId: uploadId,
+                        index: 0,
+                    });
+                    const replacementChunkPut = await (
+                        filestore as any
+                    ).putAuthoredFile(replacementChunk);
+                    replacementChunkHead = replacementChunkPut.entry.hash;
+                    const replacementRoot = new LargeFileWithChunkHeads({
+                        id: uploadId,
+                        name: `replacement after proof ${uploadPath}`,
+                        size: 3n,
+                        chunkCount: 1,
+                        ready: true,
+                        finalHash: sha256Base64Sync(replacementChunk.file),
+                        chunkEntryHeads: [replacementChunkHead!],
+                    });
+                    const replacementRootPut = await (
+                        filestore as any
+                    ).putAuthoredFile(replacementRoot);
+                    replacementRootHead = replacementRootPut.entry.hash;
+                    return originalCleanup(
+                        uploadId,
+                        expectedChunkCount,
+                        chunkEntryHeads
+                    );
+                };
+
+                try {
+                    await expect(
+                        uploadLargeThrough(
+                            filestore,
+                            uploadPath,
+                            `replacement after proof ${uploadPath}`,
+                            bytes
+                        )
+                    ).rejects.toThrow(`forced ${uploadPath} ready failure`);
+                } finally {
+                    (filestore as any).commitReadyManifest = originalCommit;
+                    (filestore as any).cleanupChunkedUpload = originalCleanup;
+                }
+
+                const uploadId = filestore.lastUploadDiagnostics!.uploadId;
+                const currentRoot = await filestore.files.index.get(uploadId, {
+                    local: true,
+                    remote: false,
+                });
+                const currentChunk = await filestore.files.index.get(
+                    `${uploadId}:0`,
+                    { local: true, remote: false }
+                );
+                expect(failedChunkHeads.length).to.be.greaterThan(0);
+                expect(failedChunkHeads).not.to.contain(replacementChunkHead);
+                expect((currentRoot as any)?.__context?.head).to.eq(
+                    replacementRootHead
+                );
+                expect((currentChunk as any)?.__context?.head).to.eq(
+                    replacementChunkHead
+                );
+                expect((filestore as any).retainedChunkEntryHeads).to.contain(
+                    replacementRootHead
+                );
+                expect((filestore as any).retainedChunkEntryHeads).to.contain(
+                    replacementChunkHead
+                );
+                expect((filestore as any).retainedChunkIds).to.contain(
+                    `${uploadId}:0`
+                );
+                expect(
+                    (filestore as any).retainedLargeFileChunkCounts.get(
+                        uploadId
+                    )
+                ).to.eq(1);
+            });
+        }
+
+        it("serializes a ready commit that wins against concurrent deletion", async () => {
+            const filestore = await peer.open(new Files());
+            const bytes = new Uint8Array(5_000_001);
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let readyId: string | undefined;
+            let releaseReadyPut!: () => void;
+            let markReadyPutStarted!: () => void;
+            const readyPutGate = new Promise<void>((resolve) => {
+                releaseReadyPut = resolve;
+            });
+            const readyPutStarted = new Promise<void>((resolve) => {
+                markReadyPutStarted = resolve;
+            });
+
+            (filestore.files as any).put = async (
+                value: AbstractFile,
+                ...args: any[]
+            ) => {
+                if (isLargeFileLike(value) && value.ready) {
+                    readyId = value.id;
+                    markReadyPutStarted();
+                    await readyPutGate;
+                }
+                return (originalPut as any)(value, ...args);
+            };
+
+            try {
+                const upload = filestore.add(
+                    "ready-commit-wins-delete-race",
+                    bytes
+                );
+                await readyPutStarted;
+                let deleteFinished = false;
+                const deletion = filestore.removeById(readyId!).then(() => {
+                    deleteFinished = true;
+                });
+                await Promise.resolve();
+                expect(deleteFinished).to.be.false;
+
+                releaseReadyPut();
+                expect(await upload).to.eq(readyId);
+                await deletion;
+                expect(
+                    await filestore.files.index.get(readyId!, {
+                        local: true,
+                        remote: false,
+                    })
+                ).to.be.undefined;
+                expect((filestore as any).fileMutationTails.has(readyId)).to.be
+                    .false;
+            } finally {
+                releaseReadyPut();
+                (filestore.files as any).put = originalPut;
+            }
+        });
+
+        it("preserves a byte-identical pending replacement when the original put rejects", async () => {
+            const filestore = await peer.open(new Files());
+            const bytes = new Uint8Array(5_000_001);
+            const originalPut = filestore.files.put.bind(filestore.files);
+            const originalDelete = filestore.files.del.bind(filestore.files);
+            const originalCleanup = (
+                filestore as any
+            ).cleanupChunkedUpload.bind(filestore);
+            let originalHead: string | undefined;
+            let replacementHead: string | undefined;
+            let uploadId: string | undefined;
+            let deleteCalls = 0;
+            let cleanupCalls = 0;
+
+            (filestore.files as any).put = async (
+                value: AbstractFile,
+                ...args: any[]
+            ) => {
+                const result = await (originalPut as any)(value, ...args);
+                if (isLargeFileLike(value) && !value.ready) {
+                    uploadId = value.id;
+                    originalHead = result.entry.hash;
+                    const replacement = new LargeFile({
+                        id: value.id,
+                        name: value.name,
+                        size: value.size,
+                        chunkCount: value.chunkCount,
+                        ready: false,
+                    });
+                    replacementHead = (await originalPut(replacement)).entry
+                        .hash;
+                    filestore.retainChunkEntryHead(
+                        "replacement-retention-sentinel",
+                        value.id,
+                        value.id
+                    );
+                    throw new Error(
+                        "original pending put rejected after replacement"
+                    );
+                }
+                return result;
+            };
+            (filestore.files as any).del = async (
+                id: string,
+                ...args: any[]
+            ) => {
+                deleteCalls += 1;
+                return (originalDelete as any)(id, ...args);
+            };
+            (filestore as any).cleanupChunkedUpload = async (
+                ...args: any[]
+            ) => {
+                cleanupCalls += 1;
+                return originalCleanup(...args);
+            };
+
+            try {
+                await expect(
+                    filestore.add("identical pending replacement", bytes)
+                ).rejects.toThrow(
+                    "original pending put rejected after replacement"
+                );
+            } finally {
+                (filestore.files as any).put = originalPut;
+                (filestore.files as any).del = originalDelete;
+                (filestore as any).cleanupChunkedUpload = originalCleanup;
+            }
+
+            expect(originalHead).to.be.a("string");
+            expect(replacementHead).to.be.a("string");
+            expect(replacementHead).not.to.eq(originalHead);
+            expect(deleteCalls).to.eq(0);
+            expect(cleanupCalls).to.eq(0);
+            const current = await filestore.files.index.get(uploadId!, {
+                local: true,
+                remote: false,
+            });
+            expect((current as any)?.__context?.head).to.eq(replacementHead);
+            expect(isLargeFileLike(current)).to.be.true;
+            expect((current as LargeFile).ready).to.be.false;
+            expect((filestore as any).retainedChunkEntryHeads).to.contain(
+                "replacement-retention-sentinel"
+            );
+        });
+
+        it("cleans a failed upload when root deletion rejects after commit", async () => {
+            const filestore = await peer.open(new Files());
+            const originalDelete = filestore.files.del.bind(filestore.files);
+            let deletedRootId: string | undefined;
+
+            (filestore.files as any).del = async (
+                id: string,
+                ...args: any[]
+            ) => {
+                deletedRootId = id;
+                await (originalDelete as any)(id, ...args);
+                throw new Error("root delete delivery failed after commit");
+            };
+
+            try {
+                await expect(
+                    filestore.addSource("postcommit failed upload delete", {
+                        size: 5_000_001n,
+                        readChunks: async function* () {
+                            yield new Uint8Array(5_000_002);
+                        },
+                    })
+                ).rejects.toThrow("Source size changed during upload");
+            } finally {
+                (filestore.files as any).del = originalDelete;
+            }
+
+            expect(deletedRootId).to.eq(
+                filestore.lastUploadDiagnostics?.uploadId
+            );
+            expect(
+                await filestore.files.index.get(deletedRootId!, {
+                    local: true,
+                    remote: false,
+                })
+            ).to.be.undefined;
+            expect(
+                (filestore as any).retainedEntryHeadsByFileId.has(deletedRootId)
+            ).to.be.false;
+        });
+
+        it("preserves a concurrent ready replacement after failed-upload deletion rejects", async () => {
+            const filestore = await peer.open(new Files());
+            const originalPut = filestore.files.put.bind(filestore.files);
+            const originalDelete = filestore.files.del.bind(filestore.files);
+            let replacementHead: string | undefined;
+
+            (filestore.files as any).del = async (id: string) => {
+                const pending = (await filestore.files.index.get(id, {
+                    local: true,
+                    remote: false,
+                })) as LargeFile;
+                const replacement = new LargeFileWithChunkHeads({
+                    id,
+                    name: pending.name,
+                    size: pending.size,
+                    chunkCount: pending.chunkCount,
+                    ready: true,
+                    finalHash: "concurrent-ready-replacement",
+                    chunkEntryHeads: [],
+                });
+                const put = await originalPut(replacement);
+                replacementHead = put.entry.hash;
+                throw new Error("delete lost to concurrent replacement");
+            };
+
+            try {
+                await expect(
+                    filestore.addSource("replacement after failed upload", {
+                        size: 5_000_001n,
+                        readChunks: async function* () {
+                            yield new Uint8Array(5_000_002);
+                        },
+                    })
+                ).rejects.toThrow("Source size changed during upload");
+            } finally {
+                (filestore.files as any).put = originalPut;
+                (filestore.files as any).del = originalDelete;
+            }
+
+            const uploadId = filestore.lastUploadDiagnostics!.uploadId;
+            const current = await filestore.files.index.get(uploadId, {
+                local: true,
+                remote: false,
+            });
+            expect((current as any)?.__context?.head).to.eq(replacementHead);
+            expect(isLargeFileLike(current)).to.be.true;
+            expect((current as LargeFile).ready).to.be.true;
+            expect((current as LargeFile).finalHash).to.eq(
+                "concurrent-ready-replacement"
+            );
+        });
+
+        it("preserves a concurrent replacement when ready-manifest put rejects", async () => {
+            const filestore = await peer.open(new Files());
+            const bytes = new Uint8Array(5_000_001);
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let replacementHead: string | undefined;
+            let injected = false;
+
+            (filestore.files as any).put = async (
+                value: AbstractFile,
+                ...args: any[]
+            ) => {
+                const result = await (originalPut as any)(value, ...args);
+                if (isLargeFileLike(value) && value.ready && !injected) {
+                    injected = true;
+                    const replacement = new LargeFileWithChunkHeads({
+                        id: value.id,
+                        name: "newer ready replacement",
+                        size: value.size,
+                        chunkCount: value.chunkCount,
+                        ready: true,
+                        finalHash: "newer-ready-hash",
+                        chunkEntryHeads: [],
+                    });
+                    replacementHead = (await originalPut(replacement)).entry
+                        .hash;
+                    throw new Error("ready put lost to replacement");
+                }
+                return result;
+            };
+
+            try {
+                await expect(
+                    filestore.add("ready replacement race", bytes)
+                ).rejects.toThrow("ready put lost to replacement");
+            } finally {
+                (filestore.files as any).put = originalPut;
+            }
+
+            const uploadId = filestore.lastUploadDiagnostics!.uploadId;
+            const current = await filestore.files.index.get(uploadId, {
+                local: true,
+                remote: false,
+            });
+            expect((current as any)?.__context?.head).to.eq(replacementHead);
+            expect((current as LargeFile).name).to.eq(
+                "newer ready replacement"
+            );
+            expect((current as LargeFile).finalHash).to.eq("newer-ready-hash");
+        });
+
         it("streams downloaded files chunk by chunk", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
@@ -376,7 +1424,7 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("pins persisted large-file chunk reads before streaming starts", async () => {
+        it("pins persisted large-file range metadata before scanning chunks", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
@@ -384,22 +1432,231 @@ describe("index", () => {
                 largeFile
             );
             const file = (await filestore.files.index.get(fileId)) as LargeFile;
-            const retainedChunks = new Set<string>();
-            const retainChunkRead = filestore.retainChunkRead.bind(filestore);
-            let firstWriteRetainedCount: number | undefined;
+            const retainedChunkCounts = (filestore as any)
+                .retainedLargeFileChunkCounts as Map<string, number>;
+            retainedChunkCounts.clear();
+            const countLocalChunks = filestore.countLocalChunks.bind(filestore);
+            let rangePinnedBeforeChunkScan = false;
 
-            (filestore as any).retainChunkRead = (chunkId: string) => {
-                retainedChunks.add(chunkId);
-                return retainChunkRead(chunkId);
+            (filestore as any).countLocalChunks = (candidate: LargeFile) => {
+                rangePinnedBeforeChunkScan =
+                    retainedChunkCounts.get(candidate.id) ===
+                    candidate.chunkCount;
+                return countLocalChunks(candidate);
             };
 
-            await file.writeFile(filestore, {
-                write: async () => {
-                    firstWriteRetainedCount ??= retainedChunks.size;
-                },
+            try {
+                await file.writeFile(filestore, {
+                    write: async () => {},
+                });
+            } finally {
+                (filestore as any).countLocalChunks = countLocalChunks;
+            }
+
+            expect(rangePinnedBeforeChunkScan).to.be.true;
+            expect(retainedChunkCounts.get(file.id)).to.eq(file.chunkCount);
+        });
+
+        it("cancels outstanding read-ahead and releases listeners when a stream closes early", async () => {
+            const filestore = await peer.open(new Files());
+            const largeFile = crypto.randomBytes(20 * 1e6) as Uint8Array;
+            const fileId = await filestore.add(
+                "cancelled streamed download",
+                largeFile
+            );
+            const file = (await filestore.files.index.get(fileId)) as LargeFile;
+            const originalGet = filestore.files.index.get.bind(
+                filestore.files.index
+            );
+            const originalSearch = filestore.files.index.search.bind(
+                filestore.files.index
+            );
+            let delayedChunkGets = 0;
+            let highestRequestedChunkIndex = -1;
+            let pendingBatchSignal: AbortSignal | undefined;
+            let pendingBatchAborted = false;
+            let markPendingBatchStarted!: () => void;
+            const pendingBatchStarted = new Promise<void>((resolve) => {
+                markPendingBatchStarted = resolve;
             });
 
-            expect(firstWriteRetainedCount).to.eq(file.chunkCount);
+            (filestore.files.index as any).get = async (
+                id: string,
+                options: unknown
+            ) => {
+                if (id.startsWith(`${fileId}:`)) {
+                    highestRequestedChunkIndex = Math.max(
+                        highestRequestedChunkIndex,
+                        Number(id.slice(fileId.length + 1))
+                    );
+                }
+                if (id.startsWith(`${fileId}:`) && id !== `${fileId}:0`) {
+                    delayedChunkGets += 1;
+                    await delay(300);
+                }
+                return originalGet(id as never, options as never);
+            };
+            (filestore.files.index as any).search = async (
+                request: any,
+                options: any
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const idQueries = queries.find((query: any) =>
+                    Array.isArray(query?.or)
+                )?.or;
+                const indices = Array.isArray(idQueries)
+                    ? idQueries
+                          .map((query: any) => getQueryValue(query))
+                          .filter(
+                              (id: unknown): id is string =>
+                                  typeof id === "string"
+                          )
+                          .map((id: string) =>
+                              Number(id.slice(fileId.length + 1))
+                          )
+                    : [];
+                if (
+                    options.remote === false &&
+                    indices.some((index: number) => index >= 2)
+                ) {
+                    pendingBatchSignal = options.signal;
+                    markPendingBatchStarted();
+                    return new Promise((_, reject) => {
+                        const abort = () => {
+                            pendingBatchAborted = true;
+                            reject(
+                                pendingBatchSignal?.reason ??
+                                    new Error("batch search aborted")
+                            );
+                        };
+                        if (pendingBatchSignal?.aborted) {
+                            abort();
+                        } else {
+                            pendingBatchSignal?.addEventListener(
+                                "abort",
+                                abort,
+                                { once: true }
+                            );
+                        }
+                    });
+                }
+                return originalSearch(request as never, options as never);
+            };
+
+            const stream = file.streamFile(filestore)[Symbol.asyncIterator]();
+            try {
+                const first = await stream.next();
+                expect(first.done).to.be.false;
+                const second = await stream.next();
+                expect(second.done).to.be.false;
+                expect(
+                    (filestore as any).activeFileChangeSignals.size
+                ).to.be.greaterThan(0);
+                await Promise.race([
+                    pendingBatchStarted,
+                    delay(1_000).then(() => {
+                        throw new Error("read-ahead batch did not start");
+                    }),
+                ]);
+
+                const returnStartedAt = Date.now();
+                await stream.return?.();
+                expect(Date.now() - returnStartedAt).to.be.lessThan(500);
+                expect(pendingBatchSignal).to.be.instanceOf(AbortSignal);
+                expect(pendingBatchSignal?.aborted).to.be.true;
+                expect(pendingBatchAborted).to.be.true;
+                expect((filestore as any).activeFileChangeSignals.size).to.eq(
+                    0
+                );
+
+                const callsAfterReturn = delayedChunkGets;
+                await delay(350);
+                expect(delayedChunkGets).to.eq(callsAfterReturn);
+                expect(file.chunkCount).to.be.greaterThan(33);
+                expect(highestRequestedChunkIndex).to.be.lessThanOrEqual(32);
+                expect((filestore as any).activeFileChangeSignals.size).to.eq(
+                    0
+                );
+            } finally {
+                await stream.return?.();
+                (filestore.files.index as any).get = originalGet;
+                (filestore.files.index as any).search = originalSearch;
+            }
+        });
+
+        it("cancels a bulk chunk fetch when the Files program closes", async () => {
+            const filestore = await peer.open(new Files());
+            const file = new LargeFile({
+                id: "closing-bulk-fetch",
+                name: "closing-bulk-fetch.bin",
+                size: 1n,
+                chunkCount: 1,
+                ready: true,
+            });
+            let markStarted!: () => void;
+            const started = new Promise<void>((resolve) => {
+                markStarted = resolve;
+            });
+            let releaseLookup!: () => void;
+            const lookupGate = new Promise<void>((resolve) => {
+                releaseLookup = resolve;
+            });
+            (filestore as any).getReadPeerHints = async () => {
+                markStarted();
+                await lookupGate;
+                return undefined;
+            };
+
+            const result = file
+                .fetchChunks(filestore, { timeout: 10_000 })
+                .then(
+                    () => undefined,
+                    (error) => error as Error
+                );
+            await started;
+            await filestore.close();
+            releaseLookup();
+
+            expect((await result)?.message).to.eq("File read cancelled");
+            expect((filestore as any).activeFileChangeSignals.size).to.eq(0);
+        });
+
+        it("cancels a pending-manifest wait when the Files program drops", async () => {
+            const filestore = await peer.open(new Files());
+            const file = new LargeFile({
+                id: "dropping-ready-wait",
+                name: "dropping-ready-wait.bin",
+                size: 1n,
+                chunkCount: 1,
+                ready: false,
+            });
+            let markStarted!: () => void;
+            const started = new Promise<void>((resolve) => {
+                markStarted = resolve;
+            });
+            let releaseLookup!: () => void;
+            const lookupGate = new Promise<void>((resolve) => {
+                releaseLookup = resolve;
+            });
+            (filestore as any).getReadPeerHints = async () => {
+                markStarted();
+                await lookupGate;
+                return undefined;
+            };
+
+            const stream = file.streamFile(filestore)[Symbol.asyncIterator]();
+            const result = stream.next().then(
+                () => undefined,
+                (error) => error as Error
+            );
+            await started;
+            await filestore.drop();
+            releaseLookup();
+
+            expect((await result)?.message).to.eq("File read cancelled");
+            expect((filestore as any).activeFileChangeSignals.size).to.eq(0);
         });
 
         it("records diagnostics for chunked uploads", async () => {
@@ -423,6 +1680,12 @@ describe("index", () => {
                 filestore.lastUploadDiagnostics?.chunkCount
             );
             expect(
+                filestore.lastUploadDiagnostics?.maxConcurrentChunkPuts
+            ).to.be.within(1, 4);
+            expect(
+                filestore.lastUploadDiagnostics?.maxConcurrentChunkPutBytes
+            ).to.be.lessThanOrEqual(2 * 1024 * 1024);
+            expect(
                 filestore.lastUploadDiagnostics?.manifestFinishedAt
             ).to.not.eq(null);
             expect(
@@ -432,7 +1695,317 @@ describe("index", () => {
             expect(filestore.lastUploadDiagnostics?.failureMessage).to.eq(null);
         });
 
-        it("pipelines persisted chunk reads without using parentId searches", async () => {
+        it("copies reusable source buffers for tiny files", async () => {
+            const filestore = await peer.open(new Files());
+            const expected = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+            const fileId = await filestore.addSource("reused tiny source", {
+                size: BigInt(expected.byteLength),
+                readChunks: async function* () {
+                    const reusable = new Uint8Array(4);
+                    reusable.set(expected.subarray(0, 4));
+                    yield reusable;
+                    reusable.set(expected.subarray(4));
+                    yield reusable;
+                },
+            });
+
+            const file = await filestore.files.index.get(fileId, {
+                local: true,
+                remote: false,
+            });
+            expect(file).to.be.instanceOf(TinyFile);
+            expect(
+                equals(
+                    await file!.getFile(filestore, { as: "joined" }),
+                    expected
+                )
+            ).to.be.true;
+        });
+
+        it("cleans a pending manifest when source iterator construction fails", async () => {
+            const filestore = await peer.open(new Files());
+
+            await expect(
+                filestore.addSource("throwing source", {
+                    size: 6n * 1024n * 1024n,
+                    readChunks: () => {
+                        throw new Error("iterator construction failed");
+                    },
+                })
+            ).rejects.toThrow("iterator construction failed");
+
+            const diagnostics = filestore.lastUploadDiagnostics!;
+            expect(diagnostics.failureMessage).to.eq(
+                "iterator construction failed"
+            );
+            expect(
+                await filestore.files.index.get(diagnostics.uploadId, {
+                    local: true,
+                    remote: false,
+                })
+            ).to.be.undefined;
+        });
+
+        it("preserves a failed upload when its pending-root deletion does not commit", async () => {
+            const filestore = await peer.open(new Files());
+            const originalDelete = filestore.files.del.bind(filestore.files);
+            let deleteCalls = 0;
+            (filestore.files as any).del = async () => {
+                deleteCalls += 1;
+                throw new Error("pending root delete failed");
+            };
+
+            try {
+                await expect(
+                    filestore.addSource("preserved throwing source", {
+                        size: 6n * 1024n * 1024n,
+                        readChunks: () => {
+                            throw new Error("iterator construction failed");
+                        },
+                    })
+                ).rejects.toThrow("iterator construction failed");
+            } finally {
+                (filestore.files as any).del = originalDelete;
+            }
+
+            const diagnostics = filestore.lastUploadDiagnostics!;
+            expect(deleteCalls).to.eq(1);
+            expect(
+                await filestore.files.index.get(diagnostics.uploadId, {
+                    local: true,
+                    remote: false,
+                })
+            ).to.not.be.undefined;
+            expect(
+                (filestore as any).retainedLargeFileChunkCounts.get(
+                    diagnostics.uploadId
+                )
+            ).to.eq(diagnostics.chunkCount);
+            expect(
+                (filestore as any).retainedEntryHeadsByFileId.has(
+                    diagnostics.uploadId
+                )
+            ).to.be.true;
+
+            await originalDelete(diagnostics.uploadId);
+            filestore.releaseFileRetention(diagnostics.uploadId);
+        });
+
+        it("bounds concurrent chunk puts while preserving manifest order and integrity", async () => {
+            const filestore = await peer.open(new Files());
+            const bytes = crypto.randomBytes(8 * 1e6) as Uint8Array;
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let activePuts = 0;
+            let activeBytes = 0;
+            let maxActivePuts = 0;
+            let maxActiveBytes = 0;
+            let readyManifestAfterDrain = false;
+            const completedIndices = new Set<number>();
+            const readIndices: number[] = [];
+            const progress: number[] = [];
+
+            (filestore.files as any).put = async (
+                value: any,
+                ...args: any[]
+            ) => {
+                if (value instanceof TinyFile && value.parentId != null) {
+                    activePuts += 1;
+                    activeBytes += value.file.byteLength;
+                    maxActivePuts = Math.max(maxActivePuts, activePuts);
+                    maxActiveBytes = Math.max(maxActiveBytes, activeBytes);
+                    try {
+                        await delay(10 + ((3 - (value.index! % 4)) % 4) * 10);
+                        const result = await (originalPut as any)(
+                            value,
+                            ...args
+                        );
+                        completedIndices.add(value.index!);
+                        return result;
+                    } finally {
+                        activePuts -= 1;
+                        activeBytes -= value.file.byteLength;
+                    }
+                }
+                if (isLargeFileLike(value) && value.ready) {
+                    readyManifestAfterDrain =
+                        activePuts === 0 && completedIndices.size > 0;
+                }
+                return (originalPut as any)(value, ...args);
+            };
+
+            let fileId: string;
+            try {
+                fileId = await filestore.addSource(
+                    "concurrent source upload",
+                    {
+                        size: BigInt(bytes.byteLength),
+                        readChunks: async function* (chunkSize: number) {
+                            const reusable = new Uint8Array(chunkSize);
+                            let index = 0;
+                            for (
+                                let offset = 0;
+                                offset < bytes.byteLength;
+                                offset += chunkSize
+                            ) {
+                                readIndices.push(index++);
+                                const end = Math.min(
+                                    offset + chunkSize,
+                                    bytes.byteLength
+                                );
+                                reusable.set(bytes.subarray(offset, end), 0);
+                                yield reusable.subarray(0, end - offset);
+                            }
+                        },
+                    },
+                    undefined,
+                    (value) => progress.push(value)
+                );
+            } finally {
+                (filestore.files as any).put = originalPut;
+            }
+
+            const diagnostics = filestore.lastUploadDiagnostics!;
+            expect(maxActivePuts).to.eq(4);
+            expect(maxActivePuts).to.be.lessThanOrEqual(
+                diagnostics.chunkPutConcurrencyLimit
+            );
+            expect(maxActiveBytes).to.be.lessThanOrEqual(
+                diagnostics.chunkPutByteLimit
+            );
+            expect(diagnostics.maxConcurrentChunkPuts).to.eq(maxActivePuts);
+            expect(diagnostics.maxConcurrentChunkPutBytes).to.eq(
+                maxActiveBytes
+            );
+            expect(readyManifestAfterDrain).to.be.true;
+            expect(readIndices).to.deep.eq([
+                ...Array(diagnostics.chunkCount).keys(),
+            ]);
+            expect(
+                progress.every(
+                    (value, index) =>
+                        index === 0 || value >= progress[index - 1]
+                )
+            ).to.be.true;
+            expect(progress.at(-1)).to.eq(1);
+
+            const readyFile = await filestore.files.index.get(fileId!, {
+                local: true,
+                remote: false,
+            });
+            expect(isLargeFileLike(readyFile)).to.be.true;
+            const heads = (readyFile as LargeFileWithChunkHeads)
+                .chunkEntryHeads;
+            expect(heads).to.have.length(diagnostics.chunkCount);
+            for (let index = 0; index < diagnostics.chunkCount; index++) {
+                const chunk = await filestore.files.index.get(
+                    `${fileId!}:${index}`,
+                    { local: true, remote: false }
+                );
+                expect((chunk as any).__context.head).to.eq(heads[index]);
+            }
+            const roundTrip = await readyFile!.getFile(filestore, {
+                as: "joined",
+            });
+            expect(equals(roundTrip, bytes)).to.be.true;
+        });
+
+        it("settles concurrent workers and cleans up after a chunk put fails", async () => {
+            const filestore = await peer.open(new Files());
+            const bytes = crypto.randomBytes(8 * 1e6) as Uint8Array;
+            const originalPut = filestore.files.put.bind(filestore.files);
+            const originalDelete = filestore.files.del.bind(filestore.files);
+            let activePuts = 0;
+            let maxActivePuts = 0;
+            let readyManifestWritten = false;
+            const deletedIds: string[] = [];
+
+            (filestore.files as any).put = async (
+                value: any,
+                ...args: any[]
+            ) => {
+                if (value instanceof TinyFile && value.parentId != null) {
+                    activePuts += 1;
+                    maxActivePuts = Math.max(maxActivePuts, activePuts);
+                    try {
+                        await delay(value.index === 2 ? 10 : 40);
+                        if (value.index === 2) {
+                            throw new Error("injected chunk put failure");
+                        }
+                        return (originalPut as any)(value, ...args);
+                    } finally {
+                        activePuts -= 1;
+                    }
+                }
+                if (isLargeFileLike(value) && value.ready) {
+                    readyManifestWritten = true;
+                }
+                return (originalPut as any)(value, ...args);
+            };
+            (filestore.files as any).del = async (id: string) => {
+                deletedIds.push(id);
+                return originalDelete(id);
+            };
+
+            try {
+                await expect(
+                    filestore.addSource("failing concurrent upload", {
+                        size: BigInt(bytes.byteLength),
+                        readChunks: async function* (chunkSize: number) {
+                            for (
+                                let offset = 0;
+                                offset < bytes.byteLength;
+                                offset += chunkSize
+                            ) {
+                                yield bytes.subarray(
+                                    offset,
+                                    Math.min(
+                                        offset + chunkSize,
+                                        bytes.byteLength
+                                    )
+                                );
+                            }
+                        },
+                    })
+                ).rejects.toThrow("injected chunk put failure");
+            } finally {
+                (filestore.files as any).put = originalPut;
+                (filestore.files as any).del = originalDelete;
+            }
+
+            const diagnostics = filestore.lastUploadDiagnostics!;
+            expect(maxActivePuts).to.be.greaterThan(1);
+            expect(maxActivePuts).to.be.lessThanOrEqual(4);
+            expect(activePuts).to.eq(0);
+            expect(readyManifestWritten).to.be.false;
+            expect(diagnostics.readyManifestStartedAt).to.eq(null);
+            expect(diagnostics.failureMessage).to.eq(
+                "injected chunk put failure"
+            );
+            expect(deletedIds[0]).to.eq(diagnostics.uploadId);
+            expect(
+                deletedIds
+                    .slice(1)
+                    .every((id) => id.startsWith(`${diagnostics.uploadId}:`))
+            ).to.be.true;
+            expect(
+                await filestore.countLocalChunks({
+                    id: diagnostics.uploadId,
+                } as any)
+            ).to.eq(0);
+            expect(
+                await filestore.files.index.get(diagnostics.uploadId, {
+                    local: true,
+                    remote: false,
+                })
+            ).to.be.undefined;
+            expect(
+                [...((filestore as any).retainedChunkIds as Set<string>)].some(
+                    (id) => id.startsWith(`${diagnostics.uploadId}:`)
+                )
+            ).to.be.false;
+        });
+
+        it("pipelines persisted remote reads with bounded per-index lookups", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
@@ -464,6 +2037,7 @@ describe("index", () => {
             let sawChunkWaitFor = false;
             let indexedChunkGets = 0;
             let resolvedRemoteChunkGets = 0;
+            const batchReplicateValues: boolean[] = [];
             const resolvedChunks = new Set<string>();
             const retainedChunkId = `${fileId}:1`;
             const retainedWriterChunk = await filestore.files.index.get(
@@ -485,6 +2059,13 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const remote = (options as any)?.remote;
+                    if (remote === false) {
+                        return [];
+                    }
+                    batchReplicateValues.push(remote.replicate);
+                }
                 const isBulkChunkLookup = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -575,25 +2156,52 @@ describe("index", () => {
             }
 
             expect(parentIdSearches).to.eq(0);
-            expect(directChunkGets).to.be.greaterThan(1);
-            expect(maxInflightChunkGets).to.be.greaterThan(1);
-            const readAhead = filestoreReader.lastReadDiagnostics?.readAhead;
-            expect(readAhead).to.eq(2);
+            expect(directChunkGets).to.be.greaterThan(0);
+            expect(maxInflightChunkGets).to.be.greaterThan(0);
+            const readDiagnostics = filestoreReader.lastReadDiagnostics!;
+            const readAhead = readDiagnostics.readAhead;
+            expect(readDiagnostics.readAheadInitial).to.eq(2);
+            expect(readAhead).to.be.lessThanOrEqual(
+                readDiagnostics.readAheadLimit
+            );
+            expect(readDiagnostics.readAheadPeak).to.be.lessThanOrEqual(
+                readDiagnostics.readAheadLimit
+            );
+            expect(readDiagnostics.readAheadLimit).to.be.lessThanOrEqual(8);
             expect(readAhead).to.be.lessThanOrEqual(file!.chunkCount);
-            expect(filestoreReader.lastReadDiagnostics?.readAheadSource).to.eq(
-                "persisted-remote"
+            expect(readDiagnostics.readAheadSource).to.eq(
+                "persisted-remote-adaptive"
             );
             expect(
                 filestoreReader.lastReadDiagnostics?.initialLocalChunkCount
             ).to.be.lessThan(file!.chunkCount);
+            expect(readDiagnostics.chunkBatchQueryCount).to.eq(0);
+            expect(readDiagnostics.chunkBatchResultCount).to.eq(0);
             expect(
-                filestoreReader.lastReadDiagnostics?.chunkAttemptTimeoutMs
-            ).to.eq(5_000);
+                readDiagnostics.chunkPersistedRemoteBatchSkipCount
+            ).to.be.greaterThan(0);
+            expect(
+                readDiagnostics.chunkPersistedRemoteBatchSkippedIndexCount
+            ).to.eq(file!.chunkCount);
+            expect(readDiagnostics.maxRemoteChunkBatchSize).to.eq(0);
+            expect(readDiagnostics.maxConcurrentRemoteChunkBatches).to.eq(0);
+            expect(maxInflightChunkGets).to.be.lessThanOrEqual(
+                readDiagnostics.readAheadLimit
+            );
+            expect(readDiagnostics.chunkBatchResolverFallbackCount).to.eq(0);
+            expect(batchReplicateValues).to.have.length(0);
+            expect(readDiagnostics.peakKnownChunkCount).to.be.lessThanOrEqual(
+                readDiagnostics.readAheadPeak * 2
+            );
+            expect(readDiagnostics.finalKnownChunkCount).to.eq(0);
             expect(sawChunkWaitFor).to.be.false;
             expect(indexedChunkGets).to.eq(0);
-            expect(resolvedRemoteChunkGets).to.be.greaterThan(1);
-            expect(retainedBeforeIndexedReplication).to.be.true;
-            expect(maxInflightChunkGets).to.be.lessThanOrEqual(readAhead);
+            expect(resolvedRemoteChunkGets).to.be.greaterThan(0);
+            expect(
+                await (filestoreReader.files.log as any).keep(
+                    retainedWriterEntry
+                )
+            ).to.be.true;
             expect(
                 Object.keys(
                     filestoreReader.lastReadDiagnostics
@@ -608,6 +2216,643 @@ describe("index", () => {
             ).to.eq(streamedChunks.length);
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
+        });
+
+        it("retries partial hinted chunk batches once without a peer hint", async () => {
+            const writer = await peer.open(new Files());
+            const bytes = crypto.randomBytes(8 * 1e6) as Uint8Array;
+            const fileId = await writer.add("partial hinted batch", bytes);
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+            const file = await reader.files.index.get(fileId);
+            expect(isLargeFileLike(file)).to.be.true;
+
+            const writerChunks = new Map<string, TinyFile>();
+            for (let index = 0; index < file!.chunkCount; index++) {
+                const chunk = await writer.files.index.get(
+                    `${fileId}:${index}`,
+                    {
+                        local: true,
+                        remote: false,
+                    }
+                );
+                writerChunks.set(chunk!.id, chunk as TinyFile);
+            }
+            const originalSearch = reader.files.index.search.bind(
+                reader.files.index
+            );
+            const originalHints = reader.getReadPeerHints.bind(reader);
+            let hintedBatches = 0;
+            let unhintedFallbacks = 0;
+            const replicateValues: boolean[] = [];
+            (reader as any).getReadPeerHints = async () => ["hinted-writer"];
+            (reader.files.index as any).search = async (
+                request: any,
+                options: any
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const idQueries = queries.find((query: any) =>
+                    Array.isArray(query?.or)
+                )?.or;
+                if (
+                    Array.isArray(idQueries) &&
+                    idQueries.every((query: any) => getQueryKey(query) === "id")
+                ) {
+                    const ids = idQueries.map((query: any) =>
+                        getQueryValue(query)
+                    );
+                    if (options.remote === false) {
+                        return [];
+                    }
+                    replicateValues.push(options.remote.replicate);
+                    if (options.remote.from) {
+                        hintedBatches += 1;
+                        await delay(30);
+                        return [writerChunks.get(ids[0])];
+                    }
+                    unhintedFallbacks += 1;
+                    return ids.map((id: string) => writerChunks.get(id));
+                }
+                return originalSearch(request as never, options as never);
+            };
+
+            let roundTrip: Uint8Array;
+            try {
+                roundTrip = await file!.getFile(reader, { as: "joined" });
+            } finally {
+                (reader.files.index as any).search = originalSearch;
+                (reader as any).getReadPeerHints = originalHints;
+            }
+
+            expect(equals(roundTrip!, bytes)).to.be.true;
+            expect(hintedBatches).to.be.greaterThan(0);
+            expect(unhintedFallbacks).to.eq(hintedBatches);
+            expect(replicateValues.every((value) => value === false)).to.be
+                .true;
+            expect(reader.lastReadDiagnostics?.chunkBatchFallbackCount).to.eq(
+                hintedBatches
+            );
+            expect(
+                reader.lastReadDiagnostics?.chunkBatchResolverFallbackCount
+            ).to.eq(0);
+            expect(reader.lastReadDiagnostics?.readAheadSource).to.eq(
+                "observer-adaptive"
+            );
+            expect(reader.lastReadDiagnostics?.readAheadPeak).to.be.greaterThan(
+                2
+            );
+            expect(
+                reader.lastReadDiagnostics?.peakKnownChunkCount
+            ).to.be.lessThanOrEqual(
+                reader.lastReadDiagnostics!.readAheadPeak * 2
+            );
+            expect(reader.lastReadDiagnostics?.finalKnownChunkCount).to.eq(0);
+            expect((reader as any).retainedChunkIds?.size ?? 0).to.eq(0);
+            expect((reader as any).retainedChunkEntryHeads?.size ?? 0).to.eq(0);
+            expect((reader as any).retainedEntryHeadsByFileId?.size ?? 0).to.eq(
+                0
+            );
+        });
+
+        it("falls back to indexed fields for legacy non-deterministic chunk ids", async () => {
+            const writer = await peer.open(new Files());
+            const fileId = "legacy-chunk-root";
+            const fileName = "legacy-chunk-root.bin";
+            const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4])];
+            for (const [index, bytes] of chunks.entries()) {
+                await writer.files.put(
+                    new TinyFile({
+                        id: `legacy-chunk-${index}`,
+                        name: `${fileName}/${index}`,
+                        file: bytes,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+            }
+            await writer.files.put(
+                new LargeFile({
+                    id: fileId,
+                    name: fileName,
+                    size: 4n,
+                    chunkCount: chunks.length,
+                    ready: true,
+                    finalHash: sha256Base64Sync(concat(chunks)),
+                })
+            );
+
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+            const file = await reader.resolveById(fileId, {
+                timeout: 10_000,
+                replicate: false,
+            });
+            expect(isLargeFileLike(file)).to.be.true;
+            const roundTrip = await file!.getFile(reader, { as: "joined" });
+
+            expect(equals(roundTrip, concat(chunks))).to.be.true;
+            expect(
+                reader.lastReadDiagnostics?.chunkBatchResolverFallbackCount
+            ).to.eq(chunks.length);
+            expect(reader.lastReadDiagnostics?.chunkResolved?.[0]).to.eq(
+                "indexed-search"
+            );
+            expect(reader.lastReadDiagnostics?.chunkResolved?.[1]).to.eq(
+                "indexed-search"
+            );
+        });
+
+        it("retries stale hints for persisted legacy chunks and rereads them offline", async () => {
+            const writer = await peer.open(new Files());
+            const fileId = "persisted-legacy-chunk-root";
+            const fileName = "persisted-legacy-chunk-root.bin";
+            const chunks = [
+                new Uint8Array([1, 2, 3]),
+                new Uint8Array([4, 5, 6]),
+            ];
+            for (const [index, bytes] of chunks.entries()) {
+                await writer.files.put(
+                    new TinyFile({
+                        id: `persisted-legacy-chunk-${index}`,
+                        name: `${fileName}/${index}`,
+                        file: bytes,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+            }
+            await writer.files.put(
+                new LargeFile({
+                    id: fileId,
+                    name: fileName,
+                    size: 6n,
+                    chunkCount: chunks.length,
+                    ready: true,
+                    finalHash: sha256Base64Sync(concat(chunks)),
+                })
+            );
+
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            // Exercise persisted reads without background full-log replication.
+            reader.persistChunkReads = true;
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+            const file = await reader.resolveById(fileId, {
+                timeout: 10_000,
+                replicate: true,
+            });
+            expect(isLargeFileLike(file)).to.be.true;
+
+            const originalSearch = reader.files.index.search.bind(
+                reader.files.index
+            );
+            const originalHints = reader.getReadPeerHints.bind(reader);
+            let hintedFieldSearches = 0;
+            let unhintedPersistedFieldSearches = 0;
+            (reader as any).getReadPeerHints = async () => ["stale-peer"];
+            (reader.files.index as any).search = async (
+                request: any,
+                options: any
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const isChunkFieldSearch =
+                    queries.some(
+                        (query: any) => getQueryKey(query) === "parentId"
+                    ) &&
+                    queries.some((query: any) => getQueryKey(query) === "name");
+                if (options.remote?.from) {
+                    if (isChunkFieldSearch) {
+                        hintedFieldSearches += 1;
+                    }
+                    return [];
+                }
+                if (isChunkFieldSearch && options.remote?.replicate === true) {
+                    unhintedPersistedFieldSearches += 1;
+                }
+                return originalSearch(request as never, options as never);
+            };
+
+            let firstRead: Uint8Array;
+            try {
+                firstRead = await file!.getFile(reader, { as: "joined" });
+            } finally {
+                (reader.files.index as any).search = originalSearch;
+                (reader as any).getReadPeerHints = originalHints;
+            }
+
+            expect(equals(firstRead!, concat(chunks))).to.be.true;
+            expect(hintedFieldSearches).to.be.greaterThan(0);
+            expect(unhintedPersistedFieldSearches).to.eq(chunks.length);
+            expect(reader.lastReadDiagnostics?.chunkResolved?.[0]).to.eq(
+                "unhinted-persisted-indexed-search"
+            );
+            expect(reader.lastReadDiagnostics?.chunkResolved?.[1]).to.eq(
+                "unhinted-persisted-indexed-search"
+            );
+
+            await writer.close();
+            (reader as any).getReadPeerHints = async () => undefined;
+            let offlineRead: Uint8Array;
+            const offlineReadStartedAt = Date.now();
+            try {
+                offlineRead = await file!.getFile(reader, {
+                    as: "joined",
+                    timeout: 5_000,
+                });
+            } finally {
+                (reader as any).getReadPeerHints = originalHints;
+            }
+            expect(Date.now() - offlineReadStartedAt).to.be.lessThan(2_000);
+            expect(equals(offlineRead, concat(chunks))).to.be.true;
+            expect(
+                reader.lastReadDiagnostics?.chunkLocalIndexedBatchResultCount
+            ).to.eq(chunks.length);
+            expect(reader.lastReadDiagnostics?.readAheadSource).to.eq(
+                "persisted-local"
+            );
+        });
+
+        it("persists batched manifest-head reads for an offline local reread", async () => {
+            const writer = await peer.open(new Files());
+            const fileId = "persisted-manifest-head-batch";
+            const fileName = "persisted-manifest-head-batch.bin";
+            const chunks = [
+                new Uint8Array([1, 2]),
+                new Uint8Array([3, 4]),
+                new Uint8Array([5, 6]),
+            ];
+            const chunkEntryHeads: string[] = [];
+            for (const [index, bytes] of chunks.entries()) {
+                const result = await writer.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: bytes,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = result.entry.hash;
+            }
+            const expected = concat(chunks);
+            const manifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: true,
+                finalHash: sha256Base64Sync(expected),
+                chunkEntryHeads,
+            });
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            reader.persistChunkReads = true;
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+
+            const originalGetMany = reader.files.log.log.getMany.bind(
+                reader.files.log.log
+            );
+            const originalIndexGet = reader.files.index.get.bind(
+                reader.files.index
+            );
+            const originalHints = reader.getReadPeerHints.bind(reader);
+            const batchCalls: Array<{ heads: string[]; options: any }> = [];
+            let perIndexChunkGets = 0;
+            (reader.files.log.log as any).getMany = async (
+                heads: string[],
+                options: any
+            ) => {
+                batchCalls.push({ heads: [...heads], options });
+                return originalGetMany(heads, options);
+            };
+            (reader.files.index as any).get = async (
+                id: unknown,
+                options: unknown
+            ) => {
+                if (typeof id === "string" && id.startsWith(`${fileId}:`)) {
+                    perIndexChunkGets += 1;
+                }
+                return originalIndexGet(id as never, options as never);
+            };
+
+            try {
+                expect(await reader.countLocalChunks(manifest)).to.eq(0);
+                expect(await reader.countLocalChunkBlocks(manifest)).to.eq(0);
+                const firstRead = await manifest.getFile(reader, {
+                    as: "joined",
+                    timeout: 10_000,
+                });
+                expect(equals(firstRead, expected)).to.be.true;
+                expect(
+                    reader.lastReadDiagnostics?.initialLocalChunkBlockCount
+                ).to.eq(0);
+                // Demand persistence stores exact entry blocks without joining
+                // the observer into Documents/index replication.
+                expect(await reader.countLocalChunks(manifest)).to.eq(0);
+                expect(await reader.countLocalChunkBlocks(manifest)).to.eq(
+                    chunks.length
+                );
+                expect(perIndexChunkGets).to.eq(0);
+                expect(
+                    batchCalls.filter((call) => call.options.remote === false)
+                        .length
+                ).to.be.greaterThan(0);
+                const remoteCalls = batchCalls.filter(
+                    (call) =>
+                        call.options.remote && call.options.remote !== false
+                );
+                expect(remoteCalls.length).to.be.greaterThan(0);
+                expect(
+                    remoteCalls.every(
+                        (call) =>
+                            call.heads.length <= 8 &&
+                            call.options.remote.replicate === true &&
+                            call.options.remote.timeout === 1_500 &&
+                            call.options.remote.signal instanceof AbortSignal
+                    )
+                ).to.be.true;
+                expect(
+                    chunkEntryHeads.every((head) =>
+                        (reader as any).retainedChunkEntryHeads.has(head)
+                    )
+                ).to.be.true;
+                expect(
+                    chunks.every((_, index) =>
+                        (reader as any).retainedChunkIds.has(
+                            `${fileId}:${index}`
+                        )
+                    )
+                ).to.be.true;
+
+                await writer.close();
+                (reader.files.log.log.entryIndex as any).cache.clear();
+                (reader as any).getReadPeerHints = async () => undefined;
+                batchCalls.length = 0;
+                const offlineRead = await manifest.getFile(reader, {
+                    as: "joined",
+                    timeout: 2_000,
+                });
+
+                expect(equals(offlineRead, expected)).to.be.true;
+                expect(perIndexChunkGets).to.eq(0);
+                expect(batchCalls.length).to.be.greaterThan(0);
+                expect(
+                    batchCalls.every((call) => call.options.remote === false)
+                ).to.be.true;
+                expect(
+                    reader.lastReadDiagnostics
+                        ?.chunkManifestHeadRemoteBatchQueryCount
+                ).to.eq(0);
+                expect(
+                    reader.lastReadDiagnostics
+                        ?.chunkManifestHeadLocalBatchAcceptedCount
+                ).to.eq(chunks.length);
+                expect(
+                    reader.lastReadDiagnostics
+                        ?.chunkManifestHeadRemoteBatchAcceptedCount
+                ).to.eq(0);
+                expect(
+                    reader.lastReadDiagnostics?.chunkBatchResolverFallbackCount
+                ).to.eq(0);
+                expect(reader.lastReadDiagnostics?.finalKnownChunkCount).to.eq(
+                    0
+                );
+                expect(await reader.countLocalChunks(manifest)).to.eq(0);
+                expect(await reader.countLocalChunkBlocks(manifest)).to.eq(
+                    chunks.length
+                );
+            } finally {
+                (reader.files.log.log as any).getMany = originalGetMany;
+                (reader.files.index as any).get = originalIndexGet;
+                (reader as any).getReadPeerHints = originalHints;
+            }
+        });
+
+        it("batch reads a fully local persisted file without peer hints", async () => {
+            const files = await peer.open(new Files());
+            const bytes = crypto.randomBytes(8 * 1e6) as Uint8Array;
+            const fileId = await files.add("offline persisted batch", bytes);
+            const file = await files.files.index.get(fileId);
+            const originalSearch = files.files.index.search.bind(
+                files.files.index
+            );
+            const originalHints = files.getReadPeerHints.bind(files);
+            const replicateValues: boolean[] = [];
+            (files as any).getReadPeerHints = async () => undefined;
+            (files.files.index as any).search = async (
+                request: any,
+                options: any
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                if (
+                    options.remote !== false &&
+                    queries.some((query: any) => Array.isArray(query?.or))
+                ) {
+                    replicateValues.push(options.remote.replicate);
+                }
+                return originalSearch(request as never, options as never);
+            };
+
+            let roundTrip: Uint8Array;
+            try {
+                roundTrip = await file!.getFile(files, { as: "joined" });
+            } finally {
+                (files.files.index as any).search = originalSearch;
+                (files as any).getReadPeerHints = originalHints;
+            }
+
+            expect(equals(roundTrip!, bytes)).to.be.true;
+            expect(replicateValues).to.have.length(0);
+            expect(files.lastReadDiagnostics?.chunkBatchResultCount).to.eq(
+                file!.chunkCount
+            );
+            expect(files.lastReadDiagnostics?.readAheadSource).to.eq(
+                "persisted-local"
+            );
+            expect(
+                files.lastReadDiagnostics?.chunkBatchResolverFallbackCount
+            ).to.eq(0);
+            expect(files.lastReadDiagnostics?.finalKnownChunkCount).to.eq(0);
+        });
+
+        it("reclassifies stale local counts before bounded per-index reads", async () => {
+            const writer = await peer.open(new Files());
+            const bytes = crypto.randomBytes(20 * 1e6) as Uint8Array;
+            const fileId = await writer.add("stale local chunk count", bytes);
+            const reader = await peer2.open<Files>(writer.address);
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+            const file = await reader.files.index.get(fileId);
+            expect(isLargeFileLike(file)).to.be.true;
+            expect(file!.chunkCount).to.be.greaterThan(34);
+            stripChunkEntryHeads(file);
+
+            const writerChunks = new Map<string, TinyFile>();
+            await Promise.all(
+                Array.from({ length: file!.chunkCount }, async (_, index) => {
+                    const chunk = await writer.files.index.get(
+                        `${fileId}:${index}`,
+                        { local: true, remote: false }
+                    );
+                    writerChunks.set(chunk!.id, chunk as TinyFile);
+                })
+            );
+            const originalSearch = reader.files.index.search.bind(
+                reader.files.index
+            );
+            const originalGet = reader.files.index.get.bind(reader.files.index);
+            const originalCountLocalChunks =
+                reader.countLocalChunks.bind(reader);
+            let localBatchCalls = 0;
+            const remoteBatchSizes: number[] = [];
+            let activeRemoteBatches = 0;
+            let maxActiveRemoteBatches = 0;
+            let perIndexRemoteGets = 0;
+            let activePerIndexRemoteGets = 0;
+            let maxActivePerIndexRemoteGets = 0;
+            (reader as any).countLocalChunks = async (parent: LargeFile) =>
+                parent.id === fileId
+                    ? parent.chunkCount
+                    : originalCountLocalChunks(parent);
+            (reader.files.index as any).search = async (
+                request: any,
+                options: any
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                const idQueries = queries.find((query: any) =>
+                    Array.isArray(query?.or)
+                )?.or;
+                if (
+                    Array.isArray(idQueries) &&
+                    idQueries.every((query: any) => getQueryKey(query) === "id")
+                ) {
+                    const ids = idQueries.map((query: any) =>
+                        getQueryValue(query)
+                    );
+                    if (options.remote === false) {
+                        localBatchCalls += 1;
+                        if (localBatchCalls === 1) {
+                            return ids.map((id: string) =>
+                                writerChunks.get(id)
+                            );
+                        }
+                        if (localBatchCalls === 2) {
+                            // Simulate stale local rows/payloads after the
+                            // initial exact probe while still returning enough
+                            // objects to expose unbounded known-chunk caching.
+                            return ids
+                                .filter(
+                                    (_: string, index: number) => index !== 1
+                                )
+                                .map((id: string) => writerChunks.get(id));
+                        }
+                        return [];
+                    }
+                    remoteBatchSizes.push(ids.length);
+                    activeRemoteBatches += 1;
+                    maxActiveRemoteBatches = Math.max(
+                        maxActiveRemoteBatches,
+                        activeRemoteBatches
+                    );
+                    try {
+                        await delay(10);
+                        return ids.map((id: string) => writerChunks.get(id));
+                    } finally {
+                        activeRemoteBatches -= 1;
+                    }
+                }
+                return originalSearch(request as never, options as never);
+            };
+            (reader.files.index as any).get = async (
+                id: string,
+                options: any
+            ) => {
+                if (id.startsWith(`${fileId}:`)) {
+                    if (options.remote === false) {
+                        return undefined;
+                    }
+                    if (options.remote && options.remote !== false) {
+                        perIndexRemoteGets += 1;
+                        activePerIndexRemoteGets += 1;
+                        maxActivePerIndexRemoteGets = Math.max(
+                            maxActivePerIndexRemoteGets,
+                            activePerIndexRemoteGets
+                        );
+                        try {
+                            await delay(10);
+                            return writerChunks.get(id);
+                        } finally {
+                            activePerIndexRemoteGets -= 1;
+                        }
+                    }
+                }
+                return originalGet(id as never, options as never);
+            };
+
+            let roundTrip: Uint8Array;
+            try {
+                roundTrip = await file!.getFile(reader, { as: "joined" });
+            } finally {
+                (reader.files.index as any).search = originalSearch;
+                (reader.files.index as any).get = originalGet;
+                (reader as any).countLocalChunks = originalCountLocalChunks;
+            }
+
+            expect(equals(roundTrip!, bytes)).to.be.true;
+            // Initial verification plus the partial 32-id local window; after
+            // reclassification, persisted reads bypass batch prefetch entirely.
+            expect(localBatchCalls).to.eq(2);
+            expect(remoteBatchSizes).to.have.length(0);
+            expect(maxActiveRemoteBatches).to.eq(0);
+            expect(perIndexRemoteGets).to.be.greaterThan(0);
+            expect(maxActivePerIndexRemoteGets).to.be.greaterThan(0);
+            expect(reader.lastReadDiagnostics?.maxRemoteChunkBatchSize).to.eq(
+                0
+            );
+            expect(
+                reader.lastReadDiagnostics?.maxConcurrentRemoteChunkBatches
+            ).to.eq(0);
+            expect(
+                reader.lastReadDiagnostics
+                    ?.chunkBatchRemoteReclassificationCount
+            ).to.eq(1);
+            expect(reader.lastReadDiagnostics?.readAheadSource).to.eq(
+                "persisted-remote-adaptive"
+            );
+            expect(
+                reader.lastReadDiagnostics?.readAheadLimit
+            ).to.be.lessThanOrEqual(8);
+            expect(reader.lastReadDiagnostics?.readAhead).to.be.lessThanOrEqual(
+                8
+            );
+            expect(maxActivePerIndexRemoteGets).to.be.lessThanOrEqual(
+                reader.lastReadDiagnostics!.readAheadLimit
+            );
+            expect(
+                reader.lastReadDiagnostics?.chunkPersistedRemoteBatchSkipCount
+            ).to.be.greaterThan(0);
+            expect(
+                reader.lastReadDiagnostics?.chunkBatchResolverFallbackCount
+            ).to.eq(0);
+            expect(
+                reader.lastReadDiagnostics?.peakKnownChunkCount
+            ).to.be.lessThanOrEqual(
+                reader.lastReadDiagnostics!.readAheadLimit * 2
+            );
+            expect(reader.lastReadDiagnostics?.finalKnownChunkCount).to.eq(0);
         });
 
         it("bounds persisted chunk misses to exact lookups", async () => {
@@ -755,7 +3000,7 @@ describe("index", () => {
                     size: BigInt(512 * 1024 * 1024),
                     readChunks: async function* (chunkSize: number) {
                         observedChunkSize = chunkSize;
-                        yield new Uint8Array(0);
+                        yield new Uint8Array(chunkSize);
                     },
                 });
                 expect.fail("expected source size mismatch");
@@ -766,6 +3011,229 @@ describe("index", () => {
             }
 
             expect(observedChunkSize).to.eq(512 * 1024);
+        });
+
+        it("normalizes empty, oversized, and reusable source yields", async () => {
+            const filestore = await peer.open(new Files());
+            const expected = crypto.randomBytes(6 * 1024 * 1024) as Uint8Array;
+
+            const fileId = await filestore.addSource(
+                "normalized source chunks",
+                {
+                    size: BigInt(expected.byteLength),
+                    readChunks: async function* (chunkSize: number) {
+                        yield new Uint8Array(0);
+                        const oversizedEnd = chunkSize * 2 + 17;
+                        yield expected.subarray(0, oversizedEnd);
+                        const reusable = new Uint8Array(
+                            Math.max(1, Math.floor(chunkSize / 7))
+                        );
+                        for (
+                            let offset = oversizedEnd;
+                            offset < expected.byteLength;
+                            offset += reusable.byteLength
+                        ) {
+                            const end = Math.min(
+                                offset + reusable.byteLength,
+                                expected.byteLength
+                            );
+                            reusable.set(expected.subarray(offset, end), 0);
+                            yield reusable.subarray(0, end - offset);
+                        }
+                    },
+                }
+            );
+
+            const diagnostics = filestore.lastUploadDiagnostics!;
+            expect(diagnostics.chunkCount).to.eq(
+                Math.ceil(expected.byteLength / diagnostics.chunkSize)
+            );
+            for (let index = 0; index < diagnostics.chunkCount; index++) {
+                const chunk = (await filestore.files.index.get(
+                    `${fileId}:${index}`,
+                    { local: true, remote: false }
+                )) as TinyFile;
+                expect(chunk.file.byteLength).to.eq(
+                    index === diagnostics.chunkCount - 1
+                        ? expected.byteLength % diagnostics.chunkSize ||
+                              diagnostics.chunkSize
+                        : diagnostics.chunkSize
+                );
+            }
+            const file = await filestore.files.index.get(fileId, {
+                local: true,
+                remote: false,
+            });
+            expect(
+                equals(
+                    await file!.getFile(filestore, { as: "joined" }),
+                    expected
+                )
+            ).to.be.true;
+        });
+
+        it("rejects a declared-size overrun before enqueuing its first chunk", async () => {
+            const filestore = await peer.open(new Files());
+            const declaredSize = 6 * 1024 * 1024;
+
+            await expect(
+                filestore.addSource("overrun source", {
+                    size: BigInt(declaredSize),
+                    readChunks: async function* () {
+                        yield new Uint8Array(declaredSize + 1);
+                    },
+                })
+            ).rejects.toThrow("Source size changed during upload");
+
+            expect(
+                filestore.lastUploadDiagnostics?.maxConcurrentChunkPutBytes
+            ).to.eq(0);
+        });
+
+        it("withholds the final normalized chunk until the source finishes", async () => {
+            const filestore = await peer.open(new Files());
+            const expected = crypto.randomBytes(6 * 1024 * 1024) as Uint8Array;
+            let markWaiting!: () => void;
+            const waiting = new Promise<void>((resolve) => {
+                markWaiting = resolve;
+            });
+            let finishSource!: () => void;
+            const finish = new Promise<void>((resolve) => {
+                finishSource = resolve;
+            });
+            const upload = filestore.addSource("withheld final chunk", {
+                size: BigInt(expected.byteLength),
+                readChunks: () => {
+                    let nextCall = 0;
+                    return {
+                        [Symbol.asyncIterator]() {
+                            return this;
+                        },
+                        async next() {
+                            nextCall += 1;
+                            if (nextCall === 1) {
+                                return {
+                                    done: false as const,
+                                    value: expected,
+                                };
+                            }
+                            markWaiting();
+                            await finish;
+                            return {
+                                done: true as const,
+                                value: undefined,
+                            };
+                        },
+                    };
+                },
+            });
+
+            await waiting;
+            const diagnostics = filestore.lastUploadDiagnostics!;
+            try {
+                await waitForResolved(async () => {
+                    expect(
+                        await filestore.countLocalChunks({
+                            id: diagnostics.uploadId,
+                        } as any)
+                    ).to.eq(diagnostics.chunkCount - 1);
+                });
+            } finally {
+                finishSource();
+            }
+            const fileId = await upload;
+            expect(
+                await filestore.countLocalChunks({ id: fileId } as any)
+            ).to.eq(diagnostics.chunkCount);
+        });
+
+        it("cancels a blocked source iterator after a queued put fails", async () => {
+            const filestore = await peer.open(new Files());
+            const originalPut = filestore.files.put.bind(filestore.files);
+            let iteratorReturned = false;
+
+            (filestore.files as any).put = async (
+                value: any,
+                ...args: any[]
+            ) => {
+                if (value instanceof TinyFile && value.parentId != null) {
+                    await delay(10);
+                    throw new Error("early queued put failure");
+                }
+                return (originalPut as any)(value, ...args);
+            };
+
+            try {
+                await expect(
+                    filestore.addSource("blocked source", {
+                        size: 6n * 1024n * 1024n,
+                        readChunks: (chunkSize: number) => {
+                            let nextCalls = 0;
+                            return {
+                                [Symbol.asyncIterator]() {
+                                    return this;
+                                },
+                                next() {
+                                    nextCalls += 1;
+                                    if (nextCalls === 1) {
+                                        return Promise.resolve({
+                                            done: false as const,
+                                            value: new Uint8Array(chunkSize),
+                                        });
+                                    }
+                                    return new Promise<never>(() => {});
+                                },
+                                return() {
+                                    iteratorReturned = true;
+                                    return Promise.resolve({
+                                        done: true as const,
+                                        value: undefined,
+                                    });
+                                },
+                            };
+                        },
+                    })
+                ).rejects.toThrow("early queued put failure");
+            } finally {
+                (filestore.files as any).put = originalPut;
+            }
+
+            expect(iteratorReturned).to.be.true;
+            const diagnostics = filestore.lastUploadDiagnostics!;
+            expect(
+                await filestore.countLocalChunks({
+                    id: diagnostics.uploadId,
+                } as any)
+            ).to.eq(0);
+        });
+
+        it("releases every attempted chunk after an oversized source stream", async () => {
+            const filestore = await peer.open(new Files());
+            const declaredSize = 6 * 1e6;
+
+            await expect(
+                filestore.addSource("oversized source", {
+                    size: BigInt(declaredSize),
+                    readChunks: async function* (chunkSize: number) {
+                        const expectedChunks = Math.ceil(
+                            declaredSize / chunkSize
+                        );
+                        for (let index = 0; index <= expectedChunks; index++) {
+                            yield new Uint8Array(chunkSize);
+                        }
+                    },
+                })
+            ).rejects.toThrow("Source size changed during upload");
+
+            const uploadId = filestore.lastUploadDiagnostics!.uploadId;
+            expect(
+                [
+                    ...((filestore as any).retainedChunkIds as Set<string>),
+                ].filter((id) => id.startsWith(`${uploadId}:`))
+            ).toHaveLength(0);
+            expect(
+                await filestore.countLocalChunks({ id: uploadId } as any)
+            ).to.eq(0);
         });
 
         it("uses indexed chunk search when direct chunk lookup misses", async () => {
@@ -811,6 +3279,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== missingDirectChunkId
+                    );
+                }
                 const hasParentId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -823,6 +3300,11 @@ describe("index", () => {
                     );
                 });
                 if (hasParentId && hasChunkName) {
+                    if ((options as any)?.remote === false) {
+                        // This test targets the direct-get -> indexed-search
+                        // fallback, so suppress the earlier local legacy probe.
+                        return [];
+                    }
                     indexedChunkSearches++;
                 }
 
@@ -894,6 +3376,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== missingDirectChunkId
+                    );
+                }
                 const hasParentId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -999,6 +3490,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== delayedChunkId
+                    );
+                }
                 const hasParentId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -1176,6 +3676,14 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (
+                    queries.some((query: any) => Array.isArray(query?.or)) ||
+                    queries.some(
+                        (query: any) => getQueryKey(query) === "parentId"
+                    )
+                ) {
+                    return [];
+                }
                 const hasRootId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "id" &&
@@ -1237,8 +3745,109 @@ describe("index", () => {
                 Object.values(
                     filestore.lastReadDiagnostics?.chunkResolved ?? {}
                 )
-            ).to.deep.eq(chunks.map(() => "manifest-head-get"));
+            ).to.deep.eq(chunks.map(() => "cached"));
+            expect(
+                Object.values(
+                    filestore.lastReadDiagnostics
+                        ?.chunkManifestHeadBatchResolved ?? {}
+                )
+            ).to.deep.eq(chunkEntryHeads);
             expect(equals(concat(streamedChunks), expected)).to.be.true;
+        });
+
+        it("does not retain manifest heads while resolving observer chunks", async () => {
+            const files = await peer.open(new Files());
+            const fileId = "observer-manifest-heads";
+            const fileName = "observer-manifest-heads.bin";
+            const chunks = [new Uint8Array([1, 2]), new Uint8Array([3, 4])];
+            const chunkEntryHeads: string[] = [];
+            for (const [index, bytes] of chunks.entries()) {
+                const result = await files.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: bytes,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = result.entry.hash;
+            }
+            const manifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: 4n,
+                chunkCount: chunks.length,
+                ready: true,
+                finalHash: sha256Base64Sync(concat(chunks)),
+                chunkEntryHeads,
+            });
+            const originalSearch = files.files.index.search.bind(
+                files.files.index
+            );
+            const originalGet = files.files.index.get.bind(files.files.index);
+            const originalLogGet = files.files.log.log.get.bind(
+                files.files.log.log
+            );
+            const logSignals: AbortSignal[] = [];
+            files.persistChunkReads = false;
+            (files as any).retainedChunkIds = new Set();
+            (files as any).retainedChunkEntryHeads = new Set();
+            (files as any).retainedEntryHeadsByFileId = new Map();
+            (files.files.index as any).search = async (
+                request: any,
+                options: any
+            ) => {
+                const queries = Array.isArray(request.query)
+                    ? request.query
+                    : [request.query];
+                if (
+                    queries.some((query: any) => Array.isArray(query?.or)) ||
+                    queries.some(
+                        (query: any) => getQueryKey(query) === "parentId"
+                    )
+                ) {
+                    expect(options.signal).to.be.instanceOf(AbortSignal);
+                    return [];
+                }
+                return originalSearch(request as never, options as never);
+            };
+            (files.files.index as any).get = async (
+                id: string,
+                options: any
+            ) => {
+                if (id.startsWith(`${fileId}:`)) {
+                    expect(options.signal).to.be.instanceOf(AbortSignal);
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
+            (files.files.log.log as any).get = async (
+                hash: string,
+                options: any
+            ) => {
+                if (chunkEntryHeads.includes(hash)) {
+                    logSignals.push(options.remote.signal);
+                }
+                return originalLogGet(hash as never, options as never);
+            };
+
+            let roundTrip: Uint8Array;
+            try {
+                roundTrip = await manifest.getFile(files, { as: "joined" });
+            } finally {
+                (files.files.index as any).search = originalSearch;
+                (files.files.index as any).get = originalGet;
+                (files.files.log.log as any).get = originalLogGet;
+            }
+
+            expect(equals(roundTrip!, concat(chunks))).to.be.true;
+            expect(logSignals).to.have.length(chunks.length);
+            expect(logSignals.every((signal) => signal instanceof AbortSignal))
+                .to.be.true;
+            expect((files as any).retainedChunkIds.size).to.eq(0);
+            expect((files as any).retainedChunkEntryHeads.size).to.eq(0);
+            expect((files as any).retainedEntryHeadsByFileId.size).to.eq(0);
         });
 
         it("falls back per chunk when ready manifest chunk heads are missing", async () => {
@@ -1427,6 +4036,9 @@ describe("index", () => {
             const originalLogGet = filestore.files.log.log.get.bind(
                 filestore.files.log.log
             );
+            const originalLogGetMany = filestore.files.log.log.getMany.bind(
+                filestore.files.log.log
+            );
             let firstHeadMissed = false;
             let firstHeadGets = 0;
 
@@ -1437,6 +4049,9 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    return [];
+                }
                 const hasRootId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "id" &&
@@ -1486,6 +4101,18 @@ describe("index", () => {
                 }
                 return originalLogGet(hash as never, options as never);
             };
+            (filestore.files.log.log as any).getMany = async (
+                hashes: string[],
+                options: unknown
+            ) => {
+                const entries = await originalLogGetMany(
+                    hashes,
+                    options as never
+                );
+                return entries.map((entry, index) =>
+                    hashes[index] === chunkEntryHeads[0] ? undefined : entry
+                );
+            };
 
             const streamedChunks: Uint8Array[] = [];
 
@@ -1503,6 +4130,7 @@ describe("index", () => {
                 (filestore.files.index as any).search = originalSearch;
                 (filestore.files.index as any).get = originalGet;
                 (filestore.files.log.log as any).get = originalLogGet;
+                (filestore.files.log.log as any).getMany = originalLogGetMany;
             }
 
             expect(firstHeadGets).to.be.greaterThan(1);
@@ -1513,7 +4141,7 @@ describe("index", () => {
                 Object.values(
                     filestore.lastReadDiagnostics?.chunkResolved ?? {}
                 )
-            ).to.deep.eq(chunks.map(() => "manifest-head-get"));
+            ).to.deep.eq(["manifest-head-get", "cached", "cached"]);
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 
@@ -2026,6 +4654,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== delayedChunkId
+                    );
+                }
                 const hasParentId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -2149,6 +4786,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== missingDirectChunkId
+                    );
+                }
                 const hasParentId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -2277,6 +4923,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== delayedChunkId
+                    );
+                }
                 const hasParentId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -2389,6 +5044,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== missingDirectChunkId
+                    );
+                }
                 const hasParentId = queries.some(
                     (query: any) =>
                         getQueryKey(query) === "parentId" &&
@@ -2401,6 +5065,9 @@ describe("index", () => {
                 );
 
                 if (hasParentId && hasChunkName) {
+                    if ((options as any)?.remote === false) {
+                        return [];
+                    }
                     preciseChunkSearches++;
                     return missingDirectChunk ? [missingDirectChunk] : [];
                 }
@@ -2433,7 +5100,7 @@ describe("index", () => {
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
 
-        it("waits for all chunk documents before streaming observer downloads", async () => {
+        it("falls back per-index after partial observer chunk batches", async () => {
             const filestore = await peer.open(new Files());
             const largeFile = crypto.randomBytes(12 * 1e6) as Uint8Array;
             const fileId = await filestore.add(
@@ -2513,7 +5180,11 @@ describe("index", () => {
 
             expect(fetchSearchCalls).to.be.greaterThan(0);
             expect(partialFetches).to.eq(2);
-            expect(directChunkGets).to.eq(0);
+            expect(directChunkGets).to.be.greaterThan(0);
+            expect(
+                filestoreReader.lastReadDiagnostics
+                    ?.chunkBatchResolverFallbackCount
+            ).to.be.greaterThan(0);
             expect(streamedChunks.length).to.be.greaterThan(1);
             expect(equals(concat(streamedChunks), largeFile)).to.be.true;
         });
@@ -2721,6 +5392,15 @@ describe("index", () => {
                 const queries = Array.isArray(request.query)
                     ? request.query
                     : [request.query];
+                if (queries.some((query: any) => Array.isArray(query?.or))) {
+                    const results = await originalSearch(
+                        request as never,
+                        options as never
+                    );
+                    return results.filter(
+                        (candidate) => candidate.id !== transientChunkId
+                    );
+                }
                 const isTransientChunkSearch =
                     queries.some(
                         (query: any) =>

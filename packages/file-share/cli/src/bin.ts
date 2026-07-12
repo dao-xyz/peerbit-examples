@@ -26,10 +26,7 @@ const coerceAddresses = (addrs: string | string[]) => {
     return (Array.isArray(addrs) ? addrs : [addrs]).map((x) => multiaddr(x));
 };
 
-const connectToNetwork = async (
-    peerbit: Peerbit,
-    peer?: string | string[]
-) => {
+const connectToNetwork = async (peerbit: Peerbit, peer?: string | string[]) => {
     if (peer) {
         await peerbit.dial(coerceAddresses(peer));
         return;
@@ -41,9 +38,11 @@ const FILE_LOOKUP_TIMEOUT_MS = 2 * 60 * 1000;
 const FILE_LOOKUP_ATTEMPT_TIMEOUT_MS = 2 * 1000;
 const FILE_LOOKUP_POLL_INTERVAL_MS = 1 * 1000;
 const DEFAULT_DIRECTORY_NAME = "peerbit-file-share";
+const CLI_REBALANCE_INTERVAL_MS = 5 * 60 * 1000;
 const CLI_REPLICATION_ARGS = {
     replicate: {
         limits: {
+            interval: CLI_REBALANCE_INTERVAL_MS,
             cpu: {
                 max: 1,
                 monitor: undefined,
@@ -101,10 +100,7 @@ const stripDirectoryArgs = (args: string[]) => {
             i++;
             continue;
         }
-        if (
-            arg.startsWith("--directory=") ||
-            arg.startsWith("--dir=")
-        ) {
+        if (arg.startsWith("--directory=") || arg.startsWith("--dir=")) {
             continue;
         }
         nextArgs.push(arg);
@@ -300,11 +296,13 @@ const cli = async (args?: string[]) => {
                     ? await openLegacyFiles()
                     : await openShareFiles(CLI_REPLICATION_ARGS, {
                           share: shareAddress,
-                          shareName:
-                              args.spaceName || path.basename(args.path),
+                          shareName: args.spaceName || path.basename(args.path),
                       });
                 const source = await createPathSource(args.path);
-                const id = await files.addSource(path.basename(args.path), source);
+                const id = await files.addSource(
+                    path.basename(args.path),
+                    source
+                );
                 const fetchCommand = args.legacyGlobal
                     ? `please get ${id} --legacy-global`
                     : `please get ${id} --space ${files.address}`;
@@ -350,8 +348,7 @@ const cli = async (args?: string[]) => {
                     type: "string",
                     describe:
                         "Peer address to dial. Shard roots are discovered automatically after connecting. --bootstrap and --relay remain accepted as aliases.",
-                    defaultDescription:
-                        "Peerbit bootstrap addresses",
+                    defaultDescription: "Peerbit bootstrap addresses",
                     default: undefined,
                 });
                 yargs.option("replicate", {
@@ -408,7 +405,9 @@ const cli = async (args?: string[]) => {
                 }
                 console.log(
                     `Fetching file with id: ${args.id} (${args.replicate ? "replicator" : "observer"} mode${
-                        shareAddress ? `, share ${shareAddress}` : ", legacy global space"
+                        shareAddress
+                            ? `, share ${shareAddress}`
+                            : ", legacy global space"
                     })`
                 );
                 let file;
@@ -463,7 +462,8 @@ const cli = async (args?: string[]) => {
                         const downloadFinishedAt = Date.now();
                         const sizeBytes = file.size;
                         const lookupMs = lookupFinishedAt - lookupStartedAt;
-                        const downloadMs = downloadFinishedAt - downloadStartedAt;
+                        const downloadMs =
+                            downloadFinishedAt - downloadStartedAt;
                         const totalMs = downloadFinishedAt - lookupStartedAt;
                         console.log(
                             chalk.greenBright(

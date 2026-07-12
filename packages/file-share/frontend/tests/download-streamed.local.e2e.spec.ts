@@ -3,7 +3,7 @@ import { startBootstrapPeer } from "./bootstrapPeer";
 import {
     createSpace,
     expectSavedViaPicker,
-    installMockSaveFilePicker,
+    installNodeBackedMockSaveFilePicker,
     rootUrl,
     setSeedMode,
     uploadSyntheticFile,
@@ -34,9 +34,18 @@ test.describe("file-share streamed download via local bootstrap", () => {
         const writer = await writerContext.newPage();
         const reader = await readerContext.newPage();
         const fileName = `local-streamed-download-${Date.now()}.bin`;
+        let nodeSinkController:
+            | Awaited<ReturnType<typeof installNodeBackedMockSaveFilePicker>>
+            | undefined;
 
         try {
-            await installMockSaveFilePicker(reader);
+            nodeSinkController = await installNodeBackedMockSaveFilePicker(
+                reader,
+                {
+                    expectedName: fileName,
+                    expectedSizeBytes: FILE_SIZE_MB * 1024 * 1024,
+                }
+            );
             const entryUrl = withPeer(rootUrl(baseURL), bootstrap.addrs);
             const shareUrl = await createSpace(
                 writer,
@@ -52,18 +61,15 @@ test.describe("file-share streamed download via local bootstrap", () => {
             await setSeedMode(reader, false);
             await waitForFileListed(reader, fileName, 600_000);
 
-            await reader
-                .locator("li", { hasText: fileName })
-                .getByTestId("download-file")
-                .click();
-
-            await expectSavedViaPicker(
+            const saved = await expectSavedViaPicker(
                 reader,
                 fileName,
                 FILE_SIZE_MB,
                 10 * 60 * 1000
             );
+            await saved.cleanup();
         } finally {
+            await nodeSinkController?.cleanup().catch(() => {});
             await writerContext.close().catch(() => {});
             await readerContext.close().catch(() => {});
             await bootstrap.stop().catch(() => {});

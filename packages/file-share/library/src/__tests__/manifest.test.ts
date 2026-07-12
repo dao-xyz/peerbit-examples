@@ -20,12 +20,32 @@ const syncedDependencies = [
     "@peerbit/trusted-network",
 ] as const;
 
+const isMajorCompatibleCaretRange = (range: string) =>
+    /^\^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,2}$/.test(range);
+
 describe("package manifest", () => {
     it("keeps published peerbit dependency ranges major-compatible", () => {
         for (const dependency of syncedDependencies) {
             const version = libraryPackageJson.dependencies?.[dependency];
             expect(version).toBeDefined();
-            expect(version).toMatch(/^\^\d+$/);
+            expect(isMajorCompatibleCaretRange(version!)).toBe(true);
+        }
+    });
+
+    it("rejects dependency ranges that can cross the next major", () => {
+        for (const range of [
+            "*",
+            "latest",
+            ">=5",
+            ">=5 <7",
+            "^5 || ^6",
+            "~5.3.0",
+            "5.3.0",
+        ]) {
+            expect(isMajorCompatibleCaretRange(range)).toBe(false);
+        }
+        for (const range of ["^5", "^5.3", "^5.3.0", "^13.1.0"]) {
+            expect(isMajorCompatibleCaretRange(range)).toBe(true);
         }
     });
 });
