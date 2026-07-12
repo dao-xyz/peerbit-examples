@@ -2095,7 +2095,19 @@ export const Drop = () => {
 
     return (
         <>
-            {files.loading ? (
+            {files.error ? (
+                <div
+                    className="flex flex-col items-center justify-center content-center h-full gap-4"
+                    data-testid="share-open-error"
+                    role="alert"
+                >
+                    <span className="font-semibold">Failed to open share</span>
+                    <span className="max-w-xl text-center text-sm">
+                        {getProgramHookErrorMessage(files.error)}
+                    </span>
+                    {goBack()}
+                </div>
+            ) : files.loading ? (
                 <div className="flex flex-col items-center justify-center content-center h-full gap-4">
                     <div className="flex flex-row gap-4 items-center justify-center">
                         <span className="italic">Loading</span> <Spinner />
