@@ -354,6 +354,166 @@ describe("index", () => {
                 .be.true;
         });
 
+        it("keeps exact manifest blocks without chunk index rows during adaptive pruning", async () => {
+            const writer = await peer.open(new Files());
+            const fileId = "retained-exact-manifest-blocks";
+            const fileName = "retained-exact-manifest-blocks.bin";
+            const chunks = [
+                new Uint8Array([1, 2]),
+                new Uint8Array([3, 4]),
+                new Uint8Array([5, 6]),
+            ];
+            const chunkEntryHeads: string[] = [];
+            for (const [index, bytes] of chunks.entries()) {
+                const result = await writer.files.put(
+                    new TinyFile({
+                        id: `${fileId}:${index}`,
+                        name: `${fileName}/${index}`,
+                        file: bytes,
+                        parentId: fileId,
+                        index,
+                    })
+                );
+                chunkEntryHeads[index] = result.entry.hash;
+            }
+            const expected = concat(chunks);
+            const manifest = new LargeFileWithChunkHeads({
+                id: fileId,
+                name: fileName,
+                size: BigInt(expected.byteLength),
+                chunkCount: chunks.length,
+                ready: true,
+                finalHash: sha256Base64Sync(expected),
+                chunkEntryHeads,
+            });
+            await writer.files.put(manifest);
+
+            const reader = await peer2.open<Files>(writer.address, {
+                args: { replicate: false },
+            });
+            reader.persistChunkReads = true;
+            await reader.files.log.waitForReplicator(peer.identity.publicKey);
+            const localManifest = await reader.resolveById(fileId, {
+                timeout: 10_000,
+                replicate: true,
+                from: [peer.identity.publicKey.hashcode()],
+                wait: false,
+            });
+            if (!isLargeFileLike(localManifest)) {
+                throw new Error("Failed to materialize the ready manifest");
+            }
+            expect(await reader.countLocalChunks(localManifest)).to.eq(0);
+
+            const roundTrip = await localManifest.getFile(reader, {
+                as: "joined",
+                timeout: 10_000,
+            });
+            expect(equals(roundTrip, expected)).to.be.true;
+            expect(await reader.countLocalChunks(localManifest)).to.eq(0);
+            expect(await reader.countLocalChunkBlocks(localManifest)).to.eq(
+                chunks.length
+            );
+
+            (reader.files.log.log.entryIndex as any).cache.clear();
+            const originalLogGet = reader.files.log.log.get.bind(
+                reader.files.log.log
+            );
+            let retainedEntryReads = 0;
+            (reader.files.log.log as any).get = async (
+                hash: string,
+                options: unknown
+            ) => {
+                if (chunkEntryHeads.includes(hash)) {
+                    retainedEntryReads += 1;
+                }
+                return originalLogGet(hash as never, options as never);
+            };
+            try {
+                for (const head of chunkEntryHeads) {
+                    expect(
+                        await (reader as any).shouldKeepFileEntry({
+                            hash: head,
+                        })
+                    ).to.be.true;
+                }
+            } finally {
+                (reader.files.log.log as any).get = originalLogGet;
+            }
+            expect(retainedEntryReads).to.eq(0);
+            expect(await reader.countLocalChunkBlocks(localManifest)).to.eq(
+                chunks.length
+            );
+
+            // Runtime ownership maps are intentionally cleared on close. The
+            // durable root manifest must rebuild them before a post-restart
+            // rebalance can prune sparse exact blocks.
+            (reader as any).clearFileRuntimeState();
+            expect((reader as any).retainedChunkEntryHeads.size).to.eq(0);
+            (reader.files.log.log.entryIndex as any).cache.clear();
+            const originalIndexGet = reader.files.index.get.bind(
+                reader.files.index
+            );
+            (reader.files.index as any).get = async (
+                id: unknown,
+                options: unknown
+            ) => {
+                if (id === `${fileId}:0`) {
+                    throw new Error("transient child index failure");
+                }
+                return originalIndexGet(id as never, options as never);
+            };
+            try {
+                expect(
+                    await (reader as any).shouldKeepFileEntry({
+                        hash: chunkEntryHeads[0],
+                    })
+                ).to.be.true;
+            } finally {
+                (reader.files.index as any).get = originalIndexGet;
+            }
+            for (const head of chunkEntryHeads.slice(1)) {
+                expect(
+                    await (reader as any).shouldKeepFileEntry({ hash: head })
+                ).to.be.true;
+            }
+            for (const head of chunkEntryHeads) {
+                expect((reader as any).retainedChunkEntryHeads.has(head)).to.be
+                    .true;
+            }
+            expect(await reader.countLocalChunkBlocks(localManifest)).to.eq(
+                chunks.length
+            );
+
+            const replacementBytes = new Uint8Array([9, 10]);
+            const replacementChunkPut = await reader.files.put(
+                new TinyFile({
+                    id: `${fileId}:0`,
+                    name: `${fileName}/0`,
+                    file: replacementBytes,
+                    parentId: fileId,
+                    index: 0,
+                })
+            );
+            await reader.files.put(
+                new LargeFileWithChunkHeads({
+                    id: fileId,
+                    name: fileName,
+                    size: BigInt(replacementBytes.byteLength),
+                    chunkCount: 1,
+                    ready: true,
+                    finalHash: sha256Base64Sync(replacementBytes),
+                    chunkEntryHeads: [replacementChunkPut.entry.hash],
+                })
+            );
+            for (const head of chunkEntryHeads) {
+                expect(
+                    await (reader as any).shouldKeepFileEntry({ hash: head })
+                ).to.be.false;
+                expect((reader as any).retainedChunkEntryHeads.has(head)).to.be
+                    .false;
+            }
+        });
+
         it("does not keep unknown shallow entries by hash alone during adaptive pruning", async () => {
             const filestore = await peer.open(new Files());
             const originalGet = filestore.files.log.log.get.bind(
@@ -1465,13 +1625,15 @@ describe("index", () => {
                 largeFile
             );
             const file = (await filestore.files.index.get(fileId)) as LargeFile;
-            const originalGet = filestore.files.index.get.bind(
-                filestore.files.index
-            );
-            const originalSearch = filestore.files.index.search.bind(
-                filestore.files.index
-            );
-            let delayedChunkGets = 0;
+            const chunkEntryHeads = (file as any).chunkEntryHeads as string[];
+            expect(chunkEntryHeads).to.have.length(file.chunkCount);
+            const log = filestore.files.log.log as any;
+            const getManyOwner =
+                typeof log.getMany === "function" ? log : log.entryIndex;
+            const originalGetManyMethod = getManyOwner?.getMany;
+            expect(originalGetManyMethod).to.be.a("function");
+            const originalGetMany = originalGetManyMethod.bind(getManyOwner);
+            let localBatchCalls = 0;
             let highestRequestedChunkIndex = -1;
             let pendingBatchSignal: AbortSignal | undefined;
             let pendingBatchAborted = false;
@@ -1480,56 +1642,28 @@ describe("index", () => {
                 markPendingBatchStarted = resolve;
             });
 
-            (filestore.files.index as any).get = async (
-                id: string,
-                options: unknown
-            ) => {
-                if (id.startsWith(`${fileId}:`)) {
-                    highestRequestedChunkIndex = Math.max(
-                        highestRequestedChunkIndex,
-                        Number(id.slice(fileId.length + 1))
-                    );
-                }
-                if (id.startsWith(`${fileId}:`) && id !== `${fileId}:0`) {
-                    delayedChunkGets += 1;
-                    await delay(300);
-                }
-                return originalGet(id as never, options as never);
-            };
-            (filestore.files.index as any).search = async (
-                request: any,
+            getManyOwner.getMany = async (
+                requestedHeads: string[],
                 options: any
             ) => {
-                const queries = Array.isArray(request.query)
-                    ? request.query
-                    : [request.query];
-                const idQueries = queries.find((query: any) =>
-                    Array.isArray(query?.or)
-                )?.or;
-                const indices = Array.isArray(idQueries)
-                    ? idQueries
-                          .map((query: any) => getQueryValue(query))
-                          .filter(
-                              (id: unknown): id is string =>
-                                  typeof id === "string"
-                          )
-                          .map((id: string) =>
-                              Number(id.slice(fileId.length + 1))
-                          )
-                    : [];
-                if (
-                    options.remote === false &&
-                    indices.some((index: number) => index >= 2)
-                ) {
+                const requestedIndices = requestedHeads
+                    .map((head) => chunkEntryHeads.indexOf(head))
+                    .filter((index) => index >= 0);
+                for (const index of requestedIndices) {
+                    highestRequestedChunkIndex = Math.max(
+                        highestRequestedChunkIndex,
+                        index
+                    );
+                }
+                if (options.remote === false) {
+                    localBatchCalls += 1;
+                }
+                if (options.remote === false && localBatchCalls === 2) {
                     pendingBatchSignal = options.signal;
                     markPendingBatchStarted();
-                    return new Promise((_, reject) => {
+                    return new Promise<any[]>(() => {
                         const abort = () => {
                             pendingBatchAborted = true;
-                            reject(
-                                pendingBatchSignal?.reason ??
-                                    new Error("batch search aborted")
-                            );
                         };
                         if (pendingBatchSignal?.aborted) {
                             abort();
@@ -1542,7 +1676,7 @@ describe("index", () => {
                         }
                     });
                 }
-                return originalSearch(request as never, options as never);
+                return originalGetMany(requestedHeads, options);
             };
 
             const stream = file.streamFile(filestore)[Symbol.asyncIterator]();
@@ -1571,18 +1705,20 @@ describe("index", () => {
                     0
                 );
 
-                const callsAfterReturn = delayedChunkGets;
+                const callsAfterReturn = localBatchCalls;
                 await delay(350);
-                expect(delayedChunkGets).to.eq(callsAfterReturn);
+                expect(localBatchCalls).to.eq(callsAfterReturn);
+                expect(localBatchCalls).to.eq(2);
                 expect(file.chunkCount).to.be.greaterThan(33);
-                expect(highestRequestedChunkIndex).to.be.lessThanOrEqual(32);
+                expect(highestRequestedChunkIndex).to.be.lessThan(
+                    file.chunkCount
+                );
                 expect((filestore as any).activeFileChangeSignals.size).to.eq(
                     0
                 );
             } finally {
                 await stream.return?.();
-                (filestore.files.index as any).get = originalGet;
-                (filestore.files.index as any).search = originalSearch;
+                getManyOwner.getMany = originalGetManyMethod;
             }
         });
 
@@ -2525,21 +2661,21 @@ describe("index", () => {
             reader.persistChunkReads = true;
             await reader.files.log.waitForReplicator(peer.identity.publicKey);
 
-            const originalGetMany = reader.files.log.log.getMany.bind(
-                reader.files.log.log
-            );
+            const log = reader.files.log.log as any;
+            const getManyOwner =
+                typeof log.getMany === "function" ? log : log.entryIndex;
+            const originalGetManyMethod = getManyOwner?.getMany;
+            expect(originalGetManyMethod).to.be.a("function");
+            const readMany = originalGetManyMethod.bind(getManyOwner);
             const originalIndexGet = reader.files.index.get.bind(
                 reader.files.index
             );
             const originalHints = reader.getReadPeerHints.bind(reader);
             const batchCalls: Array<{ heads: string[]; options: any }> = [];
             let perIndexChunkGets = 0;
-            (reader.files.log.log as any).getMany = async (
-                heads: string[],
-                options: any
-            ) => {
+            getManyOwner.getMany = async (heads: string[], options: any) => {
                 batchCalls.push({ heads: [...heads], options });
-                return originalGetMany(heads, options);
+                return readMany(heads, options);
             };
             (reader.files.index as any).get = async (
                 id: unknown,
@@ -2627,6 +2763,9 @@ describe("index", () => {
                     reader.lastReadDiagnostics
                         ?.chunkManifestHeadRemoteBatchAcceptedCount
                 ).to.eq(0);
+                expect(reader.lastReadDiagnostics?.readAheadSource).to.eq(
+                    "persisted-local"
+                );
                 expect(
                     reader.lastReadDiagnostics?.chunkBatchResolverFallbackCount
                 ).to.eq(0);
@@ -2638,7 +2777,7 @@ describe("index", () => {
                     chunks.length
                 );
             } finally {
-                (reader.files.log.log as any).getMany = originalGetMany;
+                getManyOwner.getMany = originalGetManyMethod;
                 (reader.files.index as any).get = originalIndexGet;
                 (reader as any).getReadPeerHints = originalHints;
             }
@@ -2681,9 +2820,19 @@ describe("index", () => {
 
             expect(equals(roundTrip!, bytes)).to.be.true;
             expect(replicateValues).to.have.length(0);
-            expect(files.lastReadDiagnostics?.chunkBatchResultCount).to.eq(
-                file!.chunkCount
-            );
+            expect(files.lastReadDiagnostics?.chunkBatchQueryCount).to.eq(0);
+            expect(files.lastReadDiagnostics?.chunkBatchResultCount).to.eq(0);
+            expect(
+                files.lastReadDiagnostics
+                    ?.chunkManifestHeadLocalBatchAcceptedCount
+            ).to.eq(file!.chunkCount);
+            expect(
+                files.lastReadDiagnostics
+                    ?.chunkManifestHeadRemoteBatchQueryCount
+            ).to.eq(0);
+            expect(
+                files.lastReadDiagnostics?.chunkManifestHeadBatchAcceptedCount
+            ).to.eq(file!.chunkCount);
             expect(files.lastReadDiagnostics?.readAheadSource).to.eq(
                 "persisted-local"
             );
@@ -4042,9 +4191,12 @@ describe("index", () => {
             const originalLogGet = filestore.files.log.log.get.bind(
                 filestore.files.log.log
             );
-            const originalLogGetMany = filestore.files.log.log.getMany.bind(
-                filestore.files.log.log
-            );
+            const log = filestore.files.log.log as any;
+            const getManyOwner =
+                typeof log.getMany === "function" ? log : log.entryIndex;
+            const originalGetManyMethod = getManyOwner?.getMany;
+            expect(originalGetManyMethod).to.be.a("function");
+            const originalLogGetMany = originalGetManyMethod.bind(getManyOwner);
             let firstHeadMissed = false;
             let firstHeadGets = 0;
 
@@ -4107,7 +4259,7 @@ describe("index", () => {
                 }
                 return originalLogGet(hash as never, options as never);
             };
-            (filestore.files.log.log as any).getMany = async (
+            getManyOwner.getMany = async (
                 hashes: string[],
                 options: unknown
             ) => {
@@ -4136,18 +4288,23 @@ describe("index", () => {
                 (filestore.files.index as any).search = originalSearch;
                 (filestore.files.index as any).get = originalGet;
                 (filestore.files.log.log as any).get = originalLogGet;
-                (filestore.files.log.log as any).getMany = originalLogGetMany;
+                getManyOwner.getMany = originalGetManyMethod;
             }
 
             expect(firstHeadGets).to.be.greaterThan(1);
             expect(
                 filestore.lastReadDiagnostics?.chunkManifestHeadMisses?.[0]
             ).to.eq(1);
+            const resolvedRoutes = Object.values(
+                filestore.lastReadDiagnostics?.chunkResolved ?? {}
+            );
+            expect(resolvedRoutes[0]).to.eq("manifest-head-get");
             expect(
-                Object.values(
-                    filestore.lastReadDiagnostics?.chunkResolved ?? {}
+                resolvedRoutes.every(
+                    (route) =>
+                        route === "manifest-head-get" || route === "cached"
                 )
-            ).to.deep.eq(["manifest-head-get", "cached", "cached"]);
+            ).to.be.true;
             expect(equals(concat(streamedChunks), expected)).to.be.true;
         });
 

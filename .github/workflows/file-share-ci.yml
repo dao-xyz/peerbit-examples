@@ -1,0 +1,90 @@
+name: File Share CI
+
+on:
+    pull_request:
+        paths:
+            - ".github/workflows/file-share-ci.yml"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "tsconfig.json"
+            - "vitest.config.ts"
+            - "vitest.setup.ts"
+            - "packages/file-share/**"
+    push:
+        branches: [master]
+        paths:
+            - ".github/workflows/file-share-ci.yml"
+            - "package.json"
+            - "pnpm-lock.yaml"
+            - "tsconfig.json"
+            - "vitest.config.ts"
+            - "vitest.setup.ts"
+            - "packages/file-share/**"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+    correctness:
+        name: File-share correctness and offline reopen
+        runs-on: ubuntu-latest
+        timeout-minutes: 30
+
+        steps:
+            - name: Checkout
+              uses: actions/checkout@v6
+
+            - name: Setup pnpm
+              uses: pnpm/action-setup@v5
+              with:
+                  run_install: false
+
+            - name: Setup Node
+              uses: actions/setup-node@v5
+              with:
+                  node-version: 22
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - name: Install dependencies
+              run: pnpm install --frozen-lockfile
+
+            - name: Test file-share library
+              run: pnpm --filter @peerbit/please-lib run test
+
+            - name: Build file-share library
+              run: pnpm --filter @peerbit/please-lib run build
+
+            - name: Test file-share frontend
+              run: pnpm --filter file-share run test:unit
+
+            - name: Build file-share frontend
+              run: pnpm --filter file-share run build
+
+            - name: Install Playwright Chromium
+              run: pnpm exec playwright install --with-deps chromium
+
+            - name: Test persisted offline browser reopen
+              env:
+                  PW_REOPEN_FILE_MB: "6"
+              run: >-
+                  pnpm --filter file-share exec playwright test
+                  -c playwright.config.ts
+                  tests/offline-reopen.local.e2e.spec.ts
+                  --project chromium
+                  --workers 1
+                  --reporter=line
+                  --output "${RUNNER_TEMP}/file-share-offline-reopen"
+
+            - name: Upload offline-reopen failure artifacts
+              if: failure()
+              uses: actions/upload-artifact@v7
+              with:
+                  name: file-share-offline-reopen-${{ github.run_id }}
+                  path: ${{ runner.temp }}/file-share-offline-reopen
+                  if-no-files-found: ignore
+                  retention-days: 7

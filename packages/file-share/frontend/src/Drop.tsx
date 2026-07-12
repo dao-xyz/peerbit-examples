@@ -685,6 +685,7 @@ export const Drop = () => {
                 getLightweightSnapshot: () => Record<string, unknown>;
                 getTopologySnapshot: () => Promise<Record<string, unknown>>;
                 getDiagnostics: () => Promise<Record<string, unknown>>;
+                shutdown: () => Promise<void>;
             };
             __peerbitFileShareBenchmarkStats?: {
                 updateListCalls?: Array<Record<string, unknown>>;
@@ -788,11 +789,18 @@ export const Drop = () => {
             getDiagnostics: async () => {
                 const activeProgram =
                     program && !program.closed ? program : undefined;
-                const replicators = activeProgram
-                    ? await activeProgram.files.log
-                          .getReplicators()
-                          .catch(() => undefined)
-                    : undefined;
+                const [replicators, programBlockPresent] = activeProgram
+                    ? await Promise.all([
+                          activeProgram.files.log
+                              .getReplicators()
+                              .catch(() => undefined),
+                          Promise.resolve(
+                              activeProgram.node.services.blocks.has(
+                                  activeProgram.address
+                              )
+                          ).catch(() => false),
+                      ])
+                    : [undefined, null];
                 const connections = (
                     (peer as any)?.libp2p?.getConnections?.() ?? []
                 ).map(
@@ -802,17 +810,42 @@ export const Drop = () => {
                 const peerAddresses = getPeerDialAddresses(peer);
                 const listedFiles = await Promise.all(
                     list.map(async (file) => {
-                        const [localChunkIndexRowCount, localChunkBlockCount] =
-                            activeProgram && isLargeFileLike(file)
-                                ? await Promise.all([
-                                      activeProgram
-                                          .countLocalChunks(file)
-                                          .catch(() => null),
-                                      activeProgram
-                                          .countLocalChunkBlocks(file)
-                                          .catch(() => null),
-                                  ])
-                                : [undefined, undefined];
+                        const visibleEntryHead = (file as any)?.__context?.head;
+                        const [
+                            localChunkIndexRowCount,
+                            localChunkBlockCount,
+                            localRoot,
+                        ] = activeProgram
+                            ? await Promise.all([
+                                  isLargeFileLike(file)
+                                      ? activeProgram
+                                            .countLocalChunks(file)
+                                            .catch(() => null)
+                                      : Promise.resolve(undefined),
+                                  isLargeFileLike(file)
+                                      ? activeProgram
+                                            .countLocalChunkBlocks(file)
+                                            .catch(() => null)
+                                      : Promise.resolve(undefined),
+                                  activeProgram.files.index
+                                      .get(file.id, {
+                                          local: true,
+                                          remote: false,
+                                      })
+                                      .catch(() => undefined),
+                              ])
+                            : [undefined, undefined, undefined];
+                        const localEntryHead = (localRoot as any)?.__context
+                            ?.head;
+                        const localRootEntryBlockPresent =
+                            activeProgram &&
+                            typeof visibleEntryHead === "string"
+                                ? await Promise.resolve(
+                                      activeProgram.files.log.log.blocks.has(
+                                          visibleEntryHead
+                                      )
+                                  ).catch(() => false)
+                                : null;
                         return {
                             id: file.id,
                             name: file.name,
@@ -832,6 +865,21 @@ export const Drop = () => {
                             // consumers. This is not a local-block count.
                             localChunkCount: localChunkIndexRowCount,
                             localChunkBlockCount,
+                            entryHead:
+                                typeof visibleEntryHead === "string"
+                                    ? visibleEntryHead
+                                    : null,
+                            localEntryHead:
+                                typeof localEntryHead === "string"
+                                    ? localEntryHead
+                                    : null,
+                            localRootReady: isLargeFileLike(localRoot)
+                                ? localRoot.ready
+                                : undefined,
+                            localRootFinalHash: isLargeFileLike(localRoot)
+                                ? localRoot.finalHash
+                                : undefined,
+                            localRootEntryBlockPresent,
                         };
                     })
                 );
@@ -857,6 +905,7 @@ export const Drop = () => {
                     connectionCount: connections.length,
                     connectionPeers: connections,
                     programOpenDiagnostics: program?.openDiagnostics ?? null,
+                    programBlockPresent,
                     lastUploadDiagnostics:
                         program?.lastUploadDiagnostics ?? null,
                     lastReadDiagnostics: program?.lastReadDiagnostics ?? null,
@@ -873,6 +922,12 @@ export const Drop = () => {
                         testWindow.__peerbitFileShareBenchmarkStats ?? null,
                     timings: diagnosticsRef.current,
                 };
+            },
+            shutdown: async () => {
+                if (program && !program.closed) {
+                    await program.close();
+                }
+                await (peer as any)?.stop?.();
             },
         };
         testWindow.__peerbitFileShareTestHooks = testHooks;
@@ -1831,8 +1886,54 @@ export const Drop = () => {
         const timeout = getDownloadTimeout(file);
         startActiveTransfer();
         try {
-            if (isLargeFileLike(file)) {
-                program.retainFileRead(file);
+            let downloadFile = file;
+            if (program.persistChunkReads) {
+                try {
+                    // A durable download needs the immutable root descriptor
+                    // too. Older published Peerbit clients can resolve this
+                    // block from a provider without caching it locally.
+                    if (
+                        !(await program.node.services.blocks.has(
+                            program.address
+                        ))
+                    ) {
+                        await program.save(program.node.services.blocks, {
+                            skipOnAddress: false,
+                        });
+                    }
+                } catch (error) {
+                    // Persistence is an enhancement to the requested download;
+                    // quota or local-store failures must not block the read.
+                    console.warn(
+                        "Failed to persist the file-share descriptor: " +
+                            (error instanceof Error
+                                ? error.message
+                                : String(error))
+                    );
+                }
+
+                try {
+                    // Root-list reconciliation is intentionally
+                    // non-replicating. Join only the selected root so it remains
+                    // discoverable after restart without caching the catalog.
+                    downloadFile =
+                        (await program.resolveById(file.id, {
+                            timeout: Math.min(timeout, 10_000),
+                            replicate: true,
+                            from: await program.getReadPeerHints(),
+                            wait: false,
+                        })) ?? file;
+                } catch (error) {
+                    console.warn(
+                        "Failed to persist the selected file root: " +
+                            (error instanceof Error
+                                ? error.message
+                                : String(error))
+                    );
+                }
+            }
+            if (isLargeFileLike(downloadFile)) {
+                program.retainFileRead(downloadFile);
             }
 
             // Do not change the replication role around a download. Switching a
@@ -1844,10 +1945,11 @@ export const Drop = () => {
 
             if (
                 saveFilePicker &&
-                getFileSizeBigInt(file) >= getStreamingDownloadThresholdBytes()
+                getFileSizeBigInt(downloadFile) >=
+                    getStreamingDownloadThresholdBytes()
             ) {
                 const handle = await saveFilePicker({
-                    suggestedName: file.name,
+                    suggestedName: downloadFile.name,
                 }).catch((error) => {
                     if (isUserCancelledDownload(error)) {
                         return undefined;
@@ -1856,7 +1958,7 @@ export const Drop = () => {
                 });
                 if (handle) {
                     const writable = await handle.createWritable();
-                    await file.writeFile(program, writable, {
+                    await downloadFile.writeFile(program, writable, {
                         timeout,
                         progress: (value) => {
                             progress(value);
@@ -1867,7 +1969,7 @@ export const Drop = () => {
                 return;
             }
 
-            const bytes = await file.getFile(program, {
+            const bytes = await downloadFile.getFile(program, {
                 as: "chunks",
                 timeout,
                 progress,
@@ -1876,7 +1978,7 @@ export const Drop = () => {
             const link = document.createElement("a");
             const url = window.URL.createObjectURL(blob);
             link.href = url;
-            link.download = file.name;
+            link.download = downloadFile.name;
             link.click();
             setTimeout(() => {
                 window.URL.revokeObjectURL(url);

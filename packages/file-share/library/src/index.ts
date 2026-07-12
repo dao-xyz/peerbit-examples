@@ -2048,6 +2048,7 @@ export class LargeFile extends AbstractFile {
             );
         let isRemotePersistedRead =
             persistChunkReads &&
+            debug.initialLocalChunkBlockCount !== resolvedFile.chunkCount &&
             (debug.initialLocalChunkIndexRowCount == null ||
                 debug.initialLocalChunkIndexRowCount < resolvedFile.chunkCount);
         let isAdaptiveRemoteRead = !persistChunkReads || isRemotePersistedRead;
@@ -2142,20 +2143,62 @@ export class LargeFile extends AbstractFile {
               };
         const readManifestHeadEntries = async (
             heads: string[],
-            remote: ManifestHeadRemote
+            remote: ManifestHeadRemote,
+            changeSignal: FileChangeSignal
         ): Promise<ManifestHeadEntry[]> => {
+            const signal = changeSignal.abortSignal;
+            const abortableRead = (
+                read: () => Promise<ManifestHeadEntry[]> | ManifestHeadEntry[]
+            ) =>
+                new Promise<ManifestHeadEntry[]>((resolve, reject) => {
+                    let settled = false;
+                    const finish = (settle: () => void) => {
+                        if (settled) {
+                            return;
+                        }
+                        settled = true;
+                        signal.removeEventListener("abort", abort);
+                        settle();
+                    };
+                    const abort = () =>
+                        finish(() =>
+                            reject(
+                                signal.reason ?? new FileReadCancelledError()
+                            )
+                        );
+
+                    signal.addEventListener("abort", abort, { once: true });
+                    if (signal.aborted) {
+                        abort();
+                        return;
+                    }
+
+                    try {
+                        Promise.resolve(read()).then(
+                            (entries) => finish(() => resolve(entries)),
+                            (error) => finish(() => reject(error))
+                        );
+                    } catch (error) {
+                        finish(() => reject(error));
+                    }
+                });
             const log = files.files.log.log as any;
             if (typeof log.getMany === "function") {
-                return log.getMany(heads, { remote });
+                return abortableRead(() =>
+                    log.getMany(heads, { remote, signal })
+                );
             }
 
             const entryIndex = log.entryIndex;
             if (typeof entryIndex?.getMany === "function") {
-                return entryIndex.getMany(heads, {
-                    type: "full",
-                    ignoreMissing: true,
-                    remote,
-                });
+                return abortableRead(() =>
+                    entryIndex.getMany(heads, {
+                        type: "full",
+                        ignoreMissing: true,
+                        remote,
+                        signal,
+                    })
+                );
             }
 
             if (typeof log.get !== "function") {
@@ -2165,25 +2208,30 @@ export class LargeFile extends AbstractFile {
                 1,
                 Math.min(8, remoteReadAheadLimit || 1)
             );
-            const entries: ManifestHeadEntry[] = [];
-            for (let offset = 0; offset < heads.length; offset += batchSize) {
-                if (remote && remote.signal.aborted) {
-                    throw remote.signal.reason;
+            return abortableRead(async () => {
+                const entries: ManifestHeadEntry[] = [];
+                for (
+                    let offset = 0;
+                    offset < heads.length;
+                    offset += batchSize
+                ) {
+                    changeSignal.throwIfClosed();
+                    entries.push(
+                        ...(await Promise.all(
+                            heads
+                                .slice(offset, offset + batchSize)
+                                .map((head) => log.get(head, { remote }))
+                        ))
+                    );
                 }
-                entries.push(
-                    ...(await Promise.all(
-                        heads
-                            .slice(offset, offset + batchSize)
-                            .map((head) => log.get(head, { remote }))
-                    ))
-                );
-            }
-            return entries;
+                return entries;
+            });
         };
         const queryPersistedManifestHeadBatch = async (
             indices: number[],
             from: string[] | undefined,
-            changeSignal: FileChangeSignal
+            changeSignal: FileChangeSignal,
+            fetchRemotelyMissing = true
         ) => {
             if (indices.length === 0) {
                 return indices;
@@ -2316,7 +2364,8 @@ export class LargeFile extends AbstractFile {
                 debug.chunkManifestHeadLocalBatchQueryCount += 1;
                 const localEntries = await readManifestHeadEntries(
                     requested.map(({ head }) => head),
-                    false
+                    false,
+                    changeSignal
                 );
                 changeSignal.throwIfClosed();
                 const remotelyMissing = await acceptEntries(
@@ -2324,7 +2373,7 @@ export class LargeFile extends AbstractFile {
                     localEntries,
                     "local"
                 );
-                if (remotelyMissing.length > 0) {
+                if (fetchRemotelyMissing && remotelyMissing.length > 0) {
                     debug.chunkManifestHeadRemoteBatchQueryCount += 1;
                     const remoteEntries = await readManifestHeadEntries(
                         remotelyMissing.map(({ head }) => head),
@@ -2333,7 +2382,8 @@ export class LargeFile extends AbstractFile {
                             replicate: true,
                             from,
                             signal: changeSignal.abortSignal,
-                        }
+                        },
+                        changeSignal
                     );
                     changeSignal.throwIfClosed();
                     const stillMissing = await acceptEntries(
@@ -2354,7 +2404,7 @@ export class LargeFile extends AbstractFile {
                 debug.activeManifestHeadBatches -= 1;
             }
 
-            if (accepted === 0) {
+            if (accepted === 0 && fetchRemotelyMissing) {
                 disableManifestHeadBatch("zero-accepted");
             } else if (accepted < requested.length) {
                 debug.chunkManifestHeadBatchPartialCount += 1;
@@ -2564,6 +2614,27 @@ export class LargeFile extends AbstractFile {
                 skipPersistedRemoteBatch(missing);
                 updateKnownChunkPeak();
                 return [...missing, ...deferred];
+            }
+            if (
+                persistChunkReads &&
+                !isRemotePersistedRead &&
+                debug.initialLocalChunkBlockCount === resolvedFile.chunkCount
+            ) {
+                // Exact manifest heads are authoritative even when the
+                // Documents index has not rebuilt its chunk rows yet. Decode
+                // those local blocks directly before considering any remote
+                // fallback or shrinking the read-ahead window.
+                const missing = await queryPersistedManifestHeadBatch(
+                    indices,
+                    hintedFrom,
+                    changeSignal,
+                    false
+                );
+                if (missing.length === 0) {
+                    verifyLocalReadAhead();
+                    updateKnownChunkPeak();
+                    return missing;
+                }
             }
             let missing = await queryChunkBatch(
                 indices,
@@ -3555,7 +3626,8 @@ export class Files extends Program<Args> {
     }
 
     private async validateCurrentChild(
-        file: TinyFile
+        file: TinyFile,
+        expectedEntryHead?: string
     ): Promise<"valid" | "invalid" | "unknown"> {
         if (file.parentId == null) {
             return "invalid";
@@ -3590,7 +3662,11 @@ export class Files extends Program<Args> {
             Number.isInteger(parent.chunkCount) &&
             index < parent.chunkCount &&
             file.name === `${parent.name}/${index}` &&
-            (file.id === deterministicId || isLegacyId);
+            (file.id === deterministicId || isLegacyId) &&
+            (expectedEntryHead == null ||
+                (parent.ready &&
+                    getCompleteChunkEntryHeads(parent)?.[index] ===
+                        expectedEntryHead));
         if (!valid) {
             this.forgetRetainedChunkRead(parentId, file.id);
             return "invalid";
@@ -3598,6 +3674,9 @@ export class Files extends Program<Args> {
 
         this.retainedLargeFileChunkCounts.set(parentId, parent.chunkCount);
         this.retainChunkRead(file.id, parentId);
+        if (expectedEntryHead) {
+            this.retainChunkEntryHead(expectedEntryHead, parentId, file.id);
+        }
         return "valid";
     }
 
@@ -3610,6 +3689,65 @@ export class Files extends Program<Args> {
             return "unknown";
         }
         let lookupFailed = false;
+        let missingDocument = false;
+        const ownersByFile = this.retainedChunkEntryHeadOwners.get(entryHash);
+        let hasLegacyOwner = false;
+
+        // Modern chunk ids encode their manifest position. Ownership is
+        // validated when the entry is decoded during the demand read, so the
+        // current local root can prove retention without rereading and decoding
+        // every chunk payload during a rebalance.
+        for (const [fileId, ownedDocumentIds] of ownersByFile ?? []) {
+            const prefix = `${fileId}:`;
+            const deterministicIndices: Array<{
+                documentId: string;
+                index: number;
+            }> = [];
+            for (const documentId of ownedDocumentIds) {
+                const suffix = documentId.startsWith(prefix)
+                    ? documentId.slice(prefix.length)
+                    : "";
+                const index = suffix.length > 0 ? Number(suffix) : NaN;
+                if (
+                    !Number.isSafeInteger(index) ||
+                    index < 0 ||
+                    getChunkId(fileId, index) !== documentId
+                ) {
+                    hasLegacyOwner = true;
+                    continue;
+                }
+                deterministicIndices.push({ documentId, index });
+            }
+            if (deterministicIndices.length === 0) {
+                continue;
+            }
+
+            let parent: AbstractFile | undefined;
+            try {
+                parent = await this.files.index.get(fileId, {
+                    local: true,
+                    remote: false,
+                });
+            } catch {
+                lookupFailed = true;
+                continue;
+            }
+            if (!isLargeFileLike(parent)) {
+                continue;
+            }
+            const heads = getCompleteChunkEntryHeads(parent);
+            for (const { documentId, index } of deterministicIndices) {
+                if (heads?.[index] === entryHash) {
+                    this.retainedLargeFileChunkCounts.set(
+                        fileId,
+                        parent.chunkCount
+                    );
+                    this.retainChunkRead(documentId, fileId);
+                    return "current";
+                }
+            }
+        }
+
         for (const documentId of documentIds) {
             try {
                 const current = await this.files.index.get(documentId, {
@@ -3630,8 +3768,62 @@ export class Files extends Program<Args> {
                     }
                     return "current";
                 }
+                missingDocument ||= current == null;
             } catch {
                 lookupFailed = true;
+            }
+        }
+
+        // Legacy chunk ids do not encode their manifest position, so validate
+        // their retained payload and current root before allowing adaptive
+        // pruning to drop the block.
+        if (ownersByFile?.size && hasLegacyOwner) {
+            let entry:
+                | {
+                      getPayloadValue: () => Promise<Operation>;
+                  }
+                | undefined;
+            try {
+                entry = (await this.files.log.log.get(entryHash, {
+                    remote: false,
+                })) as typeof entry;
+            } catch {
+                return lookupFailed || missingDocument ? "unknown" : "stale";
+            }
+            if (entry) {
+                try {
+                    const operation = await entry.getPayloadValue();
+                    if (isPutOperation(operation)) {
+                        const chunk = this.files.index.valueEncoding.decoder(
+                            operation.data
+                        );
+                        if (isLargeFileChunk(chunk)) {
+                            for (const [fileId, documentIds] of ownersByFile) {
+                                if (
+                                    chunk.parentId !== fileId ||
+                                    !documentIds.has(chunk.id)
+                                ) {
+                                    continue;
+                                }
+                                const childStatus =
+                                    await this.validateCurrentChild(
+                                        chunk,
+                                        entryHash
+                                    );
+                                if (childStatus === "unknown") {
+                                    lookupFailed = true;
+                                }
+                                if (childStatus === "valid") {
+                                    return "current";
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    return lookupFailed || missingDocument
+                        ? "unknown"
+                        : "stale";
+                }
             }
         }
         return lookupFailed ? "unknown" : "stale";
@@ -3870,6 +4062,7 @@ export class Files extends Program<Args> {
                 isSignedBySelf(getEntrySignatures(entryLike)) ||
                 isSignedBySelf(getEntrySignatures(entry));
             let currentHead: string | undefined;
+            let currentLookupFailed = false;
             try {
                 const current = await this.files.index.get(file.id, {
                     local: true,
@@ -3877,15 +4070,24 @@ export class Files extends Program<Args> {
                 } as any);
                 currentHead = getContextHead(current);
             } catch {
-                if (
-                    signedBySelf &&
-                    this.pendingAuthoredDocumentIds.has(file.id)
-                ) {
-                    return true;
-                }
-                return false;
+                currentLookupFailed = true;
             }
-            if (currentHead !== entry.hash) {
+            if (currentLookupFailed || currentHead !== entry.hash) {
+                if (
+                    isLargeFileChunk(file) &&
+                    (signedBySelf || this.persistChunkReads)
+                ) {
+                    const childStatus = await this.validateCurrentChild(
+                        file,
+                        entry.hash
+                    );
+                    if (childStatus === "valid") {
+                        return true;
+                    }
+                    if (childStatus === "unknown") {
+                        return true;
+                    }
+                }
                 if (
                     signedBySelf &&
                     this.pendingAuthoredDocumentIds.has(file.id)
@@ -3904,7 +4106,10 @@ export class Files extends Program<Args> {
                     // A current authored entry is kept conservatively if its
                     // parent lookup failed transiently. Confirmed missing or
                     // incompatible parents are never enough to retain it.
-                    return childStatus === "unknown" && signedBySelf;
+                    return (
+                        childStatus === "unknown" &&
+                        (signedBySelf || this.persistChunkReads)
+                    );
                 }
                 if (signedBySelf) {
                     this.retainAuthoredFile(file, entry.hash);

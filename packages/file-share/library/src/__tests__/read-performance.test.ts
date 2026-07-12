@@ -1676,6 +1676,40 @@ describe("large-file read scheduling", () => {
         );
     });
 
+    it("keeps a current persisted child while its parent lookup fails transiently", async () => {
+        const files = new Files();
+        const parentId = "transient-parent-lookup";
+        const child = withHead(
+            new TinyFile({
+                id: `${parentId}:0`,
+                name: "transient-parent-lookup.bin/0",
+                file: new Uint8Array([1]),
+                parentId,
+                index: 0,
+            }),
+            "transient-parent-child-head"
+        );
+        (files.files.index as any).get = async (id: string) => {
+            if (id === child.id) {
+                return child;
+            }
+            if (id === parentId) {
+                throw new Error("parent index temporarily unavailable");
+            }
+            return undefined;
+        };
+        Object.defineProperty(files.files.index, "valueEncoding", {
+            configurable: true,
+            value: { decoder: () => child },
+        });
+
+        expect(
+            await (files as any).shouldKeepFileEntry(
+                createPutEntry(child, "transient-parent-child-head")
+            )
+        ).toBe(true);
+    });
+
     it("invalidates retained children after their parent is deleted or replaced", async () => {
         for (const replacement of [
             undefined,
