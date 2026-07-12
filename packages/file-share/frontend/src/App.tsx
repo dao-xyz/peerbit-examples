@@ -6,9 +6,13 @@ import { Footer } from "./Footer";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Spinner } from "./Spinner";
 import {
+    dialPeerWithTimeout,
+    getLocalShareFallbackOutcome,
     getPeerAddressConfiguration,
     getPeerDialOutcome,
     getPeerOverrideAction,
+    getShareAddressFromHref,
+    type PeerDial,
     type PeerHintSource,
 } from "./app-connection";
 /* import { enable } from "@libp2p/logger";
@@ -21,17 +25,31 @@ loggefr.trace("hello") */
 
 document.documentElement.classList.add("dark");
 
+const EXPLICIT_PEER_DIAL_TIMEOUT_MS = 15_000;
+
+type AppConnectionState = "pending" | "ready" | "ready-local" | "failed";
+
 type AppDiagnostics = {
     mountedAt: number;
     peersProvided: boolean;
     peerHintSource: PeerHintSource;
     peerAddressCount: number;
     peerAddresses: string[];
-    connectionState: "pending" | "ready" | "failed";
+    connectionState: AppConnectionState;
     peerReadyAt: number | null;
     dialStartedAt: number | null;
     dialFinishedAt: number | null;
     dialError: string | null;
+    localFallbackState:
+        | "not-attempted"
+        | "checking"
+        | "ready"
+        | "missing"
+        | "error";
+    localFallbackAddress: string | null;
+    localFallbackStartedAt: number | null;
+    localFallbackFinishedAt: number | null;
+    localFallbackError: string | null;
     dialResults: Array<{
         address: string;
         status: "pending" | "fulfilled" | "rejected";
@@ -56,6 +74,11 @@ const createAppDiagnostics = (
     dialStartedAt: null,
     dialFinishedAt: null,
     dialError: null,
+    localFallbackState: "not-attempted",
+    localFallbackAddress: null,
+    localFallbackStartedAt: null,
+    localFallbackFinishedAt: null,
+    localFallbackError: null,
     dialResults: [],
 });
 
@@ -76,12 +99,18 @@ const getErrorMessage = (error: unknown) => {
 
 const PeerOverride = ({
     peers,
+    peerHintSource,
+    shareAddress,
     onReady,
+    onLocalReady,
     onError,
     onDiagnostics,
 }: {
     peers?: string[];
+    peerHintSource: PeerHintSource;
+    shareAddress: string | undefined;
     onReady: () => void;
+    onLocalReady: () => void;
     onError: (error: unknown) => void;
     onDiagnostics: (diagnostics: Partial<AppDiagnostics>) => void;
 }) => {
@@ -102,6 +131,7 @@ const PeerOverride = ({
         }
 
         let cancelled = false;
+        const dialController = new AbortController();
         const startedAt = Date.now();
         const dialResults: AppDiagnostics["dialResults"] = peers.map(
             (address) => ({
@@ -118,9 +148,18 @@ const PeerOverride = ({
             dialError: null,
             dialResults,
         });
+        const dial: PeerDial = (address, options) =>
+            (peer.dial as unknown as PeerDial).call(peer, address, options);
         const dialPromises = peers.map((address, index) =>
             Promise.resolve()
-                .then(() => peer.dial(address))
+                .then(() =>
+                    dialPeerWithTimeout(
+                        dial,
+                        address,
+                        EXPLICIT_PEER_DIAL_TIMEOUT_MS,
+                        dialController.signal
+                    )
+                )
                 .then(() => {
                     dialResults[index] = {
                         ...dialResults[index],
@@ -144,7 +183,7 @@ const PeerOverride = ({
                     throw error;
                 })
         );
-        Promise.allSettled(dialPromises).then(() => {
+        void Promise.allSettled(dialPromises).then(async () => {
             if (cancelled) {
                 return;
             }
@@ -168,18 +207,94 @@ const PeerOverride = ({
             const error = new Error(
                 `Failed to connect to all supplied peers: ${rejected.join("; ")}`
             );
-            console.error("Failed to connect to supplied peers:", error);
             onDiagnostics({
                 dialFinishedAt,
                 dialError: error.message,
                 dialResults: [...dialResults],
             });
+
+            if (peerHintSource === "peer" && shareAddress) {
+                const localFallbackStartedAt = Date.now();
+                onDiagnostics({
+                    localFallbackState: "checking",
+                    localFallbackAddress: shareAddress,
+                    localFallbackStartedAt,
+                    localFallbackFinishedAt: null,
+                    localFallbackError: null,
+                });
+                try {
+                    const blocks = (
+                        peer as unknown as {
+                            services?: {
+                                blocks?: {
+                                    has?: (
+                                        address: string
+                                    ) => boolean | Promise<boolean>;
+                                };
+                            };
+                        }
+                    ).services?.blocks;
+                    if (typeof blocks?.has !== "function") {
+                        throw new Error(
+                            "The local program block store is unavailable"
+                        );
+                    }
+                    const localProgramAvailable =
+                        await blocks.has(shareAddress);
+                    if (cancelled) {
+                        return;
+                    }
+                    const localFallbackFinishedAt = Date.now();
+                    const fallbackOutcome = getLocalShareFallbackOutcome({
+                        source: peerHintSource,
+                        shareAddress,
+                        localProgramAvailable,
+                    });
+                    if (fallbackOutcome === "ready-local") {
+                        console.warn(
+                            "Supplied peer hints were unavailable; opening the saved local share"
+                        );
+                        onDiagnostics({
+                            localFallbackState: "ready",
+                            localFallbackFinishedAt,
+                        });
+                        onLocalReady();
+                        return;
+                    }
+                    onDiagnostics({
+                        localFallbackState: "missing",
+                        localFallbackFinishedAt,
+                    });
+                } catch (fallbackError) {
+                    if (cancelled) {
+                        return;
+                    }
+                    onDiagnostics({
+                        localFallbackState: "error",
+                        localFallbackFinishedAt: Date.now(),
+                        localFallbackError: getErrorMessage(fallbackError),
+                    });
+                }
+            }
+            console.error("Failed to connect to supplied peers:", error);
             onError(error);
         });
         return () => {
             cancelled = true;
+            dialController.abort(
+                new DOMException("Peer override unmounted", "AbortError")
+            );
         };
-    }, [peer, peers?.join(","), onDiagnostics, onError, onReady]);
+    }, [
+        peer,
+        peers?.join(","),
+        peerHintSource,
+        shareAddress,
+        onDiagnostics,
+        onError,
+        onLocalReady,
+        onReady,
+    ]);
 
     return null;
 };
@@ -189,10 +304,14 @@ export const App = () => {
         () => getPeerAddressConfiguration(window.location.href),
         []
     );
+    const shareAddress = useMemo(
+        () => getShareAddressFromHref(window.location.href),
+        []
+    );
     const peers = peerConfiguration.peers;
-    const [connectionState, setConnectionState] = useState<
-        "pending" | "ready" | "failed"
-    >(peers !== undefined && peers.length > 0 ? "pending" : "ready");
+    const [connectionState, setConnectionState] = useState<AppConnectionState>(
+        peers !== undefined && peers.length > 0 ? "pending" : "ready"
+    );
     const diagnosticsRef = useRef(
         createAppDiagnostics(peers, peerConfiguration.source, connectionState)
     );
@@ -211,6 +330,10 @@ export const App = () => {
         []
     );
     const handleReady = useCallback(() => setConnectionState("ready"), []);
+    const handleLocalReady = useCallback(
+        () => setConnectionState("ready-local"),
+        []
+    );
     const handleError = useCallback(() => setConnectionState("failed"), []);
     useEffect(() => {
         const testWindow = window as Window & {
@@ -248,14 +371,30 @@ export const App = () => {
             <div className="h-screen">
                 <PeerOverride
                     peers={peers}
+                    peerHintSource={peerConfiguration.source}
+                    shareAddress={shareAddress}
                     onReady={handleReady}
+                    onLocalReady={handleLocalReady}
                     onError={handleError}
                     onDiagnostics={updateDiagnostics}
                 />
-                {connectionState === "ready" ? (
-                    <HashRouter basename="/">
-                        <BaseRoutes />
-                    </HashRouter>
+                {connectionState === "ready" ||
+                connectionState === "ready-local" ? (
+                    <>
+                        {connectionState === "ready-local" ? (
+                            <div
+                                className="fixed top-0 left-0 right-0 z-50 bg-amber-200 text-amber-950 text-center text-sm p-2"
+                                data-testid="saved-copy-warning"
+                                role="status"
+                            >
+                                Peer unavailable. Showing data saved on this
+                                device; recent changes may be missing.
+                            </div>
+                        ) : null}
+                        <HashRouter basename="/">
+                            <BaseRoutes />
+                        </HashRouter>
+                    </>
                 ) : connectionState === "failed" ? (
                     <div className="w-screen h-screen bg-neutral-200 dark:bg-black flex justify-center items-center transition-all">
                         <span>Failed to connect to peer</span>

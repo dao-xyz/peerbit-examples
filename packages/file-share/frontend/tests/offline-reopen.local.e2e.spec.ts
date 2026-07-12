@@ -63,9 +63,7 @@ const getDiagnostics = async (page: Page) => {
         { timeout: TIMEOUT_MS }
     );
     return (await page.evaluate(async () => {
-        return await (
-            window as any
-        ).__peerbitFileShareTestHooks.getDiagnostics();
+        return (window as any).__peerbitFileShareTestHooks.getDiagnostics();
     })) as Record<string, any>;
 };
 
@@ -180,7 +178,9 @@ test.describe("file-share persisted offline restart", () => {
         }
 
         const profileDirectory = testInfo.outputPath("reader-profile");
+        const freshProfileDirectory = testInfo.outputPath("fresh-profile");
         await rm(profileDirectory, { recursive: true, force: true });
+        await rm(freshProfileDirectory, { recursive: true, force: true });
 
         const fileName = `offline-reopen-${Date.now()}.bin`;
         const fixture = await createSyntheticFileOnDisk(
@@ -201,6 +201,7 @@ test.describe("file-share persisted offline restart", () => {
             | undefined;
         let writerContext: BrowserContext | undefined;
         let readerContext: BrowserContext | undefined;
+        let freshContext: BrowserContext | undefined;
 
         try {
             logStage("start-bootstrap");
@@ -210,7 +211,7 @@ test.describe("file-share persisted offline restart", () => {
             });
             const writer = await writerContext.newPage();
             logStage("create-space");
-            const shareUrl = await createSpace(
+            await createSpace(
                 writer,
                 withBootstrap(rootUrl(baseURL), bootstrap.addrs),
                 `offline-reopen-${Date.now()}`
@@ -222,6 +223,34 @@ test.describe("file-share persisted offline restart", () => {
                     "Writer diagnostics are missing programAddress"
                 );
             }
+
+            // The local E2E bootstrap is test infrastructure, not part of the
+            // URL a normal file-share host bookmarks. Once the writer is
+            // connected, remove that override and let the app publish its
+            // direct, ephemeral peer hints exactly as it does in production.
+            await writer.evaluate(() => {
+                const url = new URL(window.location.href);
+                url.searchParams.delete("bootstrap");
+                window.history.replaceState(
+                    window.history.state,
+                    "",
+                    url.toString()
+                );
+            });
+            await expect
+                .poll(() => new URL(writer.url()).searchParams.get("peer"), {
+                    timeout: 30_000,
+                })
+                .not.toBeNull();
+            const shareUrl = writer.url();
+            const bookmarkedUrl = new URL(shareUrl);
+            const stalePeerAddresses = bookmarkedUrl.searchParams
+                .get("peer")!
+                .split(",");
+            expect(bookmarkedUrl.searchParams.has("bootstrap")).toBe(false);
+            expect(stalePeerAddresses.length).toBeGreaterThan(0);
+            expect(bookmarkedUrl.hash).toBe(`#/s/${shareAddress}`);
+            logStage("direct-peer-bookmark-captured");
 
             await writer.locator("#imgupload").setInputFiles(fixture.filePath);
             await expect(writer.locator("#imgupload")).toHaveValue("");
@@ -298,21 +327,56 @@ test.describe("file-share persisted offline restart", () => {
             // or it can temporarily select a different identity directory.
             await new Promise((resolve) => setTimeout(resolve, 1_100));
 
-            const offlineUrl = new URL(shareUrl);
-            offlineUrl.search = "";
-            const hashQueryIndex = offlineUrl.hash.indexOf("?");
-            if (hashQueryIndex !== -1) {
-                offlineUrl.hash = offlineUrl.hash.slice(0, hashQueryIndex);
-            }
-            offlineUrl.searchParams.set("peer", "offline");
+            const freshReader = await launchPersistentReader(
+                freshProfileDirectory
+            );
+            freshContext = freshReader.context;
+            await freshReader.page.goto(shareUrl, {
+                waitUntil: "domcontentloaded",
+            });
+            await expect
+                .poll(
+                    async () =>
+                        (await getAppDiagnostics(freshReader.page))
+                            .connectionState,
+                    { timeout: TIMEOUT_MS }
+                )
+                .toBe("failed");
+            const freshDiagnostics = await getAppDiagnostics(freshReader.page);
+            expect(freshDiagnostics).toMatchObject({
+                peerHintSource: "peer",
+                peerAddresses: stalePeerAddresses,
+                peerAddressCount: stalePeerAddresses.length,
+                connectionState: "failed",
+                localFallbackState: "missing",
+                localFallbackAddress: shareAddress,
+            });
+            expect(freshDiagnostics.dialResults).toHaveLength(
+                stalePeerAddresses.length
+            );
+            expect(
+                freshDiagnostics.dialResults.every(
+                    (result: Record<string, unknown>) =>
+                        result.status === "rejected"
+                )
+            ).toBe(true);
+            expect(
+                await freshReader.page
+                    .getByText("Failed to connect to peer")
+                    .isVisible()
+            ).toBe(true);
+            await freshContext.close();
+            freshContext = undefined;
+            logStage("fresh-profile-stayed-fatal");
 
             const reopenedReader =
                 await launchPersistentReader(profileDirectory);
             readerContext = reopenedReader.context;
             logStage("reader-profile-relaunched");
-            await reopenedReader.page.goto(offlineUrl.toString(), {
+            await reopenedReader.page.goto(shareUrl, {
                 waitUntil: "domcontentloaded",
             });
+            expect(reopenedReader.page.url()).toBe(shareUrl);
             logStage("offline-page-open");
             const reopenedOpenDiagnostics = await waitForProgramOpen(
                 reopenedReader.page,
@@ -334,13 +398,36 @@ test.describe("file-share persisted offline restart", () => {
             const appDiagnostics = await getAppDiagnostics(reopenedReader.page);
             expect(appDiagnostics).toMatchObject({
                 peerHintSource: "peer",
-                peerAddressCount: 0,
-                connectionState: "ready",
+                peerAddresses: stalePeerAddresses,
+                peerAddressCount: stalePeerAddresses.length,
+                connectionState: "ready-local",
+                dialStartedAt: expect.any(Number),
+                dialFinishedAt: expect.any(Number),
+                dialError: expect.stringContaining(
+                    "Failed to connect to all supplied peers"
+                ),
+                localFallbackState: "ready",
+                localFallbackAddress: shareAddress,
+                localFallbackStartedAt: expect.any(Number),
+                localFallbackFinishedAt: expect.any(Number),
             });
+            expect(appDiagnostics.dialResults).toHaveLength(
+                stalePeerAddresses.length
+            );
+            expect(
+                appDiagnostics.dialResults.every(
+                    (result: Record<string, unknown>) =>
+                        result.status === "rejected"
+                )
+            ).toBe(true);
+            await expect(
+                reopenedReader.page.getByTestId("saved-copy-warning")
+            ).toBeVisible();
             const reopenedBeforeRead = await getDiagnostics(
                 reopenedReader.page
             );
             expect(reopenedBeforeRead.connectionCount).toBe(0);
+            expect(reopenedBeforeRead.connectionPeers).toEqual([]);
             expect(reopenedBeforeRead.persistChunkReads).toBe(true);
             expect(reopenedBeforeRead.peerHash).toBe(initialPeerHash);
             expect(reopenedBeforeRead.programBlockPresent).toBe(true);
@@ -396,12 +483,17 @@ test.describe("file-share persisted offline restart", () => {
             expect(reopenedRead.chunkBatchResolverFallbackCount).toBe(0);
             expect(reopenedRead.chunkFailure).toBe(null);
         } finally {
+            await freshContext?.close().catch(() => {});
             await readerContext?.close().catch(() => {});
             await writerContext?.close().catch(() => {});
             await bootstrap?.stop().catch(() => {});
             await rm(profileDirectory, { recursive: true, force: true }).catch(
                 () => {}
             );
+            await rm(freshProfileDirectory, {
+                recursive: true,
+                force: true,
+            }).catch(() => {});
             await rm(fixture.dir, { recursive: true, force: true }).catch(
                 () => {}
             );

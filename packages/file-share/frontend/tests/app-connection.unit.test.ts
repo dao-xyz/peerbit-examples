@@ -1,11 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+    dialPeerWithTimeout,
+    getLocalShareFallbackOutcome,
     getPeerAddressConfiguration,
     getPeerDialOutcome,
     getPeerOverrideAction,
+    getShareAddressFromHref,
 } from "../src/app-connection";
 
 describe("App peer override readiness", () => {
+    afterEach(() => vi.useRealTimers());
+
     it("reports direct peer hints separately from bootstrap overrides", () => {
         expect(
             getPeerAddressConfiguration(
@@ -68,5 +73,81 @@ describe("App peer override readiness", () => {
         expect(
             getPeerDialOutcome([{ status: "rejected" }, { status: "rejected" }])
         ).toBe("failed");
+    });
+
+    it("extracts a local fallback address only from an exact share route", () => {
+        expect(
+            getShareAddressFromHref(
+                "https://files.test/?peer=writer#/s/zb2rhSaved%2Dshare"
+            )
+        ).toBe("zb2rhSaved-share");
+        expect(
+            getShareAddressFromHref(
+                "https://files.test/#/s/zb2rhSaved-share?peer=writer"
+            )
+        ).toBe("zb2rhSaved-share");
+        expect(getShareAddressFromHref("https://files.test/#/")).toBe(
+            undefined
+        );
+        expect(
+            getShareAddressFromHref("https://files.test/#/s/share/child")
+        ).toBe(undefined);
+        expect(getShareAddressFromHref("https://files.test/#/s/%E0%A4%A")).toBe(
+            undefined
+        );
+        expect(
+            getShareAddressFromHref("https://files.test/#/s/saved%2Fchild")
+        ).toBe(undefined);
+    });
+
+    it("uses a saved descriptor only for failed direct peer hints", () => {
+        expect(
+            getLocalShareFallbackOutcome({
+                source: "peer",
+                shareAddress: "saved-share",
+                localProgramAvailable: true,
+            })
+        ).toBe("ready-local");
+        expect(
+            getLocalShareFallbackOutcome({
+                source: "peer",
+                shareAddress: "saved-share",
+                localProgramAvailable: false,
+            })
+        ).toBe("failed");
+        expect(
+            getLocalShareFallbackOutcome({
+                source: "bootstrap",
+                shareAddress: "saved-share",
+                localProgramAvailable: true,
+            })
+        ).toBe("failed");
+        expect(
+            getLocalShareFallbackOutcome({
+                source: "peer",
+                shareAddress: undefined,
+                localProgramAvailable: true,
+            })
+        ).toBe("failed");
+    });
+
+    it("bounds a dial even when the dial implementation never settles", async () => {
+        vi.useFakeTimers();
+        let dialSignal: AbortSignal | undefined;
+        const result = dialPeerWithTimeout(
+            async (_address, options) => {
+                dialSignal = options.signal;
+                await new Promise(() => {});
+            },
+            "peer-a",
+            25
+        );
+        const rejection = expect(result).rejects.toMatchObject({
+            name: "PeerDialTimeoutError",
+        });
+
+        await vi.advanceTimersByTimeAsync(25);
+        await rejection;
+        expect(dialSignal?.aborted).toBe(true);
     });
 });
