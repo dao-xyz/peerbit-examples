@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { LargeFile, TinyFile } from "@peerbit/please-lib";
 import {
     applyRootFileChangeToList,
+    getPendingReadyRootReconciliation,
     getRootFileChange,
     shouldRefreshRootListForFileChange,
 } from "../src/root-list";
@@ -36,9 +37,9 @@ describe("root list change handling", () => {
         });
 
         expect(shouldRefreshRootListForFileChange(event)).to.equal(true);
-        expect(getRootFileChange(event).added.map((file) => file.id)).to.deep.eq(
-            ["root"]
-        );
+        expect(
+            getRootFileChange(event).added.map((file) => file.id)
+        ).to.deep.eq(["root"]);
     });
 
     it("does not refresh for child-only change batches", () => {
@@ -65,6 +66,21 @@ describe("root list change handling", () => {
                 (file) => file.name
             )
         ).to.deep.eq(["root.bin"]);
+    });
+
+    it("merges partial root snapshots without removing roots by absence", () => {
+        const existing = largeFile({ id: "existing", name: "existing.bin" });
+        const discovered = largeFile({
+            id: "discovered",
+            name: "discovered.bin",
+        });
+
+        expect(
+            applyRootFileChangeToList([existing], {
+                added: [discovered],
+                removed: [],
+            }).map((file) => file.id)
+        ).to.deep.eq(["discovered", "existing"]);
     });
 
     it("keeps ready root metadata over older pending metadata", () => {
@@ -97,5 +113,43 @@ describe("root list change handling", () => {
         });
 
         expect(next).to.deep.eq([]);
+    });
+
+    it("keeps an added root when the same change also removes its id", () => {
+        const previous = largeFile({ id: "root", name: "previous.bin" });
+        const replacement = largeFile({
+            id: "root",
+            name: "replacement.bin",
+            ready: true,
+            finalHash: "replacement-final",
+        });
+        const next = applyRootFileChangeToList([previous], {
+            added: [replacement],
+            removed: [{ id: "root", parentId: undefined }],
+        });
+
+        expect(next).to.deep.eq([replacement]);
+    });
+
+    it("partitions accepted root snapshots into pending starts and ready cancellations", () => {
+        const pending = largeFile({ id: "pending", name: "pending.bin" });
+        const ready = largeFile({
+            id: "ready",
+            name: "ready.bin",
+            ready: true,
+            finalHash: "final",
+        });
+        const tiny = new TinyFile({
+            id: "tiny",
+            name: "tiny.bin",
+            file: new Uint8Array([1]),
+        });
+
+        expect(
+            getPendingReadyRootReconciliation([pending, ready, tiny])
+        ).toEqual({
+            pending: [pending],
+            readyIds: ["ready"],
+        });
     });
 });

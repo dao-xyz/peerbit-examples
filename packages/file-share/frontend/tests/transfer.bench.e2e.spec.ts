@@ -1,36 +1,88 @@
-import { test, type Page } from "@playwright/test";
+import {
+    test,
+    type BrowserContext,
+    type CDPSession,
+    type Page,
+} from "@playwright/test";
+import { createReadStream } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { startBootstrapPeer } from "./bootstrapPeer";
 import {
+    armDownloadedFile,
+    armSavedViaPicker,
+    crc32SavedViaPicker,
+    createCrc32,
     createSyntheticFileOnDisk,
-    expectDownloadedFile,
-    expectSavedViaPicker,
-    installMockSaveFilePicker,
+    installNodeBackedMockSaveFilePicker,
     rootUrl,
+    sha256AndCrc32File,
+    sha256FileBase64,
+    type DownloadSinkResult,
+    type SyntheticFixtureMetadata,
+    type SyntheticFixtureMode,
     waitForFileListed,
     waitForUploadComplete,
     withBootstrap,
 } from "./helpers";
+import {
+    buildReaderShareUrlWithPeerHints,
+    classifyReaderCohort,
+    classifyReaderTopology,
+    getBrowserDialablePeerAddresses,
+    getLegacyReaderRole,
+    resolveReaderCohort,
+    stopSamplerAtCompletion,
+    validateJsHeapMeasurement,
+    validateLargeFileBenchmarkSizeMb,
+    type ReaderCohort,
+    type ReaderTopologyEvidence,
+} from "./transfer-benchmark";
+import { createFileShareReplicationRole } from "../src/role-state";
 
 const ENABLED = process.env.PW_BENCH === "1";
 const SCENARIO = process.env.PW_BENCH_SCENARIO || "local";
-const READER_ROLE = process.env.PW_READER_ROLE || "adaptive";
-const ADAPTIVE_REPLICATION_ROLE = { limits: { cpu: { max: 1 } } };
+const READER_COHORT = resolveReaderCohort(
+    process.env.PW_READER_COHORT,
+    process.env.PW_READER_ROLE
+);
+const LEGACY_READER_ROLE = getLegacyReaderRole(READER_COHORT);
+const ADAPTIVE_REPLICATION_ROLE = createFileShareReplicationRole({ cpuMax: 1 });
 const FILE_SIZE_MB = Number(process.env.PW_FILE_MB || "1024");
+const FILE_SIZE_BYTES = ENABLED
+    ? validateLargeFileBenchmarkSizeMb(FILE_SIZE_MB)
+    : FILE_SIZE_MB * 1024 * 1024;
 const RESULT_FILE = process.env.PW_RESULT_FILE;
+const parseFixtureMode = (value: string): SyntheticFixtureMode => {
+    if (value === "sparse" || value === "deterministic") {
+        return value;
+    }
+    throw new Error(`Unsupported PW_FIXTURE_MODE='${value}'`);
+};
+const FIXTURE_MODE = parseFixtureMode(
+    process.env.PW_FIXTURE_MODE || "deterministic"
+);
+const FIXTURE_SEED = process.env.PW_FIXTURE_SEED || "peerbit-file-share-v1";
 const UPLOAD_TIMEOUT_MS = Number(process.env.PW_UPLOAD_TIMEOUT_MS || "1800000");
 const DOWNLOAD_TIMEOUT_MS = Number(
     process.env.PW_DOWNLOAD_TIMEOUT_MS || "1800000"
 );
+const TOPOLOGY_TIMEOUT_MS = Number(
+    process.env.PW_TOPOLOGY_TIMEOUT_MS || "180000"
+);
+const TOPOLOGY_POLL_INTERVAL_MS = 250;
+const requestedJsHeapSampleIntervalMs = Number(
+    process.env.PW_JS_HEAP_SAMPLE_INTERVAL_MS || "500"
+);
+const JS_HEAP_SAMPLE_INTERVAL_MS =
+    Number.isFinite(requestedJsHeapSampleIntervalMs) &&
+    requestedJsHeapSampleIntervalMs >= 100
+        ? requestedJsHeapSampleIntervalMs
+        : 500;
 const STREAMING_DOWNLOAD_THRESHOLD_BYTES = 250_000_000;
 
 if (!["local", "prod"].includes(SCENARIO)) {
     throw new Error(`Unsupported PW_BENCH_SCENARIO='${SCENARIO}'`);
-}
-
-if (!["adaptive", "observer"].includes(READER_ROLE)) {
-    throw new Error(`Unsupported PW_READER_ROLE='${READER_ROLE}'`);
 }
 
 const persistResult = async (result: Record<string, unknown>) => {
@@ -41,12 +93,21 @@ const persistResult = async (result: Record<string, unknown>) => {
     await writeFile(RESULT_FILE, `${JSON.stringify(result, null, 2)}\n`);
 };
 
+const crc32FileHex = async (filePath: string) => {
+    const crc32 = createCrc32();
+    for await (const chunk of createReadStream(filePath)) {
+        crc32.update(chunk);
+    }
+    return crc32.digestHex();
+};
+
 const logStage = (stage: string, details: Record<string, unknown> = {}) => {
     console.log(
         `FILE_SHARE_TRANSFER_BENCH_STAGE ${JSON.stringify({
             stage,
             scenario: SCENARIO,
-            readerRole: READER_ROLE,
+            readerCohort: READER_COHORT,
+            readerRole: LEGACY_READER_ROLE,
             fileSizeMb: FILE_SIZE_MB,
             ...details,
         })}`
@@ -81,6 +142,251 @@ const getDiagnostics = async (page: Page) => {
         }
         return await hooks.getDiagnostics();
     });
+};
+
+const getLightweightSnapshot = async (page: Page) => {
+    return await page.evaluate(() => {
+        const hooks = (window as any).__peerbitFileShareTestHooks;
+        if (!hooks?.getLightweightSnapshot) {
+            throw new Error(
+                "Missing __peerbitFileShareTestHooks.getLightweightSnapshot"
+            );
+        }
+        return hooks.getLightweightSnapshot();
+    });
+};
+
+const getTopologySnapshot = async (page: Page) => {
+    return (await page.evaluate(async () => {
+        const hooks = (window as any).__peerbitFileShareTestHooks;
+        if (!hooks?.getTopologySnapshot) {
+            throw new Error(
+                "Missing __peerbitFileShareTestHooks.getTopologySnapshot"
+            );
+        }
+        return await hooks.getTopologySnapshot();
+    })) as ReaderTopologyEvidence;
+};
+
+type ReaderTopologyReadiness = {
+    cohort: ReaderCohort;
+    expectedSelfInReplicatorSet: boolean;
+    timeoutMs: number;
+    pollingIntervalMs: number;
+    waitStartedAt: number | null;
+    waitFinishedAt: number | null;
+    waitDurationMs: number | null;
+    attempts: number;
+    ready: boolean;
+    evidence: ReaderTopologyEvidence | null;
+    validationReasons: string[];
+    lastProbeError: string | null;
+};
+
+const createReaderTopologyReadiness = (): ReaderTopologyReadiness => ({
+    cohort: READER_COHORT,
+    expectedSelfInReplicatorSet: READER_COHORT === "live-replicator",
+    timeoutMs: TOPOLOGY_TIMEOUT_MS,
+    pollingIntervalMs: TOPOLOGY_POLL_INTERVAL_MS,
+    waitStartedAt: null,
+    waitFinishedAt: null,
+    waitDurationMs: null,
+    attempts: 0,
+    ready: false,
+    evidence: null,
+    validationReasons: ["topology-not-checked"],
+    lastProbeError: null,
+});
+
+const waitForReaderTopology = async (
+    page: Page,
+    readiness: ReaderTopologyReadiness
+) => {
+    const startedAt = Date.now();
+    const deadline = startedAt + readiness.timeoutMs;
+    readiness.waitStartedAt = startedAt;
+    readiness.validationReasons = [];
+
+    while (Date.now() <= deadline) {
+        readiness.attempts += 1;
+        try {
+            const evidence = await getTopologySnapshot(page);
+            const classification = classifyReaderTopology(
+                readiness.cohort,
+                evidence
+            );
+            readiness.evidence = evidence;
+            readiness.ready = classification.ready;
+            readiness.validationReasons = classification.validationReasons;
+            readiness.lastProbeError = null;
+            if (classification.ready) {
+                readiness.waitFinishedAt = Date.now();
+                readiness.waitDurationMs = readiness.waitFinishedAt - startedAt;
+                return;
+            }
+        } catch (error) {
+            readiness.ready = false;
+            readiness.validationReasons = ["topology-probe-error"];
+            readiness.lastProbeError =
+                error instanceof Error ? error.message : String(error);
+        }
+
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+            break;
+        }
+        await new Promise((resolve) =>
+            setTimeout(
+                resolve,
+                Math.min(readiness.pollingIntervalMs, remainingMs)
+            )
+        );
+    }
+
+    readiness.waitFinishedAt = Date.now();
+    readiness.waitDurationMs = readiness.waitFinishedAt - startedAt;
+    throw new Error(
+        `Reader topology was not ready for ${readiness.cohort}: ${readiness.validationReasons.join(", ") || "unknown"}`
+    );
+};
+
+type ReaderJsHeapMeasurement = {
+    memoryKind: "javascript-heap";
+    scope: "reader-renderer";
+    metric: "JSHeapUsedSize";
+    unit: "bytes";
+    sampleIntervalMs: number;
+    startedAt: number;
+    finishedAt: number | null;
+    firstSampleAt: number | null;
+    lastSampleAt: number | null;
+    sampleCount: number;
+    startBytes: number | null;
+    endBytes: number | null;
+    peakBytes: number | null;
+    samplingErrors: string[];
+};
+
+type ReaderJsHeapSampler = {
+    stop: () => Promise<ReaderJsHeapMeasurement>;
+    snapshot: () => ReaderJsHeapMeasurement;
+};
+
+const getErrorMessage = (error: unknown) =>
+    error instanceof Error ? error.message : String(error);
+
+const startReaderJsHeapSampler = async (
+    context: BrowserContext,
+    page: Page
+): Promise<ReaderJsHeapSampler> => {
+    const measurement: ReaderJsHeapMeasurement = {
+        memoryKind: "javascript-heap",
+        scope: "reader-renderer",
+        metric: "JSHeapUsedSize",
+        unit: "bytes",
+        sampleIntervalMs: JS_HEAP_SAMPLE_INTERVAL_MS,
+        startedAt: Date.now(),
+        finishedAt: null,
+        firstSampleAt: null,
+        lastSampleAt: null,
+        sampleCount: 0,
+        startBytes: null,
+        endBytes: null,
+        peakBytes: null,
+        samplingErrors: [],
+    };
+    const snapshot = (): ReaderJsHeapMeasurement => ({
+        ...measurement,
+        samplingErrors: [...measurement.samplingErrors],
+    });
+
+    let session: CDPSession | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let activeSample: Promise<void> | undefined;
+    let stopped = false;
+    let stopPromise: Promise<ReaderJsHeapMeasurement> | undefined;
+
+    const takeSample = async () => {
+        if (!session) {
+            return;
+        }
+        try {
+            const response = await session.send("Performance.getMetrics");
+            const heapMetric = response.metrics.find(
+                (metric) => metric.name === "JSHeapUsedSize"
+            );
+            if (!heapMetric || !Number.isFinite(heapMetric.value)) {
+                measurement.samplingErrors.push(
+                    "Performance.getMetrics omitted JSHeapUsedSize"
+                );
+                return;
+            }
+            const capturedAt = Date.now();
+            if (measurement.sampleCount === 0) {
+                measurement.firstSampleAt = capturedAt;
+                measurement.startBytes = heapMetric.value;
+            }
+            measurement.lastSampleAt = capturedAt;
+            measurement.endBytes = heapMetric.value;
+            measurement.peakBytes = Math.max(
+                measurement.peakBytes ?? heapMetric.value,
+                heapMetric.value
+            );
+            measurement.sampleCount += 1;
+        } catch (error) {
+            measurement.samplingErrors.push(getErrorMessage(error));
+        }
+    };
+
+    const scheduleSample = () => {
+        if (stopped || !session) {
+            return;
+        }
+        timer = setTimeout(() => {
+            activeSample = takeSample().finally(() => {
+                activeSample = undefined;
+                scheduleSample();
+            });
+        }, JS_HEAP_SAMPLE_INTERVAL_MS);
+    };
+
+    try {
+        session = await context.newCDPSession(page);
+        await session.send("Performance.enable");
+        await takeSample();
+        scheduleSample();
+    } catch (error) {
+        measurement.samplingErrors.push(getErrorMessage(error));
+    }
+
+    return {
+        snapshot,
+        stop: () => {
+            if (stopPromise) {
+                return stopPromise;
+            }
+            stopped = true;
+            stopPromise = (async () => {
+                if (timer) {
+                    clearTimeout(timer);
+                }
+                await activeSample;
+                await takeSample();
+                measurement.finishedAt = Date.now();
+                if (session) {
+                    await session.send("Performance.disable").catch((error) => {
+                        measurement.samplingErrors.push(getErrorMessage(error));
+                    });
+                    await session.detach().catch((error) => {
+                        measurement.samplingErrors.push(getErrorMessage(error));
+                    });
+                    session = undefined;
+                }
+                return snapshot();
+            })();
+            return stopPromise;
+        },
+    };
 };
 
 const seedReplicationRole = async (
@@ -118,11 +424,358 @@ const waitForShareUrlPeerHints = async (page: Page, timeout = 180_000) => {
     );
 };
 
-const toMiBPerSecond = (bytes: number, durationMs: number) =>
-    durationMs > 0 ? bytes / (1024 * 1024) / (durationMs / 1000) : null;
+type ReaderPeerHintEvidence = {
+    source: "writer-direct-diagnostics" | "writer-share-url";
+    count: number;
+    waitStartedAt: number;
+    waitFinishedAt: number;
+    waitDurationMs: number;
+    attempts: number;
+    lastProbeError: string | null;
+};
 
-const toMbps = (bytes: number, durationMs: number) =>
-    durationMs > 0 ? (bytes * 8) / 1_000_000 / (durationMs / 1000) : null;
+const waitForWriterDirectPeerHints = async (page: Page, timeout = 180_000) => {
+    const waitStartedAt = Date.now();
+    const deadline = waitStartedAt + timeout;
+    let attempts = 0;
+    let lastProbeError: string | null = null;
+    while (Date.now() <= deadline) {
+        attempts += 1;
+        try {
+            const diagnostics = await getDiagnostics(page);
+            const peerAddresses = getBrowserDialablePeerAddresses(
+                (diagnostics as Record<string, unknown>)?.peerAddresses
+            );
+            if (peerAddresses.length > 0) {
+                const waitFinishedAt = Date.now();
+                return {
+                    peerAddresses,
+                    evidence: {
+                        source: "writer-direct-diagnostics",
+                        count: peerAddresses.length,
+                        waitStartedAt,
+                        waitFinishedAt,
+                        waitDurationMs: waitFinishedAt - waitStartedAt,
+                        attempts,
+                        lastProbeError,
+                    } satisfies ReaderPeerHintEvidence,
+                };
+            }
+            lastProbeError = "No browser-dialable writer addresses yet";
+        } catch (error) {
+            lastProbeError = getErrorMessage(error);
+        }
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+            break;
+        }
+        await new Promise((resolve) =>
+            setTimeout(resolve, Math.min(250, remainingMs))
+        );
+    }
+    throw new Error(
+        `Writer did not expose a browser-dialable direct peer address: ${lastProbeError ?? "unknown"}`
+    );
+};
+
+const waitForReaderProgramState = async (
+    page: Page,
+    expectedProgramAddress: string,
+    expectedPersistChunkReads: boolean,
+    timeout: number
+) => {
+    const handle = await page.waitForFunction(
+        ({ expectedAddress, expectedPersist }) => {
+            const hooks = (window as any).__peerbitFileShareTestHooks;
+            if (!hooks?.getLightweightSnapshot) {
+                return null;
+            }
+            const snapshot = hooks.getLightweightSnapshot();
+            if (snapshot?.programHookStatus === "error") {
+                return {
+                    state: "error",
+                    message:
+                        typeof snapshot.programHookError === "string"
+                            ? snapshot.programHookError
+                            : "unknown program-open error",
+                };
+            }
+            return snapshot?.programAddress === expectedAddress &&
+                snapshot?.programClosed === false &&
+                snapshot?.persistChunkReads === expectedPersist
+                ? { state: "ready" }
+                : null;
+        },
+        {
+            expectedAddress: expectedProgramAddress,
+            expectedPersist: expectedPersistChunkReads,
+        },
+        { polling: 25, timeout }
+    );
+    const result = (await handle.jsonValue()) as {
+        state: "ready" | "error";
+        message?: string;
+    };
+    await handle.dispose();
+    if (result.state === "error") {
+        throw new Error(`Reader program failed to open: ${result.message}`);
+    }
+};
+
+type ReadyDownloadClick = {
+    capturedAt: number;
+    clickedAt: number;
+    manifestFinalHash: string;
+    persistChunkReadsBeforeClick: boolean | null;
+    persistChunkReadsAtClick: boolean | null;
+    snapshot: Record<string, unknown>;
+};
+
+const armReadyManifestDownload = (
+    page: Page,
+    properties: {
+        fileName: string;
+        expectedProgramAddress: string;
+        expectedFinalHash: string;
+        enablePersistOnly: boolean;
+        timeout: number;
+    }
+) => {
+    const pending = page
+        .waitForFunction(
+            ({
+                expectedName,
+                expectedAddress,
+                expectedHash,
+                enablePersistOnly,
+            }) => {
+                const hooks = (window as any).__peerbitFileShareTestHooks;
+                if (!hooks?.getLightweightSnapshot) {
+                    return null;
+                }
+                const snapshot = hooks.getLightweightSnapshot();
+                if (
+                    snapshot?.programAddress !== expectedAddress ||
+                    snapshot?.programClosed !== false
+                ) {
+                    return null;
+                }
+                const file = snapshot?.listedFiles?.find(
+                    (candidate: Record<string, unknown>) =>
+                        candidate.name === expectedName
+                );
+                if (
+                    !file ||
+                    file.ready !== true ||
+                    typeof file.finalHash !== "string" ||
+                    file.finalHash.length === 0
+                ) {
+                    return null;
+                }
+                if (file.finalHash !== expectedHash) {
+                    throw new Error(
+                        `Visible manifest hash ${file.finalHash} does not match fixture hash ${expectedHash}`
+                    );
+                }
+
+                const row = Array.from(document.querySelectorAll("li")).find(
+                    (candidate) =>
+                        Array.from(candidate.querySelectorAll("span")).some(
+                            (label) => label.textContent === expectedName
+                        )
+                );
+                const button = row?.querySelector(
+                    '[data-testid="download-file"]'
+                );
+                if (
+                    !(button instanceof HTMLButtonElement) ||
+                    button.disabled ||
+                    button.textContent?.includes("pending")
+                ) {
+                    return null;
+                }
+
+                const capturedAt = Date.now();
+                const persistChunkReadsBeforeClick =
+                    typeof snapshot.persistChunkReads === "boolean"
+                        ? snapshot.persistChunkReads
+                        : null;
+                let persistChunkReadsAtClick = persistChunkReadsBeforeClick;
+                if (enablePersistOnly) {
+                    if (!hooks.setPersistChunkReads) {
+                        throw new Error(
+                            "Missing persist-only file-share benchmark hook"
+                        );
+                    }
+                    persistChunkReadsAtClick = hooks.setPersistChunkReads(true);
+                    if (persistChunkReadsAtClick !== true) {
+                        throw new Error(
+                            "Failed to enable persisted reads before click"
+                        );
+                    }
+                }
+
+                const clickedAt = Date.now();
+                button.click();
+                return {
+                    capturedAt,
+                    clickedAt,
+                    manifestFinalHash: file.finalHash,
+                    persistChunkReadsBeforeClick,
+                    persistChunkReadsAtClick,
+                    snapshot,
+                };
+            },
+            {
+                expectedName: properties.fileName,
+                expectedAddress: properties.expectedProgramAddress,
+                expectedHash: properties.expectedFinalHash,
+                enablePersistOnly: properties.enablePersistOnly,
+            },
+            { polling: 25, timeout: properties.timeout }
+        )
+        .then(async (handle) => {
+            try {
+                return (await handle.jsonValue()) as ReadyDownloadClick;
+            } finally {
+                await handle.dispose();
+            }
+        });
+    void pending.catch(() => {});
+    return pending;
+};
+
+const toMiBPerSecond = (bytes: number, durationMs: number | null) =>
+    durationMs != null && durationMs > 0
+        ? bytes / (1024 * 1024) / (durationMs / 1000)
+        : null;
+
+const toMbps = (bytes: number, durationMs: number | null) =>
+    durationMs != null && durationMs > 0
+        ? (bytes * 8) / 1_000_000 / (durationMs / 1000)
+        : null;
+
+const asRecord = (value: unknown): Record<string, unknown> | undefined =>
+    value != null && typeof value === "object"
+        ? (value as Record<string, unknown>)
+        : undefined;
+
+const asNumber = (value: unknown) =>
+    typeof value === "number" && Number.isFinite(value) ? value : null;
+
+const durationBetween = (
+    startedAt: number | null,
+    finishedAt: number | null
+) => (startedAt != null && finishedAt != null ? finishedAt - startedAt : null);
+
+const getListedFile = (
+    diagnostics: Record<string, unknown> | undefined,
+    fileName: string
+) => {
+    const listedFiles = diagnostics?.listedFiles;
+    if (!Array.isArray(listedFiles)) {
+        return undefined;
+    }
+    return listedFiles
+        .map(asRecord)
+        .find((candidate) => candidate?.name === fileName);
+};
+
+const createFixtureResult = ({
+    fixture,
+    manifestFinalHash,
+    downloadSha256Base64,
+    downloadCrc32Hex,
+    downloadCompleted,
+    usesStreamingDownload,
+}: {
+    fixture: SyntheticFixtureMetadata;
+    manifestFinalHash: string | null;
+    downloadSha256Base64: string | null;
+    downloadCrc32Hex: string | null;
+    downloadCompleted: boolean;
+    usesStreamingDownload: boolean;
+}) => {
+    const sourceManifestMatch = fixture.sha256Base64
+        ? fixture.sha256Base64 === manifestFinalHash
+        : null;
+    const directDownloadHashMatch = fixture.sha256Base64
+        ? downloadSha256Base64 == null
+            ? null
+            : fixture.sha256Base64 === downloadSha256Base64
+        : null;
+    const libraryDownloadFinalHashVerified = fixture.sha256Base64
+        ? downloadCompleted
+        : null;
+    const streamingReadbackCrc32Match = usesStreamingDownload
+        ? fixture.crc32Hex != null && downloadCrc32Hex != null
+            ? fixture.crc32Hex === downloadCrc32Hex
+            : false
+        : null;
+    const integrityVerified = fixture.sha256Base64
+        ? sourceManifestMatch === true &&
+          libraryDownloadFinalHashVerified === true &&
+          (usesStreamingDownload
+              ? directDownloadHashMatch === true &&
+                streamingReadbackCrc32Match === true
+              : directDownloadHashMatch === true)
+        : null;
+
+    return {
+        mode: fixture.mode,
+        seed: fixture.seed,
+        sourceSha256Base64: fixture.sha256Base64,
+        manifestFinalHash,
+        downloadSha256Base64,
+        sourceCrc32Hex: fixture.crc32Hex,
+        downloadCrc32Hex,
+        crc32Match: streamingReadbackCrc32Match,
+        streamingReadbackCrc32Match,
+        sourceManifestMatch,
+        directDownloadHashMatch,
+        libraryDownloadFinalHashVerified,
+        integrityVerified,
+        verification: fixture.sha256Base64
+            ? usesStreamingDownload
+                ? "source-manifest-library-stream-and-node-file-sha256-crc32"
+                : "source-manifest-library-and-browser-download-sha256"
+            : "missing",
+    };
+};
+
+const createCohortResult = (
+    cohort: ReaderCohort,
+    diagnostics: Record<string, unknown> | undefined,
+    fileName: string,
+    integrityVerified: boolean
+) => {
+    const read = asRecord(diagnostics?.lastReadDiagnostics);
+    const listedFile = getListedFile(diagnostics, fileName);
+    return classifyReaderCohort(cohort, {
+        integrityVerified,
+        programPersistChunkReads:
+            typeof read?.programPersistChunkReads === "boolean"
+                ? read.programPersistChunkReads
+                : null,
+        persistChunkReads:
+            typeof read?.persistChunkReads === "boolean"
+                ? read.persistChunkReads
+                : null,
+        initialLocalChunkCount: asNumber(read?.initialLocalChunkCount),
+        initialLocalChunkBlockCount: asNumber(
+            read?.initialLocalChunkBlockCount
+        ),
+        readAheadSource:
+            typeof read?.readAheadSource === "string"
+                ? read.readAheadSource
+                : null,
+        postReadLocalChunkCount: asNumber(listedFile?.localChunkCount),
+        postReadLocalChunkBlockCount: asNumber(
+            listedFile?.localChunkBlockCount
+        ),
+        chunkCount: asNumber(listedFile?.chunkCount),
+    });
+};
 
 test.describe("file-share transfer benchmark", () => {
     test.skip(!ENABLED, "Set PW_BENCH=1 to run file-share benchmark");
@@ -142,169 +795,466 @@ test.describe("file-share transfer benchmark", () => {
         }
 
         const usesLocalBootstrap = SCENARIO === "local";
-        const bootstrap = usesLocalBootstrap
-            ? await startBootstrapPeer()
-            : undefined;
-        const writerContext = await browser.newContext({
-            acceptDownloads: true,
-        });
-        const readerContext = await browser.newContext({
-            acceptDownloads: true,
-        });
-        const writer = await writerContext.newPage();
-        const reader = await readerContext.newPage();
         const fileName = `file-share-transfer-bench-${Date.now()}.bin`;
-        const preparedFile = await createSyntheticFileOnDisk(
-            fileName,
-            FILE_SIZE_MB
-        );
-        let writerDiagnostics: Record<string, unknown> | undefined;
-        let readerDiagnostics: Record<string, unknown> | undefined;
+        let bootstrap:
+            | Awaited<ReturnType<typeof startBootstrapPeer>>
+            | undefined;
+        let writerContext: BrowserContext | undefined;
+        let readerContext: BrowserContext | undefined;
+        let writer: Page | undefined;
+        let reader: Page | undefined;
+        let preparedFile:
+            | Awaited<ReturnType<typeof createSyntheticFileOnDisk>>
+            | undefined;
+        let shareUrl: URL | undefined;
         let writerDiagnosticsAfterDownload: Record<string, unknown> | undefined;
         let readerDiagnosticsAfterDownload: Record<string, unknown> | undefined;
-        const usesStreamingDownload =
-            preparedFile != null &&
-            FILE_SIZE_MB * 1024 * 1024 >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
+        let writerLightweightSnapshotAfterSink:
+            | Record<string, unknown>
+            | undefined;
+        let readyDownloadClick: ReadyDownloadClick | undefined;
+        let sinkResult: DownloadSinkResult | undefined;
+        let manifestFinalHash: string | null = null;
+        let downloadSha256Base64: string | null = null;
+        let downloadCrc32Hex: string | null = null;
+        let downloadCompleted = false;
+        let cleanupDownloadedFile: (() => Promise<void>) | undefined;
+        let nodeSinkController:
+            | Awaited<ReturnType<typeof installNodeBackedMockSaveFilePicker>>
+            | undefined;
+        let usesStreamingDownload = false;
+        let fixtureResult: ReturnType<typeof createFixtureResult> | undefined;
+        let cohortResult: ReturnType<typeof createCohortResult> | undefined;
+        let readerPeerHints: ReaderPeerHintEvidence | undefined;
+        const readerTopologyReadiness = createReaderTopologyReadiness();
+        let readerJsHeapSampler: ReaderJsHeapSampler | undefined;
+        let readerJsHeap: ReaderJsHeapMeasurement | undefined;
+        let readerJsHeapValidation:
+            | ReturnType<typeof validateJsHeapMeasurement>
+            | undefined;
 
         try {
-            if (usesStreamingDownload) {
-                await installMockSaveFilePicker(reader);
+            const fixtureFile = await createSyntheticFileOnDisk(
+                fileName,
+                FILE_SIZE_MB,
+                { mode: FIXTURE_MODE, seed: FIXTURE_SEED }
+            );
+            preparedFile = fixtureFile;
+            if (!fixtureFile.fixture.sha256Base64) {
+                fixtureFile.fixture.sha256Base64 = await sha256FileBase64(
+                    fixtureFile.filePath
+                );
             }
+            if (!fixtureFile.fixture.crc32Hex) {
+                fixtureFile.fixture.crc32Hex = await crc32FileHex(
+                    fixtureFile.filePath
+                );
+            }
+            const expectedFinalHash = fixtureFile.fixture.sha256Base64;
+            if (!expectedFinalHash) {
+                throw new Error("Benchmark fixture is missing its source hash");
+            }
+
+            usesStreamingDownload =
+                FILE_SIZE_BYTES >= STREAMING_DOWNLOAD_THRESHOLD_BYTES;
+            bootstrap = usesLocalBootstrap
+                ? await startBootstrapPeer()
+                : undefined;
+            writerContext = await browser.newContext({
+                acceptDownloads: true,
+            });
+            readerContext = await browser.newContext({
+                acceptDownloads: true,
+            });
+            const writerPage = await writerContext.newPage();
+            const readerPage = await readerContext.newPage();
+            writer = writerPage;
+            reader = readerPage;
+            if (usesStreamingDownload) {
+                nodeSinkController = await installNodeBackedMockSaveFilePicker(
+                    readerPage,
+                    {
+                        expectedName: fileName,
+                        expectedSizeBytes: FILE_SIZE_BYTES,
+                    }
+                );
+            }
+
             logStage("create-space");
             const entryUrl =
                 usesLocalBootstrap && bootstrap
                     ? withBootstrap(rootUrl(baseURL), bootstrap.addrs)
                     : rootUrl(baseURL);
-            await enableOpenProfiler(writer);
-            await enableOpenProfiler(reader);
-            await writer.goto(entryUrl, { waitUntil: "domcontentloaded" });
-            await waitForCreateSpaceHook(writer);
-            const address = await createSpaceFromHook(
-                writer,
-                `file-share-transfer-bench-${Date.now()}`
-            );
-            let shareUrl = new URL(writer.url());
-            logStage("seed-reader-role");
-            await seedReplicationRole(
-                reader,
-                address,
-                READER_ROLE === "observer" ? false : ADAPTIVE_REPLICATION_ROLE
-            );
-
-            logStage("open-reader", { shareUrl: shareUrl.toString() });
-            logStage("writer-page-ready");
-            if (!usesLocalBootstrap) {
-                logStage("wait-for-share-peer-hints");
-                await waitForShareUrlPeerHints(writer);
-            }
-            shareUrl = new URL(writer.url());
-            await reader.goto(shareUrl.toString(), {
+            await enableOpenProfiler(writerPage);
+            await enableOpenProfiler(readerPage);
+            await writerPage.goto(entryUrl, {
                 waitUntil: "domcontentloaded",
             });
-            logStage("reader-page-ready");
+            await waitForCreateSpaceHook(writerPage);
+            const address = await createSpaceFromHook(
+                writerPage,
+                `file-share-transfer-bench-${Date.now()}`
+            );
+            shareUrl = new URL(writerPage.url());
+
+            const initialReaderPersist = READER_COHORT === "live-replicator";
+            logStage("seed-reader-cohort", {
+                initialPersistChunkReads: initialReaderPersist,
+            });
+            await seedReplicationRole(
+                readerPage,
+                address,
+                initialReaderPersist ? ADAPTIVE_REPLICATION_ROLE : false
+            );
+
+            if (usesLocalBootstrap) {
+                logStage("wait-for-writer-direct-peer-hints");
+                const directHints =
+                    await waitForWriterDirectPeerHints(writerPage);
+                const readerShare = buildReaderShareUrlWithPeerHints(
+                    writerPage.url(),
+                    directHints.peerAddresses
+                );
+                shareUrl = new URL(readerShare.href);
+                readerPeerHints = directHints.evidence;
+            } else {
+                const waitStartedAt = Date.now();
+                logStage("wait-for-share-peer-hints");
+                await waitForShareUrlPeerHints(writerPage);
+                shareUrl = new URL(writerPage.url());
+                const peerAddresses = getBrowserDialablePeerAddresses(
+                    shareUrl.searchParams.get("peer")?.split(",")
+                );
+                if (peerAddresses.length === 0) {
+                    throw new Error(
+                        "Writer share URL did not expose a browser-dialable direct peer address"
+                    );
+                }
+                const waitFinishedAt = Date.now();
+                readerPeerHints = {
+                    source: "writer-share-url",
+                    count: peerAddresses.length,
+                    waitStartedAt,
+                    waitFinishedAt,
+                    waitDurationMs: waitFinishedAt - waitStartedAt,
+                    attempts: 1,
+                    lastProbeError: null,
+                };
+            }
+            logStage("open-reader", {
+                shareUrl: shareUrl.toString(),
+                peerHintSource: readerPeerHints.source,
+                peerHintCount: readerPeerHints.count,
+            });
+            await readerPage.goto(shareUrl.toString(), {
+                waitUntil: "domcontentloaded",
+            });
+            logStage("wait-for-reader-program-state");
+            await waitForReaderProgramState(
+                readerPage,
+                address,
+                initialReaderPersist,
+                UPLOAD_TIMEOUT_MS
+            );
+            logStage("wait-for-reader-topology", {
+                expectedSelfInReplicatorSet:
+                    readerTopologyReadiness.expectedSelfInReplicatorSet,
+            });
+            await waitForReaderTopology(readerPage, readerTopologyReadiness);
+            logStage("reader-topology-ready", {
+                waitDurationMs: readerTopologyReadiness.waitDurationMs,
+                attempts: readerTopologyReadiness.attempts,
+                evidence: readerTopologyReadiness.evidence,
+            });
 
             logStage("wait-for-input");
-            await writer.locator("#imgupload").waitFor({
+            await writerPage.locator("#imgupload").waitFor({
                 state: "attached",
                 timeout: 60_000,
             });
 
-            logStage("upload");
-            const uploadStartedAt = Date.now();
-            await writer
-                .locator("#imgupload")
-                .setInputFiles(preparedFile.filePath);
-            logStage("wait-for-writer-listing");
-            await waitForFileListed(writer, fileName, UPLOAD_TIMEOUT_MS);
-            logStage("wait-for-upload-complete");
-            await waitForUploadComplete(writer, UPLOAD_TIMEOUT_MS);
-            const uploadFinishedAt = Date.now();
-            writerDiagnostics = await getDiagnostics(writer);
-
-            logStage("wait-for-reader-listing");
-            await waitForFileListed(reader, fileName, UPLOAD_TIMEOUT_MS);
-            const readerVisibleAt = Date.now();
-            readerDiagnostics = await getDiagnostics(reader);
-
-            logStage("download");
-            const downloadStartedAt = Date.now();
-            const downloaded = usesStreamingDownload
-                ? await expectSavedViaPicker(
-                      reader,
+            logStage("arm-download-sink-and-ready-click");
+            const sinkCompletion = usesStreamingDownload
+                ? armSavedViaPicker(
+                      readerPage,
                       fileName,
                       FILE_SIZE_MB,
                       DOWNLOAD_TIMEOUT_MS
-                  ).then(() => ({
-                      size: preparedFile ? FILE_SIZE_MB * 1024 * 1024 : 0,
-                  }))
-                : await expectDownloadedFile(
-                      reader,
+                  )
+                : armDownloadedFile(
+                      readerPage,
                       fileName,
                       FILE_SIZE_MB,
                       DOWNLOAD_TIMEOUT_MS
                   );
-            const downloadFinishedAt = Date.now();
-            writerDiagnosticsAfterDownload =
-                (await getDiagnostics(writer).catch(() => undefined)) ??
-                writerDiagnostics;
-            readerDiagnosticsAfterDownload =
-                (await getDiagnostics(reader).catch(() => undefined)) ??
-                readerDiagnostics;
+            const readyDownload = armReadyManifestDownload(readerPage, {
+                fileName,
+                expectedProgramAddress: address,
+                expectedFinalHash,
+                enablePersistOnly: READER_COHORT === "cold-persisted-read",
+                timeout: UPLOAD_TIMEOUT_MS,
+            });
+
+            readerJsHeapSampler = await startReaderJsHeapSampler(
+                readerContext,
+                readerPage
+            );
+            const activeReaderJsHeapSampler = readerJsHeapSampler;
+            const measuredSinkCompletion = stopSamplerAtCompletion(
+                sinkCompletion,
+                activeReaderJsHeapSampler
+            ).then(({ result, measurement }) => {
+                readerJsHeap = measurement;
+                if (readerJsHeapSampler === activeReaderJsHeapSampler) {
+                    readerJsHeapSampler = undefined;
+                }
+                return result;
+            });
+            void measuredSinkCompletion.catch(() => {});
+            logStage("upload");
+            const uploadStartedAt = Date.now();
+            await writerPage
+                .locator("#imgupload")
+                .setInputFiles(fixtureFile.filePath);
+            await waitForFileListed(writerPage, fileName, UPLOAD_TIMEOUT_MS);
+            await waitForUploadComplete(writerPage, UPLOAD_TIMEOUT_MS);
+            const uploadFinishedAt = Date.now();
+
+            logStage("wait-for-ready-click-and-sink");
+            readyDownloadClick = await readyDownload;
+            manifestFinalHash = readyDownloadClick.manifestFinalHash;
+            sinkResult = await measuredSinkCompletion;
+            cleanupDownloadedFile = sinkResult.cleanup;
+            downloadCompleted = true;
+            readerJsHeapValidation = validateJsHeapMeasurement(readerJsHeap);
+            if (!readerJsHeapValidation.valid) {
+                throw new Error(
+                    `Invalid reader JS heap measurement: ${readerJsHeapValidation.validationReasons.join(", ")}`
+                );
+            }
+
+            // All snapshots, hashing, and rich diagnostics happen after the
+            // primary sink completion timestamp. Capture browser diagnostics
+            // first so post-sink disk verification cannot change them.
+            [
+                writerLightweightSnapshotAfterSink,
+                writerDiagnosticsAfterDownload,
+                readerDiagnosticsAfterDownload,
+            ] = await Promise.all([
+                getLightweightSnapshot(writerPage),
+                getDiagnostics(writerPage).catch(() => undefined),
+                getDiagnostics(readerPage).catch(() => undefined),
+            ]);
+            if (usesStreamingDownload && sinkResult.downloadPath) {
+                logStage("verify-streaming-node-file-digests");
+                const digests = await sha256AndCrc32File(
+                    sinkResult.downloadPath
+                );
+                downloadSha256Base64 = digests.sha256Base64;
+                downloadCrc32Hex = digests.crc32Hex;
+            } else if (usesStreamingDownload) {
+                logStage("verify-streaming-sink-crc32");
+                downloadCrc32Hex = await crc32SavedViaPicker(
+                    readerPage,
+                    fileName
+                );
+            }
+            if (sinkResult.downloadPath && downloadSha256Base64 == null) {
+                downloadSha256Base64 = await sha256FileBase64(
+                    sinkResult.downloadPath
+                );
+                if (downloadSha256Base64 !== expectedFinalHash) {
+                    throw new Error(
+                        `Downloaded file hash ${downloadSha256Base64} does not match fixture hash ${expectedFinalHash}`
+                    );
+                }
+            }
+
+            fixtureResult = createFixtureResult({
+                fixture: fixtureFile.fixture,
+                manifestFinalHash,
+                downloadSha256Base64,
+                downloadCrc32Hex,
+                downloadCompleted,
+                usesStreamingDownload,
+            });
+            if (fixtureResult.integrityVerified !== true) {
+                throw new Error(
+                    "Benchmark transfer integrity was not verified"
+                );
+            }
+            cohortResult = createCohortResult(
+                READER_COHORT,
+                readerDiagnosticsAfterDownload,
+                fileName,
+                true
+            );
+            if (!cohortResult.valid) {
+                throw new Error(
+                    `Invalid ${READER_COHORT} sample: ${cohortResult.validationReasons.join(", ")}`
+                );
+            }
+
+            const read = asRecord(
+                readerDiagnosticsAfterDownload?.lastReadDiagnostics
+            );
+            const libraryStreamStartedAt = asNumber(read?.startedAt);
+            const libraryStreamFinishedAt = asNumber(read?.finishedAt);
+            const uploadDurationMs = uploadFinishedAt - uploadStartedAt;
+            const uploadStartedToReadyVisibleMs =
+                readyDownloadClick.capturedAt - uploadStartedAt;
+            const uploadFinishedToReadyVisibleMs =
+                readyDownloadClick.capturedAt - uploadFinishedAt;
+            const readyVisibleToClickMs =
+                readyDownloadClick.clickedAt - readyDownloadClick.capturedAt;
+            const clickToSinkCompleteMs =
+                sinkResult.sinkCompletedAt - readyDownloadClick.clickedAt;
+            const libraryStreamDurationMs = durationBetween(
+                libraryStreamStartedAt,
+                libraryStreamFinishedAt
+            );
+            const clickToLibraryStreamStartMs = durationBetween(
+                readyDownloadClick.clickedAt,
+                libraryStreamStartedAt
+            );
+            const libraryStreamEndToSinkCompleteMs = durationBetween(
+                libraryStreamFinishedAt,
+                sinkResult.sinkCompletedAt
+            );
+            const readyManifestVisibilityLagMs = Math.max(
+                0,
+                uploadFinishedToReadyVisibleMs
+            );
 
             const result = {
                 status: "passed",
                 scenario: SCENARIO,
-                readerRole: READER_ROLE,
+                readerCohort: READER_COHORT,
+                readerRole: LEGACY_READER_ROLE,
                 baseURL,
                 shareUrl: shareUrl.toString(),
                 fileName,
                 fileSizeMb: FILE_SIZE_MB,
-                downloadMode: usesStreamingDownload
-                    ? "save-picker-stream"
-                    : "browser-download",
-                sizeBytes: downloaded.size,
-                uploadDurationMs: uploadFinishedAt - uploadStartedAt,
-                discoveryLagMs: readerVisibleAt - uploadFinishedAt,
-                downloadDurationMs: downloadFinishedAt - downloadStartedAt,
-                writerDiagnostics,
-                readerDiagnostics,
+                sink: sinkResult.sink,
+                downloadMode: sinkResult.sink,
+                sinkServerWriteCalls: sinkResult.serverWriteCalls,
+                sinkServerWriteDurationMs: sinkResult.serverWriteDurationMs,
+                sinkServerWriteDurationDefinition:
+                    "loopback-request-body-receive-and-node-filesystem-write-only",
+                sizeBytes: sinkResult.size,
+                fixture: fixtureResult,
+                readerCohortValidation: cohortResult,
+                readerPeerHints,
+                readerTopologyReadiness,
+                readerJsHeap,
+                readerJsHeapValidation,
+                timings: {
+                    uploadDurationMs,
+                    uploadStartedToReadyVisibleMs,
+                    uploadFinishedToReadyVisibleMs,
+                    readyVisibleToClickMs,
+                    clickToSinkCompleteMs,
+                    libraryStreamDurationMs,
+                    clickToLibraryStreamStartMs,
+                    libraryStreamEndToSinkCompleteMs,
+                },
+                uploadDurationMs,
+                uploadStartedToReadyVisibleMs,
+                uploadFinishedToReadyVisibleMs,
+                readyVisibleToClickMs,
+                clickToSinkCompleteMs,
+                libraryStreamDurationMs,
+                clickToLibraryStreamStartMs,
+                libraryStreamEndToSinkCompleteMs,
+                readerReadyManifestVisibleAt: readyDownloadClick.capturedAt,
+                readyManifestVisibilityLagMs,
+                readyManifestVisibilityOffsetFromUploadFinishedMs:
+                    uploadFinishedToReadyVisibleMs,
+                readyManifestVisibleToDownloadStartMs: readyVisibleToClickMs,
+                discoveryLagMs: readyManifestVisibilityLagMs,
+                discoveryLagDefinition:
+                    "reader-ready-visible-minus-writer-upload-finished-clamped-at-zero",
+                downloadDurationMs: clickToSinkCompleteMs,
+                downloadDurationDefinition:
+                    "browser-row-click-to-primary-sink-complete",
+                downloadStartedAt: readyDownloadClick.clickedAt,
+                downloadFinishedAt: sinkResult.sinkCompletedAt,
+                libraryStreamStartedAt,
+                libraryStreamFinishedAt,
+                writerLightweightSnapshotAfterSink,
+                readerLightweightSnapshotAtVisibility:
+                    readyDownloadClick.snapshot,
+                persistChunkReadsBeforeClick:
+                    readyDownloadClick.persistChunkReadsBeforeClick,
+                persistChunkReadsAtClick:
+                    readyDownloadClick.persistChunkReadsAtClick,
+                diagnosticsCapturedAfterSink: true,
+                writerDiagnostics: writerDiagnosticsAfterDownload,
+                readerDiagnostics: readerDiagnosticsAfterDownload,
                 writerDiagnosticsAfterDownload,
                 readerDiagnosticsAfterDownload,
-                uploadMiBps: toMiBPerSecond(
-                    downloaded.size,
-                    uploadFinishedAt - uploadStartedAt
-                ),
-                uploadMbps: toMbps(
-                    downloaded.size,
-                    uploadFinishedAt - uploadStartedAt
-                ),
+                uploadMiBps: toMiBPerSecond(sinkResult.size, uploadDurationMs),
+                uploadMbps: toMbps(sinkResult.size, uploadDurationMs),
                 downloadMiBps: toMiBPerSecond(
-                    downloaded.size,
-                    downloadFinishedAt - downloadStartedAt
+                    sinkResult.size,
+                    clickToSinkCompleteMs
                 ),
-                downloadMbps: toMbps(
-                    downloaded.size,
-                    downloadFinishedAt - downloadStartedAt
-                ),
+                downloadMbps: toMbps(sinkResult.size, clickToSinkCompleteMs),
                 startedAt: uploadStartedAt,
-                finishedAt: downloadFinishedAt,
+                finishedAt: sinkResult.sinkCompletedAt,
             };
 
             await persistResult(result);
             console.log(`FILE_SHARE_TRANSFER_BENCH ${JSON.stringify(result)}`);
         } catch (error: any) {
-            const failureWriterDiagnostics =
-                writerDiagnostics ??
-                (await getDiagnostics(writer).catch(() => undefined));
-            const failureReaderDiagnostics =
-                (await getDiagnostics(reader).catch(() => undefined)) ??
-                readerDiagnostics;
+            if (readerJsHeapSampler) {
+                readerJsHeap = await readerJsHeapSampler.stop();
+                readerJsHeapSampler = undefined;
+            }
+            const [failureWriterDiagnostics, failureReaderDiagnostics] =
+                await Promise.all([
+                    writer
+                        ? getDiagnostics(writer).catch(() => undefined)
+                        : undefined,
+                    reader
+                        ? getDiagnostics(reader).catch(() => undefined)
+                        : undefined,
+                ]);
             const result = {
                 status: "failed",
                 scenario: SCENARIO,
-                readerRole: READER_ROLE,
+                readerCohort: READER_COHORT,
+                readerRole: LEGACY_READER_ROLE,
+                shareUrl: shareUrl?.toString(),
                 fileName,
                 fileSizeMb: FILE_SIZE_MB,
+                sink: sinkResult?.sink,
+                fixture:
+                    fixtureResult ??
+                    (preparedFile
+                        ? createFixtureResult({
+                              fixture: preparedFile.fixture,
+                              manifestFinalHash,
+                              downloadSha256Base64,
+                              downloadCrc32Hex,
+                              downloadCompleted,
+                              usesStreamingDownload,
+                          })
+                        : {
+                              requestedMode: FIXTURE_MODE,
+                              seed:
+                                  FIXTURE_MODE === "deterministic"
+                                      ? FIXTURE_SEED
+                                      : null,
+                              setupComplete: false,
+                          }),
+                readerCohortValidation: cohortResult,
+                readerPeerHints,
+                readerTopologyReadiness,
+                readerJsHeap,
+                readerJsHeapValidation,
+                readyDownloadClick,
+                writerLightweightSnapshotAfterSink,
                 failure: {
                     message:
                         typeof error?.message === "string"
@@ -324,13 +1274,25 @@ test.describe("file-share transfer benchmark", () => {
             );
             throw error;
         } finally {
-            await writerContext.close().catch(() => {});
-            await readerContext.close().catch(() => {});
+            if (readerJsHeapSampler) {
+                readerJsHeap = await readerJsHeapSampler
+                    .stop()
+                    .catch(() => readerJsHeapSampler?.snapshot());
+                readerJsHeapSampler = undefined;
+            }
+            if (cleanupDownloadedFile) {
+                await cleanupDownloadedFile().catch(() => {});
+            }
+            await nodeSinkController?.cleanup().catch(() => {});
+            await writerContext?.close().catch(() => {});
+            await readerContext?.close().catch(() => {});
             await bootstrap?.stop().catch(() => {});
-            await rm(preparedFile.dir, {
-                recursive: true,
-                force: true,
-            }).catch(() => {});
+            if (preparedFile) {
+                await rm(preparedFile.dir, {
+                    recursive: true,
+                    force: true,
+                }).catch(() => {});
+            }
         }
     });
 });

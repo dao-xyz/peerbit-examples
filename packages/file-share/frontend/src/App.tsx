@@ -3,8 +3,14 @@ import { BaseRoutes } from "./routes";
 
 import { HashRouter } from "react-router";
 import { Footer } from "./Footer";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Spinner } from "./Spinner";
+import {
+    getPeerAddressConfiguration,
+    getPeerDialOutcome,
+    getPeerOverrideAction,
+    type PeerHintSource,
+} from "./app-connection";
 /* import { enable } from "@libp2p/logger";
 enable("libp2p:*"); */
 /* import { logger } from "@peerbit/logger";
@@ -13,38 +19,12 @@ const loggefr = logger({ module: "shared-log" })
 loggefr.level = 'trace'
 loggefr.trace("hello") */
 
-const getPeerAddresses = (): string[] | undefined => {
-    const params = new URLSearchParams(window.location.search);
-    const hashQueryIndex = window.location.hash.indexOf("?");
-    const hashParams =
-        hashQueryIndex !== -1
-            ? new URLSearchParams(window.location.hash.slice(hashQueryIndex + 1))
-            : undefined;
-
-    const peer = params.get("peer") ??
-        hashParams?.get("peer") ??
-        params.get("bootstrap") ??
-        hashParams?.get("bootstrap");
-    if (peer == null) {
-        return undefined;
-    }
-
-    const normalized = peer.trim().toLowerCase();
-    if (normalized === "" || normalized === "offline") {
-        return [];
-    }
-
-    return peer
-        .split(",")
-        .map((value) => value.trim())
-        .filter(Boolean);
-};
-
 document.documentElement.classList.add("dark");
 
 type AppDiagnostics = {
     mountedAt: number;
     peersProvided: boolean;
+    peerHintSource: PeerHintSource;
     peerAddressCount: number;
     peerAddresses: string[];
     connectionState: "pending" | "ready" | "failed";
@@ -63,10 +43,12 @@ type AppDiagnostics = {
 
 const createAppDiagnostics = (
     peers: string[] | undefined,
+    peerHintSource: PeerHintSource,
     connectionState: AppDiagnostics["connectionState"]
 ): AppDiagnostics => ({
     mountedAt: Date.now(),
     peersProvided: peers !== undefined,
+    peerHintSource,
     peerAddressCount: peers?.length ?? 0,
     peerAddresses: peers ?? [],
     connectionState,
@@ -106,11 +88,16 @@ const PeerOverride = ({
     const { peer } = usePeer();
 
     useEffect(() => {
-        if (!peer || peers == null || peers.length === 0) {
-            if (peer) {
-                onDiagnostics({ peerReadyAt: Date.now() });
-            }
+        const action = getPeerOverrideAction(Boolean(peer), peers);
+        if (action === "wait-for-peer") {
+            return;
+        }
+        if (action === "ready-without-explicit-dial") {
+            onDiagnostics({ peerReadyAt: Date.now() });
             onReady();
+            return;
+        }
+        if (!peer || !peers) {
             return;
         }
 
@@ -131,46 +118,64 @@ const PeerOverride = ({
             dialError: null,
             dialResults,
         });
-        Promise.all(
-            peers.map((address, index) =>
-                peer
-                    .dial(address)
-                    .then(() => {
-                        dialResults[index] = {
-                            ...dialResults[index],
-                            status: "fulfilled",
-                            finishedAt: Date.now(),
-                        };
+        const dialPromises = peers.map((address, index) =>
+            Promise.resolve()
+                .then(() => peer.dial(address))
+                .then(() => {
+                    dialResults[index] = {
+                        ...dialResults[index],
+                        status: "fulfilled",
+                        finishedAt: Date.now(),
+                    };
+                    if (!cancelled) {
                         onDiagnostics({ dialResults: [...dialResults] });
-                    })
-                    .catch((error) => {
-                        dialResults[index] = {
-                            ...dialResults[index],
-                            status: "rejected",
-                            finishedAt: Date.now(),
-                            error: getErrorMessage(error),
-                        };
+                    }
+                })
+                .catch((error) => {
+                    dialResults[index] = {
+                        ...dialResults[index],
+                        status: "rejected",
+                        finishedAt: Date.now(),
+                        error: getErrorMessage(error),
+                    };
+                    if (!cancelled) {
                         onDiagnostics({ dialResults: [...dialResults] });
-                        throw error;
-                    })
-            )
-        )
-            .then(() => {
-                if (!cancelled) {
-                    onDiagnostics({ dialFinishedAt: Date.now() });
-                    onReady();
-                }
-            })
-            .catch((error) => {
-                console.error("Failed to connect to peer:", error);
-                if (!cancelled) {
-                    onDiagnostics({
-                        dialFinishedAt: Date.now(),
-                        dialError: getErrorMessage(error),
-                    });
-                    onError(error);
-                }
+                    }
+                    throw error;
+                })
+        );
+        Promise.allSettled(dialPromises).then(() => {
+            if (cancelled) {
+                return;
+            }
+            const dialFinishedAt = Date.now();
+            const outcome = getPeerDialOutcome(dialResults);
+            if (outcome === "ready") {
+                onDiagnostics({
+                    dialFinishedAt,
+                    dialError: null,
+                    dialResults: [...dialResults],
+                });
+                onReady();
+                return;
+            }
+            const rejected = dialResults
+                .filter((result) => result.status === "rejected")
+                .map(
+                    (result) =>
+                        `${result.address}: ${result.error ?? "unknown error"}`
+                );
+            const error = new Error(
+                `Failed to connect to all supplied peers: ${rejected.join("; ")}`
+            );
+            console.error("Failed to connect to supplied peers:", error);
+            onDiagnostics({
+                dialFinishedAt,
+                dialError: error.message,
+                dialResults: [...dialResults],
             });
+            onError(error);
+        });
         return () => {
             cancelled = true;
         };
@@ -180,16 +185,22 @@ const PeerOverride = ({
 };
 
 export const App = () => {
-    const peers = getPeerAddresses();
+    const peerConfiguration = useMemo(
+        () => getPeerAddressConfiguration(window.location.href),
+        []
+    );
+    const peers = peerConfiguration.peers;
     const [connectionState, setConnectionState] = useState<
         "pending" | "ready" | "failed"
-    >(
-        peers !== undefined && peers.length > 0 ? "pending" : "ready"
-    );
+    >(peers !== undefined && peers.length > 0 ? "pending" : "ready");
     const diagnosticsRef = useRef(
-        createAppDiagnostics(peers, connectionState)
+        createAppDiagnostics(peers, peerConfiguration.source, connectionState)
     );
     diagnosticsRef.current.connectionState = connectionState;
+    diagnosticsRef.current.peersProvided = peers !== undefined;
+    diagnosticsRef.current.peerHintSource = peerConfiguration.source;
+    diagnosticsRef.current.peerAddressCount = peers?.length ?? 0;
+    diagnosticsRef.current.peerAddresses = peers ?? [];
     const updateDiagnostics = useCallback(
         (diagnostics: Partial<AppDiagnostics>) => {
             diagnosticsRef.current = {
@@ -215,25 +226,25 @@ export const App = () => {
             delete testWindow.__peerbitFileShareAppDiagnostics;
         };
     }, []);
-    const network =
-        peers !== undefined
-            ? { bootstrap: [] }
-            : import.meta.env.MODE === "development"
-              ? "local"
-              : "remote";
+    const peerProviderConfig = useMemo(
+        () => ({
+            runtime: "node" as const,
+            network:
+                peers !== undefined
+                    ? { bootstrap: [] }
+                    : import.meta.env.MODE === "development"
+                      ? ("local" as const)
+                      : ("remote" as const),
+            waitForConnected:
+                peers !== undefined || import.meta.env.MODE === "development"
+                    ? true
+                    : ("in-flight" as const),
+        }),
+        [peers]
+    );
 
     return (
-        <PeerProvider
-            config={{
-                runtime: "node",
-                network,
-                waitForConnected:
-                    peers !== undefined ||
-                    import.meta.env.MODE === "development"
-                        ? true
-                        : "in-flight",
-            }}
-        >
+        <PeerProvider config={peerProviderConfig}>
             <div className="h-screen">
                 <PeerOverride
                     peers={peers}

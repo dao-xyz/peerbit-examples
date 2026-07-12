@@ -58,6 +58,22 @@ export const getReadyLargeFileSignature = (files: AbstractFile[]) => {
     return readyFiles.length > 0 ? readyFiles.join("|") : null;
 };
 
+export const getPendingReadyRootReconciliation = (files: AbstractFile[]) => {
+    const pending: LargeFile[] = [];
+    const readyIds: string[] = [];
+    for (const file of files) {
+        if (!isLargeFileLike(file)) {
+            continue;
+        }
+        if (file.ready) {
+            readyIds.push(file.id);
+        } else {
+            pending.push(file);
+        }
+    }
+    return { pending, readyIds };
+};
+
 export const getRootFileChange = (event: Event): RootFileChange => {
     const detail = (event as CustomEvent<FileChangeDetail>).detail;
     if (!detail) {
@@ -101,9 +117,6 @@ export const applyRootFileChangeToList = (
     }
 
     for (const file of change.added) {
-        if (removedIds.has(file.id)) {
-            continue;
-        }
         const existing = byId.get(file.id);
         if (!existing || shouldPreferRootCandidate(file, existing)) {
             byId.set(file.id, file);

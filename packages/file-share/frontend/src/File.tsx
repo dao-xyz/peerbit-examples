@@ -1,11 +1,6 @@
-import {
-    IndexableFile,
-    LargeFile,
-    TinyFile,
-    isLargeFileLike,
-} from "@peerbit/please-lib";
+import { IndexableFile, TinyFile, isLargeFileLike } from "@peerbit/please-lib";
 import { Files, AbstractFile } from "@peerbit/please-lib";
-import { useEffect, useReducer, useState } from "react";
+import { useEffect, useState } from "react";
 import { FaSeedling } from "react-icons/fa";
 import { MdDeleteForever, MdDownload } from "react-icons/md";
 import { DocumentsChange } from "@peerbit/document";
@@ -13,9 +8,24 @@ import { DocumentsChange } from "@peerbit/document";
 const formatFileSize = (size: number | bigint) =>
     `${Math.round(Number(size) / 1000)} kb`;
 
+export const formatIndexedChunkRatio = (ratio: number) => `${ratio}% indexed`;
+
+const LOCAL_CHUNK_COUNT_REFRESH_DELAY_MS = 250;
+
 export const shouldDisableFileDownload = (properties: {
     progress: number | null;
 }) => properties.progress != null;
+
+export const hasFileChunkChange = (
+    detail: {
+        added?: AbstractFile[];
+        removed?: Pick<IndexableFile, "parentId">[];
+    },
+    fileId: string
+) =>
+    (detail.added ?? []).some(
+        (added) => added instanceof TinyFile && added.parentId === fileId
+    ) || (detail.removed ?? []).some((removed) => removed.parentId === fileId);
 
 export const File = (properties: {
     files: Files;
@@ -37,47 +47,89 @@ export const File = (properties: {
     });
 
     useEffect(() => {
-        if (!properties.files) {
+        if (!properties.files || !largeFile || !properties.replicated) {
+            setReplicatedChunksRatio(0);
             return;
         }
 
-        let fetchLocalChunks = () =>
-            properties.files
-                .countLocalChunks(properties.file as LargeFile)
-                .then((count) => {
-                    largeFile &&
-                        setReplicatedChunksRatio(
-                            Math.round((count * 100) / Math.max(chunkCount, 1))
-                        );
-                });
-        let changeListener = largeFile
-            ? (
-                  e: CustomEvent<DocumentsChange<AbstractFile, IndexableFile>>
-              ) => {
-                  for (const added of e.detail.added) {
-                      if (
-                          added instanceof TinyFile &&
-                          added.parentId === properties.file.id
-                      ) {
-                          fetchLocalChunks();
-                      }
-                  }
-              }
-            : undefined;
+        let disposed = false;
+        let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+        let refreshInFlight = false;
+        let refreshQueued = false;
 
-        changeListener &&
-            properties.files.files.events.addEventListener(
-                "change",
-                changeListener
-            );
-        fetchLocalChunks();
-        return () =>
-            changeListener &&
+        const fetchLocalChunks = async () => {
+            refreshTimer = undefined;
+            if (disposed || refreshInFlight) {
+                return;
+            }
+            refreshInFlight = true;
+            refreshQueued = false;
+            try {
+                const count =
+                    await properties.files.countLocalChunks(largeFile);
+                if (!disposed) {
+                    setReplicatedChunksRatio(
+                        Math.round((count * 100) / Math.max(chunkCount, 1))
+                    );
+                }
+            } catch (error) {
+                if (!disposed) {
+                    console.warn(
+                        "Failed to count local chunks for " +
+                            properties.file.name +
+                            ": " +
+                            (error instanceof Error
+                                ? error.message
+                                : String(error))
+                    );
+                }
+            } finally {
+                refreshInFlight = false;
+                if (refreshQueued && !disposed) {
+                    scheduleLocalChunkCountRefresh();
+                }
+            }
+        };
+
+        const scheduleLocalChunkCountRefresh = () => {
+            refreshQueued = true;
+            if (disposed || refreshInFlight || refreshTimer) {
+                return;
+            }
+            refreshTimer = setTimeout(() => {
+                void fetchLocalChunks();
+            }, LOCAL_CHUNK_COUNT_REFRESH_DELAY_MS);
+        };
+
+        const changeListener = (
+            event: CustomEvent<DocumentsChange<AbstractFile, IndexableFile>>
+        ) => {
+            if (hasFileChunkChange(event.detail, properties.file.id)) {
+                scheduleLocalChunkCountRefresh();
+            }
+        };
+
+        properties.files.files.events.addEventListener(
+            "change",
+            changeListener
+        );
+        void fetchLocalChunks();
+        return () => {
+            disposed = true;
+            if (refreshTimer) {
+                clearTimeout(refreshTimer);
+            }
             properties.files.files.events.removeEventListener(
                 "change",
                 changeListener
             );
-    }, [properties.files.address, properties.file.id]);
+        };
+    }, [
+        properties.files,
+        properties.file.id,
+        properties.replicated,
+        chunkCount,
+    ]);
 
     return (
         <div className="flex flex-row items-center gap-3 mb-3">
@@ -100,8 +152,11 @@ export const File = (properties: {
 
                     {replicatedChunksRatio > 0 && (
                         <div className="ml-[-5px] mt-[-15px]">
-                            <span className="text-xs bg-green-400 rounded-full p-[2px] leading-[5px] !text-black">
-                                {replicatedChunksRatio}%
+                            <span
+                                title="Indexed locally; payload availability is verified when the file is read"
+                                className="text-xs bg-green-400 rounded-full p-[2px] leading-[5px] !text-black"
+                            >
+                                {formatIndexedChunkRatio(replicatedChunksRatio)}
                             </span>
                         </div>
                     )}
@@ -138,7 +193,6 @@ export const File = (properties: {
                                     ". " +
                                     error.message?.toString()
                             );
-                            throw error;
                         });
                 }}
                 className={`flex flex-row border border-1 items-center p-2 btn btn-elevated`}
