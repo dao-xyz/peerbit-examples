@@ -4,6 +4,7 @@ import {
     classifyReaderCohort,
     classifyReaderTopology,
     getBrowserDialablePeerAddresses,
+    resolveCompatibleIndexRowCount,
     resolveReaderCohort,
     stopSamplerAtCompletion,
     TINY_FILE_SIZE_LIMIT_BYTES,
@@ -46,6 +47,15 @@ const readyTopology = (
 });
 
 describe("file-share transfer benchmark cohorts", () => {
+    it("prefers explicit index-row diagnostics and rejects alias drift", () => {
+        expect(resolveCompatibleIndexRowCount(7, 7, "post-read")).toBe(7);
+        expect(resolveCompatibleIndexRowCount(null, 6, "post-read")).toBe(6);
+        expect(resolveCompatibleIndexRowCount(5, null, "post-read")).toBe(5);
+        expect(() => resolveCompatibleIndexRowCount(7, 6, "post-read")).toThrow(
+            "post-read index-row diagnostics disagree: explicit=7, legacy=6"
+        );
+    });
+
     it("selects browser-dialable writer addresses without duplicates", () => {
         expect(
             getBrowserDialablePeerAddresses([
@@ -294,6 +304,8 @@ describe("file-share transfer benchmark cohorts", () => {
             valid: true,
             classification: "indexed-local",
             classificationBasis: "initial-index-row-count",
+            initialLocalChunkIndexRowCount: 8,
+            postReadLocalChunkIndexRowCount: 0,
         });
         expect(
             classifyReaderCohort(
@@ -336,6 +348,46 @@ describe("file-share transfer benchmark cohorts", () => {
             ).validationReasons
         ).toContain("live-read-ahead-mismatch");
     });
+
+    it("accepts partial live index rows when every exact chunk block is local", () => {
+        expect(
+            classifyReaderCohort(
+                "live-replicator",
+                validEvidence({
+                    initialLocalChunkCount: 3,
+                    postReadLocalChunkCount: 7,
+                    postReadLocalChunkBlockCount: 8,
+                })
+            )
+        ).toMatchObject({
+            eligible: true,
+            valid: true,
+            classification: "indexed-hybrid",
+            postReadLocalChunkIndexRowCount: 7,
+            postReadLocalChunkBlockCount: 8,
+            validationReasons: [],
+        });
+    });
+
+    it.each([
+        [null, "missing-post-read-local-block-count"],
+        [7, "incomplete-post-read-local-chunk-blocks"],
+        [9, "unexpected-post-read-local-chunk-block-count"],
+    ] as const)(
+        "rejects a live read with post-read exact-block count %s",
+        (postReadLocalChunkBlockCount, validationReason) => {
+            expect(
+                classifyReaderCohort(
+                    "live-replicator",
+                    validEvidence({ postReadLocalChunkBlockCount })
+                )
+            ).toMatchObject({
+                eligible: true,
+                valid: false,
+                validationReasons: [validationReason],
+            });
+        }
+    );
 
     it("validates a non-persisting observer read", () => {
         expect(

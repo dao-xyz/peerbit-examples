@@ -527,8 +527,8 @@ const LARGE_FILE_CHUNK_BATCH_SPECULATIVE_TIMEOUT_MS = 1_500;
 const LARGE_FILE_PERSISTED_READ_AHEAD = 32;
 const LARGE_FILE_OBSERVER_READ_AHEAD = 2;
 const LARGE_FILE_CHANGE_WAIT_FALLBACK_MS = 250;
-const LARGE_FILE_CHUNK_PUT_CONCURRENCY = 4;
-const LARGE_FILE_CHUNK_PUT_BYTE_LIMIT = 2 * 1024 * 1024;
+const LARGE_FILE_CHUNK_PUT_CONCURRENCY = 8;
+const LARGE_FILE_CHUNK_PUT_BYTE_LIMIT = 4 * 1024 * 1024;
 const LARGE_FILE_MIN_CHUNK_ATTEMPT_TIMEOUT_MS = 5_000;
 const LARGE_FILE_MAX_CHUNK_ATTEMPT_TIMEOUT_MS = 45_000;
 const LARGE_FILE_REMOTE_CHUNK_TIMEOUT_OVERHEAD_MS = 5_000;
@@ -1728,6 +1728,9 @@ export class LargeFile extends AbstractFile {
                     at: Date.now(),
                     ready: readinessCandidate.ready,
                     from: remoteFrom ?? null,
+                    localChunkIndexRowCount: null,
+                    // Compatibility alias. This counts Documents index rows,
+                    // not exact locally persisted chunk blocks.
                     localChunkCount: null,
                 };
             }
@@ -1841,14 +1844,16 @@ export class LargeFile extends AbstractFile {
                     hasChunkEntryHeads(remoteReady))
                     ? remoteReady
                     : readinessCandidate;
-            const localChunkCount = await files
+            const localChunkIndexRowCount = await files
                 .countLocalChunks(countCandidate)
                 .catch(() => 0);
             changeSignal.throwIfClosed();
             if (debug?.lastReadyProbe) {
-                debug.lastReadyProbe.localChunkCount = localChunkCount;
+                debug.lastReadyProbe.localChunkIndexRowCount =
+                    localChunkIndexRowCount;
+                debug.lastReadyProbe.localChunkCount = localChunkIndexRowCount;
             }
-            if (localChunkCount >= countCandidate.chunkCount) {
+            if (localChunkIndexRowCount >= countCandidate.chunkCount) {
                 if (debug) {
                     debug.waitUntilReadyResolvedBy = "complete-chunks";
                 }
@@ -1950,6 +1955,9 @@ export class LargeFile extends AbstractFile {
                 demandWaitMs: number;
                 attempts: number;
             }[],
+            initialLocalChunkIndexRowCount: null as number | null,
+            // Compatibility alias for benchmark consumers written before the
+            // index-row/local-block distinction was made explicit.
             initialLocalChunkCount: null as number | null,
             initialLocalChunkBlockCount: null as number | null,
             readAheadSource: null as string | null,
@@ -2008,12 +2016,16 @@ export class LargeFile extends AbstractFile {
             debug.initialReadPeerHints = initialReadPeerHints;
         }
         if (persistChunkReads) {
-            const [initialLocalChunkCount, initialLocalChunkBlockCount] =
-                await Promise.all([
-                    files.countLocalChunks(resolvedFile).catch(() => null),
-                    files.countLocalChunkBlocks(resolvedFile).catch(() => null),
-                ]);
-            debug.initialLocalChunkCount = initialLocalChunkCount;
+            const [
+                initialLocalChunkIndexRowCount,
+                initialLocalChunkBlockCount,
+            ] = await Promise.all([
+                files.countLocalChunks(resolvedFile).catch(() => null),
+                files.countLocalChunkBlocks(resolvedFile).catch(() => null),
+            ]);
+            debug.initialLocalChunkIndexRowCount =
+                initialLocalChunkIndexRowCount;
+            debug.initialLocalChunkCount = initialLocalChunkIndexRowCount;
             debug.initialLocalChunkBlockCount =
                 initialLocalChunkBlockCount ?? null;
         }
@@ -2036,8 +2048,8 @@ export class LargeFile extends AbstractFile {
             );
         let isRemotePersistedRead =
             persistChunkReads &&
-            (debug.initialLocalChunkCount == null ||
-                debug.initialLocalChunkCount < resolvedFile.chunkCount);
+            (debug.initialLocalChunkIndexRowCount == null ||
+                debug.initialLocalChunkIndexRowCount < resolvedFile.chunkCount);
         let isAdaptiveRemoteRead = !persistChunkReads || isRemotePersistedRead;
         let readAheadLimit = isAdaptiveRemoteRead
             ? remoteReadAheadLimit

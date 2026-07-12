@@ -1681,10 +1681,10 @@ describe("index", () => {
             );
             expect(
                 filestore.lastUploadDiagnostics?.maxConcurrentChunkPuts
-            ).to.be.within(1, 4);
+            ).to.be.within(1, 8);
             expect(
                 filestore.lastUploadDiagnostics?.maxConcurrentChunkPutBytes
-            ).to.be.lessThanOrEqual(2 * 1024 * 1024);
+            ).to.be.lessThanOrEqual(4 * 1024 * 1024);
             expect(
                 filestore.lastUploadDiagnostics?.manifestFinishedAt
             ).to.not.eq(null);
@@ -1865,7 +1865,9 @@ describe("index", () => {
             }
 
             const diagnostics = filestore.lastUploadDiagnostics!;
-            expect(maxActivePuts).to.eq(4);
+            expect(maxActivePuts).to.eq(8);
+            expect(diagnostics.chunkPutConcurrencyLimit).to.eq(8);
+            expect(diagnostics.chunkPutByteLimit).to.eq(4 * 1024 * 1024);
             expect(maxActivePuts).to.be.lessThanOrEqual(
                 diagnostics.chunkPutConcurrencyLimit
             );
@@ -1974,7 +1976,8 @@ describe("index", () => {
 
             const diagnostics = filestore.lastUploadDiagnostics!;
             expect(maxActivePuts).to.be.greaterThan(1);
-            expect(maxActivePuts).to.be.lessThanOrEqual(4);
+            expect(maxActivePuts).to.be.lessThanOrEqual(8);
+            expect(diagnostics.chunkPutConcurrencyLimit).to.eq(8);
             expect(activePuts).to.eq(0);
             expect(readyManifestWritten).to.be.false;
             expect(diagnostics.readyManifestStartedAt).to.eq(null);
@@ -2171,6 +2174,9 @@ describe("index", () => {
             expect(readAhead).to.be.lessThanOrEqual(file!.chunkCount);
             expect(readDiagnostics.readAheadSource).to.eq(
                 "persisted-remote-adaptive"
+            );
+            expect(readDiagnostics.initialLocalChunkIndexRowCount).to.eq(
+                readDiagnostics.initialLocalChunkCount
             );
             expect(
                 filestoreReader.lastReadDiagnostics?.initialLocalChunkCount
@@ -4230,6 +4236,10 @@ describe("index", () => {
             expect(
                 filestore.lastReadDiagnostics?.lastReadyProbe?.localChunkCount
             ).to.eq(1);
+            expect(
+                filestore.lastReadDiagnostics?.lastReadyProbe
+                    ?.localChunkIndexRowCount
+            ).to.eq(1);
             expect(streamedChunks).to.have.length(0);
         });
 
@@ -4310,6 +4320,10 @@ describe("index", () => {
             ).not.to.eq("pending-manifest");
             expect(
                 filestore.lastReadDiagnostics?.lastReadyProbe?.localChunkCount
+            ).to.eq(localChunkCount);
+            expect(
+                filestore.lastReadDiagnostics?.lastReadyProbe
+                    ?.localChunkIndexRowCount
             ).to.eq(localChunkCount);
             expect(streamedChunks).to.have.length(0);
         });
