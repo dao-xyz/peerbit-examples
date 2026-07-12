@@ -80,6 +80,16 @@ export const confirmRemoteRoot = async (
 
         signal.throwIfAborted();
         const from = [...hints];
+        // Published declarations lag runtime support for `from`. Keeping the
+        // compatible options in a variable avoids an excess-property failure.
+        const remote = {
+            from,
+            replicate: false,
+            timeout: timeoutMs,
+            throwOnMissing: true,
+            retryMissingResponses: false,
+            strategy: "fallback" as const,
+        };
         const candidates = (await program.files.index.search(
             new SearchRequest({
                 query: new StringMatch({
@@ -93,14 +103,7 @@ export const confirmRemoteRoot = async (
             {
                 local: false,
                 signal,
-                remote: {
-                    from,
-                    replicate: false,
-                    timeout: timeoutMs,
-                    throwOnMissing: true,
-                    retryMissingResponses: false,
-                    strategy: "fallback",
-                },
+                remote,
             }
         )) as AbstractFile[];
         signal.throwIfAborted();
