@@ -2555,10 +2555,30 @@ describe("index", () => {
             const originalSearch = reader.files.index.search.bind(
                 reader.files.index
             );
+            const originalGet = reader.files.index.get.bind(reader.files.index);
             const originalHints = reader.getReadPeerHints.bind(reader);
+            let hintedDeterministicGets = 0;
             let hintedFieldSearches = 0;
             let unhintedPersistedFieldSearches = 0;
             (reader as any).getReadPeerHints = async () => ["stale-peer"];
+            (reader.files.index as any).get = async (
+                id: unknown,
+                options: any
+            ) => {
+                if (
+                    typeof id === "string" &&
+                    id.startsWith(`${fileId}:`) &&
+                    options?.remote?.from?.includes("stale-peer")
+                ) {
+                    // The test targets stale-hint recovery for legacy indexed
+                    // fields. Make the preceding deterministic-id miss
+                    // immediate instead of depending on transport timeout
+                    // scheduling on a loaded CI runner.
+                    hintedDeterministicGets += 1;
+                    return undefined;
+                }
+                return originalGet(id as never, options as never);
+            };
             (reader.files.index as any).search = async (
                 request: any,
                 options: any
@@ -2585,13 +2605,18 @@ describe("index", () => {
 
             let firstRead: Uint8Array;
             try {
-                firstRead = await file!.getFile(reader, { as: "joined" });
+                firstRead = await file!.getFile(reader, {
+                    as: "joined",
+                    timeout: 15_000,
+                });
             } finally {
+                (reader.files.index as any).get = originalGet;
                 (reader.files.index as any).search = originalSearch;
                 (reader as any).getReadPeerHints = originalHints;
             }
 
             expect(equals(firstRead!, concat(chunks))).to.be.true;
+            expect(hintedDeterministicGets).to.be.greaterThan(0);
             expect(hintedFieldSearches).to.be.greaterThan(0);
             expect(unhintedPersistedFieldSearches).to.eq(chunks.length);
             expect(reader.lastReadDiagnostics?.chunkResolved?.[0]).to.eq(
