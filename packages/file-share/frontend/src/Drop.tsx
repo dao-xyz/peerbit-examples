@@ -801,31 +801,39 @@ export const Drop = () => {
                 );
                 const peerAddresses = getPeerDialAddresses(peer);
                 const listedFiles = await Promise.all(
-                    list.map(async (file) => ({
-                        id: file.id,
-                        name: file.name,
-                        type: isLargeFileLike(file) ? "large" : "tiny",
-                        size: file.size.toString(),
-                        ready: isLargeFileLike(file) ? file.ready : undefined,
-                        finalHash: isLargeFileLike(file)
-                            ? file.finalHash
-                            : undefined,
-                        chunkCount: isLargeFileLike(file)
-                            ? file.chunkCount
-                            : undefined,
-                        localChunkCount:
+                    list.map(async (file) => {
+                        const [localChunkIndexRowCount, localChunkBlockCount] =
                             activeProgram && isLargeFileLike(file)
-                                ? await activeProgram
-                                      .countLocalChunks(file)
-                                      .catch(() => null)
+                                ? await Promise.all([
+                                      activeProgram
+                                          .countLocalChunks(file)
+                                          .catch(() => null),
+                                      activeProgram
+                                          .countLocalChunkBlocks(file)
+                                          .catch(() => null),
+                                  ])
+                                : [undefined, undefined];
+                        return {
+                            id: file.id,
+                            name: file.name,
+                            type: isLargeFileLike(file) ? "large" : "tiny",
+                            size: file.size.toString(),
+                            ready: isLargeFileLike(file)
+                                ? file.ready
                                 : undefined,
-                        localChunkBlockCount:
-                            activeProgram && isLargeFileLike(file)
-                                ? await activeProgram
-                                      .countLocalChunkBlocks(file)
-                                      .catch(() => null)
+                            finalHash: isLargeFileLike(file)
+                                ? file.finalHash
                                 : undefined,
-                    }))
+                            chunkCount: isLargeFileLike(file)
+                                ? file.chunkCount
+                                : undefined,
+                            localChunkIndexRowCount,
+                            // Compatibility alias for existing benchmark
+                            // consumers. This is not a local-block count.
+                            localChunkCount: localChunkIndexRowCount,
+                            localChunkBlockCount,
+                        };
+                    })
                 );
                 return {
                     programAddress: program?.address ?? null,

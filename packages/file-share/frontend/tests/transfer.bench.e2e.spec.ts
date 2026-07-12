@@ -31,6 +31,7 @@ import {
     classifyReaderTopology,
     getBrowserDialablePeerAddresses,
     getLegacyReaderRole,
+    resolveCompatibleIndexRowCount,
     resolveReaderCohort,
     stopSamplerAtCompletion,
     validateJsHeapMeasurement,
@@ -751,6 +752,16 @@ const createCohortResult = (
 ) => {
     const read = asRecord(diagnostics?.lastReadDiagnostics);
     const listedFile = getListedFile(diagnostics, fileName);
+    const initialLocalChunkIndexRowCount = resolveCompatibleIndexRowCount(
+        asNumber(read?.initialLocalChunkIndexRowCount),
+        asNumber(read?.initialLocalChunkCount),
+        "initial local chunk"
+    );
+    const postReadLocalChunkIndexRowCount = resolveCompatibleIndexRowCount(
+        asNumber(listedFile?.localChunkIndexRowCount),
+        asNumber(listedFile?.localChunkCount),
+        "post-read local chunk"
+    );
     return classifyReaderCohort(cohort, {
         integrityVerified,
         programPersistChunkReads:
@@ -761,7 +772,7 @@ const createCohortResult = (
             typeof read?.persistChunkReads === "boolean"
                 ? read.persistChunkReads
                 : null,
-        initialLocalChunkCount: asNumber(read?.initialLocalChunkCount),
+        initialLocalChunkCount: initialLocalChunkIndexRowCount,
         initialLocalChunkBlockCount: asNumber(
             read?.initialLocalChunkBlockCount
         ),
@@ -769,7 +780,7 @@ const createCohortResult = (
             typeof read?.readAheadSource === "string"
                 ? read.readAheadSource
                 : null,
-        postReadLocalChunkCount: asNumber(listedFile?.localChunkCount),
+        postReadLocalChunkCount: postReadLocalChunkIndexRowCount,
         postReadLocalChunkBlockCount: asNumber(
             listedFile?.localChunkBlockCount
         ),

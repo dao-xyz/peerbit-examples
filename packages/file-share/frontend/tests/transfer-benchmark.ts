@@ -211,12 +211,62 @@ export type ReaderCohortEvidence = {
     integrityVerified: boolean;
     programPersistChunkReads: boolean | null;
     persistChunkReads: boolean | null;
+    /** Documents index rows; retained for result-schema compatibility. */
     initialLocalChunkCount: number | null;
+    /** Exact manifest-entry blocks present in the local block store. */
     initialLocalChunkBlockCount: number | null;
     readAheadSource: string | null;
+    /** Documents index rows; retained for result-schema compatibility. */
     postReadLocalChunkCount: number | null;
+    /** Exact manifest-entry blocks present in the local block store. */
     postReadLocalChunkBlockCount: number | null;
     chunkCount: number | null;
+};
+
+export const resolveCompatibleIndexRowCount = (
+    explicitIndexRowCount: number | null,
+    legacyLocalChunkCount: number | null,
+    label: string
+) => {
+    if (
+        explicitIndexRowCount != null &&
+        legacyLocalChunkCount != null &&
+        explicitIndexRowCount !== legacyLocalChunkCount
+    ) {
+        throw new Error(
+            `${label} index-row diagnostics disagree: explicit=${explicitIndexRowCount}, legacy=${legacyLocalChunkCount}`
+        );
+    }
+    return explicitIndexRowCount ?? legacyLocalChunkCount;
+};
+
+const requireCompletePostReadChunkBlocks = (
+    evidence: ReaderCohortEvidence,
+    validationReasons: string[]
+) => {
+    const hasKnownPositiveChunkCount =
+        evidence.chunkCount != null &&
+        Number.isFinite(evidence.chunkCount) &&
+        evidence.chunkCount > 0;
+    if (!hasKnownPositiveChunkCount) {
+        validationReasons.push(
+            evidence.chunkCount == null
+                ? "missing-chunk-count"
+                : "invalid-chunk-count"
+        );
+    }
+    if (evidence.postReadLocalChunkBlockCount == null) {
+        validationReasons.push("missing-post-read-local-block-count");
+    } else if (
+        hasKnownPositiveChunkCount &&
+        evidence.postReadLocalChunkBlockCount !== evidence.chunkCount
+    ) {
+        validationReasons.push(
+            evidence.postReadLocalChunkBlockCount < evidence.chunkCount!
+                ? "incomplete-post-read-local-chunk-blocks"
+                : "unexpected-post-read-local-chunk-block-count"
+        );
+    }
 };
 
 const classifyLiveRead = ({
@@ -270,6 +320,7 @@ export const classifyReaderCohort = (
         ) {
             validationReasons.push("live-read-ahead-mismatch");
         }
+        requireCompletePostReadChunkBlocks(evidence, validationReasons);
     } else if (cohort === "cold-observer") {
         classification = "cold";
         classificationBasis = "configured-cold-observer";
@@ -313,25 +364,7 @@ export const classifyReaderCohort = (
         if (evidence.readAheadSource !== "persisted-remote-adaptive") {
             validationReasons.push("persisted-read-ahead-mismatch");
         }
-        const hasKnownPositiveChunkCount =
-            evidence.chunkCount != null &&
-            Number.isFinite(evidence.chunkCount) &&
-            evidence.chunkCount > 0;
-        if (!hasKnownPositiveChunkCount) {
-            validationReasons.push(
-                evidence.chunkCount == null
-                    ? "missing-chunk-count"
-                    : "invalid-chunk-count"
-            );
-        }
-        if (evidence.postReadLocalChunkBlockCount == null) {
-            validationReasons.push("missing-post-read-local-block-count");
-        } else if (
-            hasKnownPositiveChunkCount &&
-            evidence.postReadLocalChunkBlockCount < evidence.chunkCount!
-        ) {
-            validationReasons.push("incomplete-post-read-local-chunk-blocks");
-        }
+        requireCompletePostReadChunkBlocks(evidence, validationReasons);
     }
 
     const valid = validationReasons.length === 0;
@@ -344,6 +377,8 @@ export const classifyReaderCohort = (
         eligible: cohort === "live-replicator" ? true : valid,
         valid,
         ...evidence,
+        initialLocalChunkIndexRowCount: evidence.initialLocalChunkCount,
+        postReadLocalChunkIndexRowCount: evidence.postReadLocalChunkCount,
         classificationBasis,
         validationReasons,
     };
