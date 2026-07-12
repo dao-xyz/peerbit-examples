@@ -303,12 +303,12 @@ export async function uploadSyntheticFile(
             mimeType: "application/octet-stream",
             buffer: Buffer.alloc(bytes, 7),
         });
-        return;
+    } else {
+        const tempFile = await createSyntheticFileOnDisk(fileName, sizeMb);
+        registerTemporaryDirectory(tempFile.dir);
+        await page.locator("#imgupload").setInputFiles(tempFile.filePath);
     }
-
-    const tempFile = await createSyntheticFileOnDisk(fileName, sizeMb);
-    registerTemporaryDirectory(tempFile.dir);
-    await page.locator("#imgupload").setInputFiles(tempFile.filePath);
+    await expect(page.locator("#imgupload")).toHaveValue("");
 }
 
 export async function waitForFileListed(

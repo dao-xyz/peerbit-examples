@@ -69,7 +69,7 @@ import {
     type RemoteRootConfirmationScheduler,
     type RemoteRootObservation,
 } from "./remote-root-reconciliation";
-import { settleUploadBatch } from "./upload-lifecycle";
+import { settleUploadBatch, takeInputFiles } from "./upload-lifecycle";
 
 const saveRoleLocalStorage = (files: Files, role: string) => {
     localStorage.setItem(files.address + "-role", role); // Save role in localstorage for next time
@@ -2033,9 +2033,13 @@ export const Drop = () => {
                                             data-testid="upload-input"
                                             className="hidden"
                                             onChange={(e) => {
-                                                void addFile(
-                                                    e.target?.files
-                                                ).catch(reportUploadFailure);
+                                                const uploadFiles =
+                                                    takeInputFiles(
+                                                        e.currentTarget
+                                                    );
+                                                void addFile(uploadFiles).catch(
+                                                    reportUploadFailure
+                                                );
                                             }}
                                         />
                                         <button
